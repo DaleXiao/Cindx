@@ -17,7 +17,9 @@ The harness has one lifecycle owner per concern:
 
 - `agent-runtime` owns `AgentLoopState`, `AgentRunControl`, run budgets,
   cancellation, no-progress detection, repeated-action detection, and typed turn
-  budget exhaustion.
+  budget exhaustion. `PreparedTaskState` owns the prepared objective and epoch
+  facts; `AgentTaskContract` owns obligations and evidence derived for that
+  prepared state.
 - `agent-application` owns the single run/reprepare driver and the typed run
   lifecycle vocabulary. A steer may request a fresh prepared epoch, but it
   cannot create a second production loop.
@@ -115,8 +117,10 @@ the same loop. Persisted transcript reconstruction is a crash-recovery fallback,
 not the normal approval path.
 
 Cold recovery preserves the conductor task class, tool requirement, vision flag,
-and prompt contract epoch. A successful tool call from an older steer epoch does
-not satisfy a newly steered prompt.
+prepared objective fingerprint, and independent steer/contract epochs. It
+validates the original prompt and durable transcript separately from the
+effective objective, then rebuilds non-persisted target anchors. A successful
+tool call from an older steer epoch does not satisfy a newly steered prompt.
 
 Identical tool arguments may fail twice. A third identical attempt is blocked so
 the model must change its approach.

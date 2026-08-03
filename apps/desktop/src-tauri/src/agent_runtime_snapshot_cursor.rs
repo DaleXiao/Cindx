@@ -1,4 +1,7 @@
-use crate::event_security::{redact_metadata, redact_sensitive_text};
+use crate::{
+    agent_runtime_snapshot::persistable_prepared_task_state,
+    event_security::{redact_metadata, redact_sensitive_text},
+};
 use agent_core::{Message, MessageRole, Metadata};
 use agent_runtime::{
     sanitize_assistant_content, AgentTaskStateLineage, AgentTaskStateSnapshot,
@@ -110,7 +113,12 @@ impl AgentRuntimeSnapshotCursor {
             &self.lineage.persisted_user_prompt,
             &self.transcript,
         );
-        AgentTaskStateSnapshot::capture_with_lineage(runtime, lineage)
+        let prepared_task_state = persistable_prepared_task_state(runtime);
+        AgentTaskStateSnapshot::capture_with_lineage_and_prepared_task_state(
+            runtime,
+            lineage,
+            &prepared_task_state,
+        )
     }
 
     fn append_messages(&mut self, messages: &[Message]) {

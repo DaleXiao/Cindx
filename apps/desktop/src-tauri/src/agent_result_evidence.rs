@@ -115,7 +115,7 @@ pub(crate) fn completion_tool_evidence(
         .iter()
         .filter(|evidence| match evidence.kind {
             ContractEvidenceKind::Verification => {
-                runtime.successful_mutations > 0 && runtime.verified_after_last_mutation
+                runtime.successful_mutations() > 0 && runtime.verified_after_last_mutation()
             }
             ContractEvidenceKind::InteractionObservation => {
                 successful_evidence
@@ -347,7 +347,6 @@ mod tests {
             agent_runtime::AgentRuntimeConfig { max_turns: 1 },
         );
         runtime.messages = messages;
-        runtime.verified_after_last_mutation = true;
         runtime
     }
 

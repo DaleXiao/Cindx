@@ -84,7 +84,7 @@ fn recorded_error_keeps_interrupted_run_recoverable() {
         Ok(Some(AgentRunEvent::Paused))
     );
     assert!(
-        peek_agent_recovery_envelope(&store, &run_context, &["paused"])
+        peek_agent_recovery_envelope(&store, &run_context, &[AgentRecoveryState::Paused])
             .expect("localized pause should remain resumable")
             .is_some()
     );
@@ -105,7 +105,7 @@ fn recorded_error_keeps_interrupted_run_recoverable() {
     )
     .expect("later recorded error should append");
     assert!(
-        peek_agent_recovery_envelope(&store, &run_context, &["paused"])
+        peek_agent_recovery_envelope(&store, &run_context, &[AgentRecoveryState::Paused])
             .expect("recorded error should not hide the pause")
             .is_some()
     );
@@ -124,7 +124,7 @@ fn recorded_error_keeps_interrupted_run_recoverable() {
     )
     .expect("future lifecycle event should append");
     assert!(
-        peek_agent_recovery_envelope(&store, &run_context, &["paused"])
+        peek_agent_recovery_envelope(&store, &run_context, &[AgentRecoveryState::Paused])
             .expect("invalid lifecycle event should fail closed")
             .is_none()
     );
@@ -251,4 +251,60 @@ fn unscoped_cancel_check_uses_typed_lifecycle() {
     .expect("recorded error should append");
 
     assert!(agent_task_is_cancelled(&mut store, None).expect("cancel status should load"));
+}
+
+#[test]
+fn malformed_latest_recovery_envelope_does_not_revive_an_older_checkpoint() {
+    let context = run_metadata("session-strict", "run-strict", true);
+    let mut events = vec![Event {
+        id: EventId("start-strict".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 1,
+        timestamp_ms: 10,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Agent task started".to_string(),
+        metadata: context.clone(),
+    }];
+    let envelope = build_agent_recovery_envelope_with_task_state(
+        &events,
+        &context,
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::AppRestarted,
+        20,
+        None,
+        None,
+    )
+    .expect("valid envelope should build");
+    events.push(Event {
+        id: EventId("valid-recovery".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 2,
+        timestamp_ms: 20,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Agent task paused".to_string(),
+        metadata: [(
+            "recovery_envelope".to_string(),
+            serde_json::to_string(&envelope).expect("valid envelope should encode"),
+        )]
+        .into_iter()
+        .collect(),
+    });
+    let mut malformed = serde_json::to_value(&envelope).expect("valid envelope JSON");
+    malformed["sessionId"] = "".into();
+    events.push(Event {
+        id: EventId("malformed-recovery".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 3,
+        timestamp_ms: 30,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Agent task paused".to_string(),
+        metadata: [(
+            "recovery_envelope".to_string(),
+            serde_json::to_string(&malformed).expect("malformed fixture should encode"),
+        )]
+        .into_iter()
+        .collect(),
+    });
+
+    assert!(latest_agent_recovery_envelope(&events).is_none());
 }

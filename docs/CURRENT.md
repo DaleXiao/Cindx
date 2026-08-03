@@ -1,8 +1,8 @@
 # Current Product Baseline
 
-Current application version: `0.1.88`
+Current application version: `0.1.89`
 
-Last code-fact review: `2026-08-01`
+Last code-fact review: `2026-08-03`
 
 This document describes the current source tree. Evaluation reports describe
 only the revision recorded in each report.
@@ -56,6 +56,15 @@ A new run currently follows this sequence:
 10. The completion transaction persists the result, artifacts, lifecycle state,
    learning evidence, and cleanup. Semantic memory refresh and prompt evolution
    are background work.
+
+Within an active epoch, `PreparedTaskState` is the typed source for the effective
+objective, steer/contract epochs, and completion intent; `AgentTaskContract`
+owns the resulting obligations and evidence. Runtime checkpoints use the
+versioned `cindx.agent.task-state.v2` wire, while an explicit v1 decoder retains
+existing sessions. The v2 checkpoint stores objective fingerprints and typed
+intent, not raw objectives or target anchors. Permission and restart recovery
+rebuild runtime-only anchors from the effective objective and reject mismatched
+lineage instead of silently applying state to another task.
 
 ## Data, Memory, and Retrieval
 

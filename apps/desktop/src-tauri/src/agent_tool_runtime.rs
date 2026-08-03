@@ -599,8 +599,8 @@ fn execute_agent_tool_batch_serial(
             let recovery_metadata = agent_recovery_metadata_with_task_state(
                 &active_events,
                 run_context,
-                "blocked",
-                "waiting_for_permission",
+                AgentRecoveryState::Blocked,
+                AgentRecoveryReason::WaitingForPermission,
                 Metadata::new(),
                 Some(&task_state),
                 Some(&resource_snapshot),

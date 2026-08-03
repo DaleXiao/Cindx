@@ -1,4 +1,5 @@
 use crate::agent_run_engine::PreparedAgentExecution;
+use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
 use crate::suspended_run_runtime::{
     append_observations_to_suspended_run, suspended_agent_run_control_snapshot,
     take_suspended_agent_run,
@@ -294,7 +295,7 @@ fn permission_checkpoint_message_boundary(
             .metadata
             .get("recovery_resume_key")
             .map(String::as_str)
-            != Some(recovery.resume_key.as_str())
+            != Some(recovery.identity.resume_key.as_str())
             || event.metadata.get("recovery_state").map(String::as_str) != Some("blocked")
         {
             continue;
@@ -314,12 +315,17 @@ fn permission_checkpoint_message_boundary(
 fn restore_permission_snapshot_from_boundary(
     snapshot: &AgentTaskStateSnapshot,
     recovery_prompt: &str,
+    effective_objective: &str,
     transcript: &[Message],
     boundary: usize,
 ) -> Option<(agent_runtime::AgentLoopState, usize)> {
     let boundary = boundary.min(transcript.len());
     snapshot
-        .restore(recovery_prompt.to_string(), transcript[..boundary].to_vec())
+        .restore_with_effective_objective(
+            recovery_prompt.to_string(),
+            transcript[..boundary].to_vec(),
+            effective_objective,
+        )
         .ok()
         .map(|runtime| (runtime, boundary))
 }
@@ -361,7 +367,11 @@ pub(crate) fn resolve_agent_permission_blocking(
             .and_then(|request| request.metadata.get("agent_effort").cloned())
             .map(|effort| AgentEffort::parse(&effort))
             .unwrap_or(AgentEffort::Auto);
-        let recovery = peek_agent_recovery_envelope(&store, &recovery_context, &["blocked"])?;
+        let recovery = peek_agent_recovery_envelope(
+            &store,
+            &recovery_context,
+            &[AgentRecoveryState::Blocked],
+        )?;
         let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
@@ -533,17 +543,17 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     let recovery = claim_agent_recovery_envelope(
         &mut store,
         &run_context,
-        &["blocked"],
-        "permission_resolved",
+        &[AgentRecoveryState::Blocked],
+        AgentRecoveryReason::PermissionResolved,
     )?;
     if let Some(recovery) = recovery.as_ref() {
         run_context.insert(
             "recovery_resume_key".to_string(),
-            recovery.resume_key.clone(),
+            recovery.identity.resume_key.clone(),
         );
         run_context.insert(
             "source_agent_run_id".to_string(),
-            recovery.source_run_id.clone(),
+            recovery.identity.source_run_id.clone(),
         );
         run_context.insert(
             "recovery_attempts".to_string(),
@@ -629,6 +639,26 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         }
     }
 
+    let recovered_effective_objective = initial_agent_objective_from_events(&active_events)
+        .map(|initial| effective_prompt_objective_for_messages(&initial, &transcript))
+        .unwrap_or_else(|| {
+            crate::runtime_values::effective_agent_objective(&run_context, &recovery_prompt)
+                .to_string()
+        });
+    run_context.insert(
+        "effective_prompt_objective".to_string(),
+        recovered_effective_objective,
+    );
+    let recovered_prepared_task_state =
+        crate::prepared_task_state_metadata::prepared_task_state_from_legacy_metadata(
+            &run_context,
+            &recovery_prompt,
+            agent_runtime::prompt_completion_intent(&run_context),
+        );
+    crate::prepared_task_state_metadata::project_prepared_task_state_to_legacy_metadata(
+        &recovered_prepared_task_state,
+        &mut run_context,
+    );
     let restored = recovery.as_ref().and_then(|recovery| {
         let snapshot = recovery.task_state.as_ref()?;
         let checkpoint_boundary =
@@ -637,6 +667,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         restore_permission_snapshot_from_boundary(
             snapshot,
             &recovery_prompt,
+            recovered_prepared_task_state.effective_objective(),
             &transcript,
             checkpoint_boundary,
         )
@@ -1041,18 +1072,20 @@ mod tests {
     ) -> AgentRecoveryEnvelope {
         AgentRecoveryEnvelope {
             schema: AGENT_RECOVERY_SCHEMA.to_string(),
-            resume_key: resume_key.to_string(),
-            project_id: Some("project-a".to_string()),
-            session_id: "session-a".to_string(),
-            source_run_id: "run-a".to_string(),
-            user_turn_sequence: 1,
-            prompt_fingerprint: task_state.user_prompt_fingerprint.clone(),
+            identity: AgentRecoveryIdentity {
+                project_id: Some("project-a".to_string()),
+                session_id: "session-a".to_string(),
+                resume_key: resume_key.to_string(),
+                source_run_id: "run-a".to_string(),
+                user_turn_sequence: 1,
+                prompt_fingerprint: task_state.user_prompt_fingerprint.clone(),
+            },
             effort: "auto".to_string(),
             policy: "auto_router".to_string(),
             queue_id: None,
             workflow_resume_key: None,
-            state: "blocked".to_string(),
-            reason: "waiting_for_permission".to_string(),
+            state: AgentRecoveryState::Blocked,
+            reason: AgentRecoveryReason::WaitingForPermission,
             attempts: 0,
             model_calls: 1,
             tool_calls: 0,
@@ -1099,7 +1132,7 @@ mod tests {
                 [
                     (
                         "recovery_resume_key".to_string(),
-                        envelope.resume_key.clone(),
+                        envelope.identity.resume_key.clone(),
                     ),
                     ("recovery_state".to_string(), "blocked".to_string()),
                     (
@@ -1247,7 +1280,12 @@ mod tests {
 
     #[test]
     fn cold_recovery_replays_all_permission_observations_without_duplicates() {
-        let run_context = permission_run_context(4, 0);
+        let mut run_context = permission_run_context(4, 0);
+        run_context.insert(
+            "effective_prompt_objective".to_string(),
+            "Initial request:\n核实当前屏幕上的保存按钮\n\nAccepted steering 1:\n继续核实当前屏幕上的保存按钮"
+                .to_string(),
+        );
         let tools = vec![ToolSpec::builtin(
             "computer.screenshot",
             "computer",
@@ -1322,11 +1360,18 @@ mod tests {
         let (mut restored, boundary) = restore_permission_snapshot_from_boundary(
             &snapshot,
             &original.user_prompt,
+            original.prepared_task_state().effective_objective(),
             &transcript,
             original_message_count,
         )
         .expect("blocked checkpoint should restore from its recorded message boundary");
         assert_eq!(boundary, original_message_count);
+        assert_eq!(restored.prepared_task_state().steer_epoch(), 4);
+        assert_eq!(restored.prepared_task_state().contract_epoch(), 0);
+        assert_ne!(
+            restored.prepared_task_state().effective_objective(),
+            restored.user_prompt
+        );
         assert_eq!(
             restored.task_contract.outcome_ledger_shadow(4),
             ledger_before_pause,
@@ -1481,6 +1526,7 @@ mod tests {
         let (mut restored, restored_boundary) = restore_permission_snapshot_from_boundary(
             &snapshot,
             &prior.user_prompt,
+            prior.prepared_task_state().effective_objective(),
             &transcript,
             snapshot_boundary,
         )

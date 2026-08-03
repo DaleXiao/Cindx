@@ -68,7 +68,7 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `agent-core` | Shared ids, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
-| `agent-runtime` | `AgentKernel`, loop state, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
+| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
@@ -224,8 +224,14 @@ active permissions, transcripts, tool observations, or budgets.
   state.
 - User messages, lifecycle transitions, tool events, permission decisions,
   traces, and completion data are persisted as events/projections.
-- Suspended and recoverable runs preserve canonical transcript state and typed
-  run-control metadata.
+- Suspended and recoverable runs preserve canonical transcript state, typed
+  prepared-task and obligation checkpoints, and typed recovery state, reason,
+  and identity. The desktop adapter keeps the existing storage wire through an
+  explicit legacy-metadata projection rather than a second runtime truth.
+- Checkpoint v2 persists only bounded fingerprints, epochs, intent, obligations,
+  and counters. Cold recovery supplies the separately reconstructed effective
+  objective; the runtime validates prompt, transcript, prepared state, and
+  recovery identity before accepting it. The v1 decoder remains explicit.
 - Startup aborts if persistent state is unavailable. It never reports a
   successful in-memory substitute.
 

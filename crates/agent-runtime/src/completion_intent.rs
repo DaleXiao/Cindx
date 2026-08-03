@@ -4,7 +4,8 @@ use crate::{evidence_target_anchors, EvidenceTargetAnchor};
 use agent_core::Metadata;
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptToolRequirement {
     #[default]
     None,

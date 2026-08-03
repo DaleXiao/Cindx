@@ -2028,17 +2028,19 @@ fn recovery_identity_stays_on_root_prompt_after_steer() {
     ]
     .into_iter()
     .collect();
-    let (_, source_run_id, user_turn_sequence, prompt_fingerprint, recovery_prompt) =
-        agent_recovery_identity(&events, &recovery_context)
-            .expect("recovery identity should resolve");
-    assert_eq!(source_run_id, "run-a");
-    assert_eq!(user_turn_sequence, 21);
+    let recovery = crate::agent_recovery_identity::resolve_agent_recovery_identity(
+        &events,
+        &recovery_context,
+    )
+        .expect("recovery identity should resolve");
+    assert_eq!(recovery.identity.source_run_id, "run-a");
+    assert_eq!(recovery.identity.user_turn_sequence, 21);
     assert_eq!(
-        prompt_fingerprint,
+        recovery.identity.prompt_fingerprint,
         sha256_hex("Review the report\n\nAttached files: /workspace/report.pdf".as_bytes())
     );
     assert_eq!(
-        recovery_prompt,
+        recovery.prompt,
         "Review the report\n\nAttached files: /workspace/report.pdf"
     );
 }
@@ -2050,6 +2052,23 @@ fn runtime_snapshot_matches_the_redacted_durable_projection() {
         "api_key=super-secret".to_string(),
         AgentRuntimeConfig::default(),
     );
+    let effective_objective =
+        "Initial request:\napi_key=super-secret\n\nAccepted steering 1:\nInspect token=private-value";
+    let prepared_context = [
+        (
+            "effective_prompt_objective".to_string(),
+            effective_objective.to_string(),
+        ),
+        ("steer_epoch".to_string(), "2".to_string()),
+        ("prompt_contract_epoch".to_string(), "1".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    runtime.replace_prepared_task_state(agent_runtime::PreparedTaskState::from_run_context(
+        &prepared_context,
+        &runtime.user_prompt,
+        agent_runtime::prompt_completion_intent(&prepared_context),
+    ));
     runtime.messages.push(Message {
         role: MessageRole::Assistant,
         content: "<think>private scratchpad</think>\nFinished".to_string(),
@@ -2067,9 +2086,10 @@ fn runtime_snapshot_matches_the_redacted_durable_projection() {
     }
 
     assert!(snapshot
-        .restore(
+        .restore_with_effective_objective(
             redact_sensitive_text(&runtime.user_prompt),
             persisted_messages,
+            redact_sensitive_text(effective_objective),
         )
         .is_ok());
     assert!(snapshot
@@ -6417,13 +6437,25 @@ fn completion_learning_signal_requires_post_mutation_verification() {
         ("non_mutating", false)
     );
 
-    runtime.successful_mutations = 1;
+    record_tool_outcome_with_risk(
+        &mut runtime,
+        "file.write",
+        r#"{"path":"src/lib.rs"}"#,
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::WritesWorkspace),
+    );
     assert_eq!(
         completion_learning_signal(&runtime),
         ("unverified_mutation", false)
     );
 
-    runtime.verified_after_last_mutation = true;
+    record_tool_outcome_with_risk(
+        &mut runtime,
+        "process.run",
+        r#"{"command":"cargo test"}"#,
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::ExecutesProcess),
+    );
     assert_eq!(
         completion_learning_signal(&runtime),
         ("verified_mutation", true)
@@ -6551,18 +6583,15 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
                 [
                     ("fallback_used".to_string(), "false".to_string()),
                     ("anytime_team_score_bps".to_string(), "7400".to_string()),
-                    (
-                        "anytime_anchor_score_bps".to_string(),
-                        "8000".to_string(),
-                    ),
+                    ("anytime_anchor_score_bps".to_string(), "8000".to_string()),
                     ("anytime_team_uplift_bps".to_string(), "-600".to_string()),
                     (
                         "anytime_selected_kind".to_string(),
                         "direct_anchor".to_string(),
                     ),
                 ]
-                    .into_iter()
-                    .collect(),
+                .into_iter()
+                .collect(),
                 &context,
             ),
         },
@@ -7807,31 +7836,30 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             ..ActionableSideInformation::default()
         },
     };
-    let observation = |
-        run_id: String,
-        case_id: String,
-        opponent_profile_id: &str,
-        provenance: PromptEvaluationProvenance,
-    | PromptEvolutionObservation {
-        profile_id: profile_id.to_string(),
-        evaluation_id: run_id.clone(),
-        case_id: case_id.clone(),
-        opponent_profile_id: Some(opponent_profile_id.to_string()),
-        task_class: "coding".to_string(),
-        split: PromptEvaluationSplit::Train,
-        mode: PromptEvaluationMode::PairedExecution,
-        format_valid: true,
-        succeeded: true,
-        quality_score: 0.9,
-        latency_ms: 1_000,
-        total_tokens: 800,
-        estimated_cost_microusd: 0,
-        safety_violations: 0,
-        relative_reward: Some(0.2),
-        step_credits: Vec::new(),
-        reflection_packet: Some(packet(run_id, case_id)),
-        provenance,
-    };
+    let observation =
+        |run_id: String,
+         case_id: String,
+         opponent_profile_id: &str,
+         provenance: PromptEvaluationProvenance| PromptEvolutionObservation {
+            profile_id: profile_id.to_string(),
+            evaluation_id: run_id.clone(),
+            case_id: case_id.clone(),
+            opponent_profile_id: Some(opponent_profile_id.to_string()),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::PairedExecution,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 1_000,
+            total_tokens: 800,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(0.2),
+            step_credits: Vec::new(),
+            reflection_packet: Some(packet(run_id, case_id)),
+            provenance,
+        };
     let mut observations = (0..6)
         .map(|index| {
             let run_id = format!("ordinary-{index}");
@@ -7893,11 +7921,8 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
 #[test]
 fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed() {
     let teacher = test_auto_teacher_case("Verified Auto answer");
-    let mut checkpoint = WorkflowExecutionCheckpoint::new(
-        "auto-resume-key",
-        teacher.plan.clone(),
-        30,
-    );
+    let mut checkpoint =
+        WorkflowExecutionCheckpoint::new("auto-resume-key", teacher.plan.clone(), 30);
     checkpoint
         .complete_step(
             "final",
@@ -7981,10 +8006,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
                     "collaboration_id".to_string(),
                     teacher.plan.workflow_id.clone(),
                 ),
-                (
-                    "workflow_ir".to_string(),
-                    teacher.plan.to_json().unwrap(),
-                ),
+                ("workflow_ir".to_string(), teacher.plan.to_json().unwrap()),
             ]
             .into_iter()
             .collect(),
@@ -10882,9 +10904,9 @@ fn startup_recovery_preserves_unfinished_agent_runs_as_continuations() {
     let envelope = latest_agent_recovery_envelope(&interrupted_events)
         .expect("recovery envelope should persist");
     assert_eq!(envelope.schema, AGENT_RECOVERY_SCHEMA);
-    assert_eq!(envelope.state, "paused");
-    assert_eq!(envelope.reason, "app_restarted");
-    assert_eq!(envelope.source_run_id, "run-b");
+    assert_eq!(envelope.state, AgentRecoveryState::Paused);
+    assert_eq!(envelope.reason, AgentRecoveryReason::AppRestarted);
+    assert_eq!(envelope.identity.source_run_id, "run-b");
     let resources = envelope
         .resource_snapshot
         .expect("resource checkpoint should transfer to recovery envelope");
@@ -11109,7 +11131,7 @@ fn startup_recovery_preserves_pending_permission_as_blocked() {
         .expect("events should load");
     let envelope =
         latest_agent_recovery_envelope(&events).expect("blocked recovery envelope should persist");
-    assert_eq!(envelope.state, "blocked");
+    assert_eq!(envelope.state, AgentRecoveryState::Blocked);
     assert_eq!(envelope.effort, "pro");
     assert_eq!(
         reconcile_interrupted_agent_runs(&mut store).expect("recovery should be idempotent"),
@@ -11118,8 +11140,8 @@ fn startup_recovery_preserves_pending_permission_as_blocked() {
     let claimed = claim_agent_recovery_envelope(
         &mut store,
         &context,
-        &["blocked"],
-        "permission_resolved",
+        &[AgentRecoveryState::Blocked],
+        AgentRecoveryReason::PermissionResolved,
     )
     .expect("blocked recovery claim should succeed")
     .expect("blocked checkpoint should exist");
@@ -11127,8 +11149,8 @@ fn startup_recovery_preserves_pending_permission_as_blocked() {
     let duplicate = claim_agent_recovery_envelope(
         &mut store,
         &context,
-        &["blocked"],
-        "permission_resolved",
+        &[AgentRecoveryState::Blocked],
+        AgentRecoveryReason::PermissionResolved,
     )
     .expect_err("a blocked recovery must not be claimed twice");
     assert!(duplicate.contains("already claimed"));
@@ -11180,8 +11202,8 @@ fn recovery_envelope_is_bound_to_the_latest_external_user_turn() {
     let envelope = build_agent_recovery_envelope_with_task_state(
         &events,
         &context,
-        "paused",
-        "deadline_exceeded",
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::DeadlineExceeded,
         30,
         None,
         None,
@@ -11283,19 +11305,32 @@ fn recovery_envelope_round_trips_the_kernel_task_checkpoint() {
         AgentRuntimeConfig::default(),
     );
     runtime.turn = 3;
-    runtime.successful_mutations = 1;
+    record_tool_outcome_with_risk(
+        &mut runtime,
+        "file.write",
+        r#"{"path":"report.md"}"#,
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::WritesWorkspace),
+    );
     let checkpoint = AgentTaskStateSnapshot::capture(&runtime);
     let envelope = build_agent_recovery_envelope_with_task_state(
         &events,
         &context,
-        "paused",
-        "deadline_exceeded",
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::DeadlineExceeded,
         30,
         Some(&checkpoint),
         None,
     )
     .expect("envelope should build");
     let encoded = serde_json::to_string(&envelope).expect("envelope encodes");
+    let encoded_value =
+        serde_json::from_str::<serde_json::Value>(&encoded).expect("envelope JSON decodes");
+    assert_eq!(encoded_value["resumeKey"], envelope.identity.resume_key);
+    assert_eq!(encoded_value["sessionId"], "session-a");
+    assert_eq!(encoded_value["state"], "paused");
+    assert_eq!(encoded_value["reason"], "deadline_exceeded");
+    assert!(encoded_value.get("identity").is_none());
     let decoded =
         serde_json::from_str::<AgentRecoveryEnvelope>(&encoded).expect("envelope decodes");
     let restored = decoded
@@ -11305,7 +11340,11 @@ fn recovery_envelope_round_trips_the_kernel_task_checkpoint() {
         .expect("checkpoint restores");
 
     assert_eq!(restored.turn, 3);
-    assert_eq!(restored.successful_mutations, 1);
+    assert_eq!(restored.successful_mutations(), 1);
+
+    let mut invalid = encoded_value;
+    invalid["taskState"]["schema"] = "cindx.agent.task-state.v999".into();
+    assert!(serde_json::from_value::<AgentRecoveryEnvelope>(invalid).is_err());
 }
 
 #[test]
@@ -11346,8 +11385,8 @@ fn recovery_claim_is_single_use_and_recovered_if_restart_interrupts_claim() {
     let recovery_metadata = agent_recovery_metadata_with_task_state(
         &events,
         &context,
-        "paused",
-        "deadline_exceeded",
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::DeadlineExceeded,
         [("completion".to_string(), "partial".to_string())]
             .into_iter()
             .collect(),
@@ -11364,14 +11403,22 @@ fn recovery_claim_is_single_use_and_recovered_if_restart_interrupts_claim() {
     )
     .expect("pause should persist");
 
-    let claimed =
-        claim_agent_recovery_envelope(&mut store, &context, &["paused"], "user_continued")
-            .expect("claim should succeed")
-            .expect("checkpoint should exist");
+    let claimed = claim_agent_recovery_envelope(
+        &mut store,
+        &context,
+        &[AgentRecoveryState::Paused],
+        AgentRecoveryReason::UserContinued,
+    )
+    .expect("claim should succeed")
+    .expect("checkpoint should exist");
     assert_eq!(claimed.attempts, 1);
-    let duplicate =
-        claim_agent_recovery_envelope(&mut store, &context, &["paused"], "user_continued")
-            .expect_err("a claimed recovery must not be claimed twice");
+    let duplicate = claim_agent_recovery_envelope(
+        &mut store,
+        &context,
+        &[AgentRecoveryState::Paused],
+        AgentRecoveryReason::UserContinued,
+    )
+    .expect_err("a claimed recovery must not be claimed twice");
     assert!(duplicate.contains("already claimed"));
 
     assert_eq!(
@@ -11387,7 +11434,7 @@ fn recovery_claim_is_single_use_and_recovered_if_restart_interrupts_claim() {
         .expect("events should reload");
     let recovered =
         latest_agent_recovery_envelope(&events).expect("recovered checkpoint should persist");
-    assert_eq!(recovered.state, "paused");
+    assert_eq!(recovered.state, AgentRecoveryState::Paused);
     assert_eq!(recovered.attempts, 1);
 }
 

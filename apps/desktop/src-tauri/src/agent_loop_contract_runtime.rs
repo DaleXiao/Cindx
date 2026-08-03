@@ -1,8 +1,8 @@
 use crate::desktop_prelude::*;
 use crate::{
-    app_state::AppState,
-    event_persistence::append_event,
-    runtime_values::{agent_runtime_context_for_run, run_context_steer_epoch},
+    app_state::AppState, event_persistence::append_event,
+    prepared_task_state_metadata::prepared_task_state_from_legacy_metadata,
+    runtime_values::agent_runtime_context_for_run,
 };
 use agent_core::ToolEffectSemantics;
 use agent_runtime::{
@@ -160,11 +160,13 @@ pub(crate) fn apply_run_task_contract_with_completion_intent(
             completion_intent.tool_requirement,
         )?,
     );
-    let steer_epoch = run_context_steer_epoch(run_context);
-    let prompt_contract_epoch = run_context
-        .get("prompt_contract_epoch")
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(steer_epoch);
+    let prepared_task_state = prepared_task_state_from_legacy_metadata(
+        run_context,
+        &runtime.user_prompt,
+        completion_intent.clone(),
+    );
+    let prompt_contract_epoch = prepared_task_state.contract_epoch();
+    runtime.replace_prepared_task_state(prepared_task_state);
     let prompt_required_tools = if run_context
         .get("image_generation_required")
         .map(String::as_str)

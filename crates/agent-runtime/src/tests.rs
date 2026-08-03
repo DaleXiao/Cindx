@@ -1044,7 +1044,7 @@ fn completion_gate_requests_post_mutation_verification_once() {
         &ToolOutcomeStatus::Succeeded,
         Some(&ToolRisk::ReadOnly),
     );
-    assert!(state.verified_after_last_mutation);
+    assert!(state.verified_after_last_mutation());
     assert!(completion_verification_instruction(&mut state, true, &tools).is_none());
 }
 
@@ -1113,8 +1113,8 @@ fn browser_action_requires_same_surface_postcondition_evidence() {
         &ToolOutcomeStatus::Succeeded,
         Some(&ToolRisk::UsesNetwork),
     );
-    assert_eq!(state.pending_interaction_verifications.len(), 1);
-    assert_eq!(state.successful_mutations, 0);
+    assert_eq!(state.pending_interaction_verifications().len(), 1);
+    assert_eq!(state.successful_mutations(), 0);
     let instruction = interaction_completion_verification_instruction(&mut state, &tools)
         .expect("browser action should require observation");
     assert!(instruction.contains("browser.capture"));
@@ -1126,7 +1126,7 @@ fn browser_action_requires_same_surface_postcondition_evidence() {
         &ToolOutcomeStatus::Succeeded,
         Some(&ToolRisk::ReadOnly),
     );
-    assert_eq!(state.pending_interaction_verifications.len(), 1);
+    assert_eq!(state.pending_interaction_verifications().len(), 1);
 
     record_tool_outcome_with_risk(
         &mut state,
@@ -1135,7 +1135,7 @@ fn browser_action_requires_same_surface_postcondition_evidence() {
         &ToolOutcomeStatus::Succeeded,
         Some(&ToolRisk::UsesNetwork),
     );
-    assert!(state.pending_interaction_verifications.is_empty());
+    assert!(state.pending_interaction_verifications().is_empty());
     assert_eq!(state.verified_interactions, 1);
     assert!(interaction_completion_verification_instruction(&mut state, &tools).is_none());
 }
@@ -1159,8 +1159,8 @@ fn interaction_verification_isolated_by_surface() {
             Some(&risk),
         );
     }
-    assert_eq!(state.pending_interaction_verifications.len(), 2);
-    assert_eq!(state.successful_mutations, 0);
+    assert_eq!(state.pending_interaction_verifications().len(), 2);
+    assert_eq!(state.successful_mutations(), 0);
 
     record_tool_outcome_with_risk(
         &mut state,
@@ -1169,9 +1169,9 @@ fn interaction_verification_isolated_by_surface() {
         &ToolOutcomeStatus::Succeeded,
         Some(&ToolRisk::UsesNetwork),
     );
-    assert_eq!(state.pending_interaction_verifications.len(), 1);
+    assert_eq!(state.pending_interaction_verifications().len(), 1);
     assert!(state
-        .pending_interaction_verifications
+        .pending_interaction_verifications()
         .contains_key(&InteractionSurface::Computer));
 
     record_tool_outcome_with_risk(
@@ -1181,7 +1181,7 @@ fn interaction_verification_isolated_by_surface() {
         &ToolOutcomeStatus::Succeeded,
         Some(&ToolRisk::SensitiveContext),
     );
-    assert!(state.pending_interaction_verifications.is_empty());
+    assert!(state.pending_interaction_verifications().is_empty());
     assert_eq!(state.verified_interactions, 2);
 }
 
@@ -1206,7 +1206,7 @@ fn resumed_loop_rebuilds_pending_interaction_verification() {
         AgentRuntimeConfig::default(),
     );
     assert!(state
-        .pending_interaction_verifications
+        .pending_interaction_verifications()
         .contains_key(&InteractionSurface::Computer));
 
     record_tool_outcome_with_risk(
@@ -1216,7 +1216,7 @@ fn resumed_loop_rebuilds_pending_interaction_verification() {
         &ToolOutcomeStatus::Succeeded,
         Some(&ToolRisk::SensitiveContext),
     );
-    assert!(state.pending_interaction_verifications.is_empty());
+    assert!(state.pending_interaction_verifications().is_empty());
 }
 
 fn tool(name: &str, schema: &str) -> ToolSpec {

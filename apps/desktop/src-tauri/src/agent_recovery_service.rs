@@ -2,9 +2,9 @@ use crate::desktop_prelude::*;
 use crate::{
     agent_read_model::{
         active_agent_events_for_session, agent_events_for_session,
-        agent_recovery_prompt_from_active_events, is_agent_run_start_event,
-        primary_agent_user_turn_event,
+        is_agent_run_start_event,
     },
+    agent_recovery_identity::resolve_agent_recovery_identity,
     agent_resource_snapshot::load_matching_agent_resource_snapshot,
     agent_runtime_snapshot::{
         delete_persisted_agent_runtime_snapshot, load_matching_agent_runtime_snapshot,
@@ -57,10 +57,20 @@ pub(super) fn agent_task_is_cancelled(
 }
 
 pub(super) fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRecoveryEnvelope> {
-    events.iter().rev().find_map(|event| {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.metadata.contains_key("recovery_envelope"))
+        .and_then(|event| {
         let encoded = event.metadata.get("recovery_envelope")?;
         let envelope = serde_json::from_str::<AgentRecoveryEnvelope>(encoded).ok()?;
-        (envelope.schema == AGENT_RECOVERY_SCHEMA).then_some(envelope)
+        (envelope.schema == AGENT_RECOVERY_SCHEMA
+            && envelope.identity.validate().is_ok()
+            && envelope
+                .task_state
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.validate_checkpoint().is_ok()))
+        .then_some(envelope)
     })
 }
 
@@ -97,55 +107,18 @@ pub(super) fn initial_agent_objective_from_events(events: &[Event]) -> Option<St
     })
 }
 
-pub(super) fn agent_recovery_identity(
-    events: &[Event],
-    run_context: &Metadata,
-) -> Option<(String, String, u64, String, String)> {
-    let session_id = run_context.get("session_id")?.clone();
-    let source_run_id = events
-        .iter()
-        .find(|event| is_agent_run_start_event(event))
-        .and_then(|event| event.metadata.get("agent_run_id"))
-        .cloned()
-        .or_else(|| run_context.get("agent_run_id").cloned())
-        .unwrap_or_default();
-    let user_turn_sequence = primary_agent_user_turn_event(events)
-        .map(|event| event.sequence)
-        .unwrap_or_default();
-    let prompt = agent_recovery_prompt_from_active_events(events)?;
-    let prompt_fingerprint = sha256_hex(prompt.as_bytes());
-    let project_id = run_context.get("project_id").cloned().unwrap_or_default();
-    let resume_key = format!(
-        "agent-resume-{}",
-        &sha256_hex(
-            format!(
-                "{project_id}\n{session_id}\n{source_run_id}\n{user_turn_sequence}\n{prompt_fingerprint}"
-            )
-            .as_bytes()
-        )[..24]
-    );
-    Some((
-        resume_key,
-        source_run_id,
-        user_turn_sequence,
-        prompt_fingerprint,
-        prompt,
-    ))
-}
-
 pub(super) fn build_agent_recovery_envelope_with_task_state(
     events: &[Event],
     run_context: &Metadata,
-    state: &str,
-    reason: &str,
+    state: AgentRecoveryState,
+    reason: AgentRecoveryReason,
     now_ms: u64,
     task_state: Option<&AgentTaskStateSnapshot>,
     resource_snapshot: Option<&RunResourceSnapshot>,
 ) -> Option<AgentRecoveryEnvelope> {
-    let (resume_key, source_run_id, user_turn_sequence, prompt_fingerprint, _) =
-        agent_recovery_identity(events, run_context)?;
-    let prior =
-        latest_agent_recovery_envelope(events).filter(|envelope| envelope.resume_key == resume_key);
+    let identity = resolve_agent_recovery_identity(events, run_context)?.identity;
+    let prior = latest_agent_recovery_envelope(events)
+        .filter(|envelope| envelope.identity.matches(&identity));
     let workflow_resume_key = events.iter().rev().find_map(|event| {
         event
             .metadata
@@ -165,12 +138,7 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
     };
     Some(AgentRecoveryEnvelope {
         schema: AGENT_RECOVERY_SCHEMA.to_string(),
-        resume_key,
-        project_id: run_context.get("project_id").cloned(),
-        session_id: run_context.get("session_id")?.clone(),
-        source_run_id,
-        user_turn_sequence,
-        prompt_fingerprint,
+        identity,
         effort: run_context
             .get("agent_effort")
             .cloned()
@@ -182,8 +150,8 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
             .unwrap_or_else(|| "auto_router".to_string()),
         queue_id: run_context.get("queue_id").cloned(),
         workflow_resume_key,
-        state: state.to_string(),
-        reason: reason.to_string(),
+        state,
+        reason,
         attempts: prior
             .as_ref()
             .map(|envelope| envelope.attempts)
@@ -226,8 +194,8 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
 pub(super) fn agent_recovery_metadata_with_task_state(
     events: &[Event],
     run_context: &Metadata,
-    state: &str,
-    reason: &str,
+    state: AgentRecoveryState,
+    reason: AgentRecoveryReason,
     mut metadata: Metadata,
     task_state: Option<&AgentTaskStateSnapshot>,
     resource_snapshot: Option<&RunResourceSnapshot>,
@@ -235,7 +203,7 @@ pub(super) fn agent_recovery_metadata_with_task_state(
     let envelope = build_agent_recovery_envelope_with_task_state(
         events,
         run_context,
-        state,
+        state.clone(),
         reason,
         current_time_millis(),
         task_state,
@@ -248,10 +216,16 @@ pub(super) fn agent_recovery_metadata_with_task_state(
     );
     metadata.insert(
         "recovery_resume_key".to_string(),
-        envelope.resume_key.clone(),
+        envelope.identity.resume_key.clone(),
     );
-    metadata.insert("recovery_state".to_string(), envelope.state.clone());
-    metadata.insert("recovery_reason".to_string(), envelope.reason.clone());
+    metadata.insert(
+        "recovery_state".to_string(),
+        envelope.state.label().to_string(),
+    );
+    metadata.insert(
+        "recovery_reason".to_string(),
+        envelope.reason.label().to_string(),
+    );
     metadata.insert(
         "recovery_attempts".to_string(),
         envelope.attempts.to_string(),
@@ -270,15 +244,15 @@ pub(super) fn agent_recovery_metadata_with_task_state(
     );
     metadata.insert(
         "source_agent_run_id".to_string(),
-        envelope.source_run_id.clone(),
+        envelope.identity.source_run_id.clone(),
     );
     metadata.insert(
         "user_turn_sequence".to_string(),
-        envelope.user_turn_sequence.to_string(),
+        envelope.identity.user_turn_sequence.to_string(),
     );
     metadata.insert(
         "continuation_available".to_string(),
-        (state == "paused").to_string(),
+        (state == AgentRecoveryState::Paused).to_string(),
     );
     metadata.insert(
         "recovery_envelope".to_string(),
@@ -293,24 +267,18 @@ pub(super) fn recovery_envelope_matches_active_turn(
     events: &[Event],
     run_context: &Metadata,
 ) -> bool {
-    let Some((resume_key, source_run_id, user_turn_sequence, prompt_fingerprint, _)) =
-        agent_recovery_identity(events, run_context)
+    let Some(active) = resolve_agent_recovery_identity(events, run_context)
     else {
         return false;
     };
     envelope.schema == AGENT_RECOVERY_SCHEMA
-        && envelope.resume_key == resume_key
-        && envelope.source_run_id == source_run_id
-        && envelope.user_turn_sequence == user_turn_sequence
-        && envelope.prompt_fingerprint == prompt_fingerprint
-        && run_context.get("session_id") == Some(&envelope.session_id)
-        && run_context.get("project_id") == envelope.project_id.as_ref()
+        && envelope.identity.matches(&active.identity)
 }
 
 pub(super) fn peek_agent_recovery_envelope(
     store: &SqliteStore,
     run_context: &Metadata,
-    allowed_states: &[&str],
+    allowed_states: &[AgentRecoveryState],
 ) -> Result<Option<AgentRecoveryEnvelope>, String> {
     let session_id = run_context
         .get("session_id")
@@ -321,7 +289,7 @@ pub(super) fn peek_agent_recovery_envelope(
     let Some(envelope) = latest_agent_recovery_envelope(&active_events) else {
         return Ok(None);
     };
-    if envelope.state == "resuming" {
+    if envelope.state == AgentRecoveryState::Resuming {
         return Err("agent recovery checkpoint is already claimed".to_string());
     }
     let recoverable_status = latest_agent_run_event(&active_events)
@@ -336,10 +304,10 @@ pub(super) fn peek_agent_recovery_envelope(
     if !recoverable_status {
         return Ok(None);
     }
-    if !allowed_states.contains(&envelope.state.as_str()) {
+    if !allowed_states.contains(&envelope.state) {
         return Err(format!(
             "agent recovery checkpoint is {}, not resumable",
-            envelope.state
+            envelope.state.label()
         ));
     }
     if !recovery_envelope_matches_active_turn(&envelope, &active_events, run_context) {
@@ -358,15 +326,15 @@ pub(super) fn peek_agent_recovery_envelope(
 pub(super) fn claim_agent_recovery_envelope(
     store: &mut SqliteStore,
     run_context: &Metadata,
-    allowed_states: &[&str],
-    reason: &str,
+    allowed_states: &[AgentRecoveryState],
+    reason: AgentRecoveryReason,
 ) -> Result<Option<AgentRecoveryEnvelope>, String> {
     let Some(mut envelope) = peek_agent_recovery_envelope(store, run_context, allowed_states)?
     else {
         return Ok(None);
     };
-    envelope.state = "resuming".to_string();
-    envelope.reason = reason.to_string();
+    envelope.state = AgentRecoveryState::Resuming;
+    envelope.reason = reason;
     envelope.attempts = envelope.attempts.saturating_add(1);
     envelope.updated_at_ms = current_time_millis();
     append_event(
@@ -382,15 +350,24 @@ pub(super) fn claim_agent_recovery_envelope(
                 ),
                 (
                     "recovery_resume_key".to_string(),
-                    envelope.resume_key.clone(),
+                    envelope.identity.resume_key.clone(),
                 ),
-                ("recovery_state".to_string(), envelope.state.clone()),
-                ("recovery_reason".to_string(), envelope.reason.clone()),
+                (
+                    "recovery_state".to_string(),
+                    envelope.state.label().to_string(),
+                ),
+                (
+                    "recovery_reason".to_string(),
+                    envelope.reason.label().to_string(),
+                ),
                 (
                     "recovery_attempts".to_string(),
                     envelope.attempts.to_string(),
                 ),
-                ("agent_run_id".to_string(), envelope.source_run_id.clone()),
+                (
+                    "agent_run_id".to_string(),
+                    envelope.identity.source_run_id.clone(),
+                ),
                 (
                     "recovery_envelope".to_string(),
                     serde_json::to_string(&envelope).map_err(|error| {
@@ -477,17 +454,21 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
         )
         .map_err(|error| error.to_string())?;
         let (summary, recovery_state, recovery_reason) = if pending_permissions.is_empty() {
-            ("Agent task paused", "paused", "app_restarted")
+            (
+                "Agent task paused",
+                AgentRecoveryState::Paused,
+                AgentRecoveryReason::AppRestarted,
+            )
         } else {
             (
                 "Agent task waiting for permission",
-                "blocked",
-                "app_restarted_waiting_for_permission",
+                AgentRecoveryState::Blocked,
+                AgentRecoveryReason::AppRestartedWaitingForPermission,
             )
         };
         let (task_state, resource_snapshot) =
-            match agent_recovery_identity(&active_events, &run_context) {
-                Some((_, source_run_id, _, prompt_fingerprint, _)) => {
+            match resolve_agent_recovery_identity(&active_events, &run_context) {
+                Some(resolved) => {
                     let latest_revision = active_events
                         .last()
                         .map(|event| event.sequence)
@@ -496,14 +477,14 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
                         load_matching_agent_runtime_snapshot(
                             store,
                             &run_context,
-                            &source_run_id,
-                            &prompt_fingerprint,
+                            &resolved.identity.source_run_id,
+                            &resolved.identity.prompt_fingerprint,
                             latest_revision,
                         )?,
                         load_matching_agent_resource_snapshot(
                             store,
                             &run_context,
-                            &source_run_id,
+                            &resolved.identity.source_run_id,
                             latest_revision,
                         )?,
                     )

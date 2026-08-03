@@ -150,6 +150,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             }
             AgentSteerApplication::ResolvedNoop { epoch } => {
                 runtime_context = synchronize_noop_control_epoch_context(&mut run_context, epoch);
+                runtime.advance_prepared_task_control_epoch(epoch);
                 record_retained_agent_decision_after_noop_steer(
                     state,
                     &runtime.task_id,

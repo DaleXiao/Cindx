@@ -394,7 +394,7 @@ pub(crate) fn finalize_agent_completion(
         ),
         (
             "pending_interaction_verifications".to_string(),
-            runtime.pending_interaction_verifications.len().to_string(),
+            runtime.pending_interaction_verifications().len().to_string(),
         ),
         (
             "checkpoints".to_string(),
