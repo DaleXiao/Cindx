@@ -9,10 +9,11 @@ use std::collections::BTreeMap;
 const TOOL_EVIDENCE_SCHEMA: &str = "cindx.tool_evidence.v1";
 const TOOL_EVIDENCE_PROVENANCE: &str = "runtime_dispatch";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CompletionToolEvidence {
     pub(crate) grounded_count: usize,
     pub(crate) verified_postcondition_count: usize,
+    pub(crate) trusted_contract_sequences: Vec<u64>,
 }
 
 pub(crate) fn annotate_latest_tool_observation(
@@ -102,13 +103,16 @@ pub(crate) fn completion_tool_evidence(
         return CompletionToolEvidence::default();
     }
 
-    let verified_postcondition_count = runtime
+    let trusted_contract_evidence = runtime
         .task_contract
         .evidence()
         .iter()
         .filter(|evidence| {
             successful_evidence.contains_key(&(evidence.source.clone(), evidence.sequence))
         })
+        .collect::<Vec<_>>();
+    let verified_postcondition_count = trusted_contract_evidence
+        .iter()
         .filter(|evidence| match evidence.kind {
             ContractEvidenceKind::Verification => {
                 runtime.successful_mutations > 0 && runtime.verified_after_last_mutation
@@ -126,6 +130,10 @@ pub(crate) fn completion_tool_evidence(
     CompletionToolEvidence {
         grounded_count: successful_evidence.len(),
         verified_postcondition_count,
+        trusted_contract_sequences: trusted_contract_evidence
+            .into_iter()
+            .map(|evidence| evidence.sequence)
+            .collect(),
     }
 }
 

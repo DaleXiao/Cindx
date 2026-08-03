@@ -4,6 +4,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod outcome_ledger;
+
+pub use outcome_ledger::{
+    OutcomeClaim, OutcomeClaimDecision, OutcomeClaimEvidenceStatus, OutcomeClaimKind,
+    OutcomeClaimQuality, OutcomeEvidence, OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase,
+    OutcomeLedgerShadow, OutcomeObligation, OutcomeObligationKind, OutcomePostcondition,
+    OutcomePostconditionKind, OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope,
+    OutcomeTerminal, OutcomeTerminalObservation, OutcomeTruncation,
+    OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
+    OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
+};
+
 const MAX_CONTRACT_EVIDENCE: usize = 128;
 const MAX_COMPLETION_GATE_ATTEMPTS: usize = 2;
 const MAX_CONTEXT_TARGETS: usize = 8;
@@ -158,6 +170,12 @@ pub struct AgentTaskContract {
     next_sequence: u64,
     #[serde(default)]
     gate_attempts: BTreeMap<String, usize>,
+    #[serde(default)]
+    outcome_claims: Vec<OutcomeClaim>,
+    #[serde(default)]
+    outcome_dropped_claims: u64,
+    #[serde(default)]
+    next_outcome_claim_sequence: u64,
 }
 
 impl AgentTaskContract {

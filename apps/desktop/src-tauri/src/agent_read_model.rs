@@ -257,34 +257,54 @@ pub(crate) fn agent_state_with_error_in_context(
     run_context: &Metadata,
     message: impl Into<String>,
 ) -> Result<AgentState, String> {
+    agent_state_with_error_metadata_in_context(state, run_context, message, Metadata::new())
+}
+
+pub(crate) fn agent_state_with_error_metadata_in_context(
+    state: &tauri::State<'_, AppState>,
+    run_context: &Metadata,
+    message: impl Into<String>,
+    terminal_metadata: Metadata,
+) -> Result<AgentState, String> {
     let message = message.into();
-    let session_id = run_context.get("session_id").map(String::as_str);
     let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    persist_agent_error_terminalization(&mut store, run_context, &message)?;
-
-    agent_state_for_session(&store, Some(message), session_id).map_err(|error| error.to_string())
+    persist_agent_error_terminalization_with_metadata(
+        &mut store,
+        run_context,
+        &message,
+        terminal_metadata,
+    )
 }
 
-fn persist_agent_error_terminalization(
+fn persist_agent_error_terminalization_with_metadata(
     store: &mut SqliteStore,
     run_context: &Metadata,
     message: &str,
-) -> Result<(), String> {
-    persist_agent_error_terminalization_with(store, run_context, message, |store, session_id| {
-        delete_persisted_agent_runtime_snapshot(store, session_id).map_err(StorageError::new)
-    })
+    terminal_metadata: Metadata,
+) -> Result<AgentState, String> {
+    persist_agent_error_terminalization_with(
+        store,
+        run_context,
+        message,
+        terminal_metadata,
+        |store, session_id| {
+            delete_persisted_agent_runtime_snapshot(store, session_id).map_err(StorageError::new)
+        },
+    )
 }
 
 fn persist_agent_error_terminalization_with(
     store: &mut SqliteStore,
     run_context: &Metadata,
     message: &str,
+    mut terminal_metadata: Metadata,
     delete_snapshots: impl FnOnce(&mut SqliteStore, Option<&str>) -> Result<(), StorageError>,
-) -> Result<(), String> {
+) -> Result<AgentState, String> {
     let session_id = run_context.get("session_id").map(String::as_str);
+    terminal_metadata.insert("error".to_string(), message.to_string());
     store
         .with_immediate_transaction(|store| {
             append_event(
@@ -292,14 +312,10 @@ fn persist_agent_error_terminalization_with(
                 &phase16_task_id(),
                 EventKind::Error,
                 "Agent task failed",
-                metadata_with_context(
-                    [("error".to_string(), message.to_string())]
-                        .into_iter()
-                        .collect(),
-                    run_context,
-                ),
+                metadata_with_context(terminal_metadata, run_context),
             )?;
-            delete_snapshots(store, session_id)
+            delete_snapshots(store, session_id)?;
+            agent_state_for_session(store, Some(message.to_string()), session_id)
         })
         .map_err(|error| error.to_string())
 }
@@ -1073,79 +1089,5 @@ pub(crate) fn is_agent_run_start_event(event: &Event) -> bool {
 }
 
 #[cfg(test)]
-mod terminalization_tests {
-    use super::*;
-
-    #[test]
-    fn error_terminalization_rolls_back_event_and_snapshot_cleanup_together() {
-        let mut store = SqliteStore::in_memory().expect("store should open");
-        let run_context = [
-            ("project_id".to_string(), "project-error".to_string()),
-            ("session_id".to_string(), "session-error".to_string()),
-            ("agent_run_id".to_string(), "run-error".to_string()),
-        ]
-        .into_iter()
-        .collect::<Metadata>();
-        for namespace in [
-            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
-            AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
-        ] {
-            store
-                .save_read_model(namespace, "session-error", 0, "snapshot-before")
-                .expect("snapshot should persist");
-        }
-
-        let error = persist_agent_error_terminalization_with(
-            &mut store,
-            &run_context,
-            "provider failed",
-            |store, session_id| {
-                store.delete_read_model(
-                    AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
-                    session_id.expect("session should be present"),
-                )?;
-                Err(StorageError::new("injected snapshot cleanup failure"))
-            },
-        )
-        .expect_err("injected cleanup failure should abort terminalization");
-        assert!(error.contains("injected snapshot cleanup failure"));
-
-        let events = store
-            .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-error")
-            .expect("events should load");
-        assert!(events.is_empty(), "failed terminalization leaked an event");
-        for namespace in [
-            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
-            AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
-        ] {
-            assert_eq!(
-                store
-                    .load_read_model(namespace, "session-error")
-                    .expect("snapshot should load")
-                    .map(|model| model.payload),
-                Some("snapshot-before".to_string())
-            );
-        }
-
-        persist_agent_error_terminalization(&mut store, &run_context, "provider failed")
-            .expect("terminalization retry should succeed");
-        let events = store
-            .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-error")
-            .expect("events should reload");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, EventKind::Error);
-        assert_eq!(
-            events[0].metadata.get("error").map(String::as_str),
-            Some("provider failed")
-        );
-        for namespace in [
-            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
-            AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
-        ] {
-            assert!(store
-                .load_read_model(namespace, "session-error")
-                .expect("snapshot absence should load")
-                .is_none());
-        }
-    }
-}
+#[path = "agent_read_model_tests.rs"]
+mod tests;

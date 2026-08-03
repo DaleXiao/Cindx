@@ -1,14 +1,16 @@
 use crate::desktop_prelude::*;
 use crate::{
     agent_completion_runtime::{finalize_agent_completion, AgentCompletionOutcome},
+    agent_failure_terminal_runtime::{resolve_loop_failure, AgentFailureLoopOutcome},
     agent_model_turn_runtime::{
         execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnResponse,
     },
+    agent_outcome_ledger_runtime::observe_candidate,
     agent_query_commands::{
         append_agent_progress_event, emit_agent_stream_delta,
         finish_agent_run_for_control_stop_with_task_state,
     },
-    agent_read_model::{agent_state_for_session, agent_state_with_error_in_context},
+    agent_read_model::agent_state_for_session,
     agent_runtime_snapshot::{
         capture_persistable_agent_task_state, persist_runtime_append_and_snapshot,
     },
@@ -23,9 +25,7 @@ use crate::{
         agent_runtime_context_for_run, current_time_millis, effective_agent_objective,
         run_context_steer_epoch,
     },
-    suspended_run_runtime::{
-        clear_suspended_agent_run_for_context, remember_suspended_agent_run, SuspendedAgentRun,
-    },
+    suspended_run_runtime::{remember_suspended_agent_run, SuspendedAgentRun},
     view_models::AgentState,
 };
 
@@ -71,20 +71,14 @@ pub(crate) fn pause_agent_loop_for_control_stop(
 mod contract_runtime;
 #[cfg(test)]
 pub(crate) use contract_runtime::apply_run_task_contract;
+#[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use contract_runtime::{
     apply_run_task_contract_with_evidence_scopes, planned_agent_tools,
+    workspace_verification_policy_for_run_context,
 };
 use contract_runtime::{
     record_retained_agent_decision_after_noop_steer, synchronize_noop_control_epoch_context,
 };
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn workspace_verification_policy_for_run_context(
-    run_context: &Metadata,
-) -> Result<WorkspaceVerificationPolicy, String> {
-    contract_runtime::workspace_verification_policy_for_run_context(run_context)
-}
-
 pub(crate) enum AgentLoopExecutionOutcome {
     Finished(AgentState),
     Reprepare {
@@ -349,9 +343,11 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     let mut advance =
                         AgentKernel::new(next_runtime, &tools).advance_model_response(response);
                     let mut verification_required = false;
-                    if matches!(&advance, AgentAdvance::Completed { .. }) {
+                    if let AgentAdvance::Completed { answer } = &advance {
                         let verification_instruction =
                             AgentKernel::new(next_runtime, &tools).completion_gate_for_task();
+                        let steer_epoch = run_context_steer_epoch(&run_context);
+                        observe_candidate(next_runtime, steer_epoch, answer, &verification_instruction);
                         match verification_instruction {
                             Ok(Some(instruction)) => {
                                 next_runtime.messages.truncate(previous_message_count);
@@ -496,9 +492,29 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 continue;
             }
             AgentAdvance::Failed { failure } => {
-                clear_suspended_agent_run_for_context(state, &run_context)?;
-                return agent_state_with_error_in_context(state, &run_context, failure.message)
-                    .map(AgentLoopExecutionOutcome::Finished);
+                match resolve_loop_failure(
+                    app,
+                    state,
+                    workspace_root,
+                    &runtime,
+                    &prompt,
+                    &run_context,
+                    active_collaboration,
+                    cancellation,
+                    epoch_lease,
+                    &failure,
+                    &request_id,
+                    session_id,
+                    streamed_output,
+                )? {
+                    AgentFailureLoopOutcome::Finished(agent_state) => {
+                        return Ok(AgentLoopExecutionOutcome::Finished(agent_state))
+                    }
+                    AgentFailureLoopOutcome::RestartAfterSteer => {
+                        active_collaboration = None;
+                        continue 'agent_loop;
+                    }
+                }
             }
             AgentAdvance::ToolCalls { calls } => {
                 match execute_agent_tool_batch(

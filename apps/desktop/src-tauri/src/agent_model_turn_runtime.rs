@@ -1,4 +1,7 @@
 use super::*;
+use crate::agent_failure_terminal_runtime::{
+    commit_agent_failure_terminal, AgentFailureTerminalOutcome,
+};
 use model_provider::ModelError;
 
 fn prepared_streaming_request_once<'a>(
@@ -403,11 +406,46 @@ pub(crate) fn execute_agent_model_turn(
                         cancellation,
                     )?));
                 }
-                return Ok(finished_agent_turn(agent_state_with_error_in_context(
+                let failure = AgentFailure::from_model_error(&error);
+                return match commit_agent_failure_terminal(
                     state,
+                    runtime,
                     run_context,
+                    cancellation,
+                    epoch_lease,
+                    &failure,
                     format!("Agent model call failed: {error}"),
-                )?));
+                )? {
+                    AgentFailureTerminalOutcome::Committed(agent_state) => {
+                        Ok(finished_agent_turn(agent_state))
+                    }
+                    AgentFailureTerminalOutcome::RestartAfterSteer => {
+                        if visible_stream && streamed_output {
+                            emit_agent_stream_delta(
+                                app,
+                                &request_id,
+                                session_id,
+                                "",
+                                false,
+                                true,
+                                None,
+                            );
+                        }
+                        Ok(AgentModelTurnOutcome::RestartAfterSteer)
+                    }
+                    AgentFailureTerminalOutcome::Stopped => {
+                        Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
+                            app,
+                            state,
+                            workspace_root,
+                            runtime,
+                            prompt,
+                            run_context,
+                            collaboration,
+                            cancellation,
+                        )?))
+                    }
+                };
             }
         }
     };

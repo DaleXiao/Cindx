@@ -266,6 +266,13 @@ impl AgentTaskStateSnapshot {
                 "agent task checkpoint has an invalid turn budget",
             ));
         }
+        self.task_contract
+            .validate_persisted_outcome_state()
+            .map_err(|error| {
+                AgentTaskStateError::new(format!(
+                    "agent task checkpoint contains invalid outcome state: {error}"
+                ))
+            })?;
         Ok(())
     }
 }
@@ -306,6 +313,13 @@ mod tests {
         state.task_contract.merge_workspace_verification_policy(
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
+        let claim_sentinel = "RECOVERY_CLAIM_SENTINEL";
+        state.task_contract.observe_completion_candidate(
+            3,
+            state.turn,
+            claim_sentinel,
+            crate::OutcomeClaimDecision::RepairRequired,
+        );
         for path in ["src/one.rs", "src/two.rs", "src/three.rs"] {
             record_tool_outcome_with_risk(
                 &mut state,
@@ -322,17 +336,108 @@ mod tests {
                 action_tool: "browser.click".to_string(),
             },
         );
-        let snapshot = AgentTaskStateSnapshot::from_json(
-            &AgentTaskStateSnapshot::capture(&state)
-                .to_json()
-                .expect("checkpoint encodes"),
-        )
-        .expect("checkpoint decodes");
+        let encoded = AgentTaskStateSnapshot::capture(&state)
+            .to_json()
+            .expect("checkpoint encodes");
+        assert!(!encoded.contains(claim_sentinel));
+        let snapshot = AgentTaskStateSnapshot::from_json(&encoded).expect("checkpoint decodes");
         let restored = snapshot
             .restore(state.user_prompt.clone(), state.messages.clone())
             .expect("matching transcript restores");
 
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn rejects_corrupt_or_unbounded_persisted_outcome_claims() {
+        let mut state = start_agent_loop(
+            TaskId("outcome-state-validation".to_string()),
+            "validate outcome state",
+            AgentRuntimeConfig::default(),
+        );
+        state.task_contract.observe_completion_candidate(
+            1,
+            1,
+            "candidate",
+            crate::OutcomeClaimDecision::Accepted,
+        );
+        let base = serde_json::to_value(AgentTaskStateSnapshot::capture(&state))
+            .expect("checkpoint converts to JSON");
+
+        let mut invalid_states = Vec::new();
+
+        let mut too_many = base.clone();
+        let claims = too_many["taskContract"]["outcomeClaims"]
+            .as_array_mut()
+            .expect("claims array");
+        let template = claims[0].clone();
+        for sequence in 2..=9 {
+            let mut claim = template.clone();
+            claim["sequence"] = sequence.into();
+            claims.push(claim);
+        }
+        too_many["taskContract"]["nextOutcomeClaimSequence"] = 9.into();
+        invalid_states.push(too_many);
+
+        let mut duplicate = base.clone();
+        let duplicate_claim = duplicate["taskContract"]["outcomeClaims"][0].clone();
+        duplicate["taskContract"]["outcomeClaims"]
+            .as_array_mut()
+            .expect("claims array")
+            .push(duplicate_claim);
+        duplicate["taskContract"]["nextOutcomeClaimSequence"] = 2.into();
+        invalid_states.push(duplicate);
+
+        for (field, value) in [
+            (
+                "contentSha256",
+                serde_json::Value::String("bad".to_string()),
+            ),
+            ("contentBytes", serde_json::Value::Number(0.into())),
+            (
+                "kind",
+                serde_json::Value::String("delivered_answer".to_string()),
+            ),
+            (
+                "decision",
+                serde_json::Value::String("delivered".to_string()),
+            ),
+            (
+                "evidenceStatus",
+                serde_json::Value::String("available_not_entailed".to_string()),
+            ),
+            ("availableEvidenceSequences", serde_json::json!([1])),
+        ] {
+            let mut invalid = base.clone();
+            invalid["taskContract"]["outcomeClaims"][0][field] = value;
+            invalid_states.push(invalid);
+        }
+
+        let mut cursor_behind = base.clone();
+        cursor_behind["taskContract"]["nextOutcomeClaimSequence"] = 0.into();
+        invalid_states.push(cursor_behind);
+
+        let mut dropped_inconsistent = base.clone();
+        dropped_inconsistent["taskContract"]["outcomeDroppedClaims"] = 99.into();
+        invalid_states.push(dropped_inconsistent);
+
+        for invalid in invalid_states {
+            let encoded = serde_json::to_string(&invalid).expect("invalid checkpoint encodes");
+            let error = AgentTaskStateSnapshot::from_json(&encoded)
+                .expect_err("invalid outcome state must be rejected");
+            assert!(error.to_string().contains("invalid outcome state"));
+        }
+
+        let mut legacy = base;
+        let contract = legacy["taskContract"]
+            .as_object_mut()
+            .expect("task contract object");
+        contract.remove("outcomeClaims");
+        contract.remove("outcomeDroppedClaims");
+        contract.remove("nextOutcomeClaimSequence");
+        let encoded = serde_json::to_string(&legacy).expect("legacy checkpoint encodes");
+        AgentTaskStateSnapshot::from_json(&encoded)
+            .expect("checkpoint without outcome fields remains compatible");
     }
 
     #[test]

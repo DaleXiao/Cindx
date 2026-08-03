@@ -7,6 +7,29 @@ pub(crate) enum AgentCompletionOutcome {
     Paused(AgentState),
 }
 
+fn terminal_selection_overrides(
+    selection: Option<&agent_runtime::BestKnownResult>,
+    delivered_answer: &str,
+) -> bool {
+    selection.is_some_and(|candidate| candidate.content.trim() != delivered_answer.trim())
+}
+
+fn terminal_selection_for_delivered<'a>(
+    selection: Option<&'a agent_runtime::BestKnownResult>,
+    delivered_answer: &str,
+) -> Option<&'a agent_runtime::BestKnownResult> {
+    selection.filter(|candidate| candidate.content == delivered_answer)
+}
+
+fn terminal_selection_stage(
+    selection: Option<&agent_runtime::BestKnownResult>,
+    fallback_stage: &str,
+) -> String {
+    selection
+        .map(|candidate| candidate.stage.clone())
+        .unwrap_or_else(|| fallback_stage.to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_agent_completion(
     app: &tauri::AppHandle,
@@ -95,44 +118,45 @@ pub(crate) fn finalize_agent_completion(
         (answer.clone(), false, request_id.to_string())
     };
 
+    let terminal_result_stage = if synthesized {
+        "synthesizer"
+    } else if tool_evidence.verified_postcondition_count > 0 {
+        "verified_executor"
+    } else if tool_evidence.grounded_count > 0 {
+        "grounded_executor"
+    } else {
+        "executor"
+    };
+    let terminal_result_quality = if synthesized {
+        ResultQuality::Synthesized
+    } else if tool_evidence.verified_postcondition_count > 0 {
+        ResultQuality::Verified
+    } else if tool_evidence.grounded_count > 0 {
+        ResultQuality::Grounded
+    } else {
+        ResultQuality::Substantive
+    };
+    let terminal_result_verified = tool_evidence.verified_postcondition_count > 0;
     cancellation.record_best_known_result_at(
         epoch_lease.epoch(),
-        if synthesized {
-            "synthesizer"
-        } else if tool_evidence.verified_postcondition_count > 0 {
-            "verified_executor"
-        } else if tool_evidence.grounded_count > 0 {
-            "grounded_executor"
-        } else {
-            "executor"
-        },
+        terminal_result_stage,
         &final_answer,
-        if synthesized {
-            ResultQuality::Synthesized
-        } else if tool_evidence.verified_postcondition_count > 0 {
-            ResultQuality::Verified
-        } else if tool_evidence.grounded_count > 0 {
-            ResultQuality::Grounded
-        } else {
-            ResultQuality::Substantive
-        },
+        terminal_result_quality,
         tool_evidence.grounded_count,
-        tool_evidence.verified_postcondition_count > 0,
+        terminal_result_verified,
         true,
     );
     let terminal_selection = cancellation
         .best_known_result()
         .filter(|candidate| candidate.deliverable);
-    let terminal_selection_override = terminal_selection
-        .as_ref()
-        .is_some_and(|candidate| candidate.content.trim() != final_answer.trim());
-    let terminal_selected_stage = terminal_selection
-        .as_ref()
-        .map(|candidate| candidate.stage.clone())
-        .unwrap_or_else(|| "executor".to_string());
+    let terminal_selection_override =
+        terminal_selection_overrides(terminal_selection.as_ref(), &final_answer);
     let persist_selected_terminal_message = synthesized || terminal_selection_override;
-    if let Some(selected) = terminal_selection.filter(|_| terminal_selection_override) {
-        final_answer = selected.content;
+    if let Some(selected) = terminal_selection
+        .as_ref()
+        .filter(|_| terminal_selection_override)
+    {
+        final_answer = selected.content.clone();
         emit_agent_stream_delta(app, &delivery_request_id, session_id, "", false, true, None);
         emit_agent_stream_delta(
             app,
@@ -144,6 +168,32 @@ pub(crate) fn finalize_agent_completion(
             None,
         );
     }
+    let delivered_selection =
+        terminal_selection_for_delivered(terminal_selection.as_ref(), &final_answer);
+    let terminal_selected_stage =
+        terminal_selection_stage(delivered_selection, terminal_result_stage);
+    let terminal_outcome_ledger =
+        runtime
+            .task_contract
+            .completed_outcome_ledger(agent_runtime::OutcomeTerminalObservation {
+                steer_epoch: epoch_lease.epoch(),
+                model_turn: runtime.turn,
+                answer: &final_answer,
+                selected_stage: &terminal_selected_stage,
+                selector_quality: delivered_selection
+                    .map(|candidate| candidate.quality)
+                    .unwrap_or(terminal_result_quality),
+                selector_marked_verified: delivered_selection
+                    .map(|candidate| candidate.verified)
+                    .unwrap_or(terminal_result_verified),
+                selector_marked_deliverable: delivered_selection
+                    .map(|candidate| candidate.deliverable)
+                    .unwrap_or(true),
+                selector_evidence_count: delivered_selection
+                    .map(|candidate| candidate.evidence_count)
+                    .unwrap_or(tool_evidence.grounded_count),
+                trusted_evidence_sequences: &tool_evidence.trusted_contract_sequences,
+            });
 
     let completion_progress = cancellation.progress();
     let completion_resources = cancellation.resource_usage();
@@ -319,6 +369,17 @@ pub(crate) fn finalize_agent_completion(
                     &mut terminal_metadata,
                     &completion_resources,
                 );
+                let outcome_ledger_recorded =
+                    terminal_outcome_ledger.insert_metadata(&mut terminal_metadata);
+                terminal_metadata.insert(
+                    "outcome_ledger_status".to_string(),
+                    if outcome_ledger_recorded {
+                        "recorded"
+                    } else {
+                        "omitted_invalid"
+                    }
+                    .to_string(),
+                );
                 let learning_evidence = crate::agent_result_evidence::completion_learning_evidence(
                     run_context,
                     completion_usage,
@@ -392,4 +453,38 @@ pub(crate) fn finalize_agent_completion(
         run_context.clone(),
     );
     Ok(AgentCompletionOutcome::Completed(completed_state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(content: &str, stage: &str) -> agent_runtime::BestKnownResult {
+        agent_runtime::BestKnownResult {
+            content: content.to_string(),
+            stage: stage.to_string(),
+            quality: ResultQuality::Verified,
+            evidence_count: 1,
+            verified: true,
+            deliverable: true,
+        }
+    }
+
+    #[test]
+    fn terminal_provenance_uses_exact_delivered_bytes_and_real_fallback_stage() {
+        let selected = candidate("answer", "verified_executor");
+        assert!(!terminal_selection_overrides(Some(&selected), "answer"));
+        assert!(!terminal_selection_overrides(Some(&selected), "answer "));
+        assert!(terminal_selection_overrides(Some(&selected), "different"));
+        assert_eq!(
+            terminal_selection_for_delivered(Some(&selected), "answer"),
+            Some(&selected)
+        );
+        assert!(terminal_selection_for_delivered(Some(&selected), "answer ").is_none());
+        assert_eq!(
+            terminal_selection_stage(Some(&selected), "synthesizer"),
+            "verified_executor"
+        );
+        assert_eq!(terminal_selection_stage(None, "synthesizer"), "synthesizer");
+    }
 }

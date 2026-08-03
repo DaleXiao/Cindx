@@ -89,8 +89,14 @@ pub use run_budget::{
 pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use task_contract::{
-    AgentTaskContract, ContractEvidence, ContractEvidenceKind, PromptEvidenceContext,
-    WorkspaceVerificationPolicy,
+    AgentTaskContract, ContractEvidence, ContractEvidenceKind, OutcomeClaim, OutcomeClaimDecision,
+    OutcomeClaimEvidenceStatus, OutcomeClaimKind, OutcomeClaimQuality, OutcomeEvidence,
+    OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase, OutcomeLedgerShadow,
+    OutcomeObligation, OutcomeObligationKind, OutcomePostcondition, OutcomePostconditionKind,
+    OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope, OutcomeTerminal,
+    OutcomeTerminalObservation, OutcomeTruncation, PromptEvidenceContext,
+    WorkspaceVerificationPolicy, OUTCOME_LEDGER_DIGEST_METADATA_KEY,
+    OUTCOME_LEDGER_MAX_METADATA_BYTES, OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
 };
 pub use task_state::{
     AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,
