@@ -6,11 +6,12 @@ use crate::agent_collaboration_runtime::{
 use crate::agent_conductor_runtime::{conductor_call_limits, conductor_repair_recovery_window};
 use crate::agent_conductor_scheduler::{schedule_conductor_decision, ConductorDecisionOutcome};
 use crate::agent_preparation_runtime::{
-    preparation_prompt_parts, remove_stale_preparation_context,
+    image_generation_objective_for_preparation, preparation_prompt_parts,
+    remove_stale_preparation_context, route_requirements_for_preparation,
 };
 use crate::agent_strategy_runtime::{
-    effective_prompt_objective_for_messages, should_evaluate_strategy_profile,
-    AgentPlanningSource, PlannedAgentRun,
+    effective_prompt_objective_for_messages, preferred_compatible_route_model,
+    should_evaluate_strategy_profile, AgentPlanningSource, PlannedAgentRun,
 };
 use crate::collaboration_execution::collaboration_model_failure;
 use crate::collaboration_stage_runtime::{
@@ -23,9 +24,10 @@ use crate::prompt_learning_runtime::prompt_dataset_identity;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentExecutionMode, AgentRunDecisionHarness,
-    AgentRunDecisionRequest, AgentVerificationPolicy, PromptDatasetCaseIdentityV1,
-    PromptExecutionContextV1, PromptTransferProvenance, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentExecutionMode, AgentRouteRequirements,
+    AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
+    AgentVerificationPolicy, PromptDatasetCaseIdentityV1, PromptExecutionContextV1,
+    PromptTransferProvenance, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -236,6 +238,7 @@ fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentPolicy) -> Pl
         degradation_reason: None,
         attempted_conductor_models: Vec::new(),
         selected_conductor_model: None,
+        route_requirements: AgentRouteRequirements::default(),
     }
 }
 
@@ -875,6 +878,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             historical_evidence: String::new(),
             matched_collaboration_evidence: Vec::new(),
             execution_constraints: "isolated workers are read-only".to_string(),
+            route_requirements: AgentRouteRequirements::default(),
         });
         assert!(harness.planning_prompt().contains(objective));
         let response = serde_json::to_string(&expected).expect("decision should serialize");
@@ -5167,6 +5171,10 @@ fn typed_agent_policy_provenance_preserves_the_legacy_runtime_wire() {
             "dynamic_conductor_replanned",
         ),
         (
+            AgentPlanningSource::CalibratedDirect,
+            "dynamic_conductor_calibrated_direct",
+        ),
+        (
             AgentPlanningSource::DegradedDirect,
             "dynamic_conductor_degraded_direct",
         ),
@@ -5177,6 +5185,352 @@ fn typed_agent_policy_provenance_preserves_the_legacy_runtime_wire() {
     ] {
         assert_eq!(source.label(), label);
     }
+}
+
+#[test]
+fn preparation_route_requirements_recompute_intent_and_active_images() {
+    let mut run_context = [(
+        "effective_prompt_objective".to_string(),
+        "Audit this repository".to_string(),
+    )]
+    .into_iter()
+    .collect::<Metadata>();
+    let mut active_user = test_message(MessageRole::User, "Audit this repository");
+
+    let read_only = route_requirements_for_preparation(
+        &run_context,
+        std::slice::from_ref(&active_user),
+        &active_user,
+    );
+    assert_eq!(
+        read_only.minimum_tool_requirement,
+        AgentToolRequirement::ReadOnly
+    );
+    assert!(!read_only.image_input_required);
+
+    active_user.metadata.insert(
+        "image_paths".to_string(),
+        "\n/private/tmp/screenshot.png\n".to_string(),
+    );
+    let with_image = route_requirements_for_preparation(
+        &run_context,
+        std::slice::from_ref(&active_user),
+        &active_user,
+    );
+    assert!(with_image.image_input_required);
+
+    run_context.insert("image_generation_required".to_string(), "true".to_string());
+    let image_generation = route_requirements_for_preparation(
+        &run_context,
+        std::slice::from_ref(&active_user),
+        &active_user,
+    );
+    assert_eq!(
+        image_generation.minimum_tool_requirement,
+        AgentToolRequirement::Effects
+    );
+
+    run_context.insert("steer_epoch".to_string(), "1".to_string());
+    run_context.insert(
+        "prompt_objective".to_string(),
+        "Instead, just explain what an audit is".to_string(),
+    );
+    run_context.remove("image_generation_required");
+    let steered = route_requirements_for_preparation(
+        &run_context,
+        std::slice::from_ref(&active_user),
+        &active_user,
+    );
+    assert_eq!(steered.minimum_tool_requirement, AgentToolRequirement::None);
+}
+
+#[test]
+fn additive_steer_retains_only_current_run_image_requirements() {
+    let mut run_context = [
+        ("agent_run_id".to_string(), "run-current".to_string()),
+        ("steer_epoch".to_string(), "1".to_string()),
+        (
+            "effective_prompt_objective".to_string(),
+            "Initial request:\nInspect this image\n\nAccepted steering 1:\nFocus on the header"
+                .to_string(),
+        ),
+        (
+            "prompt_objective".to_string(),
+            "Focus on the header".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let mut current_image = test_message(MessageRole::User, "Inspect this image");
+    current_image
+        .metadata
+        .insert("agent_run_id".to_string(), "run-current".to_string());
+    current_image.metadata.insert(
+        "image_paths".to_string(),
+        "/private/tmp/current.png".to_string(),
+    );
+    let mut old_image = test_message(MessageRole::User, "Old image request");
+    old_image
+        .metadata
+        .insert("agent_run_id".to_string(), "run-old".to_string());
+    old_image.metadata.insert(
+        "image_paths".to_string(),
+        "/private/tmp/old.png".to_string(),
+    );
+    let active_steer = test_message(MessageRole::User, "Focus on the header");
+
+    let additive = route_requirements_for_preparation(
+        &run_context,
+        &[
+            old_image.clone(),
+            current_image.clone(),
+            active_steer.clone(),
+        ],
+        &active_steer,
+    );
+    assert!(additive.image_input_required);
+
+    let old_run_only = route_requirements_for_preparation(
+        &run_context,
+        &[old_image, active_steer.clone()],
+        &active_steer,
+    );
+    assert!(!old_run_only.image_input_required);
+
+    let mut source_image = test_message(MessageRole::User, "Recovered image request");
+    source_image
+        .metadata
+        .insert("agent_run_id".to_string(), "run-source".to_string());
+    source_image.metadata.insert(
+        "image_paths".to_string(),
+        "/private/tmp/source.png".to_string(),
+    );
+    run_context.insert("source_agent_run_id".to_string(), "run-source".to_string());
+    let recovered_additive = route_requirements_for_preparation(
+        &run_context,
+        &[source_image.clone(), active_steer.clone()],
+        &active_steer,
+    );
+    assert!(recovered_additive.image_input_required);
+
+    run_context.insert(
+        "prompt_objective".to_string(),
+        "Instead, ignore the image and explain headers generally".to_string(),
+    );
+    let replacement = route_requirements_for_preparation(
+        &run_context,
+        &[current_image, active_steer.clone()],
+        &active_steer,
+    );
+    assert!(!replacement.image_input_required);
+    let recovered_replacement = route_requirements_for_preparation(
+        &run_context,
+        &[source_image, active_steer.clone()],
+        &active_steer,
+    );
+    assert!(!recovered_replacement.image_input_required);
+}
+
+#[test]
+fn replacement_steer_keeps_route_and_execution_intent_aligned() {
+    let replacement = "Instead, just explain how crash diagnosis works";
+    let run_context = [
+        ("agent_run_id".to_string(), "run-current".to_string()),
+        ("steer_epoch".to_string(), "1".to_string()),
+        (
+            "effective_prompt_objective".to_string(),
+            format!(
+                "Initial request:\nFix the crash in this image\n\nAccepted steering 1:\n{replacement}"
+            ),
+        ),
+        ("prompt_objective".to_string(), replacement.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let mut initial = test_message(MessageRole::User, "Fix the crash in this image");
+    initial
+        .metadata
+        .insert("agent_run_id".to_string(), "run-current".to_string());
+    initial.metadata.insert(
+        "image_paths".to_string(),
+        "/private/tmp/current.png".to_string(),
+    );
+    let active_steer = test_message(MessageRole::User, replacement);
+
+    let requirements = route_requirements_for_preparation(
+        &run_context,
+        &[initial, active_steer.clone()],
+        &active_steer,
+    );
+
+    assert_eq!(
+        requirements.minimum_tool_requirement,
+        AgentToolRequirement::None
+    );
+    assert!(!requirements.image_input_required);
+    assert_eq!(
+        agent_runtime::prompt_completion_intent(&run_context).tool_requirement,
+        agent_runtime::PromptToolRequirement::None
+    );
+}
+
+#[test]
+fn image_generation_route_follows_additive_and_replacement_steers() {
+    let config = ProviderConfig {
+        base_url: "https://provider.example/v1".to_string(),
+        image_model: "image-model".to_string(),
+        ..ProviderConfig::default()
+    };
+    let replacement = "Instead, just explain lighthouse composition";
+    let replacement_effective = format!(
+        "Initial request:\nGenerate an image of a lighthouse\n\nAccepted steering 1:\n{replacement}"
+    );
+    let mut replacement_context = [
+        ("steer_epoch".to_string(), "1".to_string()),
+        (
+            "effective_prompt_objective".to_string(),
+            replacement_effective.clone(),
+        ),
+        ("prompt_objective".to_string(), replacement.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let replacement_objective = image_generation_objective_for_preparation(
+        &replacement_context,
+        &replacement_effective,
+        replacement,
+    );
+    assert_eq!(replacement_objective, replacement);
+    add_image_generation_run_context(&mut replacement_context, &config, replacement_objective);
+    assert!(!replacement_context.contains_key("image_generation_required"));
+
+    let additive = "Generate an image of the proposed layout";
+    let additive_effective =
+        format!("Initial request:\nExplain the layout\n\nAccepted steering 1:\n{additive}");
+    let mut additive_context = [
+        ("steer_epoch".to_string(), "1".to_string()),
+        (
+            "effective_prompt_objective".to_string(),
+            additive_effective.clone(),
+        ),
+        ("prompt_objective".to_string(), additive.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let additive_objective = image_generation_objective_for_preparation(
+        &additive_context,
+        &additive_effective,
+        additive,
+    );
+    assert_eq!(additive_objective, additive_effective);
+    add_image_generation_run_context(&mut additive_context, &config, additive_objective);
+    assert_eq!(
+        additive_context
+            .get("image_generation_required")
+            .map(String::as_str),
+        Some("true")
+    );
+    let active_user = test_message(MessageRole::User, additive);
+    assert_eq!(
+        route_requirements_for_preparation(
+            &additive_context,
+            std::slice::from_ref(&active_user),
+            &active_user,
+        )
+        .minimum_tool_requirement,
+        AgentToolRequirement::Effects
+    );
+}
+
+#[test]
+fn route_fallback_prefers_the_first_compatible_configured_model() {
+    let candidates = vec![
+        ModelCandidate {
+            name: "text-only".to_string(),
+            role: ModelRole::Executor,
+            supports_tools: false,
+            supports_vision: false,
+            cost_tier: 1,
+            latency_tier: 1,
+        },
+        ModelCandidate {
+            name: "capable".to_string(),
+            role: ModelRole::Planner,
+            supports_tools: true,
+            supports_vision: true,
+            cost_tier: 2,
+            latency_tier: 2,
+        },
+    ];
+    let allowed_models = vec!["text-only".to_string(), "capable".to_string()];
+    let requirements = AgentRouteRequirements {
+        minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+        image_input_required: true,
+    };
+
+    assert_eq!(
+        preferred_compatible_route_model("text-only", &allowed_models, &candidates, requirements,)
+            .as_deref(),
+        Some("capable")
+    );
+    assert_eq!(
+        preferred_compatible_route_model(
+            "text-only",
+            &allowed_models[..1],
+            &candidates[..1],
+            requirements,
+        ),
+        None
+    );
+    assert_eq!(
+        preferred_compatible_route_model(
+            "capable",
+            &allowed_models[..1],
+            &candidates,
+            requirements,
+        ),
+        None,
+        "a capable preferred model outside the configured pool must not be selected"
+    );
+}
+
+#[test]
+fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
+    let route_requirements = AgentRouteRequirements {
+        minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+        image_input_required: true,
+    };
+    let mut decision = route_requirements.apply_to_direct(AgentRunDecision::direct("executor"));
+    decision.calibration_reason = Some("matched evidence rejects workflow".to_string());
+    let mut planned = test_planned_agent_run(decision, AgentPolicy::Auto);
+    planned.source = AgentPlanningSource::CalibratedDirect;
+    planned.route_requirements = route_requirements;
+    let mut run_context = Metadata::new();
+
+    planned
+        .apply_to_context(&mut run_context)
+        .expect("calibrated route metadata should persist");
+
+    assert_eq!(
+        run_context
+            .get("route_minimum_tool_requirement")
+            .map(String::as_str),
+        Some("read_only")
+    );
+    assert_eq!(
+        run_context
+            .get("route_image_input_required")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        run_context.get("decision_calibration").map(String::as_str),
+        Some("matched_evidence_direct")
+    );
+    assert_eq!(
+        run_context.get("conductor_degraded").map(String::as_str),
+        Some("false")
+    );
 }
 
 #[test]

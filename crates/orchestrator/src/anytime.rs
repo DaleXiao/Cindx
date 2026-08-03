@@ -618,9 +618,12 @@ impl AnytimeController {
         if !verdict.deliverable || verdict.safety_violations > 0 {
             degradation_reasons.push("selected candidate is not a safe deliverable".to_string());
         }
-        if self.config.verification_required && !verdict.verified {
+        if (self.config.verification_required
+            || self.config.stop_policy == ConductorStopPolicy::FirstVerified)
+            && !verdict.verified
+        {
             degradation_reasons
-                .push("selected candidate is not independently verified".to_string());
+                .push("selected candidate has not passed required verification".to_string());
         }
         if self.config.requires_synthesis && candidate.kind != AnytimeCandidateKind::Synthesis {
             degradation_reasons.push("selected candidate is not an explicit synthesis".to_string());
@@ -686,7 +689,7 @@ impl AnytimeController {
                 .selection_assessment(&best.candidate_id)
                 .is_some_and(|assessment| assessment.native_effort_success);
             let should_commit = match self.config.stop_policy {
-                ConductorStopPolicy::FirstVerified => native_success,
+                ConductorStopPolicy::FirstVerified => native_success && best.verdict.verified,
                 ConductorStopPolicy::Quorum => {
                     let best_is_direct_anchor = self
                         .candidates
@@ -1177,6 +1180,51 @@ mod tests {
                 candidate_id: "anchor".to_string()
             }
         );
+    }
+
+    #[test]
+    fn first_verified_waits_for_verification_even_when_the_contract_does_not_require_it() {
+        let mut config = config(ConductorStopPolicy::FirstVerified);
+        config.verification_required = false;
+        let mut controller = AnytimeController::new(config);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        controller
+            .register(AnytimeCandidate::workflow("workflow", Vec::new(), 8_000))
+            .unwrap();
+        controller.mark_running("anchor").unwrap();
+        controller.observe("anchor", verdict(7_000, false)).unwrap();
+
+        assert_eq!(
+            controller.decision(60_000, 5_000),
+            AnytimeDecision::Continue
+        );
+    }
+
+    #[test]
+    fn first_verified_terminal_reserve_can_commit_an_unverified_fallback() {
+        let mut config = config(ConductorStopPolicy::FirstVerified);
+        config.verification_required = false;
+        let mut controller = AnytimeController::new(config);
+        controller
+            .register(AnytimeCandidate::direct_anchor("anchor"))
+            .unwrap();
+        controller.mark_running("anchor").unwrap();
+        controller.observe("anchor", verdict(7_000, false)).unwrap();
+
+        assert_eq!(
+            controller.decision(5_000, 5_000),
+            AnytimeDecision::Commit {
+                candidate_id: "anchor".to_string()
+            }
+        );
+        let assessment = controller.selection_assessment("anchor").unwrap();
+        assert!(!assessment.native_effort_success);
+        assert!(assessment
+            .degradation_reasons
+            .iter()
+            .any(|reason| reason.contains("required verification")));
     }
 
     #[test]

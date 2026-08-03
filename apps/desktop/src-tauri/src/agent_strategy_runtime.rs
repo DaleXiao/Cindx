@@ -2,6 +2,8 @@
 mod context;
 #[path = "agent_strategy_preparation.rs"]
 mod preparation;
+#[path = "agent_strategy_requirements.rs"]
+mod requirements;
 
 pub(crate) use self::preparation::{
     cumulative_effective_prompt_objective, effective_prompt_objective_for_messages,
@@ -9,6 +11,9 @@ pub(crate) use self::preparation::{
 #[cfg(test)]
 pub(crate) use self::preparation::should_evaluate_strategy_profile;
 use self::preparation::{ensure_planning_current, selected_strategy_profile};
+pub(crate) use self::requirements::AgentPlanningSource;
+#[cfg(test)]
+pub(crate) use self::requirements::preferred_compatible_route_model;
 use crate::agent_conductor_runtime::{
     attempt_conductor_decision, conductor_model_sequence, preferred_fallback_model,
     unique_configured_models,
@@ -29,9 +34,9 @@ use crate::workflow_routing_runtime::{
 use agent_core::{EventKind, Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
-    AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentRunDecisionHarness,
-    AgentRunDecisionRequest, ConductorExecutionContract, ConductorPromptGenome, ModelCandidate,
-    RoutingContext, RoutingDecision,
+    AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
+    AgentRunDecisionHarness, AgentRunDecisionRequest, ConductorExecutionContract,
+    ConductorPromptGenome, ModelCandidate, RoutingContext, RoutingDecision,
 };
 
 #[derive(Debug, Clone)]
@@ -47,27 +52,7 @@ pub(crate) struct PlannedAgentRun {
     pub(crate) degradation_reason: Option<String>,
     pub(crate) attempted_conductor_models: Vec<String>,
     pub(crate) selected_conductor_model: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentPlanningSource {
-    FastDirect,
-    DynamicConductor,
-    DynamicConductorReplanned,
-    DegradedDirect,
-    DegradedWorkflow,
-}
-
-impl AgentPlanningSource {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::FastDirect => "fast_direct",
-            Self::DynamicConductor => "dynamic_conductor_v2",
-            Self::DynamicConductorReplanned => "dynamic_conductor_replanned",
-            Self::DegradedDirect => "dynamic_conductor_degraded_direct",
-            Self::DegradedWorkflow => "dynamic_conductor_degraded_workflow",
-        }
-    }
+    pub(crate) route_requirements: AgentRouteRequirements,
 }
 
 pub(crate) struct AgentRunPlanningRequest<'a> {
@@ -76,6 +61,7 @@ pub(crate) struct AgentRunPlanningRequest<'a> {
     pub(crate) prompt: &'a str,
     pub(crate) history: &'a [Message],
     pub(crate) effort: AgentPolicy,
+    pub(crate) route_requirements: AgentRouteRequirements,
     pub(crate) cancellation: &'a AgentRunControl,
 }
 
@@ -88,6 +74,7 @@ struct PlannedRunFinalizeInput {
     degradation_reason: Option<String>,
     attempted_conductor_models: Vec<String>,
     selected_conductor_model: Option<String>,
+    route_requirements: AgentRouteRequirements,
 }
 
 pub(crate) fn plan_agent_run(
@@ -101,13 +88,13 @@ pub(crate) fn plan_agent_run(
         prompt,
         history,
         effort,
+        route_requirements,
         cancellation,
     } = request;
     ensure_planning_current(cancellation)?;
-    run_context.insert(
-        "prompt_objective".to_string(),
-        truncate_for_collaboration(prompt, 6_000),
-    );
+    run_context
+        .entry("prompt_objective".to_string())
+        .or_insert_with(|| truncate_for_collaboration(prompt, 6_000));
     let default_effective_objective = truncate_for_collaboration(
         run_context
             .get("initial_prompt_objective")
@@ -120,16 +107,22 @@ pub(crate) fn plan_agent_run(
         .or_insert(default_effective_objective);
     let candidates = model_candidates_for_config(config);
     let allowed_models = unique_configured_models(&candidates);
-    let fallback_model = preferred_fallback_model(config, effort, &allowed_models);
+    let preferred_fallback_model = preferred_fallback_model(config, effort, &allowed_models);
     let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context);
 
     if !effort.uses_conductor() {
         conductor_health_runtime::record_conductor_fast_bypass(run_context);
+        let decision = requirements::fast_direct_route_decision(
+            preferred_fallback_model,
+            &candidates,
+            route_requirements,
+        )
+        .map_err(CollaborationStageError::Failed)?;
         let planned = finalize_planned_run(
             prompt,
             candidates,
             PlannedRunFinalizeInput {
-                decision: AgentRunDecision::direct(fallback_model),
+                decision,
                 source: AgentPlanningSource::FastDirect,
                 attempts: 0,
                 prompt_genome: profile,
@@ -137,6 +130,7 @@ pub(crate) fn plan_agent_run(
                 degradation_reason: None,
                 attempted_conductor_models: Vec::new(),
                 selected_conductor_model: None,
+                route_requirements,
             },
         )
         .map_err(CollaborationStageError::Failed)?;
@@ -149,6 +143,13 @@ pub(crate) fn plan_agent_run(
             .map_err(CollaborationStageError::Failed)?;
         return Ok(planned);
     }
+    let fallback_model = requirements::compatible_route_fallback_model(
+        &preferred_fallback_model,
+        &allowed_models,
+        &candidates,
+        route_requirements,
+    )
+    .map_err(CollaborationStageError::Failed)?;
     let max_parallelism = effort.max_parallelism();
     let configured_conductor_models = conductor_model_sequence(config);
     let (provider_scope, health_generation, conductor_models) =
@@ -174,6 +175,7 @@ pub(crate) fn plan_agent_run(
         evolved_directive: profile.conductor_directive(),
         historical_evidence,
         matched_collaboration_evidence,
+        route_requirements,
         execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
             .to_string(),
     };
@@ -226,11 +228,10 @@ pub(crate) fn plan_agent_run(
 
     let (decision, source, degradation_reason) = match outcome {
         ConductorDecisionOutcome::Selected(decision) => {
-            let source = if attempted_conductor_models.len() > 1 {
-                AgentPlanningSource::DynamicConductorReplanned
-            } else {
-                AgentPlanningSource::DynamicConductor
-            };
+            let source = requirements::selected_conductor_source(
+                &decision,
+                attempted_conductor_models.len(),
+            );
             (*decision, source, None)
         }
         ConductorDecisionOutcome::Exhausted => {
@@ -266,6 +267,7 @@ pub(crate) fn plan_agent_run(
             degradation_reason,
             attempted_conductor_models,
             selected_conductor_model,
+            route_requirements,
         },
     )
     .map_err(CollaborationStageError::Failed)?;
@@ -293,7 +295,14 @@ fn finalize_planned_run(
         degradation_reason,
         attempted_conductor_models,
         selected_conductor_model,
+        route_requirements,
     } = input;
+    let decision = requirements::apply_and_validate_route_requirements(
+        decision,
+        degradation_reason.is_some(),
+        &candidates,
+        route_requirements,
+    )?;
     let routing_context = decision.routing_context(prompt, candidates);
     let routing_decision = decision.routing_decision();
     let execution_contract = decision.execution_contract(effort.label());
@@ -309,6 +318,7 @@ fn finalize_planned_run(
         degradation_reason,
         attempted_conductor_models,
         selected_conductor_model,
+        route_requirements,
     })
 }
 
@@ -382,6 +392,7 @@ fn record_planned_agent_run(
                 ),
             ]
             .into_iter()
+            .chain(requirements::route_decision_metadata(planned))
             .collect(),
             run_context,
         ),

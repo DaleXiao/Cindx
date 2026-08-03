@@ -134,11 +134,24 @@ contains the task class, direct/workflow mode, primary model, tool requirement,
 risk, retrieval channels, memory policy, verification policy, parallelism,
 branch quorum, estimated steps, expected uplift, confidence, and stop policy.
 
+`AgentRouteRequirements` is the smaller authoritative input boundary. It is
+re-derived for every prepared steer epoch from completion intent, image
+generation, and the active user image input. The decision harness verifies that
+the conductor did not lower its tool or vision floor and that the selected
+configured model declares the required capabilities. Fast retains its default
+model choice and fails clearly when it is incompatible; Auto and Pro select a
+compatible configured fallback before making conductor calls.
+
 - Fast constructs a direct decision without a conductor call.
 - Auto and Pro ask configured conductor candidates for this schema.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
   dependency order and runnable/resumable/degraded/exhausted states.
+- `first_verified` requires an observed verified verdict before normal early
+  commit. Terminal reserve may still return a usable best-known fallback, but
+  the selection assessment keeps unmet verification as degradation. A prompt
+  genome using Minimal verification is raised to Evidence whenever the
+  execution contract requires verification.
 - The conductor is told the actual worker capability boundary. Isolated workers
   cannot be assigned permission-gated browser, computer, shell, or mutation work;
   those effects remain in the foreground executor.

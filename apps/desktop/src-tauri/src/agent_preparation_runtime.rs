@@ -10,6 +10,7 @@ use crate::agent_strategy_runtime::{
     effective_prompt_objective_for_messages, plan_agent_run, AgentRunPlanningRequest,
 };
 use crate::app_state::AppState;
+use crate::collaboration_service::truncate_for_collaboration;
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::configuration_models::ProviderConfig;
 use crate::event_persistence::append_event;
@@ -20,9 +21,14 @@ use crate::memory_runtime::{
 use crate::runtime_values::add_image_generation_run_context;
 use crate::session_context_service::prepare_session_history_context;
 use agent_core::{EventKind, Message, MessageRole, Metadata, TaskId};
-use agent_runtime::{AgentLoopState, AgentRunControl, RunPreparationCommit};
+use agent_runtime::{
+    prompt_completion_intent, prompt_replaces_prior_objective, AgentLoopState, AgentRunControl,
+    PromptToolRequirement, RunPreparationCommit,
+};
 use model_provider::MODEL_REQUEST_CANCELLED;
-use orchestrator::{AgentPolicy, OrchestrationPolicy};
+use orchestrator::{
+    AgentPolicy, AgentRouteRequirements, AgentToolRequirement, OrchestrationPolicy,
+};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -57,6 +63,65 @@ pub(crate) fn preparation_prompt_parts(
     Ok((history.to_vec(), active_user.clone()))
 }
 
+pub(crate) fn route_requirements_for_preparation(
+    run_context: &Metadata,
+    messages: &[Message],
+    active_user: &Message,
+) -> AgentRouteRequirements {
+    let mut minimum_tool_requirement = match prompt_completion_intent(run_context).tool_requirement
+    {
+        PromptToolRequirement::None => AgentToolRequirement::None,
+        PromptToolRequirement::ReadOnly => AgentToolRequirement::ReadOnly,
+        PromptToolRequirement::Effects => AgentToolRequirement::Effects,
+    };
+    if run_context
+        .get("image_generation_required")
+        .map(String::as_str)
+        == Some("true")
+    {
+        minimum_tool_requirement = AgentToolRequirement::Effects;
+    }
+    let message_has_images = |message: &Message| {
+        message
+            .metadata
+            .get("image_paths")
+            .is_some_and(|paths| paths.lines().any(|path| !path.trim().is_empty()))
+    };
+    let active_user_has_images = message_has_images(active_user);
+    let image_input_required = if prompt_replaces_prior_objective(run_context) {
+        active_user_has_images
+    } else {
+        let run_ids = [
+            run_context.get("agent_run_id").map(String::as_str),
+            run_context.get("source_agent_run_id").map(String::as_str),
+        ];
+        active_user_has_images
+            || messages.iter().any(|message| {
+                let message_run_id = message.metadata.get("agent_run_id").map(String::as_str);
+                message.role == MessageRole::User
+                    && message_run_id.is_some()
+                    && run_ids.contains(&message_run_id)
+                    && message_has_images(message)
+            })
+    };
+    AgentRouteRequirements {
+        minimum_tool_requirement,
+        image_input_required,
+    }
+}
+
+pub(crate) fn image_generation_objective_for_preparation<'a>(
+    run_context: &Metadata,
+    effective_objective: &'a str,
+    latest_objective: &'a str,
+) -> &'a str {
+    if prompt_replaces_prior_objective(run_context) {
+        latest_objective
+    } else {
+        effective_objective
+    }
+}
+
 pub(crate) fn remove_stale_preparation_context(history: &mut Vec<Message>) {
     history.retain(|message| {
         if message.metadata.get("internal").map(String::as_str) != Some("true") {
@@ -86,6 +151,10 @@ fn reset_preparation_run_context(run_context: &mut Metadata) {
         "task_class",
         "tool_requirement",
         "vision_required",
+        "route_minimum_tool_requirement",
+        "route_image_input_required",
+        "decision_calibration",
+        "decision_calibration_reason",
         "routing_signature",
         "collaboration_policy",
         "collaboration_profile",
@@ -171,10 +240,35 @@ pub(crate) fn prepare_agent_execution_replay(
             "effective_prompt_objective".to_string(),
             planning_objective.clone(),
         );
-        add_image_generation_run_context(&mut run_context, config, &planning_objective);
 
+        if let (Some(run_id), Some(active_user)) =
+            (run_context.get("agent_run_id"), runtime.messages.last_mut())
+        {
+            if active_user.role == MessageRole::User {
+                active_user
+                    .metadata
+                    .insert("agent_run_id".to_string(), run_id.clone());
+            }
+        }
         let (mut base_history, active_user) = preparation_prompt_parts(&runtime.messages)
             .map_err(|error| runtime_preparation_error(&run_context, error))?;
+        let latest_prompt_objective = active_user
+            .metadata
+            .get("display_content")
+            .map(String::as_str)
+            .unwrap_or(&active_user.content);
+        run_context.insert(
+            "prompt_objective".to_string(),
+            truncate_for_collaboration(latest_prompt_objective, 6_000),
+        );
+        let image_generation_objective = image_generation_objective_for_preparation(
+            &run_context,
+            &planning_objective,
+            latest_prompt_objective,
+        );
+        add_image_generation_run_context(&mut run_context, config, image_generation_objective);
+        let route_requirements =
+            route_requirements_for_preparation(&run_context, &runtime.messages, &active_user);
         remove_stale_preparation_context(&mut base_history);
         let mut history = prepare_session_history_context(
             state,
@@ -201,6 +295,7 @@ pub(crate) fn prepare_agent_execution_replay(
                 prompt: &planning_objective,
                 history: &history,
                 effort,
+                route_requirements,
                 cancellation,
             },
         );

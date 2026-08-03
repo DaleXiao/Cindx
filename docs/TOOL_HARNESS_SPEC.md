@@ -109,6 +109,14 @@ removing `tool.search`/`tool.inspect`/`tool.invoke`. Required evidence tools are
 pinned after ranking. Permission continuation recomputes this exact plan from the
 persisted run context instead of falling back to a broader catalog.
 
+Before model execution, a separate typed route contract pins the minimum tool
+class from the active completion intent. Image generation raises that floor to
+effects, and a current user image pins vision. The conductor response, Fast
+direct route, and degraded fallback all pass the same capability validation;
+declaring a weaker route or selecting a configured model without the required
+tool/vision capability is an explicit preparation error rather than a silent
+downgrade.
+
 ## Permission continuation
 
 Each session owns its suspended `AgentLoopState`. An approval resolution executes

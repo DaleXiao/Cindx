@@ -55,12 +55,108 @@ pub enum AgentVerificationPolicy {
     Independent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentToolRequirement {
+    #[default]
     None,
     ReadOnly,
     Effects,
+}
+
+impl AgentToolRequirement {
+    const fn strength(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::ReadOnly => 1,
+            Self::Effects => 2,
+        }
+    }
+
+    const fn satisfies(self, minimum: Self) -> bool {
+        self.strength() >= minimum.strength()
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ReadOnly => "read_only",
+            Self::Effects => "effects",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentRouteRequirements {
+    pub minimum_tool_requirement: AgentToolRequirement,
+    pub image_input_required: bool,
+}
+
+impl AgentRouteRequirements {
+    pub fn apply_to_direct(self, mut decision: AgentRunDecision) -> AgentRunDecision {
+        if !decision
+            .tool_requirement
+            .satisfies(self.minimum_tool_requirement)
+        {
+            decision.tool_requirement = self.minimum_tool_requirement;
+        }
+        decision.vision_required |= self.image_input_required;
+        decision
+    }
+
+    pub fn model_satisfies(self, model: &str, model_candidates: &[ModelCandidate]) -> bool {
+        let needs_tools = self.minimum_tool_requirement != AgentToolRequirement::None;
+        (!needs_tools
+            || model_candidates
+                .iter()
+                .any(|candidate| candidate.name.trim() == model.trim() && candidate.supports_tools))
+            && (!self.image_input_required
+                || model_candidates.iter().any(|candidate| {
+                    candidate.name.trim() == model.trim() && candidate.supports_vision
+                }))
+    }
+
+    pub fn validate_decision(
+        self,
+        decision: &AgentRunDecision,
+        model_candidates: &[ModelCandidate],
+    ) -> Result<(), String> {
+        if !decision
+            .tool_requirement
+            .satisfies(self.minimum_tool_requirement)
+        {
+            return Err(format!(
+                "run decision tool requirement {} is below the runtime minimum {}",
+                decision.tool_requirement.label(),
+                self.minimum_tool_requirement.label(),
+            ));
+        }
+        if self.image_input_required && !decision.vision_required {
+            return Err("run decision omitted vision for the active image input".to_string());
+        }
+
+        if decision.tool_requirement != AgentToolRequirement::None
+            && !model_candidates.iter().any(|candidate| {
+                candidate.name.trim() == decision.primary_model.trim() && candidate.supports_tools
+            })
+        {
+            return Err(format!(
+                "selected model {} is not configured with tool capability",
+                decision.primary_model
+            ));
+        }
+        if decision.vision_required
+            && !model_candidates.iter().any(|candidate| {
+                candidate.name.trim() == decision.primary_model.trim() && candidate.supports_vision
+            })
+        {
+            return Err(format!(
+                "selected model {} is not configured with vision capability",
+                decision.primary_model
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +249,8 @@ pub struct AgentRunDecision {
     pub stop_policy: ConductorStopPolicy,
     #[serde(default)]
     pub rationale: String,
+    #[serde(skip)]
+    pub calibration_reason: Option<String>,
 }
 
 impl AgentRunDecision {
@@ -176,6 +274,7 @@ impl AgentRunDecision {
             confidence_bps: 0,
             stop_policy: ConductorStopPolicy::FirstVerified,
             rationale: "safe direct fallback".to_string(),
+            calibration_reason: None,
         }
     }
 
@@ -298,6 +397,14 @@ impl AgentRunDecision {
                             .to_string(),
                     );
                 }
+                if self.stop_policy == ConductorStopPolicy::FirstVerified
+                    && self.verification == AgentVerificationPolicy::None
+                {
+                    return Err(
+                        "first_verified workflow requires self-check or independent verification"
+                            .to_string(),
+                    );
+                }
                 if self.verification == AgentVerificationPolicy::Independent
                     && self.estimated_steps < 2
                 {
@@ -310,16 +417,12 @@ impl AgentRunDecision {
         Ok(())
     }
 
-    pub fn validate_effort_admission(
-        &self,
-        effort: &str,
-        matched_evidence: &[MatchedCollaborationEvidence],
-    ) -> Result<(), String> {
+    pub fn validate_effort_admission(&self, effort: &str) -> Result<(), String> {
         if self.execution != AgentExecutionMode::Workflow {
             return Ok(());
         }
         let normalized_effort = effort.trim().to_ascii_lowercase();
-        let required_uplift = match normalized_effort.as_str() {
+        match normalized_effort.as_str() {
             "auto" => {
                 if self.expected_uplift_bps < AUTO_COLLABORATION_MIN_UPLIFT_BPS
                     || self.confidence_bps < AUTO_COLLABORATION_MIN_CONFIDENCE_BPS
@@ -329,7 +432,6 @@ impl AgentRunDecision {
                         self.expected_uplift_bps, self.confidence_bps
                     ));
                 }
-                AUTO_COLLABORATION_MIN_UPLIFT_BPS
             }
             "pro" => {
                 let minimum_uplift = minimum_team_uplift_bps("pro");
@@ -339,27 +441,61 @@ impl AgentRunDecision {
                         self.expected_uplift_bps, minimum_uplift
                     ));
                 }
-                minimum_uplift
             }
             _ => {
                 return Err("fast effort cannot admit a collaboration workflow".to_string());
             }
+        }
+        Ok(())
+    }
+
+    fn matched_collaboration_rejection(
+        &self,
+        effort: &str,
+        matched_evidence: &[MatchedCollaborationEvidence],
+    ) -> Option<String> {
+        if self.execution != AgentExecutionMode::Workflow {
+            return None;
+        }
+        let normalized_effort = effort.trim().to_ascii_lowercase();
+        let required_uplift = match normalized_effort.as_str() {
+            "auto" => AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+            "pro" => minimum_team_uplift_bps("pro"),
+            _ => return None,
         };
         let signature = self.learning_signature();
-        if let Some(evidence) = matched_evidence.iter().find(|evidence| {
+        matched_evidence.iter().find(|evidence| {
             evidence.task_class == self.task_class
                 && evidence.effort.eq_ignore_ascii_case(&normalized_effort)
                 && evidence.routing_signature == signature
                 && evidence.strong_evidence_against_collaboration(required_uplift)
-        }) {
-            return Err(format!(
+        }).map(|evidence| {
+            format!(
                 "matched direct-anchor evidence rejects collaboration for this task shape: samples={} average_uplift={}bps below_admission_floor_lower_confidence={:.2}",
                 evidence.examples,
                 evidence.average_uplift_bps,
                 evidence.below_admission_floor_confidence
-            ));
-        }
-        Ok(())
+            )
+        })
+    }
+
+    fn calibrated_to_direct(mut self, reason: String) -> Self {
+        self.execution = AgentExecutionMode::Direct;
+        self.verification = match self.verification {
+            AgentVerificationPolicy::Independent => AgentVerificationPolicy::SelfCheck,
+            verification => verification,
+        };
+        self.max_parallelism = 1;
+        self.min_successful_branches = 1;
+        self.distinct_contributions = 0;
+        self.expected_uplift_bps = 0;
+        self.stop_policy = ConductorStopPolicy::FirstVerified;
+        self.rationale = bounded_chars(
+            &format!("Calibrated to the direct anchor by trusted matched evidence: {reason}"),
+            MAX_RUN_DECISION_RATIONALE_CHARS,
+        );
+        self.calibration_reason = Some(reason);
+        self
     }
 
     pub fn policy(&self) -> OrchestrationPolicy {
@@ -509,6 +645,7 @@ pub struct AgentRunDecisionRequest {
     pub historical_evidence: String,
     pub matched_collaboration_evidence: Vec<MatchedCollaborationEvidence>,
     pub execution_constraints: String,
+    pub route_requirements: AgentRouteRequirements,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +723,7 @@ impl AgentRunDecisionHarness {
                 "Workflow admission is enforced after parsing: Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. If you cannot justify those estimates, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
                 "Runtime execution constraints are facts, not suggestions. Do not assign required effects or interactive work to a worker that cannot perform them:\n{execution_constraints}\n\n",
+                "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade or omit them.\n\n",
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
                 "Return this shape exactly:\n",
                 "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\"}}\n\n",
@@ -603,6 +741,8 @@ impl AgentRunDecisionHarness {
             },
             historical_evidence = historical_evidence,
             execution_constraints = execution_constraints,
+            minimum_tool_requirement = request.route_requirements.minimum_tool_requirement.label(),
+            image_input_required = request.route_requirements.image_input_required,
             schema = AGENT_RUN_DECISION_SCHEMA,
             effort = request.effort,
             conductor_model = request.conductor_model,
@@ -629,13 +769,23 @@ impl AgentRunDecisionHarness {
             .rfind('}')
             .filter(|end| *end >= start)
             .ok_or_else(|| "run decision returned incomplete JSON".to_string())?;
-        let decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
+        let mut decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
-        decision.validate_effort_admission(
+        self.request
+            .route_requirements
+            .validate_decision(&decision, &self.request.model_candidates)?;
+        decision.validate_effort_admission(&self.request.effort)?;
+        if let Some(reason) = decision.matched_collaboration_rejection(
             &self.request.effort,
             &self.request.matched_collaboration_evidence,
-        )?;
+        ) {
+            decision = decision.calibrated_to_direct(reason);
+            decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
+            self.request
+                .route_requirements
+                .validate_decision(&decision, &self.request.model_candidates)?;
+        }
         Ok(decision)
     }
 }
@@ -661,12 +811,23 @@ mod tests {
             effort: "auto".to_string(),
             conductor_model: "planner".to_string(),
             allowed_models: vec!["executor".to_string(), "reviewer".to_string()],
-            model_candidates: Vec::new(),
+            model_candidates: ["executor", "reviewer"]
+                .into_iter()
+                .map(|name| ModelCandidate {
+                    name: name.to_string(),
+                    role: ModelRole::Executor,
+                    supports_tools: true,
+                    supports_vision: true,
+                    cost_tier: 1,
+                    latency_tier: 1,
+                })
+                .collect(),
             max_parallelism: 3,
             evolved_directive: String::new(),
             historical_evidence: String::new(),
             matched_collaboration_evidence: Vec::new(),
             execution_constraints: "isolated workers are read-only".to_string(),
+            route_requirements: AgentRouteRequirements::default(),
         }
     }
 
@@ -775,6 +936,84 @@ mod tests {
     }
 
     #[test]
+    fn planning_prompt_exposes_authoritative_runtime_requirements() {
+        let mut request = request();
+        request.route_requirements = AgentRouteRequirements {
+            minimum_tool_requirement: AgentToolRequirement::Effects,
+            image_input_required: true,
+        };
+
+        let prompt = AgentRunDecisionHarness::new(request).planning_prompt();
+
+        assert!(prompt.contains("minimum_tool_requirement=effects"));
+        assert!(prompt.contains("image_input_required=true"));
+        assert!(prompt.contains("must satisfy them"));
+    }
+
+    #[test]
+    fn runtime_requirements_reject_tool_and_vision_downgrades() {
+        let mut request = request();
+        request.route_requirements = AgentRouteRequirements {
+            minimum_tool_requirement: AgentToolRequirement::Effects,
+            image_input_required: true,
+        };
+        let harness = AgentRunDecisionHarness::new(request);
+        let decision = serde_json::to_string(&AgentRunDecision::direct("executor")).unwrap();
+
+        let error = harness.parse(&decision).unwrap_err();
+
+        assert!(error.contains("below the runtime minimum"));
+    }
+
+    #[test]
+    fn active_image_input_cannot_be_omitted_or_sent_to_a_text_only_model() {
+        let mut omitted_request = request();
+        omitted_request.route_requirements.image_input_required = true;
+        let omitted = AgentRunDecisionHarness::new(omitted_request)
+            .parse(&serde_json::to_string(&AgentRunDecision::direct("executor")).unwrap())
+            .unwrap_err();
+        assert!(omitted.contains("omitted vision"));
+
+        let mut incapable_request = request();
+        incapable_request.route_requirements.image_input_required = true;
+        for candidate in &mut incapable_request.model_candidates {
+            if candidate.name == "executor" {
+                candidate.supports_vision = false;
+            }
+        }
+        let decision = incapable_request
+            .route_requirements
+            .apply_to_direct(AgentRunDecision::direct("executor"));
+        let incapable = AgentRunDecisionHarness::new(incapable_request)
+            .parse(&serde_json::to_string(&decision).unwrap())
+            .unwrap_err();
+        assert!(incapable.contains("not configured with vision capability"));
+    }
+
+    #[test]
+    fn selected_model_must_declare_every_requested_capability() {
+        let mut request = request();
+        request.route_requirements.minimum_tool_requirement = AgentToolRequirement::ReadOnly;
+        for candidate in &mut request.model_candidates {
+            if candidate.name == "executor" {
+                candidate.supports_tools = false;
+            }
+        }
+        let harness = AgentRunDecisionHarness::new(request);
+        let decision = AgentRouteRequirements {
+            minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+            image_input_required: false,
+        }
+        .apply_to_direct(AgentRunDecision::direct("executor"));
+
+        let error = harness
+            .parse(&serde_json::to_string(&decision).unwrap())
+            .unwrap_err();
+
+        assert!(error.contains("not configured with tool capability"));
+    }
+
+    #[test]
     fn rejects_decorative_collaboration_and_unknown_models() {
         let harness = AgentRunDecisionHarness::new(request());
         let invalid = AgentRunDecision {
@@ -857,15 +1096,15 @@ mod tests {
         auto.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS - 1;
         auto.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
         auto.stop_policy = ConductorStopPolicy::Quorum;
-        assert!(auto.validate_effort_admission("auto", &[]).is_err());
+        assert!(auto.validate_effort_admission("auto").is_err());
 
         auto.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS;
-        assert!(auto.validate_effort_admission("auto", &[]).is_ok());
+        assert!(auto.validate_effort_admission("auto").is_ok());
 
         auto.expected_uplift_bps = 0;
-        assert!(auto.validate_effort_admission("pro", &[]).is_err());
+        assert!(auto.validate_effort_admission("pro").is_err());
         auto.expected_uplift_bps = minimum_team_uplift_bps("pro");
-        assert!(auto.validate_effort_admission("pro", &[]).is_ok());
+        assert!(auto.validate_effort_admission("pro").is_ok());
 
         auto.expected_uplift_bps = 3_500;
         let evidence = MatchedCollaborationEvidence {
@@ -883,13 +1122,43 @@ mod tests {
             average_team_latency_ms: 4_000,
             average_anchor_latency_ms: Some(1_000),
         };
-        let error = auto
-            .validate_effort_admission("auto", std::slice::from_ref(&evidence))
-            .unwrap_err();
-        assert!(error.contains("matched direct-anchor evidence"));
+        assert!(auto.validate_effort_admission("auto").is_ok());
+
+        let mut calibrated_request = request();
+        calibrated_request.matched_collaboration_evidence = vec![evidence.clone()];
+        let calibrated = AgentRunDecisionHarness::new(calibrated_request)
+            .parse(&serde_json::to_string(&auto).unwrap())
+            .expect("strong matched evidence should calibrate without a repair call");
+        assert_eq!(calibrated.execution, AgentExecutionMode::Direct);
+        assert_eq!(calibrated.primary_model, "executor");
+        assert!(calibrated.calibration_reason.is_some());
+        assert!(calibrated.rationale.contains("trusted matched evidence"));
 
         let mut unrelated = evidence;
         unrelated.routing_signature = "different-task-shape".to_string();
-        assert!(auto.validate_effort_admission("auto", &[unrelated]).is_ok());
+        let mut unrelated_request = request();
+        unrelated_request.matched_collaboration_evidence = vec![unrelated];
+        let uncalibrated = AgentRunDecisionHarness::new(unrelated_request)
+            .parse(&serde_json::to_string(&auto).unwrap())
+            .unwrap();
+        assert_eq!(uncalibrated.execution, AgentExecutionMode::Workflow);
+        assert!(uncalibrated.calibration_reason.is_none());
+    }
+
+    #[test]
+    fn first_verified_workflow_requires_a_real_verification_policy() {
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.execution = AgentExecutionMode::Workflow;
+        decision.verification = AgentVerificationPolicy::None;
+        decision.max_parallelism = 1;
+        decision.min_successful_branches = 1;
+        decision.distinct_contributions = 1;
+        decision.estimated_steps = 2;
+        decision.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS;
+        decision.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
+
+        let error = decision.validate(&["executor".to_string()], 2).unwrap_err();
+
+        assert!(error.contains("requires self-check or independent verification"));
     }
 }
