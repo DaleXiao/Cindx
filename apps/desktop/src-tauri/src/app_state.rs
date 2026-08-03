@@ -98,18 +98,14 @@ pub(crate) struct WorkspaceKnowledgeCacheEntry {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentRecoveryEnvelope {
     pub(crate) schema: String,
-    pub(crate) resume_key: String,
-    pub(crate) project_id: Option<String>,
-    pub(crate) session_id: String,
-    pub(crate) source_run_id: String,
-    pub(crate) user_turn_sequence: u64,
-    pub(crate) prompt_fingerprint: String,
+    #[serde(flatten)]
+    pub(crate) identity: AgentRecoveryIdentity,
     pub(crate) effort: String,
     pub(crate) policy: String,
     pub(crate) queue_id: Option<String>,
     pub(crate) workflow_resume_key: Option<String>,
-    pub(crate) state: String,
-    pub(crate) reason: String,
+    pub(crate) state: AgentRecoveryState,
+    pub(crate) reason: AgentRecoveryReason,
     pub(crate) attempts: u32,
     pub(crate) model_calls: usize,
     pub(crate) tool_calls: usize,

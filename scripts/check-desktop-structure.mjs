@@ -3428,12 +3428,14 @@ assert(
     agentRecoveryServiceSource.includes("reconcile_interrupted_agent_runs") &&
     agentRecoveryServiceSource.includes('"Agent task paused"') &&
     rustLib.includes('"continuation_replay"') &&
-    agentRecoveryServiceSource.includes('"app_restarted_waiting_for_permission"') &&
+    agentRecoveryServiceSource.includes(
+      "AgentRecoveryReason::AppRestartedWaitingForPermission"
+    ) &&
     tauriBridge.includes('| "paused"'),
   "Long agent runs must recover durably without replaying unknown tool outcomes"
 );
 assert(
-  /let \(task_state, resource_snapshot\)\s*=\s*match agent_recovery_identity[\s\S]*?load_matching_agent_runtime_snapshot[\s\S]*?load_matching_agent_resource_snapshot[\s\S]*?agent_recovery_metadata_with_task_state[\s\S]*?append_event\([\s\S]*?delete_persisted_agent_runtime_snapshot/.test(
+  /let \(task_state, resource_snapshot\)\s*=\s*match resolve_agent_recovery_identity[\s\S]*?load_matching_agent_runtime_snapshot[\s\S]*?load_matching_agent_resource_snapshot[\s\S]*?agent_recovery_metadata_with_task_state[\s\S]*?append_event\([\s\S]*?delete_persisted_agent_runtime_snapshot/.test(
     agentRecoveryServiceSource
   ) &&
     agentRecoveryServiceSource.includes("already_recovered_wait") &&

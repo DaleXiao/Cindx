@@ -1,6 +1,4 @@
-use crate::{
-    AgentLoopState, AgentTaskContract, InteractionSurface, PendingInteractionVerification,
-};
+use crate::{AgentLoopState, AgentTaskContract, PreparedTaskState};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -11,13 +9,11 @@ struct AgentLoopControlCheckpoint {
     max_turns: usize,
     failed_tool_signatures: BTreeMap<String, usize>,
     consecutive_empty_responses: usize,
-    successful_mutations: usize,
-    verified_after_last_mutation: bool,
     verification_gate_requests: usize,
-    pending_interaction_verifications: BTreeMap<InteractionSurface, PendingInteractionVerification>,
     verified_interactions: usize,
     interaction_verification_gate_requests: usize,
     task_contract: AgentTaskContract,
+    prepared_task_state: PreparedTaskState,
 }
 
 impl AgentLoopControlCheckpoint {
@@ -29,13 +25,11 @@ impl AgentLoopControlCheckpoint {
             max_turns: state.max_turns,
             failed_tool_signatures: state.failed_tool_signatures.clone(),
             consecutive_empty_responses: state.consecutive_empty_responses,
-            successful_mutations: state.successful_mutations,
-            verified_after_last_mutation: state.verified_after_last_mutation,
             verification_gate_requests: state.verification_gate_requests,
-            pending_interaction_verifications: state.pending_interaction_verifications.clone(),
             verified_interactions: state.verified_interactions,
             interaction_verification_gate_requests: state.interaction_verification_gate_requests,
             task_contract: state.task_contract.clone(),
+            prepared_task_state: state.prepared_task_state().clone(),
         }
     }
 
@@ -46,13 +40,11 @@ impl AgentLoopControlCheckpoint {
         state.max_turns = self.max_turns;
         state.failed_tool_signatures = self.failed_tool_signatures;
         state.consecutive_empty_responses = self.consecutive_empty_responses;
-        state.successful_mutations = self.successful_mutations;
-        state.verified_after_last_mutation = self.verified_after_last_mutation;
         state.verification_gate_requests = self.verification_gate_requests;
-        state.pending_interaction_verifications = self.pending_interaction_verifications;
         state.verified_interactions = self.verified_interactions;
         state.interaction_verification_gate_requests = self.interaction_verification_gate_requests;
         state.task_contract = self.task_contract;
+        state.replace_prepared_task_state(self.prepared_task_state);
     }
 }
 
@@ -172,21 +164,32 @@ mod tests {
                 state.max_turns = 99;
                 state.failed_tool_signatures.insert("tool:a".to_string(), 2);
                 state.consecutive_empty_responses = 2;
-                state.successful_mutations = 3;
-                state.verified_after_last_mutation = true;
                 state.verification_gate_requests = 4;
-                state.pending_interaction_verifications.insert(
-                    InteractionSurface::Browser,
-                    PendingInteractionVerification {
-                        surface: InteractionSurface::Browser,
-                        action_tool: "browser.click".to_string(),
-                    },
+                state.task_contract = AgentTaskContract::restore_legacy(
+                    3,
+                    true,
+                    [(
+                        crate::InteractionSurface::Browser,
+                        "browser.click".to_string(),
+                    )]
+                    .into_iter()
+                    .collect(),
                 );
                 state.verified_interactions = 5;
                 state.interaction_verification_gate_requests = 6;
                 state.task_contract.merge_workspace_verification_policy(
                     WorkspaceVerificationPolicy::RequiredAfterMutation,
                 );
+                state.replace_prepared_task_state(PreparedTaskState::from_run_context(
+                    &[(
+                        "effective_prompt_objective".to_string(),
+                        "revised objective".to_string(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                    "inspect",
+                    crate::PromptCompletionIntent::default(),
+                ));
                 state.messages.push(Message {
                     role: MessageRole::Assistant,
                     content: "candidate".to_string(),

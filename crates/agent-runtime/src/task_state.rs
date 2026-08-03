@@ -4,48 +4,16 @@ use crate::{
         is_durable_message, is_transient_run_context, text_fingerprint, AgentTaskStateLineage,
         AgentTranscriptFingerprintAccumulator,
     },
-    AgentLoopState, AgentTaskContract, InteractionSurface, PendingInteractionVerification,
+    task_state_wire::PreparedTaskStateCheckpoint,
+    AgentLoopState, AgentTaskContract, PreparedTaskState,
 };
 use agent_core::{Message, TaskId};
-use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
-pub const AGENT_TASK_STATE_SCHEMA: &str = "cindx.agent.task-state.v1";
+pub const AGENT_TASK_STATE_SCHEMA: &str = "cindx.agent.task-state.v2";
+pub const AGENT_TASK_STATE_SCHEMA_V1: &str = "cindx.agent.task-state.v1";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PersistedInteractionSurface {
-    Browser,
-    Computer,
-}
-
-impl From<InteractionSurface> for PersistedInteractionSurface {
-    fn from(surface: InteractionSurface) -> Self {
-        match surface {
-            InteractionSurface::Browser => Self::Browser,
-            InteractionSurface::Computer => Self::Computer,
-        }
-    }
-}
-
-impl From<PersistedInteractionSurface> for InteractionSurface {
-    fn from(surface: PersistedInteractionSurface) -> Self {
-        match surface {
-            PersistedInteractionSurface::Browser => Self::Browser,
-            PersistedInteractionSurface::Computer => Self::Computer,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PersistedInteractionVerification {
-    pub surface: PersistedInteractionSurface,
-    pub action_tool: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskStateSnapshot {
     pub schema: String,
     pub task_id: String,
@@ -56,14 +24,11 @@ pub struct AgentTaskStateSnapshot {
     pub max_turns: usize,
     pub failed_tool_signatures: BTreeMap<String, usize>,
     pub consecutive_empty_responses: usize,
-    pub successful_mutations: usize,
-    pub verified_after_last_mutation: bool,
     pub verification_gate_requests: usize,
-    pub pending_interaction_verifications: Vec<PersistedInteractionVerification>,
     pub verified_interactions: usize,
     pub interaction_verification_gate_requests: usize,
-    #[serde(default)]
     pub task_contract: AgentTaskContract,
+    pub prepared_task_state: Option<PreparedTaskStateCheckpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +37,7 @@ pub struct AgentTaskStateError {
 }
 
 impl AgentTaskStateError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -96,6 +61,18 @@ impl AgentTaskStateSnapshot {
     }
 
     pub fn capture_with_lineage(state: &AgentLoopState, lineage: AgentTaskStateLineage) -> Self {
+        Self::capture_with_lineage_and_prepared_task_state(
+            state,
+            lineage,
+            state.prepared_task_state(),
+        )
+    }
+
+    pub fn capture_with_lineage_and_prepared_task_state(
+        state: &AgentLoopState,
+        lineage: AgentTaskStateLineage,
+        prepared_task_state: &PreparedTaskState,
+    ) -> Self {
         Self {
             schema: AGENT_TASK_STATE_SCHEMA.to_string(),
             task_id: state.task_id.0.clone(),
@@ -108,20 +85,11 @@ impl AgentTaskStateSnapshot {
                 &state.failed_tool_signatures,
             ),
             consecutive_empty_responses: state.consecutive_empty_responses,
-            successful_mutations: state.successful_mutations,
-            verified_after_last_mutation: state.verified_after_last_mutation,
             verification_gate_requests: state.verification_gate_requests,
-            pending_interaction_verifications: state
-                .pending_interaction_verifications
-                .values()
-                .map(|pending| PersistedInteractionVerification {
-                    surface: pending.surface.into(),
-                    action_tool: pending.action_tool.clone(),
-                })
-                .collect(),
             verified_interactions: state.verified_interactions,
             interaction_verification_gate_requests: state.interaction_verification_gate_requests,
             task_contract: state.task_contract.clone(),
+            prepared_task_state: Some(PreparedTaskStateCheckpoint::capture(prepared_task_state)),
         }
     }
 
@@ -129,6 +97,30 @@ impl AgentTaskStateSnapshot {
         &self,
         user_prompt: impl Into<String>,
         messages: Vec<Message>,
+    ) -> Result<AgentLoopState, AgentTaskStateError> {
+        let user_prompt = user_prompt.into();
+        self.restore_with_effective_objective(user_prompt.clone(), messages, user_prompt)
+    }
+
+    pub fn restore_with_effective_objective(
+        &self,
+        user_prompt: impl Into<String>,
+        messages: Vec<Message>,
+        effective_objective: impl Into<String>,
+    ) -> Result<AgentLoopState, AgentTaskStateError> {
+        let user_prompt = user_prompt.into();
+        let prepared_task_state = match self.prepared_task_state.as_ref() {
+            Some(checkpoint) => checkpoint.restore_with_objective(effective_objective.into()),
+            None => PreparedTaskState::initial(&user_prompt),
+        };
+        self.restore_with_prepared_task_state(user_prompt, messages, prepared_task_state)
+    }
+
+    pub fn restore_with_prepared_task_state(
+        &self,
+        user_prompt: impl Into<String>,
+        messages: Vec<Message>,
+        prepared_task_state: PreparedTaskState,
     ) -> Result<AgentLoopState, AgentTaskStateError> {
         self.validate()?;
         let user_prompt = user_prompt.into();
@@ -142,45 +134,15 @@ impl AgentTaskStateSnapshot {
                 "agent task checkpoint does not match the durable transcript",
             ));
         };
-
-        let mut pending_interaction_verifications = BTreeMap::new();
-        for pending in &self.pending_interaction_verifications {
-            let surface: InteractionSurface = pending.surface.clone().into();
-            if pending.action_tool.trim().is_empty() {
-                return Err(AgentTaskStateError::new(
-                    "agent task checkpoint contains an empty interaction tool",
-                ));
-            }
-            if pending_interaction_verifications
-                .insert(
-                    surface,
-                    PendingInteractionVerification {
-                        surface,
-                        action_tool: pending.action_tool.clone(),
-                    },
-                )
-                .is_some()
-            {
-                return Err(AgentTaskStateError::new(
-                    "agent task checkpoint contains duplicate interaction surfaces",
-                ));
-            }
-        }
-
-        let task_contract = if self.task_contract == AgentTaskContract::default()
-            && (self.successful_mutations > 0 || !pending_interaction_verifications.is_empty())
+        if self
+            .prepared_task_state
+            .as_ref()
+            .is_some_and(|checkpoint| !checkpoint.matches(&prepared_task_state))
         {
-            AgentTaskContract::restore_legacy(
-                self.successful_mutations,
-                self.verified_after_last_mutation,
-                pending_interaction_verifications
-                    .iter()
-                    .map(|(surface, pending)| (*surface, pending.action_tool.clone()))
-                    .collect(),
-            )
-        } else {
-            self.task_contract.clone()
-        };
+            return Err(AgentTaskStateError::new(
+                "agent task checkpoint does not match the prepared task state",
+            ));
+        }
 
         Ok(AgentLoopState {
             task_id: TaskId(self.task_id.clone()),
@@ -190,13 +152,11 @@ impl AgentTaskStateSnapshot {
             max_turns: self.max_turns,
             failed_tool_signatures: normalized_failed_tool_signatures(&self.failed_tool_signatures),
             consecutive_empty_responses: self.consecutive_empty_responses,
-            successful_mutations: self.successful_mutations,
-            verified_after_last_mutation: self.verified_after_last_mutation,
             verification_gate_requests: self.verification_gate_requests,
-            pending_interaction_verifications,
             verified_interactions: self.verified_interactions,
             interaction_verification_gate_requests: self.interaction_verification_gate_requests,
-            task_contract,
+            task_contract: self.task_contract.clone(),
+            prepared_task_state,
             context_token_ledger: Default::default(),
         })
     }
@@ -249,12 +209,33 @@ impl AgentTaskStateSnapshot {
         Ok(snapshot)
     }
 
-    fn validate(&self) -> Result<(), AgentTaskStateError> {
-        if self.schema != AGENT_TASK_STATE_SCHEMA {
-            return Err(AgentTaskStateError::new(format!(
-                "unsupported agent task checkpoint schema: {}",
-                self.schema
-            )));
+    pub fn validate_checkpoint(&self) -> Result<(), AgentTaskStateError> {
+        self.validate()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), AgentTaskStateError> {
+        match self.schema.as_str() {
+            AGENT_TASK_STATE_SCHEMA => self
+                .prepared_task_state
+                .as_ref()
+                .ok_or_else(|| {
+                    AgentTaskStateError::new(
+                        "v2 agent task checkpoint is missing prepared task state",
+                    )
+                })?
+                .validate()?,
+            AGENT_TASK_STATE_SCHEMA_V1 if self.prepared_task_state.is_none() => {}
+            AGENT_TASK_STATE_SCHEMA_V1 => {
+                return Err(AgentTaskStateError::new(
+                    "v1 agent task checkpoint contains unsupported prepared task state",
+                ))
+            }
+            _ => {
+                return Err(AgentTaskStateError::new(format!(
+                    "unsupported agent task checkpoint schema: {}",
+                    self.schema
+                )))
+            }
         }
         if self.task_id.trim().is_empty() {
             return Err(AgentTaskStateError::new(
@@ -289,8 +270,8 @@ mod tests {
     use super::*;
     use crate::{
         record_tool_outcome, record_tool_outcome_with_risk, repeated_tool_failure_count,
-        start_agent_loop, AgentRuntimeConfig, WorkspaceVerificationPolicy,
-        TOOL_FAILURE_SIGNATURE_SCHEMA,
+        start_agent_loop, AgentRuntimeConfig, InteractionSurface, PromptCompletionIntent,
+        WorkspaceVerificationPolicy, TOOL_FAILURE_SIGNATURE_SCHEMA,
     };
     use agent_core::{MessageRole, Metadata, TaskId, ToolOutcomeStatus, ToolRisk};
 
@@ -329,12 +310,11 @@ mod tests {
                 Some(&ToolRisk::WritesWorkspace),
             );
         }
-        state.pending_interaction_verifications.insert(
-            InteractionSurface::Browser,
-            PendingInteractionVerification {
-                surface: InteractionSurface::Browser,
-                action_tool: "browser.click".to_string(),
-            },
+        record_tool_outcome(
+            &mut state,
+            "browser.click",
+            r##"{"selector":"#submit"}"##,
+            &ToolOutcomeStatus::Succeeded,
         );
         let encoded = AgentTaskStateSnapshot::capture(&state)
             .to_json()
@@ -346,6 +326,249 @@ mod tests {
             .expect("matching transcript restores");
 
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn v2_persists_typed_preparation_without_raw_objective_or_targets() {
+        let mut state = start_agent_loop(
+            TaskId("task-v2".to_string()),
+            "initial request",
+            AgentRuntimeConfig::default(),
+        );
+        let effective_objective =
+            "Inspect crates/secret-target.rs and https://example.com/private-target";
+        let run_context = [
+            (
+                "effective_prompt_objective".to_string(),
+                effective_objective.to_string(),
+            ),
+            ("steer_epoch".to_string(), "5".to_string()),
+            ("prompt_contract_epoch".to_string(), "4".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let prepared = PreparedTaskState::from_run_context(
+            &run_context,
+            "initial request",
+            crate::prompt_completion_intent(&run_context),
+        );
+        assert!(!prepared.completion_intent().target_anchors.is_empty());
+        state.replace_prepared_task_state(prepared.clone());
+
+        let snapshot = AgentTaskStateSnapshot::capture(&state);
+        let encoded = snapshot.to_json().expect("v2 checkpoint encodes");
+        let value = serde_json::from_str::<serde_json::Value>(&encoded).expect("valid JSON");
+
+        assert_eq!(value["schema"], AGENT_TASK_STATE_SCHEMA);
+        assert!(value.get("successfulMutations").is_none());
+        assert!(value.get("verifiedAfterLastMutation").is_none());
+        assert!(value.get("pendingInteractionVerifications").is_none());
+        assert!(!encoded.contains(effective_objective));
+        assert!(!encoded.contains("secret-target.rs"));
+        assert!(!encoded.contains("private-target"));
+        assert_eq!(
+            value["preparedTaskState"]["objectiveFingerprint"],
+            text_fingerprint(effective_objective)
+        );
+        assert_eq!(value["preparedTaskState"]["steerEpoch"], 5);
+        assert_eq!(value["preparedTaskState"]["contractEpoch"], 4);
+
+        let restored = AgentTaskStateSnapshot::from_json(&encoded)
+            .expect("v2 checkpoint decodes")
+            .restore_with_prepared_task_state(
+                state.user_prompt.clone(),
+                state.messages.clone(),
+                prepared,
+            )
+            .expect("supplied prepared objective restores");
+        assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn v2_reconstructs_runtime_only_target_anchors_from_the_effective_objective() {
+        let objective = "Inspect crates/agent-runtime/src/task_state.rs";
+        let state = start_agent_loop(
+            TaskId("task-v2-targets".to_string()),
+            objective,
+            AgentRuntimeConfig::default(),
+        );
+        assert!(!state
+            .prepared_task_state()
+            .completion_intent()
+            .target_anchors
+            .is_empty());
+
+        let restored = AgentTaskStateSnapshot::from_json(
+            &AgentTaskStateSnapshot::capture(&state)
+                .to_json()
+                .expect("checkpoint encodes"),
+        )
+        .expect("checkpoint decodes")
+        .restore(objective, state.messages.clone())
+        .expect("matching objective restores");
+
+        assert_eq!(
+            restored
+                .prepared_task_state()
+                .completion_intent()
+                .target_anchors,
+            state
+                .prepared_task_state()
+                .completion_intent()
+                .target_anchors
+        );
+    }
+
+    #[test]
+    fn v2_restores_a_steered_effective_objective_from_persisted_typed_facts() {
+        let user_prompt = "Inspect the project";
+        let effective_objective =
+            "Initial request:\nInspect the project\n\nAccepted steering 1:\nInspect crates/agent-runtime/src/task_state.rs";
+        let run_context = [
+            (
+                "effective_prompt_objective".to_string(),
+                effective_objective.to_string(),
+            ),
+            ("steer_epoch".to_string(), "5".to_string()),
+            ("prompt_contract_epoch".to_string(), "4".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let mut state = start_agent_loop(
+            TaskId("task-v2-steered".to_string()),
+            user_prompt,
+            AgentRuntimeConfig::default(),
+        );
+        state.replace_prepared_task_state(PreparedTaskState::from_run_context(
+            &run_context,
+            user_prompt,
+            crate::prompt_completion_intent(&run_context),
+        ));
+        let checkpoint = AgentTaskStateSnapshot::from_json(
+            &AgentTaskStateSnapshot::capture(&state)
+                .to_json()
+                .expect("checkpoint encodes"),
+        )
+        .expect("checkpoint decodes");
+
+        let restored = checkpoint
+            .restore_with_effective_objective(
+                user_prompt,
+                state.messages.clone(),
+                effective_objective,
+            )
+            .expect("steered checkpoint restores");
+        assert_eq!(restored.prepared_task_state().steer_epoch(), 5);
+        assert_eq!(restored.prepared_task_state().contract_epoch(), 4);
+        assert_eq!(
+            restored.prepared_task_state().completion_intent(),
+            state.prepared_task_state().completion_intent()
+        );
+
+        let error = checkpoint
+            .restore_with_effective_objective(
+                user_prompt,
+                state.messages.clone(),
+                "Inspect a different target",
+            )
+            .expect_err("a different effective objective must fail closed");
+        assert!(error.to_string().contains("prepared task state"));
+    }
+
+    #[test]
+    fn explicit_v1_decoder_reconstructs_legacy_contract_mirrors() {
+        let state = start_agent_loop(
+            TaskId("task-v1".to_string()),
+            "resume legacy work",
+            AgentRuntimeConfig::default(),
+        );
+        let mut value = serde_json::to_value(AgentTaskStateSnapshot::capture(&state))
+            .expect("v2 checkpoint converts to JSON");
+        value["schema"] = AGENT_TASK_STATE_SCHEMA_V1.into();
+        value
+            .as_object_mut()
+            .expect("checkpoint object")
+            .remove("preparedTaskState");
+        value["successfulMutations"] = 2.into();
+        value["verifiedAfterLastMutation"] = true.into();
+        value["pendingInteractionVerifications"] = serde_json::json!([{
+            "surface": "browser",
+            "actionTool": "browser.click"
+        }]);
+        value["taskContract"] =
+            serde_json::to_value(AgentTaskContract::default()).expect("default contract encodes");
+        let encoded = serde_json::to_string(&value).expect("v1 fixture encodes");
+
+        let snapshot = AgentTaskStateSnapshot::from_json(&encoded).expect("v1 decoder accepts");
+        snapshot
+            .validate_checkpoint()
+            .expect("explicitly migrated v1 checkpoint validates");
+        assert_eq!(snapshot.schema, AGENT_TASK_STATE_SCHEMA_V1);
+        assert!(snapshot.prepared_task_state.is_none());
+        let restored = snapshot
+            .restore_with_prepared_task_state(
+                state.user_prompt.clone(),
+                state.messages.clone(),
+                state.prepared_task_state().clone(),
+            )
+            .expect("legacy checkpoint restores through typed state");
+
+        assert_eq!(restored.successful_mutations(), 2);
+        assert!(restored.verified_after_last_mutation());
+        assert_eq!(
+            restored
+                .pending_interaction_verifications()
+                .get(&InteractionSurface::Browser)
+                .map(String::as_str),
+            Some("browser.click")
+        );
+    }
+
+    #[test]
+    fn checkpoint_schema_and_prepared_state_mismatches_fail_closed() {
+        let state = start_agent_loop(
+            TaskId("task-schema".to_string()),
+            "inspect the project",
+            AgentRuntimeConfig::default(),
+        );
+        let mut value = serde_json::to_value(AgentTaskStateSnapshot::capture(&state))
+            .expect("checkpoint converts to JSON");
+
+        value["schema"] = "cindx.agent.task-state.v999".into();
+        let unknown = serde_json::to_string(&value).expect("unknown fixture encodes");
+        assert!(AgentTaskStateSnapshot::from_json(&unknown)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported agent task checkpoint schema"));
+
+        value["schema"] = AGENT_TASK_STATE_SCHEMA.into();
+        value
+            .as_object_mut()
+            .expect("checkpoint object")
+            .remove("preparedTaskState");
+        let missing = serde_json::to_string(&value).expect("missing fixture encodes");
+        assert!(AgentTaskStateSnapshot::from_json(&missing).is_err());
+
+        let snapshot = AgentTaskStateSnapshot::capture(&state);
+        let mismatched = PreparedTaskState::from_run_context(
+            &[(
+                "effective_prompt_objective".to_string(),
+                "different objective".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            "different objective",
+            PromptCompletionIntent::default(),
+        );
+        assert!(snapshot
+            .restore_with_prepared_task_state(
+                state.user_prompt.clone(),
+                state.messages.clone(),
+                mismatched,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("prepared task state"));
     }
 
     #[test]

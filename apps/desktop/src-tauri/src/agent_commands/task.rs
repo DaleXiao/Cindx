@@ -2,6 +2,7 @@ use super::queue::*;
 use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
+use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
 use crate::suspended_run_runtime::{
     clear_suspended_agent_run, suspended_agent_run_control_snapshot, take_suspended_agent_run,
     SuspendedAgentRun,
@@ -296,7 +297,8 @@ pub(crate) fn retry_agent_task_blocking(
             .list_by_task_and_metadata_or_unscoped(&phase16_task_id(), "session_id", &session_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
-        let recovery = peek_agent_recovery_envelope(&store, &recovery_context, &["paused"])?;
+        let recovery =
+            peek_agent_recovery_envelope(&store, &recovery_context, &[AgentRecoveryState::Paused])?;
         (
             agent_effort_from_active_events(&active_events),
             latest_applied_agent_steer_epoch(&active_events),
@@ -319,7 +321,7 @@ pub(crate) fn retry_agent_task_blocking(
                 .resource_snapshot
                 .clone()
                 .expect("filtered durable resource snapshot"),
-            recovery.reason != "app_restarted",
+            recovery.reason != AgentRecoveryReason::AppRestarted,
         )?
     } else {
         begin_agent_run_control_at_steer_epoch(
@@ -366,16 +368,21 @@ pub(crate) fn resume_suspended_agent_run(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        claim_agent_recovery_envelope(&mut store, &run_context, &["paused"], "user_continued")?
+        claim_agent_recovery_envelope(
+            &mut store,
+            &run_context,
+            &[AgentRecoveryState::Paused],
+            AgentRecoveryReason::UserContinued,
+        )?
     };
     if let Some(recovery) = recovery {
         run_context.insert(
             "recovery_resume_key".to_string(),
-            recovery.resume_key.clone(),
+            recovery.identity.resume_key.clone(),
         );
         run_context.insert(
             "source_agent_run_id".to_string(),
-            recovery.source_run_id.clone(),
+            recovery.identity.source_run_id.clone(),
         );
         run_context.insert(
             "recovery_attempts".to_string(),
@@ -493,6 +500,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
         recovery,
         applied_steer_epoch,
         initial_objective,
+        effective_objective,
+        prompt_contract_epoch,
     ) = {
         let mut store = state
             .store
@@ -509,11 +518,25 @@ pub(crate) fn retry_agent_task_blocking_inner(
         let recovery_prompt = agent_recovery_prompt_from_active_events(&active_events)
             .unwrap_or_else(|| prompt.clone());
         let effort = agent_effort_from_active_events(&active_events);
-        let recovery =
-            claim_agent_recovery_envelope(&mut store, &run_context, &["paused"], "user_continued")?;
+        let recovery = claim_agent_recovery_envelope(
+            &mut store,
+            &run_context,
+            &[AgentRecoveryState::Paused],
+            AgentRecoveryReason::UserContinued,
+        )?;
         let applied_steer_epoch = latest_applied_agent_steer_epoch(&active_events);
         let initial_objective = initial_agent_objective_from_events(&active_events)
             .unwrap_or_else(|| display_prompt.clone());
+        let effective_objective = effective_prompt_objective_for_messages(
+            &initial_objective,
+            &recovery_safe_transcript(&active_events),
+        );
+        let prompt_contract_epoch = recovery
+            .as_ref()
+            .and_then(|recovery| recovery.task_state.as_ref())
+            .and_then(|snapshot| snapshot.prepared_task_state.as_ref())
+            .map(|prepared| prepared.contract_epoch)
+            .unwrap_or(applied_steer_epoch);
         (
             prompt,
             display_prompt,
@@ -522,14 +545,24 @@ pub(crate) fn retry_agent_task_blocking_inner(
             recovery,
             applied_steer_epoch,
             initial_objective,
+            effective_objective,
+            prompt_contract_epoch,
         )
     };
     run_context.insert("steer_epoch".to_string(), applied_steer_epoch.to_string());
     run_context.insert("initial_prompt_objective".to_string(), initial_objective);
+    run_context.insert(
+        "effective_prompt_objective".to_string(),
+        effective_objective,
+    );
+    run_context.insert(
+        "prompt_contract_epoch".to_string(),
+        prompt_contract_epoch.to_string(),
+    );
     if let Some(recovery) = recovery.as_ref() {
         run_context.insert(
             "recovery_resume_key".to_string(),
-            recovery.resume_key.clone(),
+            recovery.identity.resume_key.clone(),
         );
         run_context.insert(
             "recovery_attempts".to_string(),
@@ -537,7 +570,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
         );
         run_context.insert(
             "source_agent_run_id".to_string(),
-            recovery.source_run_id.clone(),
+            recovery.identity.source_run_id.clone(),
         );
         run_context.insert("continuation".to_string(), "true".to_string());
         if let Some(queue_id) = recovery.queue_id.as_ref() {
@@ -552,6 +585,16 @@ pub(crate) fn retry_agent_task_blocking_inner(
     run_context.insert(
         "requested_policy".to_string(),
         requested_policy.label().to_string(),
+    );
+    let recovered_prepared_task_state =
+        crate::prepared_task_state_metadata::prepared_task_state_from_legacy_metadata(
+            &run_context,
+            &recovery_prompt,
+            agent_runtime::prompt_completion_intent(&run_context),
+        );
+    crate::prepared_task_state_metadata::project_prepared_task_state_to_legacy_metadata(
+        &recovered_prepared_task_state,
+        &mut run_context,
     );
     {
         let mut store = state
@@ -612,7 +655,11 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .as_ref()
             .and_then(|recovery| recovery.task_state.as_ref())
             .and_then(|snapshot| {
-                match snapshot.restore(recovery_prompt.clone(), messages.clone()) {
+                match snapshot.restore_with_effective_objective(
+                    recovery_prompt.clone(),
+                    messages.clone(),
+                    recovered_prepared_task_state.effective_objective(),
+                ) {
                     Ok(runtime) => Some(runtime),
                     Err(error) => {
                         let _ = append_event(

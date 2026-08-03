@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 const MAX_CLASSIFICATION_INSTRUCTION_CHARS: usize = 16_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptEvidenceScope {
     Workspace,
     External,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     agent_read_model::{active_agent_events_for_session, agent_events_for_session},
-    agent_recovery_service::agent_recovery_identity,
+    agent_recovery_identity::resolve_agent_recovery_identity,
     agent_resource_snapshot::{
         load_matching_agent_resource_snapshot, persist_agent_resource_snapshot,
     },
@@ -73,8 +73,8 @@ fn runtime_snapshot_is_overwritten_and_bound_to_the_active_run() {
     let events = agent_events_for_session(&store, &phase16_task_id(), Some("session-a"))
         .expect("events should load");
     let active = active_agent_events_for_session(&events, Some("session-a"));
-    let (_, source_run_id, _, prompt_fingerprint, _) =
-        agent_recovery_identity(&active, &context).expect("identity should resolve");
+    let recovery =
+        resolve_agent_recovery_identity(&active, &context).expect("identity should resolve");
     let latest_revision = active
         .last()
         .map(|event| event.sequence)
@@ -82,14 +82,19 @@ fn runtime_snapshot_is_overwritten_and_bound_to_the_active_run() {
     assert!(load_matching_agent_runtime_snapshot(
         &store,
         &context,
-        &source_run_id,
-        &prompt_fingerprint,
+        &recovery.identity.source_run_id,
+        &recovery.identity.prompt_fingerprint,
         latest_revision,
     )
     .expect("snapshot should load")
     .is_some());
     let resources =
-        load_matching_agent_resource_snapshot(&store, &context, &source_run_id, latest_revision)
+        load_matching_agent_resource_snapshot(
+            &store,
+            &context,
+            &recovery.identity.source_run_id,
+            latest_revision,
+        )
             .expect("resource snapshot should load")
             .expect("resource snapshot should match");
     assert_eq!(resources.segment.physical_attempts, 1);
@@ -100,7 +105,7 @@ fn runtime_snapshot_is_overwritten_and_bound_to_the_active_run() {
         &store,
         &stale_context,
         "run-b",
-        &prompt_fingerprint,
+        &recovery.identity.prompt_fingerprint,
         latest_revision,
     )
     .expect("stale snapshot lookup should succeed")
@@ -116,6 +121,82 @@ fn runtime_snapshot_is_overwritten_and_bound_to_the_active_run() {
         .load_read_model(AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE, "session-a")
         .expect("resource read model lookup should succeed")
         .is_none());
+}
+
+#[test]
+fn runtime_snapshot_loader_rejects_an_invalid_nested_task_state() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let context = run_context("session-invalid", "run-invalid");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        metadata_with_context(
+            [("prompt".to_string(), "inspect workspace".to_string())]
+                .into_iter()
+                .collect(),
+            &context,
+        ),
+    )
+    .expect("run start should persist");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "inspect workspace",
+        context.clone(),
+    )
+    .expect("user message should persist");
+    let runtime = start_agent_loop(
+        phase16_task_id(),
+        "inspect workspace".to_string(),
+        AgentRuntimeConfig::default(),
+    );
+    persist_agent_runtime_snapshot(&mut store, &runtime, &context)
+        .expect("runtime snapshot should persist");
+
+    let events = agent_events_for_session(
+        &store,
+        &phase16_task_id(),
+        Some("session-invalid"),
+    )
+    .expect("events should load");
+    let active = active_agent_events_for_session(&events, Some("session-invalid"));
+    let recovery =
+        resolve_agent_recovery_identity(&active, &context).expect("identity should resolve");
+    let latest_revision = active
+        .last()
+        .map(|event| event.sequence)
+        .unwrap_or_default();
+    let stored = store
+        .load_read_model(
+            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
+            "session-invalid",
+        )
+        .expect("runtime checkpoint should load")
+        .expect("runtime checkpoint should exist");
+    let mut payload =
+        serde_json::from_str::<serde_json::Value>(&stored.payload).expect("valid checkpoint JSON");
+    payload["taskState"]["schema"] = "cindx.agent.task-state.v999".into();
+    store
+        .save_read_model(
+            AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE,
+            "session-invalid",
+            stored.revision,
+            &serde_json::to_string(&payload).expect("checkpoint JSON should encode"),
+        )
+        .expect("invalid fixture should persist");
+
+    assert!(load_matching_agent_runtime_snapshot(
+        &store,
+        &context,
+        &recovery.identity.source_run_id,
+        &recovery.identity.prompt_fingerprint,
+        latest_revision,
+    )
+    .expect("invalid checkpoint lookup should fail closed")
+    .is_none());
 }
 
 #[test]

@@ -391,9 +391,9 @@ fn routing_quality_signals(run_events: &[&Event], terminal: &Event) -> (Option<f
 pub(crate) fn completion_learning_signal(
     runtime: &agent_runtime::AgentLoopState,
 ) -> (&'static str, bool) {
-    if runtime.successful_mutations == 0 {
+    if runtime.successful_mutations() == 0 {
         ("non_mutating", false)
-    } else if runtime.verified_after_last_mutation {
+    } else if runtime.verified_after_last_mutation() {
         ("verified_mutation", true)
     } else {
         ("unverified_mutation", false)

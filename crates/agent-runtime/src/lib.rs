@@ -29,6 +29,7 @@ mod grounding_tools;
 mod kernel;
 mod model_transport;
 mod parallel;
+mod prepared_task_state;
 mod resource_ledger;
 mod result_frontier;
 mod run_budget;
@@ -37,6 +38,7 @@ mod state_transaction;
 mod task_contract;
 mod task_state;
 mod task_state_lineage;
+mod task_state_wire;
 mod tool_runtime;
 mod turn_budget;
 mod worker_policy;
@@ -91,6 +93,7 @@ pub use parallel::{
     InterruptibleQuorumPolicy, ParallelJob, ParallelJobCompletion, ParallelJobSupervisor,
     ParallelTaskError, QuorumExecution,
 };
+pub use prepared_task_state::PreparedTaskState;
 pub use resource_ledger::{
     ModelAttemptUsage, ModelResourceUsage, ModelUsageSource, ModelUsageSourceCounts,
     PhysicalModelAttempt, RunResourceSnapshot, RunResourceUsage, MAX_PENDING_RESOURCE_ATTEMPTS,
@@ -118,10 +121,13 @@ pub use task_contract::{
     OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
 };
 pub use task_state::{
-    AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,
-    PersistedInteractionVerification, AGENT_TASK_STATE_SCHEMA,
+    AgentTaskStateError, AgentTaskStateSnapshot, AGENT_TASK_STATE_SCHEMA,
+    AGENT_TASK_STATE_SCHEMA_V1,
 };
 pub use task_state_lineage::{AgentTaskStateLineage, AgentTranscriptFingerprintAccumulator};
+pub use task_state_wire::{
+    PersistedInteractionSurface, PersistedInteractionVerification, PreparedTaskStateCheckpoint,
+};
 pub use tool_runtime::{
     apply_tool_spec_runtime_metadata, decode_persisted_tool_artifacts, finalize_tool_result,
     recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,
@@ -167,18 +173,39 @@ pub struct AgentLoopState {
     pub max_turns: usize,
     pub failed_tool_signatures: BTreeMap<String, usize>,
     pub consecutive_empty_responses: usize,
-    pub successful_mutations: usize,
-    pub verified_after_last_mutation: bool,
     pub verification_gate_requests: usize,
-    pub pending_interaction_verifications:
-        BTreeMap<InteractionSurface, PendingInteractionVerification>,
     pub verified_interactions: usize,
     pub interaction_verification_gate_requests: usize,
     pub task_contract: AgentTaskContract,
+    prepared_task_state: PreparedTaskState,
     context_token_ledger: context_token_ledger::ContextTokenLedger,
 }
 
 impl AgentLoopState {
+    pub fn replace_prepared_task_state(&mut self, prepared_task_state: PreparedTaskState) {
+        self.prepared_task_state = prepared_task_state;
+    }
+
+    pub fn prepared_task_state(&self) -> &PreparedTaskState {
+        &self.prepared_task_state
+    }
+
+    pub fn advance_prepared_task_control_epoch(&mut self, steer_epoch: u64) {
+        self.prepared_task_state.advance_control_epoch(steer_epoch);
+    }
+
+    pub fn successful_mutations(&self) -> usize {
+        self.task_contract.successful_mutations()
+    }
+
+    pub fn verified_after_last_mutation(&self) -> bool {
+        self.task_contract.latest_mutation_verified()
+    }
+
+    pub fn pending_interaction_verifications(&self) -> &BTreeMap<InteractionSurface, String> {
+        self.task_contract.pending_interactions()
+    }
+
     /// Invalidates cached token estimates after an in-place mutation to an
     /// estimator-relevant message field (`content`, `raw_tool_calls_json`, or
     /// `image_paths`). Structural replacements are detected automatically.
@@ -204,12 +231,6 @@ impl InteractionSurface {
             Self::Computer => "computer",
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingInteractionVerification {
-    pub surface: InteractionSurface,
-    pub action_tool: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +367,7 @@ pub fn start_agent_loop(
     config: AgentRuntimeConfig,
 ) -> AgentLoopState {
     let user_prompt = user_prompt.into();
+    let prepared_task_state = PreparedTaskState::initial(&user_prompt);
     AgentLoopState {
         task_id,
         messages: vec![Message {
@@ -358,13 +380,11 @@ pub fn start_agent_loop(
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
         consecutive_empty_responses: 0,
-        successful_mutations: 0,
-        verified_after_last_mutation: false,
         verification_gate_requests: 0,
-        pending_interaction_verifications: BTreeMap::new(),
         verified_interactions: 0,
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
+        prepared_task_state,
         context_token_ledger: Default::default(),
     }
 }
@@ -376,6 +396,7 @@ pub fn start_agent_loop_with_history(
     config: AgentRuntimeConfig,
 ) -> AgentLoopState {
     let user_prompt = user_prompt.into();
+    let prepared_task_state = PreparedTaskState::initial(&user_prompt);
     history.push(Message {
         role: MessageRole::User,
         content: user_prompt.clone(),
@@ -389,13 +410,11 @@ pub fn start_agent_loop_with_history(
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
         consecutive_empty_responses: 0,
-        successful_mutations: 0,
-        verified_after_last_mutation: false,
         verification_gate_requests: 0,
-        pending_interaction_verifications: BTreeMap::new(),
         verified_interactions: 0,
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
+        prepared_task_state,
         context_token_ledger: Default::default(),
     }
 }
@@ -419,25 +438,25 @@ pub fn resume_agent_loop_from_messages(
     messages: Vec<Message>,
     config: AgentRuntimeConfig,
 ) -> AgentLoopState {
+    let user_prompt = user_prompt.into();
+    let prepared_task_state = PreparedTaskState::initial(&user_prompt);
     let turn = messages
         .iter()
         .filter(|message| matches!(message.role, MessageRole::Assistant))
         .count();
     let mut state = AgentLoopState {
         task_id,
-        user_prompt: user_prompt.into(),
+        user_prompt,
         messages,
         turn,
         max_turns: config.max_turns.max(1),
         failed_tool_signatures: BTreeMap::new(),
         consecutive_empty_responses: 0,
-        successful_mutations: 0,
-        verified_after_last_mutation: false,
         verification_gate_requests: 0,
-        pending_interaction_verifications: BTreeMap::new(),
         verified_interactions: 0,
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
+        prepared_task_state,
         context_token_ledger: Default::default(),
     };
     rebuild_interaction_verification_state(&mut state);
@@ -901,7 +920,6 @@ pub fn record_tool_outcome_with_risk(
             .verified_interactions
             .saturating_add(pending_before - pending_after);
     }
-    sync_contract_projections(state);
 }
 
 fn record_persisted_tool_outcome_with_risk(
@@ -933,7 +951,6 @@ fn record_persisted_tool_outcome_with_risk(
             .verified_interactions
             .saturating_add(pending_before - pending_after);
     }
-    sync_contract_projections(state);
 }
 
 fn persisted_tool_input_placeholder(input_fingerprint: &str) -> String {
@@ -959,26 +976,6 @@ fn rebuild_interaction_verification_state(state: &mut AgentLoopState) {
             None,
         );
     }
-    sync_contract_projections(state);
-}
-
-fn sync_contract_projections(state: &mut AgentLoopState) {
-    state.successful_mutations = state.task_contract.successful_mutations();
-    state.verified_after_last_mutation = state.task_contract.latest_mutation_verified();
-    state.pending_interaction_verifications = state
-        .task_contract
-        .pending_interactions()
-        .iter()
-        .map(|(surface, action_tool)| {
-            (
-                *surface,
-                PendingInteractionVerification {
-                    surface: *surface,
-                    action_tool: action_tool.clone(),
-                },
-            )
-        })
-        .collect();
 }
 
 fn successful_tool_observation_name(content: &str) -> Option<&str> {

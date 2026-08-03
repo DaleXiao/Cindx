@@ -1,7 +1,8 @@
 #[cfg(test)]
 pub(crate) use agent_application::project_agent_artifacts as agent_output_artifacts_from_events;
 pub(crate) use agent_application::{
-    artifact_manifest_message, AgentOutputArtifact as AgentOutputArtifactView, SessionTitleState,
+    artifact_manifest_message, AgentOutputArtifact as AgentOutputArtifactView,
+    AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState, SessionTitleState,
 };
 pub(crate) use agent_core::{
     Event, EventId, EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision,
@@ -19,8 +20,6 @@ pub(crate) use agent_memory::{
     MemoryLedger, RestoreContextPack, SessionCheckpoint,
 };
 #[cfg(test)]
-pub(crate) use agent_rag::{index_workspace, replace_lancedb_index};
-#[cfg(test)]
 pub(crate) use agent_rag::RagAdapter;
 pub(crate) use agent_rag::{
     apply_embeddings_to_index_cancellable, build_grounded_answer_prompt,
@@ -33,6 +32,8 @@ pub(crate) use agent_rag::{
     RagError, RagIndex, RagIndexStats, RagSearchResult, RetrievalChannelOutcome,
     RAG_INDEX_CANCELLED,
 };
+#[cfg(test)]
+pub(crate) use agent_rag::{index_workspace, replace_lancedb_index};
 #[cfg(test)]
 pub(crate) use agent_runtime::{
     advance_with_model_response, model_request_for_turn_with_context_budget,
@@ -49,6 +50,7 @@ pub(crate) use agent_runtime::{
     WorkspaceVerificationPolicy, DEFAULT_COLLABORATION_WORKER_TURNS,
     MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
 };
+#[rustfmt::skip]
 pub(crate) use agent_skills::{
     SkillCatalog, SkillRecord,
 };
@@ -73,34 +75,30 @@ pub(crate) use orchestrator::{
     candidate_pair_review_prompt, compare_team_and_anchor_order_invariant, decide_uplift_gate,
     default_plan, derive_prompt_evolution_campaign, direct_anchor_response_prompt,
     direct_anchor_response_verdict, evaluate_prompt_auto_transfer_gate,
-    evaluate_prompt_convergence, evaluate_prompt_promotion_gate,
-    parse_candidate_pair_review, parse_policy, prompt_proposal_minibatch_decision,
-    prompt_genome_sha256, prompt_reflection_packets, prompt_transfer_reflection_packets,
-    role_label, sha256_hex, step_prompt, ActionableSideInformation,
-    AgentEngineSession, AgentEvaluationCaseScore, AgentEvaluationCheck,
-    AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
-    AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
+    evaluate_prompt_convergence, evaluate_prompt_promotion_gate, parse_candidate_pair_review,
+    parse_policy, prompt_genome_sha256, prompt_proposal_minibatch_decision,
+    prompt_reflection_packets, prompt_transfer_reflection_packets, role_label, sha256_hex,
+    step_prompt, ActionableSideInformation, AgentEngineSession, AgentEvaluationCaseScore,
+    AgentEvaluationCheck, AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket,
+    AgentEvaluationSplit, AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
     AgentEvaluationVerifierOutcome, AgentRunDecision, AnytimeCandidate, AnytimeCandidateKind,
     AnytimeCandidateState, AnytimeController, AnytimeControllerConfig, AnytimeDecision,
     AnytimeVerdict, ConductorExecutionContract, ConductorHarness, ConductorPromptGenome,
     ConductorRequest, ConductorRoleHints, ConductorStopPolicy, FrozenPromptProfileSnapshot,
-    FrozenPromptTransferEvidence,
-    LearnedModelRouter, MatchedCollaborationEvidence, MatchedCollaborationEvidenceTeacher,
-    MemoryRecallPolicy, ModelCandidate, OrchestrationPolicy,
+    FrozenPromptTransferEvidence, LearnedModelRouter, MatchedCollaborationEvidence,
+    MatchedCollaborationEvidenceTeacher, MemoryRecallPolicy, ModelCandidate, OrchestrationPolicy,
     PromptEvaluationMode, PromptEvaluationProvenance, PromptEvaluationSplit,
-    PromptTransferProvenance,
     PromptEvolutionCampaignInput, PromptEvolutionCampaignSnapshot, PromptEvolutionMethod,
     PromptEvolutionObservation, PromptInstanceParetoArchive, PromptParetoArchive,
-    PromptSearchArchive,
     PromptPromotionConfidence, PromptPromotionGateConfig, PromptProposalMinibatchDecision,
-    PromptRetryPolicy, PromptStepCredit, PromptVerification, RoutingContext, RoutingDecision,
-    RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap,
-    UpliftGateDecision, UpliftGateInput, WorkflowBudget, WorkflowExecutionCheckpoint,
-    WorkflowExecutionTelemetry, WorkflowOutputKind, WorkflowPlanIr, WorkflowSearchTeacher,
-    WorkflowStepStatus, WorkflowToolPolicy, WorkflowTopologyPrior, WorkspaceRetrievalChannel,
-    WorkspaceRetrievalPlan, AGENT_EVALUATION_TRACE_SCHEMA, CONDUCTOR_MAX_ATTEMPTS,
-    DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA,
-    WORKFLOW_IR_SCHEMA,
+    PromptRetryPolicy, PromptSearchArchive, PromptStepCredit, PromptTransferProvenance,
+    PromptVerification, RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry,
+    RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap, UpliftGateDecision,
+    UpliftGateInput, WorkflowBudget, WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry,
+    WorkflowOutputKind, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
+    WorkflowToolPolicy, WorkflowTopologyPrior, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    AGENT_EVALUATION_TRACE_SCHEMA, CONDUCTOR_MAX_ATTEMPTS, DIRECT_ANCHOR_CANDIDATE_ID,
+    MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
 };
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use std::cmp::Reverse;
@@ -120,10 +118,6 @@ pub(crate) use tools::{
 };
 
 pub(crate) use crate::agent_resource_snapshot::AgentResourceCheckpoint;
-pub(crate) use agent_runtime::{
-    exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
-    model_transport_retry_delay, ModelStreamProgress,
-};
 pub(crate) use crate::collaboration_service::{
     adaptive_model_role, adaptive_stage_metadata, build_collaboration_arbiter_prompt,
     build_collaboration_candidate_prompt, collaboration_agent_budget,
@@ -140,7 +134,6 @@ pub(crate) use crate::parallel_execution::{
     run_model_jobs_until_quorum_interruptible, AnytimeQuorumPolicy, CancellableParallelJob,
     InterruptibleQuorumPolicy, ParallelJobCompletion, ParallelJobSupervisor,
 };
-pub(crate) use agent_core::{permission_can_allow_session, permission_capability_matches};
 pub(crate) use crate::permission_service::{
     agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
     permission_decision_past_tense, permission_risk_label,
@@ -150,7 +143,6 @@ pub(crate) use crate::queue_service::{
     PendingQueuedAgentMessage, QueuedAgentMessageActionReceipt, QueuedAgentMessagePayload,
     QueuedAgentMessageReceipt, QueuedAgentMessageView,
 };
-pub(crate) use agent_application::{AgentRunEvent, AgentRunEventDecodeError, AgentRunStatus};
 pub(crate) use crate::schedule::{
     initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
     timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,
@@ -162,4 +154,10 @@ pub(crate) use crate::session_projection::{
 pub(crate) use crate::tool_runtime_service::{
     completed_exact_tool_result, completed_tool_result, failed_tool_result, finalize_tool_result,
     tool_input_fingerprint, tool_invocation_context, tool_invocation_event_metadata,
+};
+pub(crate) use agent_application::{AgentRunEvent, AgentRunEventDecodeError, AgentRunStatus};
+pub(crate) use agent_core::{permission_can_allow_session, permission_capability_matches};
+pub(crate) use agent_runtime::{
+    exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
+    model_transport_retry_delay, ModelStreamProgress,
 };

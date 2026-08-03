@@ -717,8 +717,8 @@ fn persist_paused_agent_run_with(
             let recovery_metadata = agent_recovery_metadata_with_task_state(
                 &active_events,
                 run_context,
-                "paused",
-                reason,
+                AgentRecoveryState::Paused,
+                AgentRecoveryReason::parse(reason),
                 recovery_metadata,
                 task_state,
                 Some(resource_snapshot),

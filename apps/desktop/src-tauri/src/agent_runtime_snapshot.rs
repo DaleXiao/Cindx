@@ -108,8 +108,10 @@ pub(super) fn persist_runtime_append_and_snapshot(
 pub(super) fn capture_persistable_agent_task_state(
     runtime: &agent_runtime::AgentLoopState,
 ) -> AgentTaskStateSnapshot {
+    let persistable_prepared_task_state = persistable_prepared_task_state(runtime);
     let mut projection = runtime.clone();
     projection.user_prompt = redact_sensitive_text(&projection.user_prompt);
+    projection.replace_prepared_task_state(persistable_prepared_task_state);
     for message in &mut projection.messages {
         if message.role == MessageRole::Assistant {
             message.content = sanitize_assistant_content(&message.content);
@@ -121,6 +123,31 @@ pub(super) fn capture_persistable_agent_task_state(
         message.metadata = redact_metadata(&message.metadata);
     }
     AgentTaskStateSnapshot::capture(&projection)
+}
+
+pub(super) fn persistable_prepared_task_state(
+    runtime: &agent_runtime::AgentLoopState,
+) -> agent_runtime::PreparedTaskState {
+    let prepared = runtime.prepared_task_state();
+    let redacted_objective = redact_sensitive_text(prepared.effective_objective());
+    let prepared_context = [
+        (
+            "effective_prompt_objective".to_string(),
+            redacted_objective,
+        ),
+        ("steer_epoch".to_string(), prepared.steer_epoch().to_string()),
+        (
+            "prompt_contract_epoch".to_string(),
+            prepared.contract_epoch().to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    agent_runtime::PreparedTaskState::from_run_context(
+        &prepared_context,
+        &redact_sensitive_text(&runtime.user_prompt),
+        prepared.completion_intent().clone(),
+    )
 }
 
 pub(super) fn delete_persisted_agent_runtime_snapshot(
@@ -157,6 +184,9 @@ pub(super) fn load_matching_agent_runtime_snapshot(
         Ok(snapshot) => snapshot,
         Err(_) => return Ok(None),
     };
+    if snapshot.task_state.validate_checkpoint().is_err() {
+        return Ok(None);
+    }
     let matches = snapshot.schema.as_str() == AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE
         && snapshot.session_id.as_str() == session_id.as_str()
         && snapshot.project_id == run_context.get("project_id").cloned()
