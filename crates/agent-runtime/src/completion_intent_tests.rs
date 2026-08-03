@@ -165,6 +165,7 @@ fn steer_replacement_clears_effects_but_additive_guidance_retains_them() {
         prompt_completion_intent(&additive).tool_requirement,
         PromptToolRequirement::Effects
     );
+    assert!(!prompt_replaces_prior_objective(&additive));
 
     let mut replacement = run_context(
         "Initial request:\nFix the crash in this app\n\nAccepted steering 1:\nStop fixing it; instead just explain how crash diagnosis works",
@@ -178,6 +179,7 @@ fn steer_replacement_clears_effects_but_additive_guidance_retains_them() {
         prompt_completion_intent(&replacement),
         PromptCompletionIntent::default()
     );
+    assert!(prompt_replaces_prior_objective(&replacement));
 }
 
 #[test]
@@ -207,5 +209,19 @@ fn replacing_steer_targets_only_the_active_objective() {
     assert_eq!(
         prompt_evidence_target_anchors(&context),
         BTreeSet::from([EvidenceTargetAnchor::Workspace("permission.rs".to_string())])
+    );
+}
+
+#[test]
+fn legacy_cumulative_prompt_objective_still_uses_the_latest_replacement() {
+    let cumulative = "Initial request:\nFix the crash in this app\n\nAccepted steering 1:\nInstead, just explain how crash diagnosis works";
+    let mut context = run_context(cumulative);
+    context.insert("steer_epoch".to_string(), "1".to_string());
+    context.insert("prompt_objective".to_string(), cumulative.to_string());
+
+    assert!(prompt_replaces_prior_objective(&context));
+    assert_eq!(
+        prompt_completion_intent(&context),
+        PromptCompletionIntent::default()
     );
 }

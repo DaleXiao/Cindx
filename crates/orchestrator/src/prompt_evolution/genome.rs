@@ -187,6 +187,13 @@ impl ConductorPromptGenome {
         self
     }
 
+    pub fn with_verification_requirement(mut self, verification_required: bool) -> Self {
+        if verification_required && self.verification == PromptVerification::Minimal {
+            self.verification = PromptVerification::Evidence;
+        }
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn seed(
         id: &str,
@@ -895,6 +902,38 @@ fn validate_reflective_directive(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod verification_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn required_verification_upgrades_minimal_to_evidence() {
+        let genome =
+            ConductorPromptGenome::seed_for_effort("fast").with_verification_requirement(true);
+
+        assert_eq!(genome.verification, PromptVerification::Evidence);
+    }
+
+    #[test]
+    fn optional_verification_preserves_minimal() {
+        let genome =
+            ConductorPromptGenome::seed_for_effort("fast").with_verification_requirement(false);
+
+        assert_eq!(genome.verification, PromptVerification::Minimal);
+    }
+
+    #[test]
+    fn required_verification_preserves_stronger_policies() {
+        for effort in ["auto", "pro"] {
+            let selected = ConductorPromptGenome::seed_for_effort(effort);
+            let expected = selected.verification;
+            let effective = selected.with_verification_requirement(true);
+
+            assert_eq!(effective.verification, expected);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

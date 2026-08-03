@@ -13,12 +13,16 @@ only the revision recorded in each report.
   shared interactive agent loop.
 - **Auto** asks the configured conductor for a typed `AgentRunDecision`, with a
   maximum requested parallelism of two. The decision may remain direct or
-  select a bounded workflow.
+  select a bounded workflow. Runtime-derived tool and image-input requirements
+  are hard postconditions on both the decision and selected model; the
+  conductor cannot downgrade them.
 - **Pro** uses the same decision contract with a maximum requested parallelism
   of three and a larger workflow budget.
 - An invalid conductor response receives bounded repair. Exhausted conductor
-  attempts produce an explicit degraded fallback rather than an unvalidated
-  workflow.
+  attempts produce an explicit capability-compatible degraded fallback rather
+  than an unvalidated workflow. Strong matched direct-anchor evidence
+  calibrates an otherwise admissible workflow to direct execution without
+  spending repair or alternate-conductor calls.
 
 All three modes ultimately use the same `AgentKernel`, run-control contract,
 tool permission path, persistence path, and completion transaction. They differ
@@ -34,8 +38,10 @@ A new run currently follows this sequence:
 3. `AgentRunControl` establishes cancellation, steer, turn, stage, and deadline
    budgets; `agent-harness` prevents duplicate active work for the same key.
 4. Session history is bounded and projected for the current objective.
-5. Fast chooses a direct decision. Auto and Pro request a validated conductor
-   decision.
+5. The active objective, completion intent, current image input, and image
+   generation requirement form typed route requirements. Fast chooses a direct
+   decision; Auto and Pro request a conductor decision. Both paths fail clearly
+   when the selected configured model cannot satisfy required tools or vision.
 6. Durable memory recall and workspace retrieval are prepared without mutating
    canonical conversation history. Independent retrieval channels may execute
    in parallel; graph walk expands from selected seeds.
@@ -50,9 +56,12 @@ A new run currently follows this sequence:
    obligations are bound to that epoch. Normal execution and permission recovery
    use the same planning path. A committed steer returns through the same driver
    before another epoch can begin.
-9. Terminal delivery selects the strongest verified deliverable known to the
-   run; a later unverified synthesis cannot replace it. The stream completion
-   event belongs to the same request stream that delivered the selected text.
+9. `first_verified` can stop early only for a genuinely verified deliverable.
+   At terminal reserve the strongest usable result may still be returned, but
+   its failed verification obligations remain explicit degradation rather than
+   native success. A later unverified synthesis cannot replace a stronger
+   verified result. The stream completion event belongs to the same request
+   stream that delivered the selected text.
 10. The completion transaction persists the result, artifacts, lifecycle state,
    learning evidence, and cleanup. Semantic memory refresh and prompt evolution
    are background work.

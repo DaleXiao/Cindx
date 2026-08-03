@@ -133,7 +133,9 @@ pub(super) fn prepare_adaptive_collaboration(
         }
     }
     let selected_prompt_genome = prompt_genome.clone();
-    prompt_genome = prompt_genome.with_effort_delivery_contract(&effort);
+    prompt_genome = prompt_genome
+        .with_effort_delivery_contract(&effort)
+        .with_verification_requirement(base_execution_contract.verification_required);
     let prompt_delivery_contract_applied = prompt_genome != selected_prompt_genome;
     let execution_contract =
         base_execution_contract.with_prompt_commit_strategy(prompt_genome.commit_strategy);

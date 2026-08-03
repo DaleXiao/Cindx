@@ -25,6 +25,33 @@ impl PlannedAgentRun {
             self.decision.vision_required.to_string(),
         );
         run_context.insert(
+            "route_minimum_tool_requirement".to_string(),
+            self.route_requirements
+                .minimum_tool_requirement
+                .label()
+                .to_string(),
+        );
+        run_context.insert(
+            "route_image_input_required".to_string(),
+            self.route_requirements.image_input_required.to_string(),
+        );
+        match &self.decision.calibration_reason {
+            Some(reason) => {
+                run_context.insert(
+                    "decision_calibration".to_string(),
+                    "matched_evidence_direct".to_string(),
+                );
+                run_context.insert(
+                    "decision_calibration_reason".to_string(),
+                    truncate_for_collaboration(reason, 1_200),
+                );
+            }
+            None => {
+                run_context.remove("decision_calibration");
+                run_context.remove("decision_calibration_reason");
+            }
+        }
+        run_context.insert(
             "routing_signature".to_string(),
             self.decision.learning_signature(),
         );

@@ -56,9 +56,11 @@ pub fn prompt_completion_intent(run_context: &Metadata) -> PromptCompletionInten
     } else {
         PromptToolRequirement::ReadOnly
     };
-    let target_anchors = (tool_requirement != PromptToolRequirement::None)
-        .then_some(candidate_target_anchors)
-        .unwrap_or_default();
+    let target_anchors = if tool_requirement != PromptToolRequirement::None {
+        candidate_target_anchors
+    } else {
+        BTreeSet::new()
+    };
 
     PromptCompletionIntent {
         evidence_scopes,
@@ -77,15 +79,31 @@ fn active_completion_objective(run_context: &Metadata) -> String {
         return effective.to_string();
     }
 
-    let latest = run_context
-        .get("prompt_objective")
-        .map(String::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| latest_structured_steer(effective));
+    let latest = latest_completion_objective(run_context, effective);
     if let Some(latest) = latest.filter(|latest| replaces_prior_objective(latest)) {
         return latest.to_string();
     }
     effective.to_string()
+}
+
+pub fn prompt_replaces_prior_objective(run_context: &Metadata) -> bool {
+    if run_context_steer_epoch(run_context) == 0 {
+        return false;
+    }
+    let effective = effective_agent_objective(run_context, "");
+    latest_completion_objective(run_context, effective).is_some_and(replaces_prior_objective)
+}
+
+fn latest_completion_objective<'a>(
+    run_context: &'a Metadata,
+    effective: &'a str,
+) -> Option<&'a str> {
+    run_context
+        .get("prompt_objective")
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| latest_structured_steer(value).unwrap_or(value))
+        .or_else(|| latest_structured_steer(effective))
 }
 
 fn latest_structured_steer(objective: &str) -> Option<&str> {
