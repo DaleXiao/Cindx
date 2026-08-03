@@ -1,19 +1,25 @@
 mod auto_teacher_source;
+mod distillation;
+mod distillation_snapshot;
 mod fitness;
 mod genome;
 mod learning_dataset;
 mod matched_evaluation;
 mod observation;
 mod pareto;
+mod pro_teacher_source;
 mod search;
 mod snapshot;
 
 pub use auto_teacher_source::*;
+pub use distillation::*;
+pub use distillation_snapshot::*;
 pub use genome::*;
 pub use learning_dataset::*;
 pub use matched_evaluation::*;
 pub use observation::*;
 pub use pareto::*;
+pub use pro_teacher_source::*;
 pub use snapshot::*;
 
 #[cfg(test)]

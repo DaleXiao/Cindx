@@ -1,4 +1,6 @@
-use super::{AutoTeacherSourceContextV1, ConductorPromptGenome};
+use super::{
+    AutoTeacherSourceContextV1, ConductorPromptGenome, PromptProToAutoDistillationProvenanceV1,
+};
 use crate::AgentEvaluationReflectionPacket;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -144,6 +146,8 @@ pub struct PromptEvaluationProvenance {
     #[serde(default)]
     pub transfer: Option<PromptTransferProvenance>,
     #[serde(default)]
+    pub pro_to_auto_distillation: Option<PromptProToAutoDistillationProvenanceV1>,
+    #[serde(default)]
     pub matched_evaluation: Option<super::PromptMatchedEvaluationIdentityV1>,
 }
 
@@ -177,12 +181,21 @@ impl PromptEvaluationProvenance {
             candidate_prompt_sha256: candidate_prompt_sha256.into(),
             opponent_prompt_sha256: opponent_prompt_sha256.into(),
             transfer: None,
+            pro_to_auto_distillation: None,
             matched_evaluation: None,
         }
     }
 
     pub fn with_transfer(mut self, transfer: PromptTransferProvenance) -> Self {
         self.transfer = Some(transfer);
+        self
+    }
+
+    pub fn with_pro_to_auto_distillation(
+        mut self,
+        provenance: PromptProToAutoDistillationProvenanceV1,
+    ) -> Self {
+        self.pro_to_auto_distillation = Some(provenance);
         self
     }
 
@@ -220,11 +233,14 @@ impl PromptEvaluationProvenance {
     }
 
     pub fn is_scientific(&self) -> bool {
-        self.transfer.is_none() && self.has_scientific_core()
+        self.transfer.is_none()
+            && self.pro_to_auto_distillation.is_none()
+            && self.has_scientific_core()
     }
 
     pub fn is_scientific_transfer(&self) -> bool {
         self.has_scientific_core()
+            && self.pro_to_auto_distillation.is_none()
             && self
                 .transfer
                 .as_ref()
@@ -237,6 +253,22 @@ impl PromptEvaluationProvenance {
                 .transfer
                 .as_ref()
                 .is_some_and(PromptTransferProvenance::has_strict_source_lineage)
+    }
+
+    pub fn is_scientific_pro_to_auto_distillation(&self) -> bool {
+        self.has_scientific_core()
+            && self.transfer.is_none()
+            && self
+                .pro_to_auto_distillation
+                .as_ref()
+                .is_some_and(|provenance| {
+                    provenance.permits_evaluation_digest_lineage(
+                        &self.dataset_sha256,
+                        self.matched_evaluation
+                            .as_ref()
+                            .map(|identity| identity.cohort_sha256.as_str()),
+                    )
+                })
     }
 
     pub fn is_strict_matched(&self) -> bool {
@@ -330,6 +362,41 @@ impl PromptEvolutionObservation {
             && transfer_lineage_matches
     }
 
+    pub fn is_scientific_pro_to_auto_distillation_evidence(&self) -> bool {
+        let lineage_matches = self
+            .provenance
+            .pro_to_auto_distillation
+            .as_ref()
+            .is_some_and(|distillation| {
+                if self.profile_id == distillation.auto_child_profile_id
+                    && self.opponent_profile_id.as_deref()
+                        == Some(distillation.auto_parent_profile_id.as_str())
+                {
+                    self.provenance.candidate_prompt_sha256
+                        == distillation.auto_child_profile_sha256
+                        && self.provenance.opponent_prompt_sha256
+                            == distillation.auto_parent_profile_sha256
+                } else if self.profile_id == distillation.auto_parent_profile_id
+                    && self.opponent_profile_id.as_deref()
+                        == Some(distillation.auto_child_profile_id.as_str())
+                {
+                    self.provenance.candidate_prompt_sha256
+                        == distillation.auto_parent_profile_sha256
+                        && self.provenance.opponent_prompt_sha256
+                            == distillation.auto_child_profile_sha256
+                } else {
+                    false
+                }
+            });
+        self.mode.is_execution()
+            && !self.evaluation_id.trim().is_empty()
+            && !self.case_id.trim().is_empty()
+            && self.quality_score.is_finite()
+            && self.relative_reward.is_some_and(f64::is_finite)
+            && self.provenance.is_scientific_pro_to_auto_distillation()
+            && lineage_matches
+    }
+
     pub fn is_source_attested_transfer_evidence(&self) -> bool {
         self.is_scientific_transfer_evidence() && self.provenance.is_source_attested_transfer()
     }
@@ -368,16 +435,35 @@ impl PromptEvolutionObservation {
         self.is_strict_matched_transfer_evidence() && self.is_source_attested_transfer_evidence()
     }
 
+    pub fn is_strict_pro_to_auto_distillation_evidence(&self) -> bool {
+        self.is_scientific_pro_to_auto_distillation_evidence()
+            && self
+                .provenance
+                .matched_evaluation
+                .as_ref()
+                .is_some_and(|identity| {
+                    self.provenance.is_strict_matched()
+                        && identity.evaluation_id == self.evaluation_id
+                        && identity.case_id == self.case_id
+                        && identity.split == self.split
+                        && identity.mode == self.mode
+                })
+    }
+
     pub fn scientific_cohort_sha256(&self) -> Option<&str> {
         match self.provenance.matched_evaluation.as_ref() {
             Some(identity)
                 if self.is_strict_matched_evidence()
-                    || self.is_strict_matched_transfer_evidence() =>
+                    || self.is_strict_matched_transfer_evidence()
+                    || self.is_strict_pro_to_auto_distillation_evidence() =>
             {
                 Some(identity.cohort_sha256.as_str())
             }
             Some(_) => None,
-            None if self.is_scientific_evidence() || self.is_scientific_transfer_evidence() => {
+            None if self.is_scientific_evidence()
+                || self.is_scientific_transfer_evidence()
+                || self.is_scientific_pro_to_auto_distillation_evidence() =>
+            {
                 Some(self.provenance.dataset_sha256.as_str())
             }
             None => None,
@@ -656,6 +742,49 @@ mod tests {
         }
     }
 
+    fn distillation_provenance() -> PromptProToAutoDistillationProvenanceV1 {
+        let pro_genome = ConductorPromptGenome::seed_for_effort("pro")
+            .mutations()
+            .into_iter()
+            .next()
+            .unwrap();
+        let snapshot = super::super::FrozenPromptProfileSnapshot::new_gepa(
+            "pro",
+            pro_genome,
+            "seed-pro-v1",
+            "1".repeat(64),
+            "2".repeat(64),
+        )
+        .unwrap()
+        .with_auto_teacher_evidence(super::super::FrozenPromptTransferEvidence {
+            source_effort: "auto".to_string(),
+            source_profile_id: "auto-source".to_string(),
+            source_profile_sha256: "3".repeat(64),
+            dataset_sha256: "4".repeat(64),
+            cohort_sha256: Some("5".repeat(64)),
+            paired_evidence_sha256: "6".repeat(64),
+            promotion_gate_protocol: super::super::PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
+            source_profile_lineage: Some(
+                super::super::FrozenPromptSourceProfileLineageV1::undistilled("3".repeat(64))
+                    .unwrap(),
+            ),
+        })
+        .unwrap();
+        let teacher = super::super::ProTeacherAttestationV1::from_stable_snapshot(
+            &snapshot,
+            &snapshot.genome.id,
+        )
+        .unwrap();
+        PromptProToAutoDistillationProvenanceV1::new(
+            teacher,
+            "auto-parent",
+            "c".repeat(64),
+            "auto-child",
+            "b".repeat(64),
+        )
+        .unwrap()
+    }
+
     fn scientific_provenance() -> PromptEvaluationProvenance {
         PromptEvaluationProvenance::blind_pairwise_swap(
             vec!["independent-reviewer".to_string()],
@@ -727,6 +856,50 @@ mod tests {
         let legacy: PromptTransferProvenance = serde_json::from_str(encoded).unwrap();
         assert!(legacy.is_valid_auto_to_pro());
         assert!(!legacy.has_strict_source_lineage());
+    }
+
+    #[test]
+    fn pro_to_auto_evidence_is_typed_and_isolated_from_other_tracks() {
+        let provenance =
+            scientific_provenance().with_pro_to_auto_distillation(distillation_provenance());
+
+        assert!(!provenance.is_scientific());
+        assert!(!provenance.is_scientific_transfer());
+        assert!(provenance.is_scientific_pro_to_auto_distillation());
+
+        let mut observation = PromptEvolutionObservation {
+            profile_id: "auto-child".to_string(),
+            evaluation_id: "distill-eval".to_string(),
+            case_id: "distill-case".to_string(),
+            opponent_profile_id: Some("auto-parent".to_string()),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::PairedExecution,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 100,
+            total_tokens: 100,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(0.2),
+            step_credits: Vec::new(),
+            reflection_packet: None,
+            provenance,
+        };
+        assert!(observation.is_scientific_pro_to_auto_distillation_evidence());
+
+        observation.profile_id = "auto-parent".to_string();
+        assert!(!observation.is_scientific_pro_to_auto_distillation_evidence());
+    }
+
+    #[test]
+    fn legacy_provenance_cannot_become_distillation_evidence() {
+        let encoded = serde_json::to_vec(&scientific_provenance()).unwrap();
+        let legacy: PromptEvaluationProvenance = serde_json::from_slice(&encoded).unwrap();
+
+        assert!(legacy.pro_to_auto_distillation.is_none());
+        assert!(!legacy.is_scientific_pro_to_auto_distillation());
     }
 }
 

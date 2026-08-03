@@ -1,6 +1,6 @@
 use super::*;
 
-fn prompt_attempt_matches_profiles(
+pub(crate) fn prompt_attempt_matches_profiles(
     attempt: &PromptEvaluationAttemptState,
     candidate_id: &str,
     stable_id: &str,
@@ -35,7 +35,7 @@ fn prompt_attempt_has_complete_pair(
         == 2
 }
 
-fn prompt_active_pair_cohort(
+pub(crate) fn prompt_active_pair_cohort(
     model: &PromptEvolutionReadModel,
     candidate_id: &str,
     stable_id: &str,
@@ -311,6 +311,55 @@ pub(crate) fn stable_prompt_profile_fingerprint(
     Ok((genome, fingerprint))
 }
 
+fn frozen_auto_source_profile_lineage(
+    model: &PromptEvolutionReadModel,
+    auto_profile: &ConductorPromptGenome,
+    auto_profile_sha256: &str,
+) -> Result<orchestrator::FrozenPromptSourceProfileLineageV1, String> {
+    if prompt_genome_sha256(auto_profile)? != auto_profile_sha256 {
+        return Err("Auto source profile fingerprint does not match".to_string());
+    }
+    if auto_profile.id == ConductorPromptGenome::seed_for_effort("auto").id {
+        return orchestrator::FrozenPromptSourceProfileLineageV1::undistilled(
+            auto_profile_sha256.to_string(),
+        );
+    }
+
+    let mut canonical = model
+        .rollouts
+        .values()
+        .filter_map(|rollout| rollout.frozen_profile.as_ref())
+        .filter(|snapshot| {
+            snapshot.validate().is_ok()
+                && snapshot.effort == "auto"
+                && snapshot.genome.id == auto_profile.id
+                && snapshot.candidate_sha256 == auto_profile_sha256
+        })
+        .map(|snapshot| {
+            snapshot.pro_teacher_evidence.as_ref().map_or_else(
+                || {
+                    orchestrator::FrozenPromptSourceProfileLineageV1::undistilled(
+                        auto_profile_sha256.to_string(),
+                    )
+                },
+                |evidence| {
+                    orchestrator::FrozenPromptSourceProfileLineageV1::from_distillation(
+                        auto_profile_sha256.to_string(),
+                        evidence,
+                    )
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    canonical.sort_by(|left, right| left.lineage_sha256.cmp(&right.lineage_sha256));
+    canonical.dedup_by(|left, right| left.lineage_sha256 == right.lineage_sha256);
+    match canonical.as_slice() {
+        [lineage] => Ok(lineage.clone()),
+        [] => Err("non-seed Auto transfer source has no canonical frozen lineage".to_string()),
+        _ => Err("Auto transfer source has ambiguous frozen lineage".to_string()),
+    }
+}
+
 pub(crate) fn frozen_prompt_profile_for_promotion(
     model: &PromptEvolutionReadModel,
     effort: &str,
@@ -326,6 +375,16 @@ pub(crate) fn frozen_prompt_profile_for_promotion(
             "GEPA promotion profile {candidate_id} is unavailable"
         ));
     };
+    if record.evolution_method == Some(PromptEvolutionMethod::ProToAutoDistillation) {
+        if effort != "auto" {
+            return Err("Pro-to-Auto distillation can only promote Auto".to_string());
+        }
+        return crate::prompt_distillation_rollout::frozen_distillation_profile_for_promotion(
+            model,
+            candidate_id,
+            stable_profile_id,
+        );
+    }
     if record.evolution_method != Some(PromptEvolutionMethod::GepaReflectivePaired) {
         return Err(format!(
             "profile {candidate_id} is not a GEPA reflective paired candidate"
@@ -456,6 +515,8 @@ pub(crate) fn frozen_prompt_profile_for_promotion(
         &serde_json::to_vec(&transfer_evidence)
             .map_err(|error| format!("Auto transfer evidence serialization failed: {error}"))?,
     );
+    let source_profile_lineage =
+        frozen_auto_source_profile_lineage(model, &auto_profile, &auto_profile_sha256)?;
     snapshot.with_auto_teacher_evidence(FrozenPromptTransferEvidence {
         source_effort: "auto".to_string(),
         source_profile_id: auto_profile.id,
@@ -464,6 +525,7 @@ pub(crate) fn frozen_prompt_profile_for_promotion(
         cohort_sha256: Some(active_transfer_cohort),
         paired_evidence_sha256: transfer_evidence_sha256,
         promotion_gate_protocol: orchestrator::PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
+        source_profile_lineage: Some(source_profile_lineage),
     })
 }
 
@@ -515,7 +577,40 @@ pub(crate) fn reconcile_prompt_rollout(
         .get(effort)
         .cloned()
         .unwrap_or_else(|| default_prompt_rollout(effort));
-    let Some(candidate_id) = evaluation.champion_id.as_deref() else {
+    let distillation_candidate = if effort == "auto" {
+        rollout
+            .canary_profile_id
+            .as_ref()
+            .filter(|candidate_id| {
+                crate::prompt_distillation_rollout::prompt_candidate_is_distillation(
+                    model,
+                    effort,
+                    candidate_id,
+                )
+            })
+            .cloned()
+            .or_else(|| {
+                let candidate_id =
+                    crate::prompt_distillation_rollout::latest_prompt_distillation_candidate(
+                        model,
+                        &rollout.stable_profile_id,
+                    )?;
+                crate::prompt_distillation_rollout::evaluate_trusted_prompt_distillation_gate(
+                    model,
+                    &candidate_id,
+                    &rollout.stable_profile_id,
+                )
+                .ok()
+                .filter(|trusted| trusted.result.eligible)
+                .map(|_| candidate_id)
+            })
+    } else {
+        None
+    };
+    let candidate_id = distillation_candidate
+        .as_deref()
+        .or(evaluation.champion_id.as_deref());
+    let Some(candidate_id) = candidate_id else {
         model.rollouts.insert(effort.to_string(), rollout.clone());
         return rollout;
     };
@@ -539,12 +634,43 @@ pub(crate) fn reconcile_prompt_rollout(
         .filter(|(observed_effort, _)| observed_effort == effort)
         .map(|(_, observation)| observation.clone())
         .collect::<Vec<_>>();
-    let (promotion_gate, _) = evaluate_trusted_prompt_promotion_gate(
-        model,
-        &effort_observations,
-        candidate_id,
-        &rollout.stable_profile_id,
-    );
+    let candidate_is_distillation =
+        crate::prompt_distillation_rollout::prompt_candidate_is_distillation(
+            model,
+            effort,
+            candidate_id,
+        );
+    let promotion_gate = if candidate_is_distillation {
+        match crate::prompt_distillation_rollout::evaluate_trusted_prompt_distillation_gate(
+            model,
+            candidate_id,
+            &rollout.stable_profile_id,
+        ) {
+            Ok(trusted) => trusted.result,
+            Err(error) => {
+                if rollout.canary_profile_id.as_deref() == Some(candidate_id) {
+                    rollout.canary_profile_id = None;
+                    rollout.canary_percent = 0;
+                    rollout.rollback_count = rollout.rollback_count.saturating_add(1);
+                    rollout.status = "rolled_back".to_string();
+                    rollout.last_reason = Some(format!("distillation_gate_regressed:{error}"));
+                } else {
+                    rollout.status = "evaluating".to_string();
+                    rollout.last_reason = Some(format!("distillation_gate_pending:{error}"));
+                }
+                model.rollouts.insert(effort.to_string(), rollout.clone());
+                return rollout;
+            }
+        }
+    } else {
+        evaluate_trusted_prompt_promotion_gate(
+            model,
+            &effort_observations,
+            candidate_id,
+            &rollout.stable_profile_id,
+        )
+        .0
+    };
     let confidence = &promotion_gate.confidence;
     rollout.promotion_confidence = Some(confidence.wilson_lower_bound);
     if !promotion_gate.eligible {
@@ -637,9 +763,21 @@ pub(crate) fn reconcile_prompt_rollout(
         return rollout;
     }
 
-    if let Some(reason) =
-        prompt_canary_degraded(model, effort, &rollout.stable_profile_id, candidate_id)
-    {
+    let canary_degradation =
+        prompt_canary_degraded(model, effort, &rollout.stable_profile_id, candidate_id).or_else(
+            || {
+                if candidate_is_distillation {
+                    crate::prompt_distillation_rollout::prompt_distillation_canary_degraded(
+                        model,
+                        &rollout.stable_profile_id,
+                        candidate_id,
+                    )
+                } else {
+                    None
+                }
+            },
+        );
+    if let Some(reason) = canary_degradation {
         rollout.canary_profile_id = None;
         rollout.canary_percent = 0;
         rollout.rollback_count = rollout.rollback_count.saturating_add(1);
@@ -650,10 +788,13 @@ pub(crate) fn reconcile_prompt_rollout(
     }
 
     let live_runs = prompt_live_observations(model, effort, candidate_id).len();
-    let enough_new_evidence = confidence
-        .comparisons
-        .saturating_sub(rollout.evidence_checkpoint)
-        >= 2;
+    // Distillation campaigns are terminal once their matched gate passes; later stages
+    // revalidate that frozen gate and require fresh live canary traffic instead.
+    let enough_new_evidence = candidate_is_distillation
+        || confidence
+            .comparisons
+            .saturating_sub(rollout.evidence_checkpoint)
+            >= 2;
     let enough_live_traffic = live_runs.saturating_sub(rollout.live_checkpoint) >= 1;
     if enough_new_evidence && enough_live_traffic {
         if rollout.canary_percent >= 50 {

@@ -44,7 +44,7 @@ fn test_prompt_evaluation_provenance(
     )
 }
 
-fn bind_matched_prompt_evidence(
+pub(crate) fn bind_matched_prompt_evidence(
     model: &mut PromptEvolutionReadModel,
     effort: &str,
     candidate_id: &str,

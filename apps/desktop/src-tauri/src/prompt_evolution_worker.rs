@@ -8,11 +8,10 @@ use crate::prompt_evolution_campaign_budget::{
 };
 use crate::prompt_evolution_campaign_runtime::append_prompt_evaluation_action;
 use crate::prompt_evolution_models::{
-    notify_prompt_evaluation_worker, prompt_evaluation_inflight, wait_for_prompt_evaluation_worker,
+    prompt_evaluation_inflight, wait_for_prompt_evaluation_worker,
 };
 use crate::prompt_learning_runtime::{
-    prompt_configuration_sha256_is_valid, prompt_evaluation_error_text,
-    prompt_evaluation_request_configuration_sha256 as request_configuration_sha256,
+    prompt_evaluation_error_text,
     validate_prompt_evaluation_request_configuration as validate_request_configuration,
 };
 use crate::prompt_pairwise_runtime::run_background_prompt_pairwise_evaluation;
@@ -20,93 +19,25 @@ use crate::runtime_constants::{
     BACKGROUND_WORK_IDLE_GRACE_MS, PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT,
     PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT,
 };
-use crate::runtime_values::{current_time_millis, unique_id};
+use crate::runtime_values::current_time_millis;
 use agent_core::{Event, EventKind, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use model_provider::MODEL_REQUEST_CANCELLED;
-use orchestrator::ConductorPromptGenome;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
 
-const PROMPT_EVALUATION_REQUEST_SCHEMA: &str = "cindx.prompt-evaluation-request.v1";
-const REQUEST_EVENT: &str = "Conductor prompt evaluation requested";
+pub(crate) use crate::prompt_distillation_worker_request::{
+    enqueue_prompt_pairwise_evaluation, enqueue_prompt_pro_to_auto_distillation,
+    PromptEvaluationRequest, REQUEST_EVENT, REQUEST_ID_KEY, REQUEST_METADATA_KEY,
+};
+#[cfg(test)]
+use crate::prompt_distillation_worker_request::PROMPT_EVALUATION_REQUEST_SCHEMA;
+
 const CHECKPOINT_EVENT: &str = "Conductor prompt evaluation request checkpointed";
 const COMPLETED_EVENT: &str = "Conductor prompt evaluation request completed";
 const FAILED_EVENT: &str = "Conductor prompt evaluation request failed";
-const REQUEST_METADATA_KEY: &str = "prompt_evaluation_request";
-const REQUEST_ID_KEY: &str = "prompt_evaluation_request_id";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct PromptEvaluationRequest {
-    schema: String,
-    request_id: String,
-    task_id: String,
-    run_context: Metadata,
-    effort: String,
-    policy: String,
-    worker_models: Vec<String>,
-    agent_budget: usize,
-    current_profile: ConductorPromptGenome,
-    #[serde(default)]
-    configuration_sha256: String,
-}
-
-impl PromptEvaluationRequest {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        task_id: &TaskId,
-        run_context: &Metadata,
-        request_id: Option<String>,
-        effort: String,
-        policy: String,
-        worker_models: Vec<String>,
-        agent_budget: usize,
-        current_profile: ConductorPromptGenome,
-        configuration_sha256: String,
-    ) -> Self {
-        Self {
-            schema: PROMPT_EVALUATION_REQUEST_SCHEMA.to_string(),
-            request_id: request_id.unwrap_or_else(|| unique_id("prompt-evaluation-request")),
-            task_id: task_id.0.clone(),
-            run_context: persistent_prompt_evaluation_context(run_context),
-            effort,
-            policy,
-            worker_models,
-            agent_budget,
-            current_profile,
-            configuration_sha256,
-        }
-    }
-
-    fn validate(&self) -> Result<(), String> {
-        if self.schema != PROMPT_EVALUATION_REQUEST_SCHEMA {
-            return Err("unsupported prompt evaluation request schema".to_string());
-        }
-        if self.request_id.trim().is_empty()
-            || self.task_id.trim().is_empty()
-            || !matches!(self.effort.as_str(), "auto" | "pro")
-            || self.worker_models.is_empty()
-            || !(1..=3).contains(&self.agent_budget)
-            || !prompt_configuration_sha256_is_valid(&self.configuration_sha256)
-        {
-            return Err("prompt evaluation request is incomplete".to_string());
-        }
-        self.current_profile.validate()
-    }
-
-    fn scope_key(&self) -> (&str, &str) {
-        let project_id = self
-            .run_context
-            .get("project_id")
-            .map(String::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("global");
-        (project_id, self.effort.as_str())
-    }
-}
 
 #[derive(Debug, Clone)]
 struct PendingPromptEvaluation {
@@ -114,68 +45,6 @@ struct PendingPromptEvaluation {
     request: PromptEvaluationRequest,
     completed_actions: usize,
     campaign_usage: PromptEvaluationCampaignUsage,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn enqueue_prompt_pairwise_evaluation(
-    app: &tauri::AppHandle,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    request_id: Option<String>,
-    effort: String,
-    policy: String,
-    worker_models: Vec<String>,
-    agent_budget: usize,
-    current_profile: ConductorPromptGenome,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let fingerprint = (
-        &effort,
-        &policy,
-        &worker_models,
-        agent_budget,
-        &current_profile,
-    );
-    let configuration_sha256 = request_configuration_sha256(&state, fingerprint)?;
-    let request = PromptEvaluationRequest::new(
-        task_id,
-        run_context,
-        request_id,
-        effort,
-        policy,
-        worker_models,
-        agent_budget,
-        current_profile,
-        configuration_sha256,
-    );
-    request.validate()?;
-    let payload = serde_json::to_string(&request)
-        .map_err(|error| format!("prompt evaluation request serialization failed: {error}"))?;
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_event(
-        &mut store,
-        task_id,
-        EventKind::TaskStatusChanged,
-        REQUEST_EVENT,
-        metadata_with_context(
-            [
-                (REQUEST_ID_KEY.to_string(), request.request_id.clone()),
-                (REQUEST_METADATA_KEY.to_string(), payload),
-                ("background_evaluation".to_string(), "true".to_string()),
-                ("prompt_effort".to_string(), request.effort.clone()),
-            ]
-            .into_iter()
-            .collect(),
-            &request.run_context,
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    drop(store);
-    notify_prompt_evaluation_worker();
-    Ok(())
 }
 
 pub(crate) fn start_prompt_evolution_worker(app: tauri::AppHandle) {
@@ -201,6 +70,13 @@ fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
             crate::prompt_evolution_transfer_outbox::dispatch_prompt_auto_transfer_intents(&app)
         {
             eprintln!("prompt Auto transfer intent scan failed: {error}");
+        }
+        if crate::prompt_distillation_outbox::prompt_distillation_outbox_is_idle(&state) {
+            if let Err(error) =
+                crate::prompt_distillation_outbox::dispatch_prompt_pro_distillation_intents(&app)
+            {
+                eprintln!("prompt Pro distillation intent scan failed: {error}");
+            }
         }
         let pending = match latest_pending_prompt_evaluations(&state) {
             Ok(pending) => pending,
@@ -280,7 +156,7 @@ fn latest_pending_prompt_evaluations_from_events(
         terminal.insert(request_id);
     }
     let checkpoints = recover_prompt_evaluation_checkpoints(events)?;
-    let mut latest = BTreeMap::<(String, String), PendingPromptEvaluation>::new();
+    let mut latest = BTreeMap::<(String, String, String), PendingPromptEvaluation>::new();
     let mut request_ids = BTreeSet::new();
     for event in events.iter().filter(|event| event.summary == REQUEST_EVENT) {
         let Some(payload) = event.metadata.get(REQUEST_METADATA_KEY) else {
@@ -311,7 +187,7 @@ fn latest_pending_prompt_evaluations_from_events(
             request,
         };
         let key = candidate.request.scope_key();
-        let key = (key.0.to_string(), key.1.to_string());
+        let key = (key.0.to_string(), key.1.to_string(), key.2.to_string());
         let replace = latest
             .get(&key)
             .is_none_or(|current| candidate.sequence > current.sequence);
@@ -428,6 +304,7 @@ fn process_pending_prompt_evaluation(
             &request.worker_models,
             request.agent_budget,
             &request.current_profile,
+            request.pro_teacher_snapshot.as_ref(),
             &control,
         );
         *campaign_usage_out = pending.campaign_usage.with_control_usage(&control);
@@ -615,27 +492,6 @@ fn checkpoint_prompt_evaluation_request(
         reason,
         None,
     )
-}
-
-fn persistent_prompt_evaluation_context(run_context: &Metadata) -> Metadata {
-    const SAFE_KEYS: [&str; 8] = [
-        "agent_run_id",
-        "agent_effort",
-        "collaboration_policy",
-        "project_id",
-        "project_root",
-        "prompt_profile",
-        "session_id",
-        "task_class",
-    ];
-    SAFE_KEYS
-        .into_iter()
-        .filter_map(|key| {
-            run_context
-                .get(key)
-                .map(|value| (key.to_string(), value.clone()))
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -32,6 +32,10 @@ pub enum PromptPromotionBlocker {
     WeakConfidence,
     GeneralizationGap,
     HoldoutTaskClassRegression,
+    HoldoutFailureRegression,
+    HoldoutQualityRegression,
+    HoldoutLatencyRegression,
+    HoldoutTokenRegression,
 }
 
 impl PromptPromotionBlocker {
@@ -52,6 +56,10 @@ impl PromptPromotionBlocker {
             Self::WeakConfidence => "weak_confidence",
             Self::GeneralizationGap => "generalization_gap",
             Self::HoldoutTaskClassRegression => "holdout_task_class_regression",
+            Self::HoldoutFailureRegression => "holdout_failure_regression",
+            Self::HoldoutQualityRegression => "holdout_quality_regression",
+            Self::HoldoutLatencyRegression => "holdout_latency_regression",
+            Self::HoldoutTokenRegression => "holdout_token_regression",
         }
     }
 }
@@ -110,7 +118,7 @@ pub struct PromptPromotionGateResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PairKey {
+pub(crate) struct PairKey {
     evaluation_id: String,
     case_id: String,
     split: PromptEvaluationSplit,
@@ -119,7 +127,7 @@ struct PairKey {
 }
 
 impl PairKey {
-    fn from_observation(observation: &PromptEvolutionObservation) -> Option<Self> {
+    pub(crate) fn from_observation(observation: &PromptEvolutionObservation) -> Option<Self> {
         let evaluation_id = observation.evaluation_id.trim();
         let case_id = observation.case_id.trim();
         if evaluation_id.is_empty() || case_id.is_empty() {
@@ -266,7 +274,7 @@ pub fn evaluate_prompt_auto_transfer_gate_in_cohort_with_failures(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_prompt_pair_gate<Accept, ValidatePair>(
+pub(crate) fn evaluate_prompt_pair_gate<Accept, ValidatePair>(
     observations: &[PromptEvolutionObservation],
     candidate_id: &str,
     stable_id: &str,

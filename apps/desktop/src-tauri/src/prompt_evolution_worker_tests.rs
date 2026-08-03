@@ -1,5 +1,9 @@
 use super::*;
 use agent_core::{EventId, EventKind};
+use orchestrator::{
+    ConductorPromptGenome, FrozenPromptProfileSnapshot, FrozenPromptSourceProfileLineageV1,
+    FrozenPromptTransferEvidence, PROMPT_AUTO_TRANSFER_GATE_PROTOCOL,
+};
 
 fn request(effort: &str, id: &str) -> PromptEvaluationRequest {
     PromptEvaluationRequest {
@@ -12,6 +16,7 @@ fn request(effort: &str, id: &str) -> PromptEvaluationRequest {
         worker_models: vec!["model".to_string()],
         agent_budget: 1,
         current_profile: ConductorPromptGenome::seed_for_effort(effort),
+        pro_teacher_snapshot: None,
         configuration_sha256: String::new(),
     }
 }
@@ -21,6 +26,41 @@ fn request_for_project(effort: &str, id: &str, project_id: &str) -> PromptEvalua
     request
         .run_context
         .insert("project_id".to_string(), project_id.to_string());
+    request
+}
+
+fn certified_pro_snapshot() -> FrozenPromptProfileSnapshot {
+    let pro = ConductorPromptGenome::seed_for_effort("pro")
+        .mutations()
+        .into_iter()
+        .next()
+        .unwrap();
+    FrozenPromptProfileSnapshot::new_gepa(
+        "pro",
+        pro,
+        ConductorPromptGenome::seed_for_effort("pro").id,
+        "1".repeat(64),
+        "2".repeat(64),
+    )
+    .unwrap()
+    .with_auto_teacher_evidence(FrozenPromptTransferEvidence {
+        source_effort: "auto".to_string(),
+        source_profile_id: "auto-source".to_string(),
+        source_profile_sha256: "3".repeat(64),
+        dataset_sha256: "4".repeat(64),
+        cohort_sha256: Some("5".repeat(64)),
+        paired_evidence_sha256: "6".repeat(64),
+        promotion_gate_protocol: PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
+        source_profile_lineage: Some(
+            FrozenPromptSourceProfileLineageV1::undistilled("3".repeat(64)).unwrap(),
+        ),
+    })
+    .unwrap()
+}
+
+fn distillation_request(id: &str, project_id: &str) -> PromptEvaluationRequest {
+    let mut request = request_for_project("auto", id, project_id);
+    request.pro_teacher_snapshot = Some(certified_pro_snapshot());
     request
 }
 
@@ -140,6 +180,25 @@ fn same_effort_requests_are_isolated_by_project() {
         .collect::<BTreeSet<_>>();
 
     assert_eq!(ids, BTreeSet::from(["project-a-new", "project-b"]));
+}
+
+#[test]
+fn ordinary_and_distillation_tracks_recover_independently_and_coalesce_per_track() {
+    let ordinary = request_for_project("auto", "ordinary", "project-a");
+    let older_distillation = distillation_request("distillation-old", "project-a");
+    let newer_distillation = distillation_request("distillation-new", "project-a");
+    let pending = latest_pending_prompt_evaluations_from_events(&[
+        request_event(1, &older_distillation),
+        request_event(2, &ordinary),
+        request_event(3, &newer_distillation),
+    ])
+    .unwrap();
+    let ids = pending
+        .iter()
+        .map(|pending| pending.request.request_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(ids, BTreeSet::from(["distillation-new", "ordinary"]));
 }
 
 #[test]

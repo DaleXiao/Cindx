@@ -343,10 +343,10 @@ pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenom
                 .map(|genome| vec![genome])
         })
         .unwrap_or_default();
-    let evolution_method = match event.metadata.get("mutation_strategy").map(String::as_str) {
-        Some("gepa_reflection") => Some(PromptEvolutionMethod::GepaReflectivePaired),
-        _ => None,
-    };
+    let mutation_strategy = event.metadata.get("mutation_strategy").map(String::as_str);
+    let distillation_provenance = (mutation_strategy == Some("pro_to_auto_distillation"))
+        .then_some(event)
+        .and_then(crate::prompt_distillation_runtime::prompt_distillation_provenance_from_event);
     let scope = event
         .metadata
         .get("project_id")
@@ -358,11 +358,27 @@ pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenom
     genomes
         .into_iter()
         .filter(|genome| genome.validate().is_ok())
-        .map(|genome| PromptGenomeRecord {
-            scope: scope.clone(),
-            effort: effort.clone(),
-            genome,
-            evolution_method,
+        .filter_map(|genome| {
+            let evolution_method = match mutation_strategy {
+                Some("gepa_reflection") => Some(PromptEvolutionMethod::GepaReflectivePaired),
+                Some("pro_to_auto_distillation") => {
+                    let provenance = distillation_provenance.as_ref()?;
+                    if genome.id != provenance.auto_child_profile_id
+                        || prompt_genome_sha256(&genome).ok().as_ref()
+                            != Some(&provenance.auto_child_profile_sha256)
+                    {
+                        return None;
+                    }
+                    Some(PromptEvolutionMethod::ProToAutoDistillation)
+                }
+                _ => None,
+            };
+            Some(PromptGenomeRecord {
+                scope: scope.clone(),
+                effort: effort.clone(),
+                genome,
+                evolution_method,
+            })
         })
         .collect()
 }
@@ -976,6 +992,7 @@ pub(crate) fn build_prompt_evolution_read_model(
                 upsert_prompt_observation(&mut model.observations, effort, observation);
             }
         }
+        crate::prompt_distillation_runtime::apply_prompt_distillation_event(&mut model, event);
         apply_prompt_rollout_event(&mut model, event);
     }
     model
@@ -1089,6 +1106,7 @@ pub(crate) fn load_prompt_evolution_read_model(
             {
                 upsert_prompt_observation(&mut model.observations, effort, observation);
             }
+            crate::prompt_distillation_runtime::apply_prompt_distillation_event(&mut model, event);
             let terminal_scope = if is_agent_run_terminal(event) {
                 event
                     .metadata

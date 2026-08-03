@@ -140,13 +140,12 @@ pub(crate) fn enqueue_prompt_auto_transfer_evaluation(
     if !config.prompt_evolution_enabled || !config.is_ready() {
         return Ok(false);
     }
-    let scoped_model = crate::prompt_evolution_store_runtime::with_prompt_evolution_store(
-        &state,
-        |store| {
-        let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
-        Ok(prompt_evolution_read_model_for_scope(&model, project_id))
-        },
-    )?;
+    let scoped_model =
+        crate::prompt_evolution_store_runtime::with_prompt_evolution_store(&state, |store| {
+            let model =
+                load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+            Ok(prompt_evolution_read_model_for_scope(&model, project_id))
+        })?;
     let (effort, policy, worker_models, agent_budget, current_profile) =
         prompt_auto_transfer_request(&config, &scoped_model)?;
     enqueue_prompt_pairwise_evaluation(
@@ -308,6 +307,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     worker_models: &[String],
     agent_budget: usize,
     current_profile: &ConductorPromptGenome,
+    pro_teacher_snapshot: Option<&FrozenPromptProfileSnapshot>,
     control: &Arc<AgentRunControl>,
 ) -> Result<bool, String> {
     if control.should_stop() {
@@ -326,11 +326,12 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .unwrap_or(active_workspace_root(state)?);
     let (model, scoped_model, events) =
         crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
-        let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
-        let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
-        let events = store
-            .list_by_task_and_metadata(task_id, "project_id", project_id)
-            .map_err(|error| error.to_string())?;
+            let model =
+                load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+            let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
+            let events = store
+                .list_by_task_and_metadata(task_id, "project_id", project_id)
+                .map_err(|error| error.to_string())?;
             Ok((model, scoped_model, events))
         })?;
     let rollout = scoped_model.rollouts.get(effort).cloned();
@@ -360,11 +361,15 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .chain(std::iter::once(current_profile.generation))
         .max()
         .unwrap_or_default();
-    let dataset = prompt_offline_dataset_for_generation(
-        discovered_dataset,
-        previous_dataset.as_ref(),
-        campaign_generation,
-    )?;
+    let dataset = if pro_teacher_snapshot.is_some() {
+        discovered_dataset
+    } else {
+        prompt_offline_dataset_for_generation(
+            discovered_dataset,
+            previous_dataset.as_ref(),
+            campaign_generation,
+        )?
+    };
     if dataset
         .iter()
         .any(|case| !crate::prompt_learning_runtime::prompt_learning_case_is_safe(case, config))
@@ -373,9 +378,11 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     }
     if dataset.len() < PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
         let digest = prompt_offline_dataset_digest(&dataset);
-        if previous_dataset.as_ref().is_none_or(|snapshot| {
-            snapshot.digest != digest || snapshot.status != "insufficient_cases"
-        }) {
+        if pro_teacher_snapshot.is_none()
+            && previous_dataset.as_ref().is_none_or(|snapshot| {
+                snapshot.digest != digest || snapshot.status != "insufficient_cases"
+            })
+        {
             append_prompt_offline_dataset_snapshot(
                 state,
                 task_id,
@@ -388,6 +395,16 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         }
         return Ok(false);
     }
+    let distillation = pro_teacher_snapshot
+        .map(|snapshot| {
+            crate::prompt_distillation_runtime::prepare_prompt_distillation_evaluation(
+                &scoped_model,
+                current_profile,
+                snapshot,
+                &dataset,
+            )
+        })
+        .transpose()?;
     let campaign =
         prompt_pairwise_campaign_snapshot(config, effort, &dataset, &evaluation, rollout.as_ref())?;
     let mut campaign_run_context = run_context.clone();
@@ -408,65 +425,91 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .mutation_parent
         .as_ref()
         .map(|parent| parent.id.clone());
-    if let Some(parent) = evaluation.mutation_parent.as_ref() {
-        if generate_background_prompt_mutation(
-            state,
-            config,
-            task_id,
-            run_context,
-            effort,
-            parent,
-            &evaluation.mutation_trajectories,
-            control,
-        )? {
-            return Ok(true);
+    if distillation.is_none() {
+        if let Some(parent) = evaluation.mutation_parent.as_ref() {
+            if generate_background_prompt_mutation(
+                state,
+                config,
+                task_id,
+                run_context,
+                effort,
+                parent,
+                &evaluation.mutation_trajectories,
+                control,
+            )? {
+                return Ok(true);
+            }
         }
     }
     let current_task_class = dataset
         .first()
         .map(|case| case.task_class.as_str())
         .unwrap_or("general");
-    let Some(challenger) =
-        prompt_rollout_counterpart(rollout.as_ref(), &known_profiles, current_profile).or_else(
-            || prompt_evolution_challenger(&evaluation, current_profile, current_task_class),
-        )
+    let Some(challenger) = distillation
+        .as_ref()
+        .map(|evaluation| evaluation.child.clone())
+        .or_else(|| {
+            prompt_rollout_counterpart(rollout.as_ref(), &known_profiles, current_profile).or_else(
+                || prompt_evolution_challenger(&evaluation, current_profile, current_task_class),
+            )
+        })
     else {
         return Ok(false);
     };
-    let current_counts = prompt_direct_profile_evidence_counts(
-        &evaluation.observations,
-        &current_profile.id,
-        &challenger.id,
-    );
-    let challenger_counts = prompt_direct_profile_evidence_counts(
-        &evaluation.observations,
-        &challenger.id,
-        &current_profile.id,
-    );
-    let required_holdout_runs = rollout
+    let (current_counts, challenger_counts) = if let Some(distillation) = distillation.as_ref() {
+        let counts = crate::prompt_distillation_runtime::prompt_distillation_evidence_counts(
+            &evaluation.observations,
+            &distillation.provenance,
+            &distillation.dataset.dataset_sha256,
+        );
+        (counts, counts)
+    } else {
+        let current_counts = prompt_direct_profile_evidence_counts(
+            &evaluation.observations,
+            &current_profile.id,
+            &challenger.id,
+        );
+        let challenger_counts = prompt_direct_profile_evidence_counts(
+            &evaluation.observations,
+            &challenger.id,
+            &current_profile.id,
+        );
+        (current_counts, challenger_counts)
+    };
+    let required_holdout_runs = distillation
         .as_ref()
-        .filter(|rollout| {
-            rollout.canary_profile_id.as_ref().is_some_and(|canary| {
-                (current_profile.id == rollout.stable_profile_id && challenger.id == *canary)
-                    || (challenger.id == rollout.stable_profile_id && current_profile.id == *canary)
-            })
-        })
-        .and_then(|rollout| {
-            let canary = rollout.canary_profile_id.as_deref()?;
-            let live_runs = evaluation
-                .observations
-                .iter()
-                .filter(|observation| {
-                    observation.profile_id == canary
-                        && observation.mode == PromptEvaluationMode::Live
+        .map(|_| PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS)
+        .unwrap_or_else(|| {
+            rollout
+                .as_ref()
+                .filter(|rollout| {
+                    rollout.canary_profile_id.as_ref().is_some_and(|canary| {
+                        (current_profile.id == rollout.stable_profile_id
+                            && challenger.id == *canary)
+                            || (challenger.id == rollout.stable_profile_id
+                                && current_profile.id == *canary)
+                    })
                 })
-                .count();
-            (live_runs > rollout.live_checkpoint).then(|| {
-                PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS.max(rollout.evidence_checkpoint.saturating_add(2))
-            })
-        })
-        .unwrap_or(PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS);
-    let proposal_gate = if current_profile
+                .and_then(|rollout| {
+                    let canary = rollout.canary_profile_id.as_deref()?;
+                    let live_runs = evaluation
+                        .observations
+                        .iter()
+                        .filter(|observation| {
+                            observation.profile_id == canary
+                                && observation.mode == PromptEvaluationMode::Live
+                        })
+                        .count();
+                    (live_runs > rollout.live_checkpoint).then(|| {
+                        PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS
+                            .max(rollout.evidence_checkpoint.saturating_add(2))
+                    })
+                })
+                .unwrap_or(PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS)
+        });
+    let proposal_gate = if distillation.is_some() {
+        None
+    } else if current_profile
         .parents
         .iter()
         .any(|parent| parent == &challenger.id)
@@ -552,15 +595,30 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 .flatten()
         })
         .flatten();
-    let selected_case = transfer_case.or_else(|| {
-        select_prompt_offline_case(
-            &dataset,
-            &evaluation.observations,
-            &current_profile.id,
-            &challenger.id,
-            split,
-        )
-    });
+    let selected_case = distillation
+        .as_ref()
+        .and_then(|distillation| {
+            crate::prompt_distillation_runtime::select_prompt_distillation_case(
+                &evaluation.observations,
+                distillation,
+                split,
+            )
+        })
+        .or(transfer_case)
+        .or_else(|| {
+            distillation
+                .is_none()
+                .then(|| {
+                    select_prompt_offline_case(
+                        &dataset,
+                        &evaluation.observations,
+                        &current_profile.id,
+                        &challenger.id,
+                        split,
+                    )
+                })
+                .flatten()
+        });
     let Some(selected_case) = selected_case else {
         return Ok(false);
     };
@@ -581,15 +639,17 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     if reserved_evaluator_models.is_empty() {
         return Ok(false);
     }
-    append_prompt_offline_dataset_snapshot(
-        state,
-        task_id,
-        run_context,
-        effort,
-        &dataset,
-        campaign_generation,
-        Some(&selected_case),
-    )?;
+    if distillation.is_none() {
+        append_prompt_offline_dataset_snapshot(
+            state,
+            task_id,
+            run_context,
+            effort,
+            &dataset,
+            campaign_generation,
+            Some(&selected_case),
+        )?;
+    }
     let mode = match split {
         PromptEvaluationSplit::Train => PromptEvaluationMode::PairedExecution,
         PromptEvaluationSplit::Holdout => PromptEvaluationMode::ReplayExecution,
@@ -624,11 +684,15 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         matched_treatment_budget,
         control.as_ref(),
     )?;
-    let learning_cohort = crate::prompt_learning_runtime::prompt_learning_cohort(
-        &dataset,
-        campaign_generation,
-        execution_context,
-    )?;
+    let learning_cohort = if let Some(distillation) = distillation.as_ref() {
+        PromptLearningCohortV1::new(distillation.dataset.clone(), execution_context)?
+    } else {
+        crate::prompt_learning_runtime::prompt_learning_cohort(
+            &dataset,
+            campaign_generation,
+            execution_context,
+        )?
+    };
     let matched_identity = PromptMatchedEvaluationIdentityV1::new(
         evaluation_id.clone(),
         &learning_cohort,
@@ -802,6 +866,9 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             PromptEvaluationAttemptStatus::TreatmentFailure,
             "treatment_execution_failed",
         )?;
+        if distillation.is_some() {
+            return Ok(false);
+        }
     }
     let participant_models = prompt_candidate_models([candidate_a, candidate_b]);
     let evaluator_models = reserved_evaluator_models
@@ -921,6 +988,19 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     let dataset_sha256 = learning_cohort.dataset.dataset_sha256.clone();
     let prompt_sha_a = current_prompt_sha256;
     let prompt_sha_b = challenger_prompt_sha256;
+    let provenance_a = PromptEvaluationProvenance::blind_pairwise_swap(
+        vec![reviewer_model.clone()],
+        participant_models.clone(),
+        dataset_sha256.clone(),
+        prompt_sha_a.clone(),
+        prompt_sha_b.clone(),
+    )
+    .with_matched_evaluation(matched_identity.clone());
+    let provenance_a = if let Some(distillation) = distillation.as_ref() {
+        provenance_a.with_pro_to_auto_distillation(distillation.provenance.clone())
+    } else {
+        provenance_a
+    };
     let observation_a = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_a,
         candidate_b,
@@ -935,15 +1015,21 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         &judge.step_scores_a,
         judge.feedback_a,
         std::slice::from_ref(&config.api_key),
-        PromptEvaluationProvenance::blind_pairwise_swap(
-            vec![reviewer_model.clone()],
-            participant_models.clone(),
-            dataset_sha256.clone(),
-            prompt_sha_a.clone(),
-            prompt_sha_b.clone(),
-        )
-        .with_matched_evaluation(matched_identity.clone()),
+        provenance_a,
     );
+    let provenance_b = PromptEvaluationProvenance::blind_pairwise_swap(
+        vec![reviewer_model.clone()],
+        participant_models,
+        dataset_sha256,
+        prompt_sha_b,
+        prompt_sha_a,
+    )
+    .with_matched_evaluation(matched_identity);
+    let provenance_b = if let Some(distillation) = distillation.as_ref() {
+        provenance_b.with_pro_to_auto_distillation(distillation.provenance.clone())
+    } else {
+        provenance_b
+    };
     let observation_b = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_b,
         candidate_a,
@@ -958,14 +1044,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         &judge.step_scores_b,
         judge.feedback_b,
         std::slice::from_ref(&config.api_key),
-        PromptEvaluationProvenance::blind_pairwise_swap(
-            vec![reviewer_model.clone()],
-            participant_models,
-            dataset_sha256,
-            prompt_sha_b,
-            prompt_sha_a,
-        )
-        .with_matched_evaluation(matched_identity),
+        provenance_b,
     );
     let lease = match control.execution_epoch_lease() {
         agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
@@ -989,15 +1068,27 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         }
     };
     let observation_commit = control.commit_execution_step_with(lease, || {
-        append_prompt_pairwise_observations(
-            state,
-            task_id,
-            run_context,
-            effort,
-            mode,
-            [&observation_a, &observation_b],
-            [&candidate_a.plan.genome, &candidate_b.plan.genome],
-        )
+        if let Some(distillation) = distillation.as_ref() {
+            crate::prompt_distillation_runtime::append_prompt_distillation_observations(
+                state,
+                task_id,
+                run_context,
+                mode,
+                [&observation_a, &observation_b],
+                [&candidate_a.plan.genome, &candidate_b.plan.genome],
+                distillation,
+            )
+        } else {
+            append_prompt_pairwise_observations(
+                state,
+                task_id,
+                run_context,
+                effort,
+                mode,
+                [&observation_a, &observation_b],
+                [&candidate_a.plan.genome, &candidate_b.plan.genome],
+            )
+        }
     });
     match observation_commit {
         Ok(agent_runtime::RunExecutionStepCommit::Committed(())) => {}
@@ -1036,77 +1127,57 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         attempt.finish(PromptEvaluationAttemptStatus::CompletedPair, "")?;
     }
     control.mark_progress("prompt_evaluation", "matched treatment pair persisted");
-    crate::prompt_transfer_runtime::run_prompt_auto_transfer_evaluations(
-        state,
-        config,
-        task_id,
-        run_context,
-        effort,
-        policy,
-        &evaluation_worker_models,
-        agent_budget,
-        &workspace_root,
-        &dataset,
-        auto_teacher,
-        auto_stable_profile.as_ref(),
-        &selected_case,
-        split,
-        mode,
-        control,
-        &evaluation_id,
-        &objective,
-        &task_class,
-        &reviewer_model,
-        [candidate_a, candidate_b],
-    )?;
-    let next_evaluation = crate::prompt_evolution_store_runtime::with_prompt_evolution_store(
-        state,
-        |store| {
-        let model =
-            load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
-        let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
+    if distillation.is_none() {
+        crate::prompt_transfer_runtime::run_prompt_auto_transfer_evaluations(
+            state,
+            config,
+            task_id,
+            run_context,
+            effort,
+            policy,
+            &evaluation_worker_models,
+            agent_budget,
+            &workspace_root,
+            &dataset,
+            auto_teacher,
+            auto_stable_profile.as_ref(),
+            &selected_case,
+            split,
+            mode,
+            control,
+            &evaluation_id,
+            &objective,
+            &task_class,
+            &reviewer_model,
+            [candidate_a, candidate_b],
+        )?;
+    }
+    let next_evaluation =
+        crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
+            let model =
+                load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+            let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
             evaluate_prompt_evolution_read_model(&scoped_model, effort)
-        },
-    )?;
-    if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
-        if attempted_mutation_parent.as_deref() != Some(parent.id.as_str()) {
-            let _ = generate_background_prompt_mutation(
-                state,
-                config,
-                task_id,
-                run_context,
-                effort,
-                parent,
-                &next_evaluation.mutation_trajectories,
-                control,
-            )?;
+        })?;
+    if distillation.is_none() {
+        if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
+            if attempted_mutation_parent.as_deref() != Some(parent.id.as_str()) {
+                let _ = generate_background_prompt_mutation(
+                    state,
+                    config,
+                    task_id,
+                    run_context,
+                    effort,
+                    parent,
+                    &next_evaluation.mutation_trajectories,
+                    control,
+                )?;
+            }
         }
     }
     Ok(true)
 }
 
 #[cfg(test)]
-mod scheduling_tests {
-    use super::*;
-
-    #[test]
-    fn auto_transfer_followup_uses_the_current_pro_contract() {
-        let config = ProviderConfig {
-            planner_model: "planner".to_string(),
-            executor_model: "executor".to_string(),
-            reviewer_model: "reviewer".to_string(),
-            ..ProviderConfig::default()
-        };
-        let model = build_prompt_evolution_read_model(&[], 0, 0);
-
-        let (effort, policy, worker_models, agent_budget, profile) =
-            prompt_auto_transfer_request(&config, &model).unwrap();
-
-        assert_eq!(effort, "pro");
-        assert_eq!(policy, "best_of_n");
-        assert_eq!(agent_budget, AgentPolicy::Pro.max_parallelism());
-        assert_eq!(worker_models, vec!["planner", "executor", "reviewer"]);
-        assert_eq!(profile.id, ConductorPromptGenome::seed_for_effort("pro").id);
-        assert!(profile.require_final_synthesis);
-    }
-}
+#[path = "prompt_pairwise_runtime_tests.rs"]
+mod tests;
