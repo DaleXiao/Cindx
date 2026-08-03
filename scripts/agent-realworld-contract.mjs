@@ -4,6 +4,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptPath = fileURLToPath(import.meta.url);
+const setupFailureStages = new Set([
+  "project_configuration",
+  "workspace_index",
+  "memory_seed",
+  "recall_session"
+]);
+const setupFailureCodes = new Set([
+  "configuration",
+  "index",
+  "persistence",
+  "data",
+  "transient",
+  "provider"
+]);
 
 function requireFact(condition, message) {
   if (!condition) throw new Error(message);
@@ -55,6 +69,28 @@ function errorKind(value) {
   if (normalized.includes("max") && normalized.includes("turn")) return "turn_limit";
   if (normalized.includes("provider") || normalized.includes("request")) return "provider";
   return "runtime";
+}
+
+function validateSetupFailure(run, key, infrastructureFailed) {
+  if (!infrastructureFailed) {
+    requireFact(run.setup_failure == null, `${key}: non-setup run must not report setup failure`);
+    return;
+  }
+  const failure = run.setup_failure;
+  if (failure == null) return;
+  requireFact(typeof failure === "object", `${key}: setup failure is invalid`);
+  requireFact(
+    setupFailureStages.has(failure.stage),
+    `${key}: setup failure stage is invalid`
+  );
+  requireFact(
+    setupFailureCodes.has(failure.code),
+    `${key}: setup failure code is invalid`
+  );
+  requireFact(
+    typeof failure.retryable === "boolean",
+    `${key}: setup failure retryable flag is missing`
+  );
 }
 
 function validateSuite(suite) {
@@ -123,6 +159,7 @@ function validateRun(run, testCase, treatment, replicate) {
   requireFact(typeof run.verification.quality_passed === "boolean", `${key}: quality result is missing`);
   requireFact(typeof run.verification.answer_passed === "boolean", `${key}: answer result is missing`);
   const infrastructureFailed = run.terminal_status === "infrastructure_failed";
+  validateSetupFailure(run, key, infrastructureFailed);
   if (infrastructureFailed) {
     requireFact(run.completed === false, `${key}: infrastructure failure cannot be completed`);
   }
@@ -334,7 +371,14 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       memory_records_after_seed: run.memory_records_after_seed,
       input_sha256: run.input_sha256,
       output_sha256: run.output_sha256,
-      error_kind: errorKind(run.error),
+      setup_failure: run.setup_failure
+        ? {
+            stage: run.setup_failure.stage,
+            code: run.setup_failure.code,
+            retryable: run.setup_failure.retryable
+          }
+        : null,
+      error_kind: run.setup_failure?.code ?? errorKind(run.error),
       metrics: run.metrics,
       verification: run.verification
     }))

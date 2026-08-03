@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { renderMarkdown, validateAndSanitize } from "./agent-realworld-contract.mjs";
 import {
+  evaluationEnvironment,
   mergeRunCheckpoint,
   normalizeInterruptedRun,
   parseArguments,
@@ -48,6 +49,7 @@ function fixture() {
     output_sha256: hash(output),
     output,
     error: null,
+    setup_failure: null,
     metrics: {
       latency_ms: treatment === "fast" ? 10 : 20,
       setup_latency_ms: 0,
@@ -107,6 +109,23 @@ test("validates the complete matrix and removes private output", () => {
   assert.match(markdown, /\| coding \| 100\.0% \| 100\.0% \| 100\.0% \| 100\.0% \|/);
 });
 
+test("accepts legacy raw without setup failure and keeps error classification", () => {
+  const legacy = fixture();
+  for (const run of legacy.raw.runs) delete run.setup_failure;
+  const failed = legacy.raw.runs[1];
+  failed.completed = false;
+  failed.terminal_status = "failed";
+  failed.error = "request timed out";
+  failed.verification.quality_passed = false;
+  failed.verification.answer_passed = false;
+  legacy.rawBytes = Buffer.from(JSON.stringify(legacy.raw));
+
+  const report = validateAndSanitize(legacy);
+  assert.equal(report.runs[1].setup_failure, null);
+  assert.equal(report.runs[1].error_kind, "timeout");
+  assert.equal(report.runs[1].error, undefined);
+});
+
 test("rejects incomplete and tampered evidence", () => {
   const incomplete = fixture();
   incomplete.raw.runs.pop();
@@ -133,7 +152,9 @@ test("publishes infrastructure failures only as an invalid baseline", () => {
   const failed = incomplete.raw.runs[2];
   failed.completed = false;
   failed.terminal_status = "infrastructure_failed";
-  failed.error = "memory seed failed";
+  failed.error = "memory seed failed with private provider detail";
+  failed.setup_failure = { stage: "memory_seed", code: "transient", retryable: true };
+  failed.metrics.setup_latency_ms = 37;
   failed.verification.quality_passed = false;
   failed.verification.answer_passed = false;
   failed.verification.external_effect_passed = null;
@@ -144,10 +165,35 @@ test("publishes infrastructure failures only as an invalid baseline", () => {
   assert.equal(report.decision.status, "INVALID_BASELINE");
   assert.equal(report.evidence.complete_matrix, false);
   assert.equal(report.evidence.incomplete_runs, 1);
+  assert.deepEqual(report.runs[2].setup_failure, {
+    stage: "memory_seed",
+    code: "transient",
+    retryable: true
+  });
+  assert.equal(report.runs[2].error_kind, "transient");
+  assert.equal(report.runs[2].metrics.setup_latency_ms, 37);
+  assert.equal(report.runs[2].error, undefined);
   assert.match(report.decision.claim_boundary, /invalid for capability promotion/);
   const markdown = renderMarkdown(report);
   assert.match(markdown, /^# Cindx Agent Real-World Evaluation /);
   assert.match(markdown, /Incomplete or unverified runs: 1/);
+});
+
+test("single-cell environment isolates evaluation data after provider loading", () => {
+  const tempRoot = path.join(os.tmpdir(), "cindx-realworld-cell");
+  const inheritedDataDir = path.join(os.tmpdir(), "cindx-production-provider-config");
+  const env = evaluationEnvironment(
+    { CINDX_DATA_DIR: inheritedDataDir },
+    { gitHead: "a".repeat(40), suitePath: "/private/suite.json", replicates: 1 },
+    { replicate: 1, caseId: "case-a", treatment: "auto" },
+    "/private/raw.json",
+    tempRoot
+  );
+
+  assert.equal(env.CINDX_DATA_DIR, inheritedDataDir);
+  assert.equal(env.CINDX_AGENT_REALWORLD_DATA_DIR, path.join(tempRoot, ".cindx-eval-data"));
+  assert.equal(env.CINDX_AGENT_REALWORLD_CASES, "case-a");
+  assert.equal(env.CINDX_AGENT_REALWORLD_TREATMENTS, "auto");
 });
 
 test("preflight rejects dirty or malformed provenance", () => {
