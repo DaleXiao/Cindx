@@ -4,10 +4,21 @@ use crate::agent_run_engine::{
 };
 use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
 use crate::suspended_run_runtime::{
-    clear_suspended_agent_run, suspended_agent_run_control_snapshot, take_suspended_agent_run,
-    SuspendedAgentRun,
+    clear_suspended_agent_run, suspended_agent_run_control_snapshot, suspended_agent_run_policy,
+    take_suspended_agent_run, SuspendedAgentRun,
 };
 use crate::*;
+
+pub(crate) fn persisted_agent_policy_from_active_events(
+    active_events: &[Event],
+) -> Result<AgentPolicy, String> {
+    let persisted = active_events
+        .iter()
+        .find(|event| is_agent_run_start_event(event))
+        .and_then(|event| event.metadata.get("agent_effort"))
+        .map(String::as_str);
+    persisted_agent_policy(persisted)
+}
 
 #[tauri::command]
 pub(crate) async fn run_agent_task(
@@ -28,7 +39,7 @@ pub(crate) fn run_agent_task_blocking(
     input: AgentTaskInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
-    let effort = AgentEffort::parse(&input.effort);
+    let effort = AgentPolicy::parse_ingress(&input.effort);
     let run_control_lease =
         begin_agent_run_control_for_effort(&state, &session_id, effort.label(), None)?;
     let cancellation = run_control_lease.control();
@@ -51,7 +62,7 @@ pub(crate) fn run_agent_task_blocking_inner(
     input: AgentTaskInput,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
-    let effort = AgentEffort::parse(&input.effort);
+    let effort = AgentPolicy::parse_ingress(&input.effort);
     let user_prompt = input.prompt.trim().to_string();
     let queue_id = input.queue_id.clone();
     let session_id = input.session_id;
@@ -288,7 +299,7 @@ pub(crate) fn retry_agent_task_blocking(
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
     let recovery_context = project_session_metadata_for_session(&state, Some(&session_id))?;
-    let (effort, applied_steer_epoch, durable_recovery) = {
+    let (persisted_effort, applied_steer_epoch, durable_recovery) = {
         let store = state
             .store
             .lock()
@@ -300,11 +311,16 @@ pub(crate) fn retry_agent_task_blocking(
         let recovery =
             peek_agent_recovery_envelope(&store, &recovery_context, &[AgentRecoveryState::Paused])?;
         (
-            agent_effort_from_active_events(&active_events),
+            persisted_agent_policy_from_active_events(&active_events)?,
             latest_applied_agent_steer_epoch(&active_events),
             recovery,
         )
     };
+    let suspended_effort = suspended_agent_run_policy(&state, &session_id)?;
+    if suspended_effort.is_some_and(|effort| effort != persisted_effort) {
+        return Err("suspended agent policy does not match the active run".to_string());
+    }
+    let effort = suspended_effort.unwrap_or(persisted_effort);
     let suspended_snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
     let run_control_lease = if let Some(snapshot) = suspended_snapshot {
         begin_agent_run_control_for_continuation(&state, &session_id, snapshot)?
@@ -355,6 +371,7 @@ pub(crate) fn resume_suspended_agent_run(
         run_control: _,
         last_touched_at_ms: _,
     } = suspended;
+    let effort = persisted_agent_policy(run_context.get("agent_effort").map(String::as_str))?;
     let config = clone_provider_config(state)?;
     if !config.is_ready() {
         return agent_state_with_error_in_context(
@@ -442,12 +459,6 @@ pub(crate) fn resume_suspended_agent_run(
         )
         .map_err(|error| error.to_string())?;
     }
-    let effort = AgentEffort::parse(
-        run_context
-            .get("agent_effort")
-            .map(String::as_str)
-            .unwrap_or("auto"),
-    );
     let prepared = PreparedAgentExecution {
         base_run_context: run_context.clone(),
         run_context,
@@ -517,7 +528,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .unwrap_or_else(|| prompt.clone());
         let recovery_prompt = agent_recovery_prompt_from_active_events(&active_events)
             .unwrap_or_else(|| prompt.clone());
-        let effort = agent_effort_from_active_events(&active_events);
+        let effort = persisted_agent_policy_from_active_events(&active_events)?;
         let recovery = claim_agent_recovery_envelope(
             &mut store,
             &run_context,

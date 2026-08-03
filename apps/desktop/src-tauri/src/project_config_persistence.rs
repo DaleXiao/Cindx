@@ -1,7 +1,6 @@
 use crate::{
     configuration_models::{
-        default_agent_effort, AgentEffort, ProjectRecord, ProjectSessionConfig, SessionRecord,
-        WorkspaceConfig,
+        default_agent_effort, ProjectRecord, ProjectSessionConfig, SessionRecord, WorkspaceConfig,
     },
     persistence_runtime::{
         project_session_config_path, validate_workspace_root, workspace_config_path,
@@ -10,6 +9,7 @@ use crate::{
     session_title_service::is_automatic_session_name,
 };
 use agent_application::SessionTitleState;
+use orchestrator::AgentPolicy;
 use std::{
     fs,
     io::{self, Write},
@@ -157,7 +157,7 @@ fn load_project_session_config_from_path(
                     detail: fields[3].to_string(),
                     effort: fields
                         .get(8)
-                        .map(|value| AgentEffort::parse(value).label().to_string())
+                        .map(|value| AgentPolicy::parse_ingress(value).label().to_string())
                         .unwrap_or_else(default_agent_effort),
                     seen_event_sequence: fields
                         .get(10)

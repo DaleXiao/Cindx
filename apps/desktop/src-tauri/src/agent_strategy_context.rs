@@ -1,16 +1,11 @@
 use super::PlannedAgentRun;
 use crate::collaboration_service::truncate_for_collaboration;
-use crate::configuration_models::AgentEffort;
 use agent_core::Metadata;
 use orchestrator::{AgentExecutionMode, AgentToolRequirement};
 
 impl PlannedAgentRun {
-    pub(crate) fn apply_to_context(
-        &self,
-        run_context: &mut Metadata,
-        effort: AgentEffort,
-    ) -> Result<(), String> {
-        let requested_policy = effort.requested_policy();
+    pub(crate) fn apply_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {
+        let requested_policy = self.policy.requested_policy();
         let collaboration_policy = self.decision.policy();
         run_context.insert(
             "task_class".to_string(),
@@ -33,7 +28,10 @@ impl PlannedAgentRun {
             "routing_signature".to_string(),
             self.decision.learning_signature(),
         );
-        run_context.insert("agent_effort".to_string(), effort.label().to_string());
+        run_context.insert(
+            "agent_effort".to_string(),
+            self.policy.label().to_string(),
+        );
         run_context.insert(
             "requested_policy".to_string(),
             requested_policy.label().to_string(),
@@ -68,7 +66,10 @@ impl PlannedAgentRun {
             self.decision.primary_model.clone(),
         );
         run_context.insert("router_examples".to_string(), "0".to_string());
-        run_context.insert("router_source".to_string(), self.source.clone());
+        run_context.insert(
+            "router_source".to_string(),
+            self.source.label().to_string(),
+        );
         run_context.insert(
             "conductor_degraded".to_string(),
             self.degradation_reason.is_some().to_string(),

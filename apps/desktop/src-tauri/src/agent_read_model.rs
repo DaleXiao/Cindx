@@ -410,21 +410,12 @@ fn model_prompt_from_run_start(event: &Event) -> Option<String> {
         .cloned()
 }
 
-pub(crate) fn agent_effort_from_active_events(active_events: &[Event]) -> AgentEffort {
-    active_events
-        .iter()
-        .find(|event| is_agent_run_start_event(event))
-        .and_then(|event| event.metadata.get("agent_effort"))
-        .map(|effort| AgentEffort::parse(effort))
-        .unwrap_or(AgentEffort::Auto)
-}
-
 pub(crate) fn agent_run_budget_from_start_event(event: &Event) -> RunBudget {
     let effort = event
         .metadata
         .get("agent_effort")
-        .map(|value| AgentEffort::parse(value))
-        .unwrap_or(AgentEffort::Auto);
+        .map(|value| AgentPolicy::parse_ingress(value))
+        .unwrap_or(AgentPolicy::Auto);
     RunBudget::for_effort(effort.label())
 }
 

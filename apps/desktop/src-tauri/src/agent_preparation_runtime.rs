@@ -11,7 +11,7 @@ use crate::agent_strategy_runtime::{
 };
 use crate::app_state::AppState;
 use crate::collaboration_stage_runtime::CollaborationStageError;
-use crate::configuration_models::{AgentEffort, ProviderConfig};
+use crate::configuration_models::ProviderConfig;
 use crate::event_persistence::append_event;
 use crate::memory_runtime::{
     append_prepared_memory_context, append_skill_context_for_run, commit_prepared_memory_recall,
@@ -22,7 +22,7 @@ use crate::session_context_service::prepare_session_history_context;
 use agent_core::{EventKind, Message, MessageRole, Metadata, TaskId};
 use agent_runtime::{AgentLoopState, AgentRunControl, RunPreparationCommit};
 use model_provider::MODEL_REQUEST_CANCELLED;
-use orchestrator::OrchestrationPolicy;
+use orchestrator::{AgentPolicy, OrchestrationPolicy};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -128,7 +128,7 @@ pub(crate) fn prepare_agent_execution_replay(
     mut runtime: AgentLoopState,
     mut prompt: String,
     artifact_manifest: Option<Message>,
-    effort: AgentEffort,
+    effort: AgentPolicy,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PreparedAgentExecution, AgentRunPreparationError> {
     let base_run_context = run_context.clone();

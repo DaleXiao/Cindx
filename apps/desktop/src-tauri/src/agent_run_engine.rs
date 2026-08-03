@@ -6,13 +6,14 @@ use crate::agent_query_commands::finish_agent_run_for_control_stop_with_task_sta
 use crate::agent_read_model::agent_state_with_error_in_context;
 use crate::app_state::AppState;
 use crate::collaboration_service::AgentCollaboration;
-use crate::configuration_models::{agent_model_for_run, AgentEffort, ProviderConfig};
+use crate::configuration_models::{agent_model_for_run, ProviderConfig};
 use crate::runtime_constants::AGENT_MODEL_RECOVERY_WINDOW_SECONDS;
 use crate::view_models::AgentState;
 use agent_application::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, AgentRunPreparation};
 use agent_core::{Message, Metadata, ModelRole, TaskId};
 use agent_runtime::{AgentLoopState, AgentRunControl, RunStageClass};
 use model_provider::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
+use orchestrator::AgentPolicy;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,7 +47,7 @@ pub(crate) fn continue_agent_loop(
     config: &ProviderConfig,
     workspace_root: &Path,
     prepared: PreparedAgentExecution,
-    effort: AgentEffort,
+    effort: AgentPolicy,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     AgentExecutionService::new(app, state).execute_prepared(
@@ -77,7 +78,7 @@ impl<'app, 'state> AgentExecutionService<'app, 'state> {
         config: &ProviderConfig,
         workspace_root: &Path,
         prepared: PreparedAgentExecution,
-        effort: AgentEffort,
+        effort: AgentPolicy,
         cancellation: &Arc<AgentRunControl>,
     ) -> Result<AgentState, String> {
         let mut executor = DesktopAgentRunExecutor {
@@ -103,7 +104,7 @@ struct DesktopAgentRunExecutor<'a, 'state> {
     state: &'a tauri::State<'state, AppState>,
     config: &'a ProviderConfig,
     workspace_root: &'a Path,
-    effort: AgentEffort,
+    effort: AgentPolicy,
     cancellation: &'a Arc<AgentRunControl>,
     base_run_context: Metadata,
 }
@@ -219,7 +220,7 @@ pub(crate) fn prepare_agent_execution(
     runtime: AgentLoopState,
     prompt: String,
     artifact_manifest: Option<Message>,
-    effort: AgentEffort,
+    effort: AgentPolicy,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PreparedAgentExecution, AgentRunPreparationError> {
     prepare_agent_execution_replay(

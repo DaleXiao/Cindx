@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod agent_engine;
+mod agent_policy;
 mod anytime;
 mod candidate_selection;
 mod conductor_runtime;
@@ -23,6 +24,7 @@ mod workflow_runtime;
 mod workflow_validation;
 
 pub use agent_engine::*;
+pub use agent_policy::*;
 pub use anytime::*;
 pub use candidate_selection::*;
 pub use conductor_runtime::*;

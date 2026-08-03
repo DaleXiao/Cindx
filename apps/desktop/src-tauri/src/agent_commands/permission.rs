@@ -2,7 +2,7 @@ use crate::agent_run_engine::PreparedAgentExecution;
 use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
 use crate::suspended_run_runtime::{
     append_observations_to_suspended_run, suspended_agent_run_control_snapshot,
-    take_suspended_agent_run,
+    suspended_agent_run_policy, take_suspended_agent_run,
 };
 use crate::*;
 
@@ -354,24 +354,28 @@ pub(crate) fn resolve_agent_permission_blocking(
 ) -> Result<AgentState, String> {
     let snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
     let recovery_context = project_session_metadata_for_session(&state, Some(&session_id))?;
-    let (effort, durable_recovery, applied_steer_epoch) = if snapshot.is_some() {
-        (AgentEffort::Auto, None, 0)
-    } else {
+    let (request_effort, durable_recovery, applied_steer_epoch) = {
         let store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let effort = store
+        let persisted_effort = store
             .get_permission_request(&PermissionRequestId(request_id.clone()))
             .map_err(|error| error.to_string())?
-            .and_then(|request| request.metadata.get("agent_effort").cloned())
-            .map(|effort| AgentEffort::parse(&effort))
-            .unwrap_or(AgentEffort::Auto);
-        let recovery = peek_agent_recovery_envelope(
-            &store,
-            &recovery_context,
-            &[AgentRecoveryState::Blocked],
-        )?;
+            .and_then(|request| request.metadata.get("agent_effort").cloned());
+        let effort = persisted_effort
+            .as_deref()
+            .map(|value| persisted_agent_policy(Some(value)))
+            .transpose()?;
+        let recovery = if snapshot.is_some() {
+            None
+        } else {
+            peek_agent_recovery_envelope(
+                &store,
+                &recovery_context,
+                &[AgentRecoveryState::Blocked],
+            )?
+        };
         let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
@@ -380,6 +384,15 @@ pub(crate) fn resolve_agent_permission_blocking(
             recovery,
             latest_applied_agent_steer_epoch(&active_events),
         )
+    };
+    let suspended_effort = suspended_agent_run_policy(&state, &session_id)?;
+    let effort = match (request_effort, suspended_effort) {
+        (Some(requested), Some(suspended)) if requested != suspended => {
+            return Err("suspended agent policy does not match the permission request".to_string())
+        }
+        (Some(requested), _) => requested,
+        (None, Some(suspended)) => suspended,
+        (None, None) => AgentPolicy::Auto,
     };
     let run_control_lease = if let Some(snapshot) = snapshot {
         begin_agent_run_control_for_effort(&state, &session_id, effort.label(), Some(snapshot))?
@@ -403,6 +416,7 @@ pub(crate) fn resolve_agent_permission_blocking(
         request_id,
         decision,
         session_id.clone(),
+        effort,
         &cancellation,
     )
 }
@@ -413,6 +427,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     request_id: String,
     decision: String,
     session_id: String,
+    effort: AgentPolicy,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
@@ -613,13 +628,6 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             for (key, value) in &run_context {
                 suspended.run_context.insert(key.clone(), value.clone());
             }
-            let effort = AgentEffort::parse(
-                suspended
-                    .run_context
-                    .get("agent_effort")
-                    .map(String::as_str)
-                    .unwrap_or("auto"),
-            );
             let prepared = PreparedAgentExecution {
                 base_run_context: suspended.run_context.clone(),
                 run_context: suspended.run_context,
@@ -716,12 +724,6 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         copy_replayed_contract_evidence_metadata(&runtime, &mut transcript, resolved.message_index);
     }
     runtime.messages = transcript;
-    let effort = AgentEffort::parse(
-        run_context
-            .get("agent_effort")
-            .map(String::as_str)
-            .unwrap_or("auto"),
-    );
     let prepared = PreparedAgentExecution {
         base_run_context: run_context.clone(),
         run_context,

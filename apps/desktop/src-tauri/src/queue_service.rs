@@ -1,4 +1,4 @@
-use super::{AgentAttachmentView, AgentEffort};
+use super::{AgentAttachmentView, AgentPolicy};
 use agent_core::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -118,7 +118,7 @@ fn apply_queue_event_to_views(messages: &mut Vec<QueuedAgentMessageView>, event:
                 session_id,
                 prompt: payload.prompt,
                 attachments: payload.attachments,
-                effort: AgentEffort::parse(&payload.effort).label().to_string(),
+                effort: AgentPolicy::parse_ingress(&payload.effort).label().to_string(),
                 mode,
                 created_at_ms,
                 updated_at_ms: event.timestamp_ms,
@@ -131,7 +131,7 @@ fn apply_queue_event_to_views(messages: &mut Vec<QueuedAgentMessageView>, event:
             if let Some(message) = messages.iter_mut().find(|message| message.id == queue_id) {
                 message.prompt = payload.prompt;
                 message.attachments = payload.attachments;
-                message.effort = AgentEffort::parse(&payload.effort).label().to_string();
+                message.effort = AgentPolicy::parse_ingress(&payload.effort).label().to_string();
                 message.updated_at_ms = event.timestamp_ms;
             }
         }
@@ -218,7 +218,7 @@ pub(crate) fn pending_queued_agent_messages(
                             session_id: session_id.to_string(),
                             prompt: payload.prompt.clone(),
                             attachments: payload.attachments.clone(),
-                            effort: AgentEffort::parse(&payload.effort).label().to_string(),
+                            effort: AgentPolicy::parse_ingress(&payload.effort).label().to_string(),
                             mode,
                             created_at_ms,
                             updated_at_ms: event.timestamp_ms,
@@ -235,7 +235,7 @@ pub(crate) fn pending_queued_agent_messages(
                 if let Some(message) = pending.get_mut(&queue_id) {
                     message.view.prompt = payload.prompt.clone();
                     message.view.attachments = payload.attachments.clone();
-                    message.view.effort = AgentEffort::parse(&payload.effort).label().to_string();
+                    message.view.effort = AgentPolicy::parse_ingress(&payload.effort).label().to_string();
                     message.view.updated_at_ms = event.timestamp_ms;
                     message.payload = payload;
                 }
