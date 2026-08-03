@@ -6,6 +6,11 @@ use crate::project_session_persistence::metadata_with_context;
 use crate::prompt_evolution_models::{
     notify_prompt_evaluation_worker, prompt_evaluation_inflight, wait_for_prompt_evaluation_worker,
 };
+use crate::prompt_learning_runtime::{
+    prompt_configuration_sha256_is_valid, prompt_evaluation_error_text,
+    prompt_evaluation_request_configuration_sha256 as request_configuration_sha256,
+    validate_prompt_evaluation_request_configuration as validate_request_configuration,
+};
 use crate::prompt_pairwise_runtime::run_background_prompt_pairwise_evaluation;
 use crate::runtime_constants::{
     BACKGROUND_WORK_IDLE_GRACE_MS, PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT,
@@ -41,6 +46,8 @@ pub(crate) struct PromptEvaluationRequest {
     worker_models: Vec<String>,
     agent_budget: usize,
     current_profile: ConductorPromptGenome,
+    #[serde(default)]
+    configuration_sha256: String,
 }
 
 impl PromptEvaluationRequest {
@@ -53,6 +60,7 @@ impl PromptEvaluationRequest {
         worker_models: Vec<String>,
         agent_budget: usize,
         current_profile: ConductorPromptGenome,
+        configuration_sha256: String,
     ) -> Self {
         Self {
             schema: PROMPT_EVALUATION_REQUEST_SCHEMA.to_string(),
@@ -64,6 +72,7 @@ impl PromptEvaluationRequest {
             worker_models,
             agent_budget,
             current_profile,
+            configuration_sha256,
         }
     }
 
@@ -76,6 +85,7 @@ impl PromptEvaluationRequest {
             || !matches!(self.effort.as_str(), "auto" | "pro")
             || self.worker_models.is_empty()
             || !(1..=3).contains(&self.agent_budget)
+            || !prompt_configuration_sha256_is_valid(&self.configuration_sha256)
         {
             return Err("prompt evaluation request is incomplete".to_string());
         }
@@ -111,6 +121,9 @@ pub(crate) fn enqueue_prompt_pairwise_evaluation(
     agent_budget: usize,
     current_profile: ConductorPromptGenome,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let fingerprint = (&effort, &policy, &worker_models, agent_budget, &current_profile);
+    let configuration_sha256 = request_configuration_sha256(&state, fingerprint)?;
     let request = PromptEvaluationRequest::new(
         task_id,
         run_context,
@@ -119,11 +132,11 @@ pub(crate) fn enqueue_prompt_pairwise_evaluation(
         worker_models,
         agent_budget,
         current_profile,
+        configuration_sha256,
     );
     request.validate()?;
     let payload = serde_json::to_string(&request)
         .map_err(|error| format!("prompt evaluation request serialization failed: {error}"))?;
-    let state = app.state::<AppState>();
     let mut store = state
         .store
         .lock()
@@ -161,6 +174,9 @@ pub(crate) fn start_prompt_evolution_worker(app: tauri::AppHandle) {
 }
 
 fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
+    if !crate::prompt_attempt_runtime::recover_prompt_evaluation_attempts_at_worker_start(&app) {
+        return;
+    }
     let mut wake_revision = 0u64;
     loop {
         let state = app.state::<AppState>();
@@ -314,7 +330,9 @@ fn process_pending_prompt_evaluation(
     else {
         return Ok(());
     };
-    let control = Arc::new(AgentRunControl::new("pro"));
+    let control = Arc::new(AgentRunControl::with_budget(
+        crate::prompt_learning_runtime::prompt_evaluation_parent_budget(),
+    ));
     let control_lease = state
         .prompt_evaluation_controls
         .register(request.effort.clone(), Arc::clone(&control))
@@ -409,6 +427,9 @@ fn validate_request_models(
                 .to_string(),
         );
     }
+    let r = request;
+    let fingerprint = (&r.effort, &r.policy, &r.worker_models, r.agent_budget, &r.current_profile);
+    validate_request_configuration(config, &r.configuration_sha256, fingerprint)?;
     Ok(())
 }
 
@@ -460,7 +481,7 @@ fn append_request_status(
     .into_iter()
     .collect::<Metadata>();
     if let Some(error) = error {
-        metadata.insert("error".to_string(), error.chars().take(2_000).collect());
+        metadata.insert("error".to_string(), prompt_evaluation_error_text(error));
     }
     let mut store = state
         .store
@@ -513,6 +534,7 @@ mod tests {
             worker_models: vec!["model".to_string()],
             agent_budget: 1,
             current_profile: ConductorPromptGenome::seed_for_effort(effort),
+            configuration_sha256: String::new(),
         }
     }
 

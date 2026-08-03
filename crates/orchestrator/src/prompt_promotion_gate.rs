@@ -1,5 +1,5 @@
 use crate::{
-    prompt_promotion_confidence, PromptEvaluationMode, PromptEvaluationSplit,
+    prompt_promotion_confidence_from_relative_rewards, PromptEvaluationMode, PromptEvaluationSplit,
     PromptEvolutionObservation, PromptPromotionConfidence,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +56,44 @@ impl PromptPromotionBlocker {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptPromotionFailurePenalty {
+    pub evaluation_id: String,
+    pub cohort_sha256: String,
+    pub case_id: String,
+    pub task_class: String,
+    pub split: PromptEvaluationSplit,
+    pub candidate_profile_id: String,
+    pub stable_profile_id: String,
+    pub candidate_failed: bool,
+    pub stable_failed: bool,
+}
+
+impl PromptPromotionFailurePenalty {
+    pub fn validate(&self) -> Result<(), String> {
+        let valid_sha256 = self.cohort_sha256.len() == 64
+            && self
+                .cohort_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if self.evaluation_id.trim().is_empty()
+            || self.evaluation_id.len() > 512
+            || self.case_id.trim().is_empty()
+            || self.case_id.len() > 256
+            || self.task_class.trim().is_empty()
+            || self.task_class.len() > 256
+            || self.candidate_profile_id.trim().is_empty()
+            || self.stable_profile_id.trim().is_empty()
+            || self.candidate_profile_id == self.stable_profile_id
+            || (!self.candidate_failed && !self.stable_failed)
+            || !valid_sha256
+        {
+            return Err("prompt promotion failure penalty is malformed".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptPromotionGateResult {
     pub eligible: bool,
@@ -77,7 +115,7 @@ struct PairKey {
     case_id: String,
     split: PromptEvaluationSplit,
     mode: PromptEvaluationMode,
-    dataset_sha256: String,
+    cohort_sha256: String,
 }
 
 impl PairKey {
@@ -92,8 +130,21 @@ impl PairKey {
             case_id: case_id.to_string(),
             split: observation.split,
             mode: observation.mode,
-            dataset_sha256: observation.provenance.dataset_sha256.clone(),
+            cohort_sha256: observation.scientific_cohort_sha256()?.to_string(),
         })
+    }
+
+    fn from_failure(penalty: &PromptPromotionFailurePenalty) -> Self {
+        Self {
+            evaluation_id: penalty.evaluation_id.clone(),
+            case_id: penalty.case_id.clone(),
+            split: penalty.split,
+            mode: match penalty.split {
+                PromptEvaluationSplit::Train => PromptEvaluationMode::PairedExecution,
+                PromptEvaluationSplit::Holdout => PromptEvaluationMode::ReplayExecution,
+            },
+            cohort_sha256: penalty.cohort_sha256.clone(),
+        }
     }
 }
 
@@ -108,6 +159,47 @@ pub fn evaluate_prompt_promotion_gate(
         candidate_id,
         stable_id,
         config,
+        None,
+        &[],
+        PromptEvolutionObservation::is_scientific_evidence,
+        |_, _| true,
+    )
+}
+
+pub fn evaluate_prompt_promotion_gate_in_cohort(
+    observations: &[PromptEvolutionObservation],
+    candidate_id: &str,
+    stable_id: &str,
+    cohort_sha256: &str,
+    config: PromptPromotionGateConfig,
+) -> PromptPromotionGateResult {
+    evaluate_prompt_pair_gate(
+        observations,
+        candidate_id,
+        stable_id,
+        config,
+        Some(cohort_sha256),
+        &[],
+        PromptEvolutionObservation::is_scientific_evidence,
+        |_, _| true,
+    )
+}
+
+pub fn evaluate_prompt_promotion_gate_with_failures_in_cohort(
+    observations: &[PromptEvolutionObservation],
+    failures: &[PromptPromotionFailurePenalty],
+    candidate_id: &str,
+    stable_id: &str,
+    cohort_sha256: &str,
+    config: PromptPromotionGateConfig,
+) -> PromptPromotionGateResult {
+    evaluate_prompt_pair_gate(
+        observations,
+        candidate_id,
+        stable_id,
+        config,
+        Some(cohort_sha256),
+        failures,
         PromptEvolutionObservation::is_scientific_evidence,
         |_, _| true,
     )
@@ -125,6 +217,8 @@ pub fn evaluate_prompt_auto_transfer_gate(
         candidate_id,
         auto_profile_id,
         config,
+        None,
+        &[],
         |observation| {
             observation.is_scientific_transfer_evidence()
                 && observation
@@ -140,11 +234,45 @@ pub fn evaluate_prompt_auto_transfer_gate(
     )
 }
 
+pub fn evaluate_prompt_auto_transfer_gate_in_cohort_with_failures(
+    observations: &[PromptEvolutionObservation],
+    failures: &[PromptPromotionFailurePenalty],
+    candidate_id: &str,
+    auto_profile_id: &str,
+    auto_profile_sha256: &str,
+    cohort_sha256: &str,
+    config: PromptPromotionGateConfig,
+) -> PromptPromotionGateResult {
+    evaluate_prompt_pair_gate(
+        observations,
+        candidate_id,
+        auto_profile_id,
+        config,
+        Some(cohort_sha256),
+        failures,
+        |observation| {
+            observation.is_strict_matched_transfer_evidence()
+                && observation
+                    .provenance
+                    .transfer
+                    .as_ref()
+                    .is_some_and(|transfer| {
+                        transfer.source_profile_id == auto_profile_id
+                            && transfer.source_profile_sha256 == auto_profile_sha256
+                    })
+        },
+        |candidate, auto| candidate.provenance.transfer == auto.provenance.transfer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn evaluate_prompt_pair_gate<Accept, ValidatePair>(
     observations: &[PromptEvolutionObservation],
     candidate_id: &str,
     stable_id: &str,
     config: PromptPromotionGateConfig,
+    required_cohort_sha256: Option<&str>,
+    failure_penalties: &[PromptPromotionFailurePenalty],
     accept: Accept,
     validate_pair: ValidatePair,
 ) -> PromptPromotionGateResult
@@ -157,18 +285,20 @@ where
     let mut stable_by_pair = BTreeMap::new();
     let mut candidate_seen = BTreeSet::new();
     let mut stable_seen = BTreeSet::new();
-    let active_dataset_sha256 = observations
-        .iter()
-        .rev()
-        .find(|observation| accept(observation))
-        .map(|observation| observation.provenance.dataset_sha256.as_str());
+    let active_cohort_sha256 = required_cohort_sha256.or_else(|| {
+        observations
+            .iter()
+            .rev()
+            .filter(|observation| accept(observation))
+            .find_map(PromptEvolutionObservation::scientific_cohort_sha256)
+    });
 
     for observation in observations
         .iter()
         .filter(|observation| accept(observation))
         .filter(|observation| {
-            active_dataset_sha256
-                .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
+            active_cohort_sha256
+                .is_some_and(|digest| observation.scientific_cohort_sha256() == Some(digest))
         })
     {
         let is_candidate = observation.profile_id == candidate_id
@@ -239,6 +369,32 @@ where
         })
         .collect::<Vec<_>>();
 
+    let complete_keys = candidate_keys
+        .intersection(&stable_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut failure_by_pair = BTreeMap::<PairKey, &PromptPromotionFailurePenalty>::new();
+    for failure in failure_penalties.iter().filter(|failure| {
+        active_cohort_sha256 == Some(failure.cohort_sha256.as_str())
+            && failure.candidate_profile_id == candidate_id
+            && failure.stable_profile_id == stable_id
+    }) {
+        if failure.validate().is_err() {
+            blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
+            continue;
+        }
+        let key = PairKey::from_failure(failure);
+        if complete_keys.contains(&key) {
+            continue;
+        }
+        if failure_by_pair
+            .insert(key, failure)
+            .is_some_and(|existing| existing != failure)
+        {
+            blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
+        }
+    }
+
     let train = complete_candidate
         .iter()
         .copied()
@@ -249,6 +405,27 @@ where
         .copied()
         .filter(|observation| observation.mode == PromptEvaluationMode::ReplayExecution)
         .collect::<Vec<_>>();
+    let train_failures = failure_by_pair
+        .values()
+        .copied()
+        .filter(|failure| failure.split == PromptEvaluationSplit::Train)
+        .collect::<Vec<_>>();
+    let holdout_failures = failure_by_pair
+        .values()
+        .copied()
+        .filter(|failure| failure.split == PromptEvaluationSplit::Holdout)
+        .collect::<Vec<_>>();
+    let train_case_ids = train
+        .iter()
+        .map(|observation| observation.case_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let holdout_case_ids = holdout
+        .iter()
+        .map(|observation| observation.case_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if !train_case_ids.is_disjoint(&holdout_case_ids) {
+        blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
+    }
     let unique_train_cases = train
         .iter()
         .map(|observation| observation.case_id.as_str())
@@ -270,10 +447,12 @@ where
         .collect::<BTreeSet<_>>()
         .len();
 
-    if train.len() < config.minimum_train_runs {
+    let train_runs = train.len() + train_failures.len();
+    let holdout_runs = holdout.len() + holdout_failures.len();
+    if train_runs < config.minimum_train_runs {
         blockers.insert(PromptPromotionBlocker::InsufficientTrainRuns);
     }
-    if holdout.len() < config.minimum_holdout_runs {
+    if holdout_runs < config.minimum_holdout_runs {
         blockers.insert(PromptPromotionBlocker::InsufficientHoldoutRuns);
     }
     if unique_train_cases < config.minimum_unique_train_cases {
@@ -289,13 +468,14 @@ where
         blockers.insert(PromptPromotionBlocker::InsufficientHoldoutTaskClassDiversity);
     }
 
-    let average_reward = |entries: &[&PromptEvolutionObservation]| {
-        entries.iter().map(|entry| entry.reward()).sum::<f64>() / entries.len().max(1) as f64
+    let average_reward = |entries: &[&PromptEvolutionObservation], failures: usize| {
+        entries.iter().map(|entry| entry.reward()).sum::<f64>()
+            / (entries.len() + failures).max(1) as f64
     };
-    let train_average_reward = average_reward(&train);
-    let holdout_average_reward = average_reward(&holdout);
-    if !train.is_empty()
-        && !holdout.is_empty()
+    let train_average_reward = average_reward(&train, train_failures.len());
+    let holdout_average_reward = average_reward(&holdout, holdout_failures.len());
+    if train_runs > 0
+        && holdout_runs > 0
         && train_average_reward - holdout_average_reward > config.maximum_generalization_gap
     {
         blockers.insert(PromptPromotionBlocker::GeneralizationGap);
@@ -308,6 +488,12 @@ where
             .or_default()
             .push(observation.relative_reward.unwrap_or_default());
     }
+    for failure in &holdout_failures {
+        holdout_classes
+            .entry(failure.task_class.as_str())
+            .or_default()
+            .push(-1.0);
+    }
     if holdout_classes.values().any(|rewards| {
         rewards.iter().sum::<f64>() / (rewards.len().max(1) as f64)
             < -config.maximum_holdout_task_class_regression
@@ -315,15 +501,20 @@ where
         blockers.insert(PromptPromotionBlocker::HoldoutTaskClassRegression);
     }
 
-    let confidence = prompt_promotion_confidence(holdout.iter().copied());
+    let confidence = prompt_promotion_confidence_from_relative_rewards(
+        holdout
+            .iter()
+            .map(|observation| observation.relative_reward.unwrap_or_default())
+            .chain(holdout_failures.iter().map(|_| -1.0)),
+    );
     if confidence.wilson_lower_bound < config.minimum_wilson_lower_bound {
         blockers.insert(PromptPromotionBlocker::WeakConfidence);
     }
     let blockers = blockers.into_iter().collect::<Vec<_>>();
     PromptPromotionGateResult {
         eligible: blockers.is_empty(),
-        train_runs: train.len(),
-        holdout_runs: holdout.len(),
+        train_runs,
+        holdout_runs,
         unique_train_cases,
         unique_holdout_cases,
         train_task_classes,
@@ -456,6 +647,22 @@ mod tests {
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    fn bind_matched_cohort(observations: &mut [PromptEvolutionObservation], cohort_sha256: &str) {
+        for observation in observations {
+            observation.provenance.matched_evaluation =
+                Some(crate::PromptMatchedEvaluationIdentityV1 {
+                    schema: crate::PROMPT_MATCHED_EVALUATION_SCHEMA_V1.to_string(),
+                    evaluation_id: observation.evaluation_id.clone(),
+                    cohort_sha256: cohort_sha256.to_string(),
+                    dataset_sha256: observation.provenance.dataset_sha256.clone(),
+                    case_id: observation.case_id.clone(),
+                    objective_sha256: crate::sha256_hex(observation.case_id.as_bytes()),
+                    split: observation.split,
+                    mode: observation.mode,
+                });
+        }
     }
 
     fn transfer_pair(
@@ -631,6 +838,87 @@ mod tests {
     }
 
     #[test]
+    fn matched_execution_cohorts_cannot_be_combined_even_on_the_same_dataset() {
+        let mut evidence = complete_evidence();
+        bind_matched_cohort(&mut evidence[..4], &"a".repeat(64));
+        bind_matched_cohort(&mut evidence[4..], &"b".repeat(64));
+
+        let result = evaluate_prompt_promotion_gate(&evidence, "candidate", "stable", config());
+
+        assert!(!result.eligible);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InsufficientTrainRuns));
+    }
+
+    #[test]
+    fn unobserved_treatment_failure_enters_the_denominator_and_later_pair_recovers() {
+        let cohort = "c".repeat(64);
+        let mut evidence = complete_evidence();
+        bind_matched_cohort(&mut evidence, &cohort);
+        let failure = PromptPromotionFailurePenalty {
+            evaluation_id: "holdout-failed".to_string(),
+            cohort_sha256: cohort.clone(),
+            case_id: "holdout-failed-case".to_string(),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Holdout,
+            candidate_profile_id: "candidate".to_string(),
+            stable_profile_id: "stable".to_string(),
+            candidate_failed: true,
+            stable_failed: false,
+        };
+
+        let failed = evaluate_prompt_promotion_gate_with_failures_in_cohort(
+            &evidence,
+            std::slice::from_ref(&failure),
+            "candidate",
+            "stable",
+            &cohort,
+            config(),
+        );
+        assert_eq!(failed.holdout_runs, 3);
+        assert_eq!(failed.confidence.losses, 1);
+        assert!(failed.holdout_average_reward < 0.9);
+
+        let mut recovered = pair(
+            "holdout-failed",
+            "holdout-failed-case",
+            "coding",
+            PromptEvaluationSplit::Holdout,
+            0.3,
+        );
+        bind_matched_cohort(&mut recovered, &cohort);
+        evidence.extend(recovered);
+        let recovered = evaluate_prompt_promotion_gate_with_failures_in_cohort(
+            &evidence,
+            &[failure],
+            "candidate",
+            "stable",
+            &cohort,
+            config(),
+        );
+        assert_eq!(recovered.holdout_runs, 3);
+        assert_eq!(recovered.confidence.losses, 0);
+    }
+
+    #[test]
+    fn train_and_holdout_case_identity_overlap_blocks_promotion() {
+        let mut evidence = complete_evidence();
+        for observation in &mut evidence {
+            if observation.case_id == "holdout-a" {
+                observation.case_id = "train-a".to_string();
+            }
+        }
+
+        let result = evaluate_prompt_promotion_gate(&evidence, "candidate", "stable", config());
+
+        assert!(!result.eligible);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::InvalidEvidenceShape));
+    }
+
+    #[test]
     fn mismatched_prompt_lineage_blocks_promotion() {
         let mut evidence = complete_evidence();
         let stable = evidence
@@ -678,6 +966,48 @@ mod tests {
         assert!(result.eligible, "{:?}", result.blockers);
         assert_eq!(result.train_runs, 2);
         assert_eq!(result.holdout_runs, 2);
+    }
+
+    #[test]
+    fn production_auto_transfer_gate_requires_one_strict_matched_cohort() {
+        let auto_profile_sha256 = crate::sha256_hex(b"auto-stable-genome");
+        let legacy = complete_transfer_evidence();
+        let legacy_result = evaluate_prompt_auto_transfer_gate_in_cohort_with_failures(
+            &legacy,
+            &[],
+            "candidate",
+            "auto-stable",
+            &auto_profile_sha256,
+            &"c".repeat(64),
+            config(),
+        );
+        assert!(!legacy_result.eligible);
+
+        let cohort = "c".repeat(64);
+        let mut matched = legacy;
+        bind_matched_cohort(&mut matched, &cohort);
+        let result = evaluate_prompt_auto_transfer_gate_in_cohort_with_failures(
+            &matched,
+            &[],
+            "candidate",
+            "auto-stable",
+            &auto_profile_sha256,
+            &cohort,
+            config(),
+        );
+        assert!(result.eligible, "{:?}", result.blockers);
+
+        bind_matched_cohort(&mut matched[..4], &"d".repeat(64));
+        let mixed = evaluate_prompt_auto_transfer_gate_in_cohort_with_failures(
+            &matched,
+            &[],
+            "candidate",
+            "auto-stable",
+            &auto_profile_sha256,
+            &cohort,
+            config(),
+        );
+        assert!(!mixed.eligible);
     }
 
     #[test]

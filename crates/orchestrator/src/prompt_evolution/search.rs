@@ -7,7 +7,7 @@ impl PromptSearchArchive {
         observations: &[PromptEvolutionObservation],
         minimum_train_runs: usize,
     ) -> Result<Self, String> {
-        let active_dataset_sha256 = latest_scientific_training_dataset_digest(observations);
+        let active_cohort_sha256 = latest_scientific_training_dataset_digest(observations);
         let mut genome_ids = BTreeSet::new();
         for genome in genomes {
             genome.validate()?;
@@ -30,8 +30,9 @@ impl PromptSearchArchive {
                     && observation.split == PromptEvaluationSplit::Train
                     && observation.mode == PromptEvaluationMode::PairedExecution
                     && observation.is_scientific_evidence()
-                    && active_dataset_sha256
-                        .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
+                    && active_cohort_sha256.is_some_and(|digest| {
+                        observation.scientific_cohort_sha256() == Some(digest)
+                    })
             }));
             if train.paired_runs < minimum_train_runs
                 || train.execution_runs < minimum_train_runs

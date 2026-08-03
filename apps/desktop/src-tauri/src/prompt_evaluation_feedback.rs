@@ -1,4 +1,5 @@
 use super::*;
+use crate::prompt_learning_runtime::prompt_text_contains_residual_secret;
 
 pub(crate) fn evaluate_prompt_candidate_pair(
     config: &ProviderConfig,
@@ -83,6 +84,7 @@ pub(crate) fn evaluate_prompt_candidate_pair(
     Ok(payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_prompt_candidate_pair_position_balanced(
     config: &ProviderConfig,
     reviewer_model: &str,
@@ -90,7 +92,8 @@ pub(crate) fn evaluate_prompt_candidate_pair_position_balanced(
     candidate_a: &PromptExecutionCandidate,
     candidate_b: &PromptExecutionCandidate,
     evaluation_id: &str,
-    control: &Arc<AgentRunControl>,
+    forward_control: &Arc<AgentRunControl>,
+    reverse_control: &Arc<AgentRunControl>,
 ) -> Result<PromptPairwiseEvaluationPayload, String> {
     let (forward, reverse) = std::thread::scope(|scope| {
         let forward_id = format!("{evaluation_id}-forward");
@@ -103,7 +106,7 @@ pub(crate) fn evaluate_prompt_candidate_pair_position_balanced(
                 candidate_a,
                 candidate_b,
                 &forward_id,
-                control,
+                forward_control,
             )
         });
         let reverse = scope.spawn(move || {
@@ -114,7 +117,7 @@ pub(crate) fn evaluate_prompt_candidate_pair_position_balanced(
                 candidate_b,
                 candidate_a,
                 &reverse_id,
-                control,
+                reverse_control,
             )
         });
         (
@@ -179,6 +182,28 @@ pub(crate) fn redact_prompt_evaluation_trace(
         }
     }
     trace.apply_redaction(redaction_secrets);
+}
+
+pub(crate) fn prompt_reflection_packet_is_safe(
+    packet: &AgentEvaluationReflectionPacket,
+    redaction_secrets: &[String],
+) -> bool {
+    let Ok(encoded) = serde_json::to_string(packet) else {
+        return false;
+    };
+    let contains_configured_secret = redaction_secrets
+        .iter()
+        .map(|secret| secret.trim())
+        .filter(|secret| !secret.is_empty())
+        .filter_map(|secret| serde_json::to_string(secret).ok())
+        .any(|secret| {
+            let escaped = secret
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(&secret);
+            encoded.contains(escaped)
+        });
+    !contains_configured_secret && !prompt_text_contains_residual_secret(&encoded)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,8 +419,10 @@ pub(crate) fn prompt_pairwise_observation(
         redact_prompt_evaluation_trace(&mut trace, redaction_secrets);
         trace
             .reflection_packet()
-            .expect("fresh feedback trace satisfies the reflection boundary")
+            .ok()
+            .filter(|packet| prompt_reflection_packet_is_safe(packet, redaction_secrets))
     });
+    let reflection_packet = reflection_packet.flatten();
     PromptEvolutionObservation {
         profile_id: candidate.plan.genome.id.clone(),
         evaluation_id: evaluation_id.to_string(),

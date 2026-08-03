@@ -1,11 +1,15 @@
 mod fitness;
 mod genome;
+mod learning_dataset;
+mod matched_evaluation;
 mod observation;
 mod pareto;
 mod search;
 mod snapshot;
 
 pub use genome::*;
+pub use learning_dataset::*;
+pub use matched_evaluation::*;
 pub use observation::*;
 pub use pareto::*;
 pub use snapshot::*;

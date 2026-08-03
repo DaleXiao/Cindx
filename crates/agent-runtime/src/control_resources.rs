@@ -102,7 +102,7 @@ impl AgentRunControl {
         }
         settlement.settled
             && state.stop_reason.is_none()
-            && !self.user_cancelled.load(Ordering::SeqCst)
+            && !self.cancellation_requested()
             && self.objective_epoch_matches_locked(&state, expected_epoch)
     }
 

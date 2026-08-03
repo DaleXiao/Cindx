@@ -266,6 +266,13 @@ impl RunResourceLedger {
         self.bump_mutation_revision();
     }
 
+    pub(crate) fn absorb_completed_segment(&mut self, snapshot: RunResourceSnapshot) {
+        let settled = RunResourceLedger::from_persisted_snapshot(snapshot).segment;
+        merge_run_usage(&mut self.segment, settled.clone());
+        merge_run_usage(&mut self.lineage, settled);
+        self.bump_mutation_revision();
+    }
+
     pub(crate) fn reserve(
         &mut self,
         budget: RunBudget,
@@ -549,6 +556,41 @@ fn merge_model_usage(target: &mut ModelResourceUsage, source: ModelResourceUsage
         .usage_sources
         .unknown
         .saturating_add(source.usage_sources.unknown);
+}
+
+fn merge_run_usage(target: &mut RunResourceUsage, source: RunResourceUsage) {
+    target.physical_attempts = target
+        .physical_attempts
+        .saturating_add(source.physical_attempts);
+    target.prompt_tokens = target.prompt_tokens.saturating_add(source.prompt_tokens);
+    target.completion_tokens = target
+        .completion_tokens
+        .saturating_add(source.completion_tokens);
+    target.total_tokens = target.total_tokens.saturating_add(source.total_tokens);
+    target.reserved_tokens = target
+        .reserved_tokens
+        .saturating_add(source.reserved_tokens);
+    target.usage_sources.provider = target
+        .usage_sources
+        .provider
+        .saturating_add(source.usage_sources.provider);
+    target.usage_sources.provider_partial = target
+        .usage_sources
+        .provider_partial
+        .saturating_add(source.usage_sources.provider_partial);
+    target.usage_sources.estimated = target
+        .usage_sources
+        .estimated
+        .saturating_add(source.usage_sources.estimated);
+    target.usage_sources.unknown = target
+        .usage_sources
+        .unknown
+        .saturating_add(source.usage_sources.unknown);
+    for (model, usage) in source.models {
+        let key = bounded_model_key(&target.models, &model);
+        merge_model_usage(target.models.entry(key).or_default(), usage);
+    }
+    *target = bounded_usage(std::mem::take(target));
 }
 
 #[cfg(test)]

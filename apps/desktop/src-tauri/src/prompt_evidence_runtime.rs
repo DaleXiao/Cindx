@@ -2,6 +2,7 @@ use super::*;
 use crate::agent_strategy_runtime::cumulative_effective_prompt_objective;
 use orchestrator::{
     LearningAttribution, LearningDisposition, LearningEvidenceV1, LearningUsageCompleteness,
+    PromptLearningPurpose,
 };
 
 fn is_agent_run_terminal(event: &Event) -> bool {
@@ -22,6 +23,9 @@ fn event_steer_epoch(event: &Event) -> &str {
 
 fn prompt_auto_teacher_case(
     run_id: &str,
+    project_id: &str,
+    task_class: &str,
+    objective: &crate::prompt_learning_runtime::PromptLearningText,
     run_events: &[&Event],
     terminal: &Event,
     stable_epoch: &str,
@@ -31,6 +35,19 @@ fn prompt_auto_teacher_case(
     }
     let stable_epoch_number = stable_epoch.parse::<u64>().ok()?;
     let learning_evidence = LearningEvidenceV1::from_metadata(&terminal.metadata)?;
+    let learning_receipt = crate::prompt_learning_runtime::prompt_learning_receipt(
+        PromptLearningPurpose::AutoTeacher,
+        run_id,
+        project_id,
+        task_class,
+        objective,
+        run_events,
+        terminal,
+        stable_epoch_number,
+    );
+    if !learning_receipt.is_eligible() {
+        return None;
+    }
     if !learning_evidence.is_learnable()
         || learning_evidence.termination != orchestrator::LearningTermination::Completed
         || learning_evidence.disposition != LearningDisposition::Positive
@@ -133,12 +150,15 @@ fn prompt_auto_teacher_case(
                 model: checkpoint_step.model.clone(),
                 attempts: checkpoint_step.attempts,
                 status: checkpoint_step.status.clone(),
-                output: truncate_for_collaboration(
-                    &redact_sensitive_text(
+                output: {
+                    let output = crate::prompt_learning_runtime::redact_prompt_learning_text(
                         checkpoint_step.output.as_deref().unwrap_or_default(),
-                    ),
-                    6_000,
-                ),
+                    );
+                    if output.residual_sensitive_data {
+                        return None;
+                    }
+                    truncate_for_collaboration(&output.text, 6_000)
+                },
                 errors: checkpoint_step
                     .error
                     .as_deref()
@@ -170,21 +190,24 @@ fn prompt_auto_teacher_case(
             .flatten()
             .filter(|content| !content.trim().is_empty())
     })?;
-    let redacted_output = redact_sensitive_text(output.trim());
-    if redacted_output.trim().is_empty() {
+    let redacted_output = crate::prompt_learning_runtime::redact_prompt_learning_text(output);
+    if redacted_output.text.trim().is_empty() || redacted_output.residual_sensitive_data {
         return None;
     }
-    let output_sha256 = sha256_hex(redacted_output.as_bytes());
-    let final_output = truncate_for_collaboration(&redacted_output, 12_000);
-    plan.objective = truncate_for_collaboration(
-        &redact_sensitive_text(plan.objective.trim()),
-        4_000,
-    );
+    let output_sha256 = sha256_hex(redacted_output.text.as_bytes());
+    let final_output = truncate_for_collaboration(&redacted_output.text, 12_000);
+    let plan_objective =
+        crate::prompt_learning_runtime::redact_prompt_learning_text(&plan.objective);
+    if plan_objective.residual_sensitive_data {
+        return None;
+    }
+    plan.objective = truncate_for_collaboration(&plan_objective.text, 4_000);
     for step in &mut plan.steps {
-        step.subtask = truncate_for_collaboration(
-            &redact_sensitive_text(step.subtask.trim()),
-            2_000,
-        );
+        let subtask = crate::prompt_learning_runtime::redact_prompt_learning_text(&step.subtask);
+        if subtask.residual_sensitive_data {
+            return None;
+        }
+        step.subtask = truncate_for_collaboration(&subtask.text, 2_000);
     }
     let mut participant_models = std::iter::once(plan.coordinator_model.clone())
         .chain(plan.steps.iter().map(|step| step.model.clone()))
@@ -219,12 +242,12 @@ pub(crate) fn prompt_profile_evidence_counts(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
 ) -> (usize, usize) {
-    let active_dataset_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
+    let active_cohort_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
     prompt_unique_evidence_counts(
         observations
             .iter()
             .filter(|observation| observation.profile_id == profile_id),
-        active_dataset_sha256,
+        active_cohort_sha256,
     )
 }
 
@@ -232,7 +255,7 @@ pub(crate) fn prompt_profile_training_evidence_count(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
 ) -> usize {
-    let Some(dataset_sha256) =
+    let Some(cohort_sha256) =
         orchestrator::latest_scientific_training_dataset_digest(observations)
     else {
         return 0;
@@ -243,7 +266,9 @@ pub(crate) fn prompt_profile_training_evidence_count(
         .filter(|observation| observation.split == PromptEvaluationSplit::Train)
         .filter(|observation| observation.mode == PromptEvaluationMode::PairedExecution)
         .filter(|observation| observation.is_scientific_evidence())
-        .filter(|observation| observation.provenance.dataset_sha256 == dataset_sha256)
+        .filter(|observation| {
+            observation.scientific_cohort_sha256() == Some(cohort_sha256)
+        })
         .map(PromptEvolutionObservation::evidence_identity)
         .collect::<BTreeSet<_>>()
         .len()
@@ -254,28 +279,30 @@ pub(crate) fn prompt_direct_profile_evidence_counts(
     profile_id: &str,
     opponent_profile_id: &str,
 ) -> (usize, usize) {
-    let active_dataset_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
+    let active_cohort_sha256 = orchestrator::latest_scientific_dataset_digest(observations);
     prompt_unique_evidence_counts(
         observations.iter().filter(|observation| {
             observation.profile_id == profile_id
                 && observation.opponent_profile_id.as_deref() == Some(opponent_profile_id)
         }),
-        active_dataset_sha256,
+        active_cohort_sha256,
     )
 }
 
 fn prompt_unique_evidence_counts<'a>(
     observations: impl Iterator<Item = &'a PromptEvolutionObservation>,
-    dataset_sha256: Option<&str>,
+    cohort_sha256: Option<&str>,
 ) -> (usize, usize) {
-    let Some(dataset_sha256) = dataset_sha256 else {
+    let Some(cohort_sha256) = cohort_sha256 else {
         return (0, 0);
     };
     let mut paired = BTreeSet::new();
     let mut replay = BTreeSet::new();
     for observation in observations
         .filter(|observation| observation.is_scientific_evidence())
-        .filter(|observation| observation.provenance.dataset_sha256 == dataset_sha256)
+        .filter(|observation| {
+            observation.scientific_cohort_sha256() == Some(cohort_sha256)
+        })
     {
         if observation.mode.is_paired_execution() {
             paired.insert(observation.evidence_identity());
@@ -483,9 +510,10 @@ pub(crate) fn prompt_offline_dataset(
                     .and_then(|event| event.metadata.get("prompt"))
             })
             .map(|objective| {
-                truncate_for_collaboration(&redact_sensitive_text(objective.trim()), 4_000)
+                crate::prompt_learning_runtime::redact_prompt_learning_text(objective)
             });
-        let Some(objective) = objective.filter(|objective| objective.chars().count() >= 4) else {
+        let Some(objective) = objective.filter(|objective| objective.text.chars().count() >= 4)
+        else {
             continue;
         };
         let task_class = decision
@@ -497,7 +525,17 @@ pub(crate) fn prompt_offline_dataset(
             })
             .cloned()
             .unwrap_or_else(|| "general".to_string());
-        let case_digest = sha256_hex(objective.as_bytes());
+        let learning_receipt = crate::prompt_learning_runtime::prompt_learning_receipt(
+            PromptLearningPurpose::ObjectiveReplay,
+            &run_id,
+            project_id,
+            &task_class,
+            &objective,
+            &run_events,
+            terminal,
+            stable_epoch_number,
+        );
+        let case_digest = sha256_hex(objective.text.as_bytes());
         let id = format!("runtime-{task_class}-{}", &case_digest[..16]);
         let split_digest = sha256_hex(id.as_bytes());
         let split_bucket = u8::from_str_radix(&split_digest[..2], 16).unwrap_or_default();
@@ -508,14 +546,23 @@ pub(crate) fn prompt_offline_dataset(
                 PromptEvaluationSplit::Train
             }
         });
-        let auto_teacher = prompt_auto_teacher_case(&run_id, &run_events, terminal, stable_epoch);
+        let auto_teacher = prompt_auto_teacher_case(
+            &run_id,
+            project_id,
+            &task_class,
+            &objective,
+            &run_events,
+            terminal,
+            stable_epoch,
+        );
         let candidate = PromptOfflineCase {
             id,
-            objective,
+            objective: objective.text,
             task_class,
             project_id: project_id.to_string(),
             source_run_id: run_id,
             split,
+            learning_receipt: Some(learning_receipt),
             auto_teacher,
         };
         match cases.entry(candidate.id.clone()) {
@@ -610,6 +657,21 @@ pub(crate) fn prompt_offline_dataset(
     cases
 }
 
+pub(crate) fn prompt_learning_dataset(
+    events: &[Event],
+    project_id: &str,
+    preferred_auto_profile: Option<(&str, &str)>,
+) -> Vec<PromptOfflineCase> {
+    prompt_offline_dataset(events, project_id, preferred_auto_profile)
+        .into_iter()
+        .filter(|case| {
+            case.learning_receipt
+                .as_ref()
+                .is_some_and(PromptLearningEligibilityReceiptV1::is_eligible)
+        })
+        .collect()
+}
+
 pub(crate) fn select_prompt_offline_case(
     dataset: &[PromptOfflineCase],
     observations: &[PromptEvolutionObservation],
@@ -667,6 +729,7 @@ pub(crate) fn select_prompt_auto_transfer_case(
     dataset: &[PromptOfflineCase],
     observations: &[PromptEvolutionObservation],
     profile_ids: [&str; 2],
+    active_cohorts: [Option<&str>; 2],
     auto_profile_id: &str,
     auto_profile_sha256: &str,
     split: PromptEvaluationSplit,
@@ -684,6 +747,10 @@ pub(crate) fn select_prompt_auto_transfer_case(
         })
         .min_by_key(|case| {
             let evidence_for = |profile_id: &str, case_id: Option<&str>| {
+                let active_cohort = profile_ids
+                    .iter()
+                    .position(|candidate| *candidate == profile_id)
+                    .and_then(|index| active_cohorts[index]);
                 observations
                     .iter()
                     .filter(|observation| {
@@ -691,8 +758,11 @@ pub(crate) fn select_prompt_auto_transfer_case(
                             && observation.opponent_profile_id.as_deref()
                                 == Some(auto_profile_id)
                             && observation.split == split
-                            && observation.is_scientific_transfer_evidence()
+                            && observation.is_strict_matched_transfer_evidence()
                             && observation.provenance.dataset_sha256 == dataset_sha256
+                            && active_cohort.is_some_and(|cohort| {
+                                observation.scientific_cohort_sha256() == Some(cohort)
+                            })
                             && observation.provenance.transfer.as_ref().is_some_and(|transfer| {
                                 transfer.source_profile_id == auto_profile_id
                                     && transfer.source_profile_sha256 == auto_profile_sha256
@@ -719,14 +789,9 @@ pub(crate) fn select_prompt_auto_transfer_case(
 }
 
 pub(crate) fn prompt_offline_dataset_digest(dataset: &[PromptOfflineCase]) -> String {
-    sha256_hex(
-        dataset
-            .iter()
-            .map(|case| format!("{}:{:?}", case.id, case.split))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .as_bytes(),
-    )
+    crate::prompt_learning_runtime::prompt_dataset_identity(dataset, 0)
+        .map(|identity| identity.dataset_sha256)
+        .unwrap_or_else(|_| sha256_hex(b"invalid-prompt-dataset"))
 }
 
 pub(crate) fn prompt_auto_transfer_dataset_digest(
@@ -734,35 +799,64 @@ pub(crate) fn prompt_auto_transfer_dataset_digest(
     auto_profile_id: &str,
     auto_profile_sha256: &str,
 ) -> Option<String> {
-    let entries = dataset
+    prompt_auto_transfer_dataset_identity(dataset, auto_profile_id, auto_profile_sha256)
+        .map(|identity| identity.dataset_sha256)
+}
+
+pub(crate) fn prompt_auto_transfer_dataset_identity(
+    dataset: &[PromptOfflineCase],
+    auto_profile_id: &str,
+    auto_profile_sha256: &str,
+) -> Option<PromptDatasetIdentityV1> {
+    let project_id = dataset.first()?.project_id.as_str();
+    if dataset.iter().any(|case| case.project_id != project_id) {
+        return None;
+    }
+    let cases = dataset
         .iter()
         .filter_map(|case| {
             let teacher = case.auto_teacher.as_ref()?;
             (teacher.profile_id == auto_profile_id
                 && teacher.profile_sha256 == auto_profile_sha256)
-                .then(|| {
-                    format!(
-                        "{}:{:?}:{}:{}:{}",
-                        case.id, case.split, teacher.source_run_id, teacher.steer_epoch,
-                        teacher.output_sha256,
-                    )
+                .then(|| orchestrator::PromptDatasetCaseIdentityV1 {
+                    case_id: case.id.clone(),
+                    objective_sha256: sha256_hex(
+                        format!(
+                            "auto_to_pro_transfer_v1\n{}\n{}\n{}\n{}\n{}",
+                            sha256_hex(case.objective.trim().as_bytes()),
+                            teacher.source_run_id,
+                            teacher.steer_epoch,
+                            teacher.profile_sha256,
+                            teacher.output_sha256,
+                        )
+                        .as_bytes(),
+                    ),
+                    task_family_sha256: sha256_hex(case.task_class.trim().as_bytes()),
+                    split: case.split,
                 })
         })
         .collect::<Vec<_>>();
-    (!entries.is_empty()).then(|| sha256_hex(entries.join("\n").as_bytes()))
+    (!cases.is_empty())
+        .then(|| PromptDatasetIdentityV1::new(project_id, 0, cases).ok())
+        .flatten()
 }
 
 pub(crate) fn prompt_offline_dataset_for_generation(
     discovered: Vec<PromptOfflineCase>,
     previous: Option<&PromptOfflineDatasetState>,
     generation: u32,
-) -> Vec<PromptOfflineCase> {
+) -> Result<Vec<PromptOfflineCase>, String> {
     let Some(previous) = previous.filter(|snapshot| {
         snapshot.status == "ready"
             && snapshot.generation == generation
             && snapshot.case_ids.len() >= PROMPT_EVOLUTION_OFFLINE_MIN_CASES
+            && snapshot.identity.as_ref().is_some_and(|identity| {
+                identity.validate().is_ok()
+                    && identity.generation == generation
+                    && identity.dataset_sha256 == snapshot.digest
+            })
     }) else {
-        return discovered;
+        return Ok(discovered);
     };
     let by_id = discovered
         .iter()
@@ -773,11 +867,19 @@ pub(crate) fn prompt_offline_dataset_for_generation(
         .iter()
         .filter_map(|case_id| by_id.get(case_id.as_str()).map(|case| (*case).clone()))
         .collect::<Vec<_>>();
-    if frozen.len() == previous.case_ids.len() {
-        frozen
-    } else {
-        discovered
+    if frozen.len() != previous.case_ids.len() {
+        return Err(
+            "frozen prompt dataset is incomplete; refusing cohort substitution".to_string(),
+        );
     }
+    let frozen_identity =
+        crate::prompt_learning_runtime::prompt_dataset_identity(&frozen, generation)?;
+    if previous.identity.as_ref() != Some(&frozen_identity) {
+        return Err(
+            "frozen prompt dataset identity changed; refusing cohort substitution".to_string(),
+        );
+    }
+    Ok(frozen)
 }
 
 pub(crate) fn append_prompt_offline_dataset_snapshot(
@@ -795,7 +897,13 @@ pub(crate) fn append_prompt_offline_dataset_snapshot(
         .collect::<BTreeMap<_, _>>();
     let split_manifest = serde_json::to_string(&split_manifest)
         .map_err(|error| format!("offline split manifest serialization failed: {error}"))?;
-    let dataset_digest = prompt_offline_dataset_digest(dataset);
+    let dataset_identity = crate::prompt_learning_runtime::prompt_dataset_identity(
+        dataset,
+        generation,
+    )?;
+    let dataset_digest = dataset_identity.dataset_sha256.clone();
+    let dataset_identity = serde_json::to_string(&dataset_identity)
+        .map_err(|error| format!("offline dataset identity serialization failed: {error}"))?;
     let case_ids = serde_json::to_string(
         &dataset
             .iter()
@@ -822,6 +930,7 @@ pub(crate) fn append_prompt_offline_dataset_snapshot(
                 ("background_evaluation".to_string(), "true".to_string()),
                 ("prompt_effort".to_string(), effort.to_string()),
                 ("dataset_sha256".to_string(), dataset_digest),
+                ("dataset_identity_v1".to_string(), dataset_identity),
                 ("dataset_generation".to_string(), generation.to_string()),
                 ("dataset_case_ids".to_string(), case_ids),
                 ("dataset_split_manifest".to_string(), split_manifest),

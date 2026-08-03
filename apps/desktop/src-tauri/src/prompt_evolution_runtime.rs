@@ -495,12 +495,13 @@ pub(crate) fn prompt_evolution_state(
         observed_runs += evaluation.observations.len();
         population_size += evaluation.population.len();
         frontier_profiles += evaluation.frontier_ids.len();
-        let active_dataset_sha256 =
+        let active_cohort_sha256 =
             orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
         let is_active_scientific = |observation: &&PromptEvolutionObservation| {
             observation.is_scientific_evidence()
-                && active_dataset_sha256
-                    .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
+                && active_cohort_sha256.is_some_and(|digest| {
+                    observation.scientific_cohort_sha256() == Some(digest)
+                })
         };
         let effort_paired_runs = evaluation
             .observations
@@ -525,8 +526,9 @@ pub(crate) fn prompt_evolution_state(
                 observation.split == PromptEvaluationSplit::Train
                     && observation.mode.is_paired_execution()
                     && observation.is_scientific_evidence()
-                    && active_dataset_sha256
-                        .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
+                    && active_cohort_sha256.is_some_and(|digest| {
+                        observation.scientific_cohort_sha256() == Some(digest)
+                    })
                     && observation.reflection_packet.is_some()
             })
             .count();
@@ -652,8 +654,8 @@ pub(crate) fn prompt_evolution_state(
                 .filter(|observation| {
                     observation.mode == PromptEvaluationMode::Live
                         || (observation.is_scientific_evidence()
-                            && active_dataset_sha256.is_some_and(|digest| {
-                                observation.provenance.dataset_sha256 == digest
+                            && active_cohort_sha256.is_some_and(|digest| {
+                                observation.scientific_cohort_sha256() == Some(digest)
                             }))
                 })
             {

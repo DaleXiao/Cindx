@@ -9,6 +9,22 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const desktopRoot = path.join(repoRoot, "apps", "desktop");
 const tauriRoot = path.join(desktopRoot, "src-tauri");
 const targetTriple = "aarch64-apple-darwin";
+const sourceRevisionResult = spawnSync("git", ["rev-parse", "HEAD"], {
+  cwd: repoRoot,
+  encoding: "utf8"
+});
+const sourceRevision = sourceRevisionResult.stdout?.trim();
+if (sourceRevisionResult.status !== 0 || !/^[0-9a-f]{40}$/.test(sourceRevision ?? "")) {
+  throw new Error("A full Git source revision is required for a reproducible Cindx build");
+}
+const sourceStatusResult = spawnSync(
+  "git",
+  ["status", "--porcelain=v1", "--untracked-files=all"],
+  { cwd: repoRoot, encoding: "utf8" }
+);
+if (sourceStatusResult.status !== 0 || sourceStatusResult.stdout?.trim()) {
+  throw new Error("A clean Git source tree is required for a reproducible Cindx build");
+}
 const args = new Set(process.argv.slice(2));
 const skipTests = args.has("--skip-tests");
 const installApp = !args.has("--no-install");
@@ -42,6 +58,7 @@ const stableToolchainBin = path.join(
 );
 const buildEnv = {
   ...process.env,
+  CINDX_SOURCE_REVISION: sourceRevision,
   CARGO_TARGET_DIR: targetRoot,
   PATH: [
     path.join(os.homedir(), ".cargo", "bin"),

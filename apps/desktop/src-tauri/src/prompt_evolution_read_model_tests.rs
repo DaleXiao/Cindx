@@ -1,6 +1,14 @@
 use super::*;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
-use orchestrator::{LearningAttribution, LearningTermination};
+use crate::prompt_attempt_runtime::{
+    PROMPT_EVALUATION_ATTEMPT_EVENT, PROMPT_EVALUATION_ATTEMPT_METADATA_KEY,
+};
+use orchestrator::{
+    LearningAttribution, LearningTermination, PromptDatasetCaseIdentityV1,
+    PromptDatasetIdentityV1, PromptEvaluationAttemptEventV1, PromptEvaluationAttemptStatus,
+    PromptExecutionContextV1, PromptLearningCohortV1, PromptMatchedEvaluationIdentityV1,
+    PromptTransferProvenance, PromptTreatmentIdentityV1, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+};
 
 fn context_metadata() -> Metadata {
     [
@@ -461,7 +469,7 @@ fn live_observations_bind_workflow_and_typed_evidence_to_the_terminal_steer_epoc
 }
 
 #[test]
-fn explicit_pairwise_evaluation_observations_remain_unchanged() {
+fn malformed_single_pairwise_observation_is_rejected() {
     let observation = PromptEvolutionObservation {
         profile_id: "offline-profile".to_string(),
         evaluation_id: "offline-evaluation".to_string(),
@@ -500,10 +508,7 @@ fn explicit_pairwise_evaluation_observations_remain_unchanged() {
         .collect(),
     };
 
-    assert_eq!(
-        prompt_evolution_observations_from_events(&[event]),
-        vec![("pro".to_string(), observation)]
-    );
+    assert!(prompt_evolution_observations_from_events(&[event]).is_empty());
 }
 
 #[test]
@@ -514,6 +519,42 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
     let auto_profile = "auto-stable";
     let pro_sha256 = sha256_hex(pro_profile.as_bytes());
     let auto_sha256 = sha256_hex(auto_profile.as_bytes());
+    let dataset = PromptDatasetIdentityV1::new(
+        project_id,
+        0,
+        vec![PromptDatasetCaseIdentityV1 {
+            case_id: "runtime-coding-transfer".to_string(),
+            objective_sha256: "c".repeat(64),
+            task_family_sha256: "f".repeat(64),
+            split: PromptEvaluationSplit::Train,
+        }],
+    )
+    .unwrap();
+    let cohort = PromptLearningCohortV1::new(
+        dataset,
+        PromptExecutionContextV1 {
+            schema: PROMPT_EXECUTION_CONTEXT_SCHEMA_V1.to_string(),
+            provider_sha256: "1".repeat(64),
+            model_pool_sha256: "2".repeat(64),
+            harness_sha256: "3".repeat(64),
+            system_prompt_sha256: "4".repeat(64),
+            policy: AgentPolicy::Pro,
+            policy_sha256: "5".repeat(64),
+            budget_sha256: "6".repeat(64),
+            tool_contract_sha256: "7".repeat(64),
+            source_revision_sha256: "8".repeat(64),
+            workspace_revision_sha256: "9".repeat(64),
+        },
+    )
+    .unwrap();
+    let matched_identity = PromptMatchedEvaluationIdentityV1::new(
+        evaluation_id.clone(),
+        &cohort,
+        "runtime-coding-transfer",
+        PromptEvaluationSplit::Train,
+        PromptEvaluationMode::PairedExecution,
+    )
+    .unwrap();
     let transfer = PromptTransferProvenance::auto_to_pro(
         "auto-source-run",
         2,
@@ -547,11 +588,12 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
             provenance: PromptEvaluationProvenance::blind_pairwise_swap(
                 vec!["independent-judge".to_string()],
                 vec!["pro-worker".to_string(), "auto-worker".to_string()],
-                "d".repeat(64),
+                cohort.dataset.dataset_sha256.clone(),
                 candidate_sha256,
                 opponent_sha256,
             )
-            .with_transfer(transfer.clone()),
+            .with_transfer(transfer.clone())
+            .with_matched_evaluation(matched_identity.clone()),
         }
     };
     let observations = vec![
@@ -562,7 +604,13 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
             auto_sha256.clone(),
             0.2,
         ),
-        observation(auto_profile, pro_profile, auto_sha256, pro_sha256, -0.2),
+        observation(
+            auto_profile,
+            pro_profile,
+            auto_sha256,
+            pro_sha256.clone(),
+            -0.2,
+        ),
     ];
     let transfer_event = Event {
         id: EventId("auto-transfer-event".to_string()),
@@ -589,14 +637,50 @@ fn auto_transfer_event_enters_only_its_scoped_read_model() {
         .collect(),
     };
 
-    let model = build_prompt_evolution_read_model(std::slice::from_ref(&transfer_event), 1, 1);
+    let mut model = build_prompt_evolution_read_model(std::slice::from_ref(&transfer_event), 1, 1);
+    assert_eq!(model.observations.len(), 2);
+    assert!(prompt_evolution_read_model_for_scope(&model, project_id)
+        .observations
+        .is_empty());
+    let started = PromptEvaluationAttemptEventV1::started(
+        matched_identity,
+        &cohort,
+        [
+            PromptTreatmentIdentityV1 {
+                profile_id: pro_profile.to_string(),
+                prompt_sha256: pro_sha256.clone(),
+            },
+            PromptTreatmentIdentityV1 {
+                profile_id: auto_profile.to_string(),
+                prompt_sha256: sha256_hex(auto_profile.as_bytes()),
+            },
+        ],
+    )
+    .unwrap();
+    let terminal = PromptEvaluationAttemptEventV1::terminal(
+        &started,
+        PromptEvaluationAttemptStatus::CompletedPair,
+        [false; 2],
+        "",
+    )
+    .unwrap();
+    model
+        .cohorts
+        .insert(cohort.cohort_sha256.clone(), cohort);
+    model.attempts.insert(
+        started.identity.evaluation_id.clone(),
+        PromptEvaluationAttemptState {
+            started,
+            terminal: Some(terminal),
+        },
+    );
     let project_a = prompt_evolution_read_model_for_scope(&model, project_id);
     let project_b = prompt_evolution_read_model_for_scope(&model, "project-b");
     assert_eq!(project_a.observations.len(), 2);
     assert!(project_a
         .observations
         .iter()
-        .all(|(_, observation)| observation.is_scientific_transfer_evidence()));
+        .all(|(_, observation)| observation.is_strict_matched_transfer_evidence()));
     assert!(project_b.observations.is_empty());
 
     let mut mismatched = transfer_event;
@@ -674,9 +758,174 @@ fn legacy_unscoped_prompt_genomes_force_a_read_model_rebuild() {
             evolution_method: None,
         }],
         observations: Vec::new(),
+        attempts: BTreeMap::new(),
+        cohorts: BTreeMap::new(),
+        cohort_sequences: BTreeMap::new(),
         rollouts: BTreeMap::new(),
         datasets: BTreeMap::new(),
     };
 
     assert!(!prompt_genome_scopes_are_valid(&model));
+}
+
+#[test]
+fn matched_attempt_lifecycle_persists_one_terminal_and_keeps_failures_in_the_read_model() {
+    let dataset = PromptDatasetIdentityV1::new(
+        "project-a",
+        1,
+        vec![PromptDatasetCaseIdentityV1 {
+            case_id: "case-a".to_string(),
+            objective_sha256: "a".repeat(64),
+            task_family_sha256: "b".repeat(64),
+            split: PromptEvaluationSplit::Train,
+        }],
+    )
+    .unwrap();
+    let context = PromptExecutionContextV1 {
+        schema: PROMPT_EXECUTION_CONTEXT_SCHEMA_V1.to_string(),
+        provider_sha256: "1".repeat(64),
+        model_pool_sha256: "2".repeat(64),
+        harness_sha256: "3".repeat(64),
+        system_prompt_sha256: "4".repeat(64),
+        policy: AgentPolicy::Auto,
+        policy_sha256: "5".repeat(64),
+        budget_sha256: "6".repeat(64),
+        tool_contract_sha256: "7".repeat(64),
+        source_revision_sha256: "8".repeat(64),
+        workspace_revision_sha256: "9".repeat(64),
+    };
+    let cohort = PromptLearningCohortV1::new(dataset, context).unwrap();
+    let evaluation_id = scoped_prompt_evaluation_id("project-a", "attempt-a");
+    let identity = PromptMatchedEvaluationIdentityV1::new(
+        evaluation_id.clone(),
+        &cohort,
+        "case-a",
+        PromptEvaluationSplit::Train,
+        PromptEvaluationMode::PairedExecution,
+    )
+    .unwrap();
+    let started = PromptEvaluationAttemptEventV1::started(
+        identity,
+        &cohort,
+        [
+            PromptTreatmentIdentityV1 {
+                profile_id: "current".to_string(),
+                prompt_sha256: "c".repeat(64),
+            },
+            PromptTreatmentIdentityV1 {
+                profile_id: "challenger".to_string(),
+                prompt_sha256: "d".repeat(64),
+            },
+        ],
+    )
+    .unwrap();
+    let failed = PromptEvaluationAttemptEventV1::terminal(
+        &started,
+        PromptEvaluationAttemptStatus::TreatmentFailure,
+        [true, false],
+        "treatment_execution_failed",
+    )
+    .unwrap();
+    let invalid_duplicate = PromptEvaluationAttemptEventV1::terminal(
+        &started,
+        PromptEvaluationAttemptStatus::InfrastructureInvalid,
+        [false; 2],
+        "late_duplicate",
+    )
+    .unwrap();
+    let attempt_event = |sequence: u64, attempt: &PromptEvaluationAttemptEventV1| Event {
+        id: EventId(format!("attempt-event-{sequence}")),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: sequence,
+        kind: EventKind::TaskStatusChanged,
+        summary: PROMPT_EVALUATION_ATTEMPT_EVENT.to_string(),
+        metadata: [
+            ("project_id".to_string(), "project-a".to_string()),
+            (
+                "prompt_evaluation_id".to_string(),
+                evaluation_id.clone(),
+            ),
+            (
+                PROMPT_EVALUATION_ATTEMPT_METADATA_KEY.to_string(),
+                serde_json::to_string(attempt).unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let started_event = attempt_event(1, &started);
+    let mut model = build_prompt_evolution_read_model(
+        &[
+            started_event.clone(),
+            attempt_event(2, &failed),
+            attempt_event(3, &invalid_duplicate),
+        ],
+        3,
+        3,
+    );
+    model
+        .cohorts
+        .insert(cohort.cohort_sha256.clone(), cohort.clone());
+
+    let state = model.attempts.get(&evaluation_id).unwrap();
+    assert_eq!(state.started.status, PromptEvaluationAttemptStatus::Started);
+    assert_eq!(
+        state.terminal.as_ref().map(|event| event.status),
+        Some(PromptEvaluationAttemptStatus::TreatmentFailure)
+    );
+    assert!(state
+        .terminal
+        .as_ref()
+        .is_some_and(PromptEvaluationAttemptEventV1::enters_effect_denominator));
+
+    let observation = PromptEvolutionObservation {
+        profile_id: "current".to_string(),
+        evaluation_id: evaluation_id.clone(),
+        case_id: "case-a".to_string(),
+        opponent_profile_id: Some("challenger".to_string()),
+        task_class: "coding".to_string(),
+        split: PromptEvaluationSplit::Train,
+        mode: PromptEvaluationMode::PairedExecution,
+        format_valid: true,
+        succeeded: false,
+        quality_score: 0.0,
+        latency_ms: 1,
+        total_tokens: 1,
+        estimated_cost_microusd: 0,
+        safety_violations: 0,
+        relative_reward: Some(-1.0),
+        step_credits: Vec::new(),
+        reflection_packet: None,
+        provenance: PromptEvaluationProvenance::blind_pairwise_swap(
+            vec!["reviewer".to_string()],
+            vec!["worker".to_string()],
+            started.identity.dataset_sha256.clone(),
+            "c".repeat(64),
+            "d".repeat(64),
+        )
+        .with_matched_evaluation(started.identity.clone()),
+    };
+    model
+        .observations
+        .push(("auto".to_string(), observation.clone()));
+    assert_eq!(
+        prompt_evolution_read_model_for_scope(&model, "project-a")
+            .observations
+            .len(),
+        1
+    );
+
+    let mut missing_terminal = build_prompt_evolution_read_model(&[started_event], 1, 1);
+    missing_terminal
+        .cohorts
+        .insert(cohort.cohort_sha256.clone(), cohort);
+    missing_terminal
+        .observations
+        .push(("auto".to_string(), observation));
+    assert!(
+        prompt_evolution_read_model_for_scope(&missing_terminal, "project-a")
+            .observations
+            .is_empty()
+    );
 }

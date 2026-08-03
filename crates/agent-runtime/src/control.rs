@@ -14,7 +14,7 @@ use crate::{AgentLoopState, AgentRuntimeConfig};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[path = "control_construction.rs"]
@@ -116,7 +116,8 @@ struct RunMutableState {
 #[derive(Debug)]
 pub struct AgentRunControl {
     budget: RunBudget,
-    user_cancelled: AtomicBool,
+    user_cancelled: Arc<AtomicBool>,
+    parent_cancelled: Option<Arc<AtomicBool>>,
     model_calls: AtomicUsize,
     tool_calls: AtomicUsize,
     agent_turns: AtomicUsize,
@@ -131,7 +132,8 @@ impl AgentRunControl {
         let started_at = now.checked_sub(snapshot.elapsed_active).unwrap_or(now);
         Self {
             budget: snapshot.budget,
-            user_cancelled: AtomicBool::new(false),
+            user_cancelled: Arc::new(AtomicBool::new(false)),
+            parent_cancelled: None,
             model_calls: AtomicUsize::new(snapshot.model_calls),
             tool_calls: AtomicUsize::new(snapshot.tool_calls),
             agent_turns: AtomicUsize::new(snapshot.agent_turns),
@@ -185,7 +187,8 @@ impl AgentRunControl {
                 resources.start_new_segment();
                 Ok(Self {
                     budget,
-                    user_cancelled: AtomicBool::new(false),
+                    user_cancelled: Arc::new(AtomicBool::new(false)),
+                    parent_cancelled: None,
                     model_calls: AtomicUsize::new(0),
                     tool_calls: AtomicUsize::new(0),
                     agent_turns: AtomicUsize::new(0),
@@ -282,6 +285,14 @@ impl AgentRunControl {
             .stop_reason
             .get_or_insert(RunStopReason::UserCancelled);
         true
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.user_cancelled.load(Ordering::SeqCst)
+            || self
+                .parent_cancelled
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
     }
 
     pub fn request_stop(&self, reason: RunStopReason) {
@@ -557,7 +568,7 @@ impl AgentRunControl {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.active_model_calls = state.active_model_calls.saturating_sub(1);
         if state.stop_reason.is_some()
-            || self.user_cancelled.load(Ordering::SeqCst)
+            || self.cancellation_requested()
             || !self.objective_epoch_matches_locked(&state, expected_epoch)
         {
             return false;
@@ -686,7 +697,7 @@ impl AgentRunControl {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.active_tool_calls = state.active_tool_calls.saturating_sub(1);
         if state.stop_reason.is_some()
-            || self.user_cancelled.load(Ordering::SeqCst)
+            || self.cancellation_requested()
             || !self.objective_epoch_matches_locked(&state, expected_epoch)
         {
             return false;
@@ -854,14 +865,14 @@ impl AgentRunControl {
     pub fn execution_epoch_lease_is_current(&self, lease: RunEpochLease) -> bool {
         let state = self.state.lock().expect("run control state poisoned");
         state.stop_reason.is_none()
-            && !self.user_cancelled.load(Ordering::SeqCst)
+            && !self.cancellation_requested()
             && self.execution_epoch_matches_locked(&state, lease.epoch)
     }
 
     pub fn objective_epoch_is_current(&self, expected_epoch: u64) -> bool {
         let state = self.state.lock().expect("run control state poisoned");
         state.stop_reason.is_none()
-            && !self.user_cancelled.load(Ordering::SeqCst)
+            && !self.cancellation_requested()
             && self.objective_epoch_matches_locked(&state, expected_epoch)
     }
 
@@ -1002,7 +1013,7 @@ impl AgentRunControl {
     pub fn mark_progress_at(&self, expected_epoch: u64, stage: &str, detail: &str) -> bool {
         let mut state = self.state.lock().expect("run control state poisoned");
         if state.stop_reason.is_some()
-            || self.user_cancelled.load(Ordering::SeqCst)
+            || self.cancellation_requested()
             || !self.objective_epoch_matches_locked(&state, expected_epoch)
         {
             return false;
@@ -1308,7 +1319,7 @@ impl AgentRunControl {
         if state.phase == RunPhase::TerminalCommitted {
             return state.stop_reason;
         }
-        if self.user_cancelled.load(Ordering::SeqCst) {
+        if self.cancellation_requested() {
             state
                 .stop_reason
                 .get_or_insert(RunStopReason::UserCancelled);

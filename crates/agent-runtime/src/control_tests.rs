@@ -981,6 +981,204 @@ fn user_cancelled_snapshot_cannot_continue() {
 }
 
 #[test]
+fn isolated_treatments_have_equal_independent_budgets_and_share_parent_cancellation() {
+    let mut budget = test_budget();
+    budget.initial_model_calls = 4;
+    budget.max_model_calls = 4;
+    budget.terminal_model_call_reserve = 0;
+    let parent = AgentRunControl::with_budget(budget);
+    let left = parent.isolated_treatment(2).unwrap();
+    let right = parent.isolated_treatment(2).unwrap();
+
+    assert_eq!(left.snapshot().budget.max_model_calls, 2);
+    assert_eq!(right.snapshot().budget.max_model_calls, 2);
+    assert!(left.begin_model_call("left-1").is_ok());
+    left.finish_model_call();
+    assert!(left.begin_model_call("left-2").is_ok());
+    left.finish_model_call();
+    assert_eq!(
+        left.begin_model_call("left-3"),
+        Err(RunStopReason::ModelCallBudgetExceeded)
+    );
+    assert!(right.begin_model_call("right-1").is_ok());
+    right.finish_model_call();
+    assert!(matches!(
+        right.begin_tool_call("right", "file.read", "right-file"),
+        Ok(1)
+    ));
+    right.finish_tool_call();
+    assert_eq!(right.record_agent_turn("right"), Ok(1));
+    let physical = right
+        .begin_physical_model_attempt("right-model", 10, 10, RunStageClass::Finalizer)
+        .unwrap();
+    assert!(right.finish_physical_model_attempt(
+        physical,
+        Some(ModelAttemptUsage::new(
+            10,
+            5,
+            15,
+            crate::ModelUsageSource::Provider,
+        )),
+    ));
+    assert_eq!(parent.snapshot().model_calls, 0);
+    parent.absorb_isolated_treatments(&[&left, &right]).unwrap();
+    assert_eq!(parent.snapshot().model_calls, 3);
+    assert_eq!(parent.snapshot().tool_calls, 1);
+    assert_eq!(parent.snapshot().agent_turns, 1);
+    assert_eq!(parent.resource_usage().segment.total_tokens, 15);
+    assert_eq!(parent.resource_usage().segment.physical_attempts, 1);
+    assert_eq!(
+        parent.isolated_treatment(2).unwrap_err(),
+        RunStopReason::StageBudgetExhausted
+    );
+
+    let cancel_parent = AgentRunControl::with_budget(budget);
+    let cancel_left = cancel_parent.isolated_treatment(2).unwrap();
+    let cancel_right = cancel_parent.isolated_treatment(2).unwrap();
+    assert!(cancel_parent.request_cancel());
+    assert_eq!(
+        cancel_left.stop_reason(),
+        Some(RunStopReason::UserCancelled)
+    );
+    assert_eq!(
+        cancel_right.stop_reason(),
+        Some(RunStopReason::UserCancelled)
+    );
+}
+
+#[test]
+fn isolated_treatment_preserves_progressive_model_tool_and_turn_limits() {
+    let mut budget = test_budget();
+    budget.initial_model_calls = 4;
+    budget.max_model_calls = 12;
+    budget.model_calls_per_extension = 4;
+    budget.initial_tool_calls = 6;
+    budget.max_tool_calls = 18;
+    budget.tool_calls_per_extension = 6;
+    budget.initial_agent_turns = 4;
+    budget.max_agent_turns = 12;
+    budget.agent_turns_per_extension = 4;
+    budget.max_repair_attempts = 4;
+    budget.terminal_model_call_reserve = 0;
+
+    let parent = AgentRunControl::with_budget(budget);
+    let model_lane = parent.isolated_treatment(2).unwrap();
+    let model_budget = model_lane.budget();
+    assert_eq!(model_budget.initial_model_calls, 2);
+    assert_eq!(model_budget.max_model_calls, 6);
+    assert_eq!(model_budget.model_calls_per_extension, 2);
+    assert_eq!(model_lane.progress().model_call_limit, 2);
+    for call in 1..=2 {
+        assert_eq!(model_lane.begin_model_call("candidate"), Ok(call));
+        model_lane.finish_model_call();
+    }
+    assert!(model_lane.record_checkpoint("candidate", "verified", "model-checkpoint-1"));
+    for call in 3..=4 {
+        assert_eq!(model_lane.begin_model_call("candidate"), Ok(call));
+        model_lane.finish_model_call();
+    }
+    assert_eq!(model_lane.progress().model_call_limit, 4);
+    assert!(model_lane.record_checkpoint("candidate", "verified", "model-checkpoint-2"));
+    for call in 5..=6 {
+        assert_eq!(model_lane.begin_model_call("candidate"), Ok(call));
+        model_lane.finish_model_call();
+    }
+    assert_eq!(model_lane.progress().model_call_limit, 6);
+    assert!(model_lane.record_checkpoint("candidate", "verified", "model-checkpoint-3"));
+    assert_eq!(
+        model_lane.begin_model_call("candidate"),
+        Err(RunStopReason::ModelCallBudgetExceeded)
+    );
+
+    let tool_lane = parent.isolated_treatment(2).unwrap();
+    let tool_budget = tool_lane.budget();
+    assert_eq!(tool_budget.initial_tool_calls, 3);
+    assert_eq!(tool_budget.max_tool_calls, 9);
+    assert_eq!(tool_budget.tool_calls_per_extension, 3);
+    assert_eq!(tool_lane.progress().tool_call_limit, 3);
+    for call in 1..=3 {
+        assert_eq!(
+            tool_lane.begin_tool_call("candidate", "file.read", &format!("file-{call}")),
+            Ok(call)
+        );
+        tool_lane.finish_tool_call();
+    }
+    assert!(tool_lane.record_checkpoint("candidate", "verified", "tool-checkpoint"));
+    assert_eq!(
+        tool_lane.begin_tool_call("candidate", "file.read", "file-4"),
+        Ok(4)
+    );
+    tool_lane.finish_tool_call();
+    assert_eq!(tool_lane.progress().tool_call_limit, 6);
+
+    let turn_lane = parent.isolated_treatment(2).unwrap();
+    let turn_budget = turn_lane.budget();
+    assert_eq!(turn_budget.initial_agent_turns, 2);
+    assert_eq!(turn_budget.max_agent_turns, 6);
+    assert_eq!(turn_budget.agent_turns_per_extension, 2);
+    assert_eq!(turn_lane.progress().agent_turn_limit, 2);
+    assert_eq!(turn_lane.record_agent_turn("candidate"), Ok(1));
+    assert_eq!(turn_lane.record_agent_turn("candidate"), Ok(2));
+    assert!(turn_lane.record_checkpoint("candidate", "verified", "turn-checkpoint"));
+    assert_eq!(turn_lane.record_agent_turn("candidate"), Ok(3));
+    assert_eq!(turn_lane.progress().agent_turn_limit, 4);
+}
+
+#[test]
+fn absorbed_candidate_extension_leaves_model_budget_for_a_reviewer() {
+    let mut budget = test_budget();
+    budget.initial_model_calls = 4;
+    budget.max_model_calls = 8;
+    budget.model_calls_per_extension = 4;
+    budget.terminal_model_call_reserve = 0;
+
+    let parent = AgentRunControl::with_budget(budget);
+    let candidate = parent.isolated_treatment(2).unwrap();
+    assert_eq!(candidate.budget().initial_model_calls, 2);
+    assert_eq!(candidate.budget().model_calls_per_extension, 2);
+    for call in 1..=2 {
+        assert_eq!(candidate.begin_model_call("candidate"), Ok(call));
+        candidate.finish_model_call();
+    }
+    assert!(candidate.record_checkpoint("candidate", "verified", "candidate-checkpoint"));
+    assert_eq!(candidate.begin_model_call("candidate"), Ok(3));
+    candidate.finish_model_call();
+    assert_eq!(candidate.progress().model_call_limit, 4);
+
+    parent.absorb_isolated_treatments(&[&candidate]).unwrap();
+    let progress = parent.progress();
+    assert_eq!(progress.model_calls, 3);
+    assert_eq!(progress.model_call_limit, 6);
+    assert_eq!(progress.budget_extensions, 1);
+
+    let reviewer = parent
+        .isolated_treatment(2)
+        .expect("candidate extension should leave one model call for the reviewer");
+    assert_eq!(reviewer.budget().initial_model_calls, 1);
+    assert_eq!(reviewer.begin_model_call("reviewer"), Ok(1));
+}
+
+#[test]
+fn delayed_treatment_uses_the_parent_absolute_remaining_deadline() {
+    let mut budget = test_budget();
+    budget.max_duration = Duration::from_millis(200);
+    budget.no_progress_timeout = Duration::from_millis(180);
+    budget.max_model_calls = 8;
+    budget.initial_model_calls = 8;
+    budget.max_tool_calls = 8;
+    budget.initial_tool_calls = 8;
+    budget.max_agent_turns = 8;
+    budget.initial_agent_turns = 8;
+    budget.max_repair_attempts = 8;
+    let parent = AgentRunControl::with_budget(budget);
+    thread::sleep(Duration::from_millis(25));
+
+    let reviewer = parent.isolated_treatment(2).unwrap();
+    assert!(reviewer.snapshot().budget.max_duration < budget.max_duration);
+    assert_eq!(reviewer.stop_reason(), None);
+}
+
+#[test]
 fn active_model_call_uses_the_model_timeout_before_no_progress() {
     let mut budget = test_budget();
     budget.max_duration = Duration::from_secs(1);

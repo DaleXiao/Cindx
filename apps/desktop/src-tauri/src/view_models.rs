@@ -897,6 +897,8 @@ pub(crate) struct PromptOfflineDatasetState {
     pub(crate) project_id: String,
     pub(crate) digest: String,
     #[serde(default)]
+    pub(crate) identity: Option<PromptDatasetIdentityV1>,
+    #[serde(default)]
     pub(crate) generation: u32,
     #[serde(default)]
     pub(crate) case_ids: Vec<String>,
@@ -908,6 +910,12 @@ pub(crate) struct PromptOfflineDatasetState {
     pub(crate) updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PromptEvaluationAttemptState {
+    pub(crate) started: PromptEvaluationAttemptEventV1,
+    pub(crate) terminal: Option<PromptEvaluationAttemptEventV1>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PromptEvolutionReadModel {
     pub(crate) schema: String,
@@ -917,6 +925,12 @@ pub(crate) struct PromptEvolutionReadModel {
     pub(crate) event_count: u64,
     pub(crate) genomes: Vec<PromptGenomeRecord>,
     pub(crate) observations: Vec<(String, PromptEvolutionObservation)>,
+    #[serde(default)]
+    pub(crate) attempts: BTreeMap<String, PromptEvaluationAttemptState>,
+    #[serde(default)]
+    pub(crate) cohorts: BTreeMap<String, PromptLearningCohortV1>,
+    #[serde(default)]
+    pub(crate) cohort_sequences: BTreeMap<String, u64>,
     #[serde(default)]
     pub(crate) rollouts: BTreeMap<String, PromptRolloutState>,
     #[serde(default)]

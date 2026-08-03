@@ -108,6 +108,8 @@ pub struct PromptEvaluationProvenance {
     pub opponent_prompt_sha256: String,
     #[serde(default)]
     pub transfer: Option<PromptTransferProvenance>,
+    #[serde(default)]
+    pub matched_evaluation: Option<super::PromptMatchedEvaluationIdentityV1>,
 }
 
 impl PromptEvaluationProvenance {
@@ -140,11 +142,20 @@ impl PromptEvaluationProvenance {
             candidate_prompt_sha256: candidate_prompt_sha256.into(),
             opponent_prompt_sha256: opponent_prompt_sha256.into(),
             transfer: None,
+            matched_evaluation: None,
         }
     }
 
     pub fn with_transfer(mut self, transfer: PromptTransferProvenance) -> Self {
         self.transfer = Some(transfer);
+        self
+    }
+
+    pub fn with_matched_evaluation(
+        mut self,
+        identity: super::PromptMatchedEvaluationIdentityV1,
+    ) -> Self {
+        self.matched_evaluation = Some(identity);
         self
     }
 
@@ -183,6 +194,13 @@ impl PromptEvaluationProvenance {
                 .transfer
                 .as_ref()
                 .is_some_and(PromptTransferProvenance::is_valid_auto_to_pro)
+    }
+
+    pub fn is_strict_matched(&self) -> bool {
+        self.has_scientific_core()
+            && self.matched_evaluation.as_ref().is_some_and(|identity| {
+                identity.validate().is_ok() && identity.dataset_sha256 == self.dataset_sha256
+            })
     }
 }
 
@@ -269,6 +287,52 @@ impl PromptEvolutionObservation {
             && transfer_lineage_matches
     }
 
+    pub fn is_strict_matched_evidence(&self) -> bool {
+        self.is_scientific_evidence()
+            && self
+                .provenance
+                .matched_evaluation
+                .as_ref()
+                .is_some_and(|identity| {
+                    self.provenance.is_strict_matched()
+                        && identity.evaluation_id == self.evaluation_id
+                        && identity.case_id == self.case_id
+                        && identity.split == self.split
+                        && identity.mode == self.mode
+                })
+    }
+
+    pub fn is_strict_matched_transfer_evidence(&self) -> bool {
+        self.is_scientific_transfer_evidence()
+            && self
+                .provenance
+                .matched_evaluation
+                .as_ref()
+                .is_some_and(|identity| {
+                    self.provenance.is_strict_matched()
+                        && identity.evaluation_id == self.evaluation_id
+                        && identity.case_id == self.case_id
+                        && identity.split == self.split
+                        && identity.mode == self.mode
+                })
+    }
+
+    pub fn scientific_cohort_sha256(&self) -> Option<&str> {
+        match self.provenance.matched_evaluation.as_ref() {
+            Some(identity)
+                if self.is_strict_matched_evidence()
+                    || self.is_strict_matched_transfer_evidence() =>
+            {
+                Some(identity.cohort_sha256.as_str())
+            }
+            Some(_) => None,
+            None if self.is_scientific_evidence() || self.is_scientific_transfer_evidence() => {
+                Some(self.provenance.dataset_sha256.as_str())
+            }
+            None => None,
+        }
+    }
+
     pub fn evidence_identity(&self) -> String {
         if !self.evaluation_id.trim().is_empty() {
             return format!(
@@ -323,8 +387,8 @@ pub fn latest_scientific_dataset_digest(
     observations
         .iter()
         .rev()
-        .find(|observation| observation.is_scientific_evidence())
-        .map(|observation| observation.provenance.dataset_sha256.as_str())
+        .filter(|observation| observation.is_scientific_evidence())
+        .find_map(|observation| observation.scientific_cohort_sha256())
 }
 
 pub fn latest_scientific_training_dataset_digest(
@@ -333,12 +397,12 @@ pub fn latest_scientific_training_dataset_digest(
     observations
         .iter()
         .rev()
-        .find(|observation| {
+        .filter(|observation| {
             observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
                 && observation.is_scientific_evidence()
         })
-        .map(|observation| observation.provenance.dataset_sha256.as_str())
+        .find_map(|observation| observation.scientific_cohort_sha256())
 }
 
 pub fn latest_scientific_transfer_dataset_digest(
@@ -347,8 +411,8 @@ pub fn latest_scientific_transfer_dataset_digest(
     observations
         .iter()
         .rev()
-        .find(|observation| observation.is_scientific_transfer_evidence())
-        .map(|observation| observation.provenance.dataset_sha256.as_str())
+        .filter(|observation| observation.is_scientific_transfer_evidence())
+        .find_map(|observation| observation.scientific_cohort_sha256())
 }
 
 pub fn prompt_reflection_packets(
@@ -373,7 +437,7 @@ pub fn prompt_reflection_packets(
                 && observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
                 && observation.is_scientific_evidence()
-                && observation.provenance.dataset_sha256 == active_dataset_sha256
+                && observation.scientific_cohort_sha256() == Some(active_dataset_sha256)
         })
         .filter_map(|observation| observation.reflection_packet.as_ref())
         .filter(|packet| packet.candidate_id == profile_id)
@@ -405,7 +469,7 @@ pub fn prompt_transfer_reflection_packets(
                 && observation.split == PromptEvaluationSplit::Train
                 && observation.mode == PromptEvaluationMode::PairedExecution
                 && observation.is_scientific_transfer_evidence()
-                && observation.provenance.dataset_sha256 == active_dataset_sha256
+                && observation.scientific_cohort_sha256() == Some(active_dataset_sha256)
         })
         .filter_map(|observation| observation.reflection_packet.as_ref())
         .filter(|packet| packet.candidate_id == profile_id)
