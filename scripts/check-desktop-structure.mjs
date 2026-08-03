@@ -3342,6 +3342,9 @@ assert(
       "pub fn pin_prompt_evidence_tools"
     ) &&
     agentRuntimeGroundingToolsSource.includes(
+      "pub fn pin_evidence_scope_tools"
+    ) &&
+    agentRuntimeGroundingToolsSource.includes(
       "pub fn tool_matches_evidence_scope"
     ) &&
     agentRuntimeGroundingPolicySource.includes("pub fn prompt_evidence_scopes") &&
@@ -3350,9 +3353,12 @@ assert(
     ) &&
     agentRuntimeModelTransportSource.includes("pub struct ModelStreamProgress") &&
     agentLoopContractRuntimeSource.includes("use agent_runtime::{") &&
-    agentLoopContractRuntimeSource.includes(
+    (agentLoopContractRuntimeSource.includes(
       "pin_prompt_evidence_tools(run_context"
-    ),
+    ) ||
+      agentLoopContractRuntimeSource.includes(
+        "pin_evidence_scope_tools(&completion_intent.evidence_scopes"
+      )),
   "Grounding and model transport policy must remain portable agent-runtime ownership"
 );
 assert(

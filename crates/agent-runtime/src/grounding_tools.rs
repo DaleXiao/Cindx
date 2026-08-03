@@ -36,14 +36,23 @@ pub fn pin_prompt_evidence_tools(
     inline: &mut Vec<ToolSpec>,
 ) -> BTreeSet<PromptEvidenceScope> {
     let scopes = prompt_evidence_scopes(run_context);
+    pin_evidence_scope_tools(&scopes, catalog, inline);
+    scopes
+}
+
+pub fn pin_evidence_scope_tools(
+    scopes: &BTreeSet<PromptEvidenceScope>,
+    catalog: &[ToolSpec],
+    inline: &mut Vec<ToolSpec>,
+) {
     if scopes.is_empty() {
-        return scopes;
+        return;
     }
     let mut names = inline
         .iter()
         .map(|tool| tool.name.clone())
         .collect::<BTreeSet<_>>();
-    for scope in &scopes {
+    for scope in scopes {
         if inline
             .iter()
             .any(|tool| tool_matches_evidence_scope(tool, *scope))
@@ -75,5 +84,4 @@ pub fn pin_prompt_evidence_tools(
         }
     }
     inline.sort_by(|left, right| left.name.cmp(&right.name));
-    scopes
 }

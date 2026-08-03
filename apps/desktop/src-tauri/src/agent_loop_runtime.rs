@@ -2,10 +2,13 @@ use crate::desktop_prelude::*;
 use crate::{
     agent_completion_runtime::{finalize_agent_completion, AgentCompletionOutcome},
     agent_failure_terminal_runtime::{resolve_loop_failure, AgentFailureLoopOutcome},
+    agent_grounded_response_runtime::{
+        advance_grounded_model_response, should_reset_rejected_completion_stream,
+        GroundedModelResponse,
+    },
     agent_model_turn_runtime::{
         execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnResponse,
     },
-    agent_outcome_ledger_runtime::observe_candidate,
     agent_query_commands::{
         append_agent_progress_event, emit_agent_stream_delta,
         finish_agent_run_for_control_stop_with_task_state,
@@ -70,11 +73,12 @@ pub(crate) fn pause_agent_loop_for_control_stop(
 #[path = "agent_loop_contract_runtime.rs"]
 mod contract_runtime;
 #[cfg(test)]
-pub(crate) use contract_runtime::apply_run_task_contract;
+pub(crate) use contract_runtime::{
+    apply_run_task_contract, workspace_verification_policy_for_run_context,
+};
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use contract_runtime::{
-    apply_run_task_contract_with_evidence_scopes, planned_agent_tools,
-    workspace_verification_policy_for_run_context,
+    apply_run_task_contract_with_completion_intent, planned_agent_tools,
 };
 use contract_runtime::{
     record_retained_agent_decision_after_noop_steer, synchronize_noop_control_epoch_context,
@@ -104,18 +108,18 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
     let session_id_owned = run_context.get("session_id").cloned();
     let session_id = session_id_owned.as_deref();
     let registry = tool_registry_for_state(state, workspace_root)?;
-    let (tools, evidence_scopes) = planned_agent_tools(
+    let (tools, completion_intent) = planned_agent_tools(
         &registry,
         &run_context,
         effective_agent_objective(&run_context, &prompt),
         config.context_window_tokens,
     );
-    apply_run_task_contract_with_evidence_scopes(
+    apply_run_task_contract_with_completion_intent(
         &mut runtime,
         &run_context,
         &tools,
         collaboration,
-        &evidence_scopes,
+        &completion_intent,
     )?;
     let mut snapshot_cursor = AgentRuntimeSnapshotCursor::rebuild(&runtime, &run_context);
     let mut runtime_context = agent_runtime_context_for_run(&run_context);
@@ -297,6 +301,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 return Err(violation.to_string());
             }
         };
+        let visible_contract_evidence_sequences = prepared_turn.visible_contract_evidence_sequences;
         let mut request = prepared_turn.request;
         let context_governor = prepared_turn.context;
         request.metadata.insert(
@@ -338,36 +343,16 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         let previous_message_count = runtime.messages.len();
         let response_commit = cancellation.commit_execution_step_with(epoch_lease, || {
             let mut transaction = AgentLoopAppendTransaction::begin(&mut runtime);
-            let (advance, verification_required) =
-                transaction.with_append_only_mutation(|next_runtime| {
-                    let mut advance =
-                        AgentKernel::new(next_runtime, &tools).advance_model_response(response);
-                    let mut verification_required = false;
-                    if let AgentAdvance::Completed { answer } = &advance {
-                        let verification_instruction =
-                            AgentKernel::new(next_runtime, &tools).completion_gate_for_task();
-                        let steer_epoch = run_context_steer_epoch(&run_context);
-                        observe_candidate(next_runtime, steer_epoch, answer, &verification_instruction);
-                        match verification_instruction {
-                            Ok(Some(instruction)) => {
-                                next_runtime.messages.truncate(previous_message_count);
-                                AgentKernel::new(next_runtime, &tools)
-                                    .apply_instruction(&instruction);
-                                verification_required = true;
-                            }
-                            Ok(None) => {}
-                            Err(failure) => {
-                                next_runtime.messages.truncate(previous_message_count);
-                                advance = AgentAdvance::Failed { failure };
-                            }
-                        }
-                    }
-                    if let AgentAdvance::Retry { instruction } = &advance {
-                        AgentKernel::new(next_runtime, &tools)
-                            .apply_model_response_retry(instruction.clone());
-                    }
-                    (advance, verification_required)
-                });
+            let grounded = transaction.with_append_only_mutation(|next_runtime| {
+                advance_grounded_model_response(
+                    next_runtime,
+                    &tools,
+                    response,
+                    previous_message_count,
+                    run_context_steer_epoch(&run_context),
+                    &visible_contract_evidence_sequences,
+                )
+            });
             let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
                 transaction.state(),
                 previous_message_count,
@@ -387,9 +372,14 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             drop(store);
             transaction.commit();
             snapshot_cursor = next_cursor;
-            Ok::<_, String>((advance, verification_required))
+            Ok::<_, String>(grounded)
         })?;
-        let (advance, verification_required) = match response_commit {
+        let GroundedModelResponse {
+            advance,
+            verification_required,
+            receipt: grounded_completion_receipt,
+            rejection: completion_rejection,
+        } = match response_commit {
             agent_runtime::RunExecutionStepCommit::Committed(committed) => committed,
             agent_runtime::RunExecutionStepCommit::RestartAfterSteer => {
                 runtime.messages.truncate(previous_message_count);
@@ -423,6 +413,13 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     .map_err(|error| error.to_string());
             }
         };
+        if should_reset_rejected_completion_stream(
+            visible_stream,
+            streamed_output,
+            completion_rejection,
+        ) {
+            emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+        }
         if verification_required {
             cancellation.mark_progress_at(
                 run_context_steer_epoch(&run_context),
@@ -434,6 +431,9 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
 
         match advance {
             AgentAdvance::Completed { answer } => {
+                let grounded_completion_receipt = grounded_completion_receipt.ok_or_else(|| {
+                    "completed agent response is missing a grounded completion receipt".to_string()
+                })?;
                 match finalize_agent_completion(
                     app,
                     state,
@@ -448,6 +448,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     session_id,
                     streamed_output,
                     answer,
+                    grounded_completion_receipt,
                     epoch_lease,
                 )? {
                     AgentCompletionOutcome::Completed(agent_state) => {
@@ -505,7 +506,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     &failure,
                     &request_id,
                     session_id,
-                    streamed_output,
+                    streamed_output && completion_rejection.is_none(),
                 )? {
                     AgentFailureLoopOutcome::Finished(agent_state) => {
                         return Ok(AgentLoopExecutionOutcome::Finished(agent_state))

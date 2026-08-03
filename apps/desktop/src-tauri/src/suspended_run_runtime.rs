@@ -5,7 +5,7 @@ use crate::{
     runtime_values::current_time_millis,
     tool_execution::append_visual_reference_message,
 };
-use agent_core::Metadata;
+use agent_core::{MessageRole, Metadata};
 use agent_runtime::{AgentKernel, RunControlSnapshot};
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
 
@@ -88,7 +88,9 @@ impl SuspendedRunStore {
         let now_ms = current_time_millis();
         self.with_runs(|runs| {
             Self::purge_expired(runs, now_ms);
-            session_ids.iter().any(|session_id| runs.contains_key(session_id))
+            session_ids
+                .iter()
+                .any(|session_id| runs.contains_key(session_id))
         })
     }
 
@@ -169,6 +171,14 @@ pub(crate) fn append_observations_to_suspended_run(
             None,
             &resolved.observation,
         );
+        if let Some(message) = suspended
+            .runtime
+            .messages
+            .last_mut()
+            .filter(|message| message.role == MessageRole::Tool)
+        {
+            message.metadata.extend(resolved.message_metadata.clone());
+        }
         append_visual_reference_message(
             &mut suspended.runtime,
             &resolved.tool_name,

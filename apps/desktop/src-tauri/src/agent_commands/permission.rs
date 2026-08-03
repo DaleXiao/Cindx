@@ -57,7 +57,8 @@ fn permission_tool_observation_metadata(
     tool_input: &str,
     run_context: &Metadata,
 ) -> Metadata {
-    let metadata = [
+    let input_fingerprint = agent_runtime::tool_input_fingerprint(tool_name, tool_input);
+    let mut metadata: Metadata = [
         ("kind".to_string(), "tool_observation".to_string()),
         ("tool_call_id".to_string(), tool_call_id.to_string()),
         ("tool".to_string(), tool_name.to_string()),
@@ -73,7 +74,7 @@ fn permission_tool_observation_metadata(
         ),
         (
             "tool_input_fingerprint".to_string(),
-            agent_runtime::tool_input_fingerprint(tool_name, tool_input),
+            input_fingerprint.clone(),
         ),
         (
             "prompt_contract_epoch".to_string(),
@@ -82,6 +83,16 @@ fn permission_tool_observation_metadata(
     ]
     .into_iter()
     .collect();
+    let completion_intent = agent_runtime::prompt_completion_intent(run_context);
+    if let Some(witness) = agent_runtime::evidence_target_witness(
+        tool_input,
+        &completion_intent.target_anchors,
+        tool_name,
+        &input_fingerprint,
+        permission_prompt_contract_epoch(run_context),
+    ) {
+        metadata.insert("evidence_target_witness".to_string(), witness);
+    }
     metadata_with_context(metadata, run_context)
 }
 
@@ -92,6 +103,7 @@ struct PersistedPermissionObservation {
     call_id: agent_core::ToolCallId,
     tool_name: String,
     input_fingerprint: String,
+    target_witness: Option<String>,
     status: ToolOutcomeStatus,
     observation: String,
 }
@@ -104,8 +116,30 @@ fn persisted_permission_observation_payload_matches(
         && left.call_id == right.call_id
         && left.tool_name == right.tool_name
         && left.input_fingerprint == right.input_fingerprint
+        && left.target_witness == right.target_witness
         && left.status == right.status
         && left.observation == right.observation
+}
+
+fn copy_replayed_contract_evidence_metadata(
+    runtime: &agent_runtime::AgentLoopState,
+    transcript: &mut [Message],
+    message_index: usize,
+) {
+    let Some(source) = runtime.messages.last() else {
+        return;
+    };
+    let Some(target) = transcript.get_mut(message_index) else {
+        return;
+    };
+    for key in [
+        agent_runtime::CONTRACT_EVIDENCE_SEQUENCES_METADATA_KEY,
+        "contract_evidence_sequence",
+    ] {
+        if let Some(value) = source.metadata.get(key) {
+            target.metadata.insert(key.to_string(), value.clone());
+        }
+    }
 }
 
 fn persisted_tool_outcome_status(value: &str) -> Option<ToolOutcomeStatus> {
@@ -187,6 +221,7 @@ fn persisted_permission_observations(
                 call_id: agent_core::ToolCallId(call_id),
                 tool_name,
                 input_fingerprint,
+                target_witness: message.metadata.get("evidence_target_witness").cloned(),
                 status,
                 observation: message.content.clone(),
             })
@@ -553,7 +588,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         .unwrap_or_else(|| "Continue the agent task.".to_string());
     let recovery_prompt =
         agent_recovery_prompt_from_active_events(&active_events).unwrap_or_else(|| prompt.clone());
-    let transcript = agent_runtime_transcript_from_active_events(&active_events);
+    let mut transcript = agent_runtime_transcript_from_active_events(&active_events);
     let persisted_permission_observations =
         persisted_permission_observations(&transcript, &run_context);
     let permission_observation_boundary = current_permission_observation_boundary(
@@ -618,18 +653,18 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         )
     });
     let registry = tool_registry_for_state(&state, &root)?;
-    let (tools, evidence_scopes) = crate::agent_loop_runtime::planned_agent_tools(
+    let (tools, completion_intent) = crate::agent_loop_runtime::planned_agent_tools(
         &registry,
         &run_context,
         crate::runtime_values::effective_agent_objective(&run_context, &prompt),
         config.context_window_tokens,
     );
-    apply_run_task_contract_with_evidence_scopes(
+    apply_run_task_contract_with_completion_intent(
         &mut runtime,
         &run_context,
         &tools,
         None,
-        &evidence_scopes,
+        &completion_intent,
     )?;
     for resolved in persisted_permission_observations
         .iter()
@@ -642,10 +677,12 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             resolved.call_id.clone(),
             &resolved.tool_name,
             &resolved.input_fingerprint,
+            resolved.target_witness.as_deref(),
             &resolved.status,
             risk.as_ref(),
             &resolved.observation,
         );
+        copy_replayed_contract_evidence_metadata(&runtime, &mut transcript, resolved.message_index);
     }
     runtime.messages = transcript;
     let effort = AgentEffort::parse(
@@ -723,7 +760,7 @@ pub(crate) fn resolve_agent_permission_request(
     )
     .map_err(|error| error.to_string())?;
 
-    let (observation, status, image_paths) = if matches!(
+    let (observation, status, image_paths, message_metadata) = if matches!(
         decision,
         PermissionDecision::AllowOnce | PermissionDecision::AllowForSession
     ) {
@@ -766,19 +803,20 @@ pub(crate) fn resolve_agent_permission_request(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let message_metadata = permission_tool_observation_metadata(
+            &request_id,
+            &tool_call_id,
+            &tool_name,
+            &status,
+            &tool_input,
+            run_context,
+        );
         append_message_event_with_metadata(
             &mut store,
             &request.task_id,
             MessageRole::Tool,
             &observation,
-            permission_tool_observation_metadata(
-                &request_id,
-                &tool_call_id,
-                &tool_name,
-                &status,
-                &tool_input,
-                run_context,
-            ),
+            message_metadata.clone(),
         )
         .map_err(|error| error.to_string())?;
         if !image_paths.is_empty() {
@@ -790,7 +828,7 @@ pub(crate) fn resolve_agent_permission_request(
                 run_context,
             )?;
         }
-        (observation, status, image_paths)
+        (observation, status, image_paths, message_metadata)
     } else {
         let status = ToolOutcomeStatus::Denied;
         let observation =
@@ -813,22 +851,23 @@ pub(crate) fn resolve_agent_permission_request(
             ),
         )
         .map_err(|error| error.to_string())?;
+        let message_metadata = permission_tool_observation_metadata(
+            &request_id,
+            &tool_call_id,
+            &tool_name,
+            &status,
+            &tool_input,
+            run_context,
+        );
         append_message_event_with_metadata(
             &mut store,
             &request.task_id,
             MessageRole::Tool,
             &observation,
-            permission_tool_observation_metadata(
-                &request_id,
-                &tool_call_id,
-                &tool_name,
-                &status,
-                &tool_input,
-                run_context,
-            ),
+            message_metadata.clone(),
         )
         .map_err(|error| error.to_string())?;
-        (observation, status, Vec::new())
+        (observation, status, Vec::new(), message_metadata)
     };
     Ok(ResolvedToolObservation {
         call_id: agent_core::ToolCallId(tool_call_id),
@@ -837,6 +876,7 @@ pub(crate) fn resolve_agent_permission_request(
         status,
         observation,
         image_paths,
+        message_metadata,
     })
 }
 
@@ -894,7 +934,7 @@ mod tests {
         let root = std::env::temp_dir().join("cindx-permission-browser-tool-plan");
         let mut registry = ToolRegistry::with_workspace_tools(root);
         registry.install_meta_tools();
-        let (tools, evidence_scopes) = crate::agent_loop_runtime::planned_agent_tools(
+        let (tools, completion_intent) = crate::agent_loop_runtime::planned_agent_tools(
             &registry,
             &run_context,
             objective,
@@ -909,7 +949,9 @@ mod tests {
             run_context.get("tool_requirement").map(String::as_str),
             Some("effects")
         );
-        assert!(evidence_scopes.contains(&PromptEvidenceScope::Browser));
+        assert!(completion_intent
+            .evidence_scopes
+            .contains(&PromptEvidenceScope::Browser));
         assert!(names.contains("browser.open"));
         assert!(names.contains("browser.extract_text"));
         assert!(names.contains("file.write"));
@@ -1198,8 +1240,9 @@ mod tests {
         conflicting
             .metadata
             .insert("tool_call_id".to_string(), "call-b".to_string());
-        assert!(persisted_permission_observations(&[observation, conflicting], &run_context)
-            .is_empty());
+        assert!(
+            persisted_permission_observations(&[observation, conflicting], &run_context).is_empty()
+        );
     }
 
     #[test]
@@ -1302,9 +1345,15 @@ mod tests {
                 observation.call_id.clone(),
                 &observation.tool_name,
                 &observation.input_fingerprint,
+                observation.target_witness.as_deref(),
                 &observation.status,
                 risk.as_ref(),
                 &observation.observation,
+            );
+            copy_replayed_contract_evidence_metadata(
+                &restored,
+                &mut transcript,
+                observation.message_index,
             );
         }
         assert_eq!(
@@ -1328,6 +1377,13 @@ mod tests {
             0
         );
         restored.messages = transcript.clone();
+
+        assert!(restored.messages.iter().any(|message| {
+            message.metadata.get("tool_call_id").map(String::as_str) == Some("call-a")
+                && message
+                    .metadata
+                    .contains_key(agent_runtime::CONTRACT_EVIDENCE_SEQUENCES_METADATA_KEY)
+        }));
 
         assert_eq!(
             AgentKernel::new(&mut restored, &tools).completion_gate_for_task(),

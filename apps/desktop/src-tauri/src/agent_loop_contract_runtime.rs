@@ -6,8 +6,8 @@ use crate::{
 };
 use agent_core::ToolEffectSemantics;
 use agent_runtime::{
-    pin_prompt_evidence_tools, prompt_evidence_scopes, tool_matches_evidence_scope,
-    PromptEvidenceScope,
+    pin_evidence_scope_tools, prompt_completion_intent, tool_matches_evidence_scope,
+    EvidenceTargetAnchor, PromptCompletionIntent, PromptEvidenceScope, PromptToolRequirement,
 };
 
 pub(crate) fn planned_agent_tools(
@@ -15,20 +15,25 @@ pub(crate) fn planned_agent_tools(
     run_context: &Metadata,
     prompt: &str,
     context_window: u64,
-) -> (Vec<ToolSpec>, BTreeSet<PromptEvidenceScope>) {
+) -> (Vec<ToolSpec>, PromptCompletionIntent) {
     let catalog = registry.specs();
-    let evidence_scopes = prompt_evidence_scopes(run_context);
-    let intent = tool_exposure_intent(run_context, &evidence_scopes);
+    let completion_intent = prompt_completion_intent(run_context);
+    let intent = tool_exposure_intent(
+        run_context,
+        &completion_intent.evidence_scopes,
+        completion_intent.tool_requirement,
+    );
     let mut tools = registry
         .exposure_plan_with_intent(prompt, context_window, &intent)
         .inline;
-    pin_prompt_evidence_tools(run_context, &catalog, &mut tools);
-    (tools, evidence_scopes)
+    pin_evidence_scope_tools(&completion_intent.evidence_scopes, &catalog, &mut tools);
+    (tools, completion_intent)
 }
 
 fn tool_exposure_intent(
     run_context: &Metadata,
     evidence_scopes: &BTreeSet<PromptEvidenceScope>,
+    completion_requirement: PromptToolRequirement,
 ) -> ToolExposureIntent {
     let mut intent = ToolExposureIntent::default();
     match run_context.get("task_class").map(String::as_str) {
@@ -71,10 +76,10 @@ fn tool_exposure_intent(
             }
         }
     }
-    match run_context.get("tool_requirement").map(String::as_str) {
-        Some("read_only") => intent.prefer_read_only = true,
-        Some("effects") => intent.prefer_effects = true,
-        _ => {}
+    match merged_tool_requirement(run_context, completion_requirement) {
+        PromptToolRequirement::ReadOnly => intent.prefer_read_only = true,
+        PromptToolRequirement::Effects => intent.prefer_effects = true,
+        PromptToolRequirement::None => {}
     }
     if run_context
         .get("image_generation_required")
@@ -86,23 +91,37 @@ fn tool_exposure_intent(
     intent
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_verification_policy_for_run_context(
     run_context: &Metadata,
 ) -> Result<WorkspaceVerificationPolicy, String> {
-    if let Some(serialized) = run_context.get("conductor_contract") {
+    workspace_verification_policy_for_run_context_with_requirement(
+        run_context,
+        prompt_completion_intent(run_context).tool_requirement,
+    )
+}
+
+fn workspace_verification_policy_for_run_context_with_requirement(
+    run_context: &Metadata,
+    completion_requirement: PromptToolRequirement,
+) -> Result<WorkspaceVerificationPolicy, String> {
+    let configured = if let Some(serialized) = run_context.get("conductor_contract") {
         let contract = ConductorExecutionContract::from_json(serialized)?;
-        return Ok(if contract.verification_required {
+        if contract.verification_required {
             WorkspaceVerificationPolicy::RequiredAfterMutation
         } else {
             WorkspaceVerificationPolicy::NotRequired
-        });
-    }
-
+        }
+    } else if run_context
+        .get("verification_required")
+        .is_some_and(|value| value == "true")
+    {
+        WorkspaceVerificationPolicy::RequiredAfterMutation
+    } else {
+        WorkspaceVerificationPolicy::NotRequired
+    };
     Ok(
-        if run_context
-            .get("verification_required")
-            .is_some_and(|value| value == "true")
-        {
+        if configured.is_required() || completion_requirement == PromptToolRequirement::Effects {
             WorkspaceVerificationPolicy::RequiredAfterMutation
         } else {
             WorkspaceVerificationPolicy::NotRequired
@@ -117,25 +136,29 @@ pub(crate) fn apply_run_task_contract(
     tools: &[ToolSpec],
     collaboration: Option<&AgentCollaboration>,
 ) -> Result<(), String> {
-    let evidence_scopes = prompt_evidence_scopes(run_context);
-    apply_run_task_contract_with_evidence_scopes(
+    let completion_intent = prompt_completion_intent(run_context);
+    apply_run_task_contract_with_completion_intent(
         runtime,
         run_context,
         tools,
         collaboration,
-        &evidence_scopes,
+        &completion_intent,
     )
 }
 
-pub(crate) fn apply_run_task_contract_with_evidence_scopes(
+pub(crate) fn apply_run_task_contract_with_completion_intent(
     runtime: &mut agent_runtime::AgentLoopState,
     run_context: &Metadata,
     tools: &[ToolSpec],
     collaboration: Option<&AgentCollaboration>,
-    evidence_scopes: &BTreeSet<PromptEvidenceScope>,
+    completion_intent: &PromptCompletionIntent,
 ) -> Result<(), String> {
+    let evidence_scopes = &completion_intent.evidence_scopes;
     AgentKernel::new(runtime, tools).merge_workspace_verification_policy(
-        workspace_verification_policy_for_run_context(run_context)?,
+        workspace_verification_policy_for_run_context_with_requirement(
+            run_context,
+            completion_intent.tool_requirement,
+        )?,
     );
     let steer_epoch = run_context_steer_epoch(run_context);
     let prompt_contract_epoch = run_context
@@ -156,7 +179,8 @@ pub(crate) fn apply_run_task_contract_with_evidence_scopes(
         prompt_required_tools.iter().copied(),
     );
 
-    let prompt_capability_requirements = prompt_capability_requirements(run_context, tools);
+    let prompt_capability_requirements =
+        prompt_capability_requirements(run_context, tools, completion_intent.tool_requirement);
     AgentKernel::new(runtime, tools).replace_prompt_required_any_tool_successes(
         prompt_contract_epoch,
         prompt_capability_requirements,
@@ -181,17 +205,49 @@ pub(crate) fn apply_run_task_contract_with_evidence_scopes(
         .collect::<BTreeMap<_, _>>();
     AgentKernel::new(runtime, tools)
         .replace_prompt_evidence_requirements(prompt_contract_epoch, evidence_requirements.clone());
+    let anchors = &completion_intent.target_anchors;
+    let evidence_targets = active_evidence_scopes
+        .iter()
+        .map(|scope| {
+            (
+                scope.requirement_id().to_string(),
+                anchors
+                    .iter()
+                    .filter(|anchor| evidence_anchor_matches_scope(anchor, *scope))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
+    AgentKernel::new(runtime, tools)
+        .bind_prompt_evidence_targets(prompt_contract_epoch, evidence_targets);
     if active_evidence_scopes.contains(&PromptEvidenceScope::Workspace) {
-        if let Some((receipt, observation)) =
+        if let Some((message_index, receipt, observation)) =
             workspace_knowledge_receipt(&mut runtime.messages, prompt_contract_epoch)
         {
-            AgentKernel::new(runtime, tools).record_prompt_context_evidence_for_requirement_at(
-                prompt_contract_epoch,
-                PromptEvidenceScope::Workspace.requirement_id(),
-                "knowledge_context",
-                &receipt,
-                &observation,
-            );
+            let recorded = AgentKernel::new(runtime, tools)
+                .record_prompt_context_evidence_for_requirement_at(
+                    prompt_contract_epoch,
+                    PromptEvidenceScope::Workspace.requirement_id(),
+                    "knowledge_context",
+                    &receipt,
+                    &observation,
+                );
+            if recorded {
+                if let Some(sequence) = runtime.task_contract.prompt_evidence_sequence(
+                    prompt_contract_epoch,
+                    PromptEvidenceScope::Workspace.requirement_id(),
+                ) {
+                    runtime.messages[message_index].metadata.insert(
+                        "contract_evidence_sequence".to_string(),
+                        sequence.to_string(),
+                    );
+                    runtime.messages[message_index].metadata.insert(
+                        agent_runtime::CONTRACT_EVIDENCE_SEQUENCES_METADATA_KEY.to_string(),
+                        serde_json::json!([sequence]).to_string(),
+                    );
+                }
+            }
         }
     }
     for (requirement_id, source, receipt, observation) in persisted_collaboration_receipts(
@@ -214,10 +270,15 @@ pub(crate) fn apply_run_task_contract_with_evidence_scopes(
 fn prompt_capability_requirements(
     run_context: &Metadata,
     tools: &[ToolSpec],
+    completion: PromptToolRequirement,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut requirements = BTreeMap::new();
-    match run_context.get("tool_requirement").map(String::as_str) {
-        Some("read_only") => {
+    let configured = configured_tool_requirement(run_context);
+    match merged_tool_requirement(run_context, completion) {
+        PromptToolRequirement::ReadOnly => {
+            if configured != PromptToolRequirement::ReadOnly {
+                return requirements;
+            }
             let tools = tools
                 .iter()
                 .filter(|tool| substantive_read_tool(tool))
@@ -227,7 +288,7 @@ fn prompt_capability_requirements(
                 requirements.insert("conductor_read_evidence".to_string(), tools);
             }
         }
-        Some("effects") => {
+        PromptToolRequirement::Effects => {
             let tools = tools
                 .iter()
                 .filter(|tool| {
@@ -237,12 +298,63 @@ fn prompt_capability_requirements(
                 .map(|tool| tool.name.clone())
                 .collect::<BTreeSet<_>>();
             if !tools.is_empty() {
-                requirements.insert("conductor_effect".to_string(), tools);
+                let id = if configured == PromptToolRequirement::Effects {
+                    "conductor_effect"
+                } else {
+                    "prompt_effect"
+                };
+                requirements.insert(id.to_string(), tools);
             }
         }
-        _ => {}
+        PromptToolRequirement::None => {}
     }
     requirements
+}
+
+fn merged_tool_requirement(
+    run_context: &Metadata,
+    completion_requirement: PromptToolRequirement,
+) -> PromptToolRequirement {
+    let configured = configured_tool_requirement(run_context);
+    match (configured, completion_requirement) {
+        (PromptToolRequirement::Effects, _) | (_, PromptToolRequirement::Effects) => {
+            PromptToolRequirement::Effects
+        }
+        (PromptToolRequirement::ReadOnly, _) | (_, PromptToolRequirement::ReadOnly) => {
+            PromptToolRequirement::ReadOnly
+        }
+        _ => PromptToolRequirement::None,
+    }
+}
+
+fn configured_tool_requirement(run_context: &Metadata) -> PromptToolRequirement {
+    match run_context.get("tool_requirement").map(String::as_str) {
+        Some("effects") => PromptToolRequirement::Effects,
+        Some("read_only") => PromptToolRequirement::ReadOnly,
+        _ => PromptToolRequirement::None,
+    }
+}
+
+fn evidence_anchor_matches_scope(
+    anchor: &EvidenceTargetAnchor,
+    scope: PromptEvidenceScope,
+) -> bool {
+    matches!(
+        (anchor, scope),
+        (
+            EvidenceTargetAnchor::Workspace(_),
+            PromptEvidenceScope::Workspace
+        ) | (
+            EvidenceTargetAnchor::ExternalUrl(_),
+            PromptEvidenceScope::External
+        ) | (
+            EvidenceTargetAnchor::ExternalSubject(_),
+            PromptEvidenceScope::External
+        ) | (
+            EvidenceTargetAnchor::ExternalUrl(_),
+            PromptEvidenceScope::Browser
+        )
+    )
 }
 
 fn substantive_read_tool(tool: &ToolSpec) -> bool {
@@ -254,44 +366,49 @@ fn substantive_read_tool(tool: &ToolSpec) -> bool {
 fn workspace_knowledge_receipt(
     messages: &mut [Message],
     prompt_contract_epoch: u64,
-) -> Option<(String, String)> {
-    messages.iter_mut().rev().find_map(|message| {
-        let selected_count = message
-            .metadata
-            .get("selected_count")?
-            .parse::<usize>()
-            .ok()?;
-        let trusted = message.role == MessageRole::Reviewer
-            && message.metadata.get("internal").map(String::as_str) == Some("true")
-            && message.metadata.get("kind").map(String::as_str) == Some("knowledge_context")
-            && message
+) -> Option<(usize, String, String)> {
+    messages
+        .iter_mut()
+        .enumerate()
+        .rev()
+        .find_map(|(message_index, message)| {
+            let selected_count = message
                 .metadata
-                .get("context_source_schema")
-                .map(String::as_str)
-                == Some(agent_runtime::CONTEXT_SOURCE_SCHEMA)
-            && selected_count > 0;
-        trusted.then(|| {
-            message
-                .metadata
-                .insert("required_grounding".to_string(), "true".to_string());
-            message.metadata.insert(
-                "prompt_contract_epoch".to_string(),
-                prompt_contract_epoch.to_string(),
-            );
-            message.metadata.insert(
-                "requirement_id".to_string(),
-                PromptEvidenceScope::Workspace.requirement_id().to_string(),
-            );
-            message.metadata.insert(
-                "requirement_ids_json".to_string(),
-                r#"["workspace_grounding"]"#.to_string(),
-            );
-            (
-                format!("selected_count={selected_count}"),
-                message.content.clone(),
-            )
+                .get("selected_count")?
+                .parse::<usize>()
+                .ok()?;
+            let trusted = message.role == MessageRole::Reviewer
+                && message.metadata.get("internal").map(String::as_str) == Some("true")
+                && message.metadata.get("kind").map(String::as_str) == Some("knowledge_context")
+                && message
+                    .metadata
+                    .get("context_source_schema")
+                    .map(String::as_str)
+                    == Some(agent_runtime::CONTEXT_SOURCE_SCHEMA)
+                && selected_count > 0;
+            trusted.then(|| {
+                message
+                    .metadata
+                    .insert("required_grounding".to_string(), "true".to_string());
+                message.metadata.insert(
+                    "prompt_contract_epoch".to_string(),
+                    prompt_contract_epoch.to_string(),
+                );
+                message.metadata.insert(
+                    "requirement_id".to_string(),
+                    PromptEvidenceScope::Workspace.requirement_id().to_string(),
+                );
+                message.metadata.insert(
+                    "requirement_ids_json".to_string(),
+                    r#"["workspace_grounding"]"#.to_string(),
+                );
+                (
+                    message_index,
+                    format!("selected_count={selected_count}"),
+                    message.content.clone(),
+                )
+            })
         })
-    })
 }
 
 fn persisted_collaboration_receipts(

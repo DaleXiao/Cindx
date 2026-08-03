@@ -135,4 +135,5 @@ pub(crate) struct ResolvedToolObservation {
     pub(crate) status: ToolOutcomeStatus,
     pub(crate) observation: String,
     pub(crate) image_paths: Vec<String>,
+    pub(crate) message_metadata: Metadata,
 }

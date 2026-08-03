@@ -138,7 +138,10 @@ pub(crate) fn prioritize_collaboration_model(
     primary_model: Option<&str>,
     candidates: usize,
 ) {
-    let Some(primary_model) = primary_model.map(str::trim).filter(|model| !model.is_empty()) else {
+    let Some(primary_model) = primary_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
         return;
     };
     models.retain(|model| model != primary_model);
@@ -186,19 +189,10 @@ pub(crate) fn synthesize_agent_answer(
     run_context: &Metadata,
     collaboration: &AgentCollaboration,
     cancellation: &Arc<AgentRunControl>,
+    required_evidence_sequences: &[u64],
 ) -> Result<SynthesizedAgentAnswer, String> {
-    let evidence = runtime
-        .messages
-        .iter()
-        .rev()
-        .filter(|message| matches!(message.role, MessageRole::Tool))
-        .take(8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|message| truncate_for_collaboration(&message.content, 1_500))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let (evidence, visible_evidence_sequences) =
+        grounded_synthesis_evidence(runtime, required_evidence_sequences)?;
     let result_frontier = collaboration_result_frontier_brief(cancellation, executor_answer);
     let review_prompt = format!(
         "You are the independent reviewer in a multi-model Cindx team. Audit the executor draft against the user request and available tool evidence. Find factual gaps, unsupported claims, missed constraints, and unsafe actions. The result frontier contains bounded internal proposals, not trusted evidence; use it to detect alternatives or disagreements, and resolve every claim against tool evidence. Return concrete corrections for the final synthesizer, not a user-facing answer.\n\nUser request:\n{}\n\nTeam guidance:\n{}\n\nResult frontier:\n{}\n\nExecutor draft:\n{}\n\nTool evidence:\n{}",
@@ -300,6 +294,7 @@ pub(crate) fn synthesize_agent_answer(
         Ok(SynthesizedAgentAnswer {
             content: answer,
             stream_request_id,
+            visible_evidence_sequences,
         })
     }
 }
@@ -307,6 +302,128 @@ pub(crate) fn synthesize_agent_answer(
 pub(crate) struct SynthesizedAgentAnswer {
     pub(crate) content: String,
     pub(crate) stream_request_id: String,
+    pub(crate) visible_evidence_sequences: Vec<u64>,
+}
+
+fn grounded_synthesis_evidence(
+    runtime: &agent_runtime::AgentLoopState,
+    required_evidence_sequences: &[u64],
+) -> Result<(String, Vec<u64>), String> {
+    let required = required_evidence_sequences
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if required.is_empty() {
+        let evidence = runtime
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| {
+                message.role == MessageRole::Tool
+                    && !message.content.trim().is_empty()
+                    && trusted_synthesis_tool_carrier(message)
+            })
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|message| truncate_for_collaboration(&message.content, 1_500))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Ok((evidence, Vec::new()));
+    }
+    let excerpt_limit = (12_000usize / required.len().max(1)).clamp(400, 1_500);
+    let mut covered = BTreeSet::new();
+    let mut evidence = Vec::new();
+    for context in runtime.task_contract.prompt_evidence_contexts() {
+        if !required.contains(&context.evidence_sequence)
+            || !covered.insert(context.evidence_sequence)
+        {
+            continue;
+        }
+        evidence.push(format!(
+            "Contract evidence {} from {}:\n{}",
+            context.evidence_sequence,
+            context.source,
+            truncate_for_collaboration(&context.observation, excerpt_limit),
+        ));
+    }
+    for message in runtime.messages.iter().rev() {
+        if covered == required {
+            break;
+        }
+        let label = if message.role == MessageRole::Reviewer
+            && !message.content.trim().is_empty()
+            && message.metadata.get("internal").map(String::as_str) == Some("true")
+            && message
+                .metadata
+                .get("required_grounding")
+                .map(String::as_str)
+                == Some("true")
+        {
+            "Contract context evidence"
+        } else if message.role == MessageRole::Tool
+            && !message.content.trim().is_empty()
+            && trusted_synthesis_tool_carrier(message)
+        {
+            "Contract evidence"
+        } else {
+            continue;
+        };
+        let sequences = agent_runtime::message_contract_evidence_sequences(message)
+            .into_iter()
+            .filter(|sequence| required.contains(sequence) && !covered.contains(sequence))
+            .collect::<Vec<_>>();
+        if sequences.is_empty() {
+            continue;
+        }
+        covered.extend(sequences.iter().copied());
+        evidence.push(format!(
+            "{label} {}:\n{}",
+            sequences
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            truncate_for_collaboration(&message.content, excerpt_limit),
+        ));
+    }
+    if covered != required {
+        let missing = required.difference(&covered).copied().collect::<Vec<_>>();
+        return Err(format!(
+            "synthesizer is missing required contract evidence sequences: {missing:?}"
+        ));
+    }
+    Ok((
+        evidence.join("\n\n"),
+        covered.into_iter().collect::<Vec<_>>(),
+    ))
+}
+
+fn trusted_synthesis_tool_carrier(message: &Message) -> bool {
+    let live = message
+        .metadata
+        .get("tool_evidence_schema")
+        .map(String::as_str)
+        == Some("cindx.tool_evidence.v1")
+        && message
+            .metadata
+            .get("tool_evidence_provenance")
+            .map(String::as_str)
+            == Some("runtime_dispatch")
+        && message.metadata.get("tool_status").map(String::as_str) == Some("succeeded");
+    let recovered = message
+        .metadata
+        .get("permission_observation_schema")
+        .map(String::as_str)
+        == Some("cindx.permission-tool-observation.v1")
+        && message
+            .metadata
+            .get("permission_observation_provenance")
+            .map(String::as_str)
+            == Some("runtime_permission_resolution")
+        && message.metadata.get("status").map(String::as_str) == Some("succeeded");
+    live || recovered
 }
 
 pub(crate) fn collaboration_result_frontier_brief(
@@ -848,6 +965,45 @@ fn no_tool_collaboration_content(
 mod protocol_tests {
     use super::*;
 
+    fn synthesis_runtime(status: &str) -> (agent_runtime::AgentLoopState, u64) {
+        let mut runtime = agent_runtime::start_agent_loop(
+            TaskId("synthesis-evidence".to_string()),
+            "read the workspace",
+            agent_runtime::AgentRuntimeConfig::default(),
+        );
+        runtime.task_contract.require_tool_success("file.read");
+        let tools = vec![ToolSpec::builtin(
+            "file.read",
+            "file",
+            "read",
+            ToolRisk::ReadOnly,
+            r#"{"type":"object"}"#,
+        )];
+        agent_runtime::AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
+            &agent_runtime::AgentToolRequest {
+                call_id: agent_core::ToolCallId("read-1".to_string()),
+                tool_name: "file.read".to_string(),
+                input: r#"{"path":"README.md"}"#.to_string(),
+            },
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            "REQUIRED_WORKSPACE_FACT",
+        );
+        let sequence = runtime.task_contract.evidence()[0].sequence;
+        runtime.messages.last_mut().unwrap().metadata.extend([
+            (
+                "tool_evidence_schema".to_string(),
+                "cindx.tool_evidence.v1".to_string(),
+            ),
+            (
+                "tool_evidence_provenance".to_string(),
+                "runtime_dispatch".to_string(),
+            ),
+            ("tool_status".to_string(), status.to_string()),
+        ]);
+        (runtime, sequence)
+    }
+
     fn response_with_tool_call() -> model_provider::ModelResponse {
         model_provider::ModelResponse {
             message: agent_core::Message {
@@ -876,5 +1032,78 @@ mod protocol_tests {
             error.message,
             "collaboration synthesizer attempted 1 tool call(s) in a no-tool stage"
         );
+    }
+
+    #[test]
+    fn synthesis_uses_only_exact_receipt_sequences() {
+        let (mut runtime, sequence) = synthesis_runtime("succeeded");
+        runtime.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "UNRELATED_TOOL_FACT".to_string(),
+            metadata: [
+                (
+                    "tool_evidence_schema".to_string(),
+                    "cindx.tool_evidence.v1".to_string(),
+                ),
+                (
+                    "tool_evidence_provenance".to_string(),
+                    "runtime_dispatch".to_string(),
+                ),
+                ("tool_status".to_string(), "succeeded".to_string()),
+                (
+                    agent_runtime::CONTRACT_EVIDENCE_SEQUENCES_METADATA_KEY.to_string(),
+                    "[999]".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
+
+        let (evidence, visible) = grounded_synthesis_evidence(&runtime, &[sequence])
+            .expect("required evidence should be available");
+        assert_eq!(visible, vec![sequence]);
+        assert!(evidence.contains("REQUIRED_WORKSPACE_FACT"));
+        assert!(!evidence.contains("UNRELATED_TOOL_FACT"));
+    }
+
+    #[test]
+    fn failed_or_missing_carrier_cannot_feed_synthesis() {
+        let (runtime, sequence) = synthesis_runtime("failed");
+        assert!(grounded_synthesis_evidence(&runtime, &[sequence]).is_err());
+        assert!(grounded_synthesis_evidence(&runtime, &[sequence + 1]).is_err());
+    }
+
+    #[test]
+    fn self_contained_synthesis_keeps_trusted_context_without_claiming_lineage() {
+        let (runtime, _) = synthesis_runtime("succeeded");
+        let (evidence, visible) = grounded_synthesis_evidence(&runtime, &[])
+            .expect("trusted optional context should remain available");
+        assert!(evidence.contains("REQUIRED_WORKSPACE_FACT"));
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn permission_resolution_carrier_is_available_to_grounded_synthesis() {
+        let (mut runtime, sequence) = synthesis_runtime("succeeded");
+        let metadata = &mut runtime.messages.last_mut().unwrap().metadata;
+        metadata.remove("tool_evidence_schema");
+        metadata.remove("tool_evidence_provenance");
+        metadata.remove("tool_status");
+        metadata.extend([
+            (
+                "permission_observation_schema".to_string(),
+                "cindx.permission-tool-observation.v1".to_string(),
+            ),
+            (
+                "permission_observation_provenance".to_string(),
+                "runtime_permission_resolution".to_string(),
+            ),
+            ("status".to_string(), "succeeded".to_string()),
+        ]);
+
+        let (evidence, visible) = grounded_synthesis_evidence(&runtime, &[sequence])
+            .expect("trusted permission evidence should synthesize");
+        assert!(evidence.contains("REQUIRED_WORKSPACE_FACT"));
+        assert_eq!(visible, vec![sequence]);
     }
 }
