@@ -34,7 +34,7 @@ fn steered_run_context(initial: &str, steer: &str, epoch: u64) -> Metadata {
 }
 
 fn prompt_evidence_scope(run_context: &Metadata) -> Option<PromptEvidenceScope> {
-    let scopes = prompt_evidence_scopes(run_context);
+    let scopes = prompt_completion_intent(run_context).evidence_scopes;
     assert!(
         scopes.len() <= 1,
         "single-domain fixture produced {scopes:?}"
@@ -238,7 +238,10 @@ fn evidence_scope_is_narrow_and_deterministic() {
                 Some(PromptEvidenceScope::Workspace),
             ),
             ("Review this interface contract", None),
-            ("Implement search in this app", None),
+            (
+                "Implement search in this app",
+                Some(PromptEvidenceScope::Workspace),
+            ),
             ("实现搜索功能", None),
             ("Optimize binary search", None),
             ("Write a short poem about databases", None),
@@ -265,7 +268,8 @@ fn evidence_tools_are_pinned_after_catalog_exposure_planning() {
     ];
     let mut inline = vec![catalog[3].clone()];
 
-    pin_prompt_evidence_tools(&context, &catalog, &mut inline);
+    let scopes = prompt_completion_intent(&context).evidence_scopes;
+    pin_evidence_scope_tools(&scopes, &catalog, &mut inline);
 
     let names = inline
         .iter()
@@ -295,7 +299,7 @@ fn browser_decision_focuses_tools_and_defers_unrelated_computer_controls() {
     let mut registry = ToolRegistry::with_workspace_tools(root);
     registry.install_meta_tools();
 
-    let (tools, scopes) = planned_agent_tools(
+    let (tools, completion_intent) = planned_agent_tools(
         &registry,
         &context,
         "Open the incident dashboard in the browser and create a JSON report",
@@ -306,7 +310,9 @@ fn browser_decision_focuses_tools_and_defers_unrelated_computer_controls() {
         .map(|tool| tool.name.as_str())
         .collect::<BTreeSet<_>>();
 
-    assert!(scopes.contains(&PromptEvidenceScope::Browser));
+    assert!(completion_intent
+        .evidence_scopes
+        .contains(&PromptEvidenceScope::Browser));
     assert!(names.contains("browser.open"));
     assert!(names.contains("browser.extract_text"));
     assert!(names.contains("file.write"));
@@ -373,6 +379,74 @@ fn conductor_effect_and_browser_evidence_are_both_required_for_the_current_epoch
         "{}",
         ToolOutcomeStatus::Succeeded,
         "tool=browser.extract_text\nstatus=succeeded\noutput=\nincident active",
+    );
+    assert_eq!(
+        AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
+        Ok(None)
+    );
+}
+
+#[test]
+fn explicit_software_change_infers_effect_and_postcondition_without_conductor_metadata() {
+    let tools = vec![
+        read_tool("file.read", ToolRisk::ReadOnly),
+        ToolSpec::builtin(
+            "file.write",
+            "file",
+            "write",
+            ToolRisk::WritesWorkspace,
+            r#"{"type":"object"}"#,
+        )
+        .with_effect_semantics(ToolEffectSemantics::Idempotent),
+    ];
+    let context = run_context("Fix the Settings crash in this app", 5);
+    let mut runtime = start_agent_loop(
+        TaskId("inferred-effect".to_string()),
+        "Fix the Settings crash in this app",
+        AgentRuntimeConfig::default(),
+    );
+    apply_run_task_contract(&mut runtime, &context, &tools, None)
+        .expect("inferred effect contract applies");
+    assert_eq!(
+        runtime.task_contract.workspace_verification_policy(),
+        WorkspaceVerificationPolicy::RequiredAfterMutation
+    );
+
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "file.read",
+        r#"{"path":"src/settings.rs"}"#,
+        ToolOutcomeStatus::Succeeded,
+        "tool=file.read\nstatus=succeeded\noutput=crash source",
+    );
+    let effect_gate = AgentKernel::new(&mut runtime, &tools)
+        .completion_gate_for_task()
+        .expect("effect gate evaluates")
+        .expect("read evidence alone is not an effect");
+    assert!(effect_gate.content.contains("prompt_effect"));
+
+    AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
+        &agent_runtime::AgentToolRequest {
+            call_id: ToolCallId("write-settings".to_string()),
+            tool_name: "file.write".to_string(),
+            input: r#"{"path":"src/settings.rs"}"#.to_string(),
+        },
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::WritesWorkspace),
+        "tool=file.write\nstatus=succeeded\noutput=updated",
+    );
+    assert!(AgentKernel::new(&mut runtime, &tools)
+        .completion_gate_for_task()
+        .expect("postcondition gate evaluates")
+        .is_some());
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "file.read",
+        r#"{"path":"src/settings.rs"}"#,
+        ToolOutcomeStatus::Succeeded,
+        "tool=file.read\nstatus=succeeded\noutput=updated source",
     );
     assert_eq!(
         AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
@@ -573,7 +647,7 @@ fn mixed_scopes_require_each_active_domain() {
             "web.search",
         ),
     ] {
-        let scopes = prompt_evidence_scopes(&run_context(objective, 1));
+        let scopes = prompt_completion_intent(&run_context(objective, 1)).evidence_scopes;
         assert_eq!(scopes.len(), 2, "expected two domains for {objective}");
 
         for (only, missing) in [(first, second), (second, first)] {
@@ -584,11 +658,16 @@ fn mixed_scopes_require_each_active_domain() {
             );
             apply_run_task_contract(&mut runtime, &run_context(objective, 1), &tools, None)
                 .expect("contract applies");
+            let only_input = if only == "web.search" {
+                serde_json::json!({ "query": objective }).to_string()
+            } else {
+                "{}".to_string()
+            };
             apply_observation(
                 &mut runtime,
                 &tools,
                 only,
-                "{}",
+                &only_input,
                 ToolOutcomeStatus::Succeeded,
                 &format!("tool={only}\nstatus=succeeded\noutput=\nsubstantive evidence"),
             );
@@ -596,11 +675,16 @@ fn mixed_scopes_require_each_active_domain() {
                 .completion_gate_for_task()
                 .expect("remaining domain is gated")
                 .is_some());
+            let missing_input = if missing == "web.search" {
+                serde_json::json!({ "query": objective }).to_string()
+            } else {
+                "{}".to_string()
+            };
             apply_observation(
                 &mut runtime,
                 &tools,
                 missing,
-                "{}",
+                &missing_input,
                 ToolOutcomeStatus::Succeeded,
                 &format!("tool={missing}\nstatus=succeeded\noutput=\nsubstantive evidence"),
             );
@@ -704,6 +788,80 @@ fn external_retrieval_requires_external_instead_of_workspace_evidence() {
 }
 
 #[test]
+fn explicit_workspace_target_rejects_unrelated_file_evidence() {
+    let tools = vec![read_tool("file.read", ToolRisk::ReadOnly)];
+    let mut runtime = start_agent_loop(
+        TaskId("workspace-target".to_string()),
+        "Audit permission.rs",
+        AgentRuntimeConfig::default(),
+    );
+    let context = run_context("Audit permission.rs", 2);
+    apply_run_task_contract(&mut runtime, &context, &tools, None).expect("contract applies");
+
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "file.read",
+        r#"{"path":"README.md"}"#,
+        ToolOutcomeStatus::Succeeded,
+        "tool=file.read\nstatus=succeeded\noutput=unrelated readme",
+    );
+    assert!(AgentKernel::new(&mut runtime, &tools)
+        .completion_gate_for_task()
+        .expect("wrong target remains gated")
+        .is_some());
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "file.read",
+        r#"{"path":"apps/desktop/src-tauri/src/permission.rs"}"#,
+        ToolOutcomeStatus::Succeeded,
+        "tool=file.read\nstatus=succeeded\noutput=permission implementation",
+    );
+    assert_eq!(
+        AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
+        Ok(None)
+    );
+}
+
+#[test]
+fn named_external_subject_rejects_an_unrelated_search_query() {
+    let tools = vec![read_tool("web.search", ToolRisk::UsesNetwork)];
+    let mut runtime = start_agent_loop(
+        TaskId("external-target".to_string()),
+        "Search the web for Rust async cancellation semantics",
+        AgentRuntimeConfig::default(),
+    );
+    let context = run_context("Search the web for Rust async cancellation semantics", 3);
+    apply_run_task_contract(&mut runtime, &context, &tools, None).expect("contract applies");
+
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "web.search",
+        r#"{"query":"Python package indexes"}"#,
+        ToolOutcomeStatus::Succeeded,
+        "tool=web.search\nstatus=succeeded\noutput=unrelated results",
+    );
+    assert!(AgentKernel::new(&mut runtime, &tools)
+        .completion_gate_for_task()
+        .expect("unrelated query remains gated")
+        .is_some());
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "web.search",
+        r#"{"query":"Rust async cancellation"}"#,
+        ToolOutcomeStatus::Succeeded,
+        "tool=web.search\nstatus=succeeded\noutput=Rust cancellation sources",
+    );
+    assert_eq!(
+        AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
+        Ok(None)
+    );
+}
+
+#[test]
 fn trusted_workspace_knowledge_satisfies_grounding_without_duplicate_read() {
     let tools = vec![read_tool("file.read", ToolRisk::ReadOnly)];
     let mut runtime = start_agent_loop(
@@ -787,6 +945,31 @@ fn trusted_workspace_knowledge_satisfies_grounding_without_duplicate_read() {
     assert_eq!(
         agent_runtime::ContextSourceKind::from_message(grounding),
         Some(agent_runtime::ContextSourceKind::GroundingEvidence)
+    );
+    let sequence = runtime
+        .task_contract
+        .prompt_evidence_sequence(0, "workspace_grounding")
+        .expect("knowledge evidence has exact lineage");
+    assert_eq!(
+        grounding
+            .metadata
+            .get("contract_evidence_sequence")
+            .and_then(|value| value.parse::<u64>().ok()),
+        Some(sequence)
+    );
+    let prepared = AgentKernel::new(&mut runtime, &tools)
+        .prepare_model_turn(None, None, 16_384, 2_048)
+        .expect("knowledge-backed turn should prepare");
+    assert_eq!(prepared.visible_contract_evidence_sequences, vec![sequence]);
+    assert_eq!(
+        prepared
+            .request
+            .messages
+            .iter()
+            .filter(|message| message.content.contains("grounded snippets"))
+            .count(),
+        1,
+        "protected knowledge is not duplicated into another capsule"
     );
 }
 
@@ -916,13 +1099,15 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
         .map(|(scope, _, _)| *scope)
         .collect::<BTreeSet<_>>();
     let context = run_context("Audit, verify online, and inspect the screen", 4);
+    let mut completion_intent = prompt_completion_intent(&context);
+    completion_intent.evidence_scopes = scopes;
 
-    apply_run_task_contract_with_evidence_scopes(
+    apply_run_task_contract_with_completion_intent(
         &mut runtime,
         &context,
         &tools,
         Some(&collaboration),
-        &scopes,
+        &completion_intent,
     )
     .expect("collaboration evidence contract applies");
 

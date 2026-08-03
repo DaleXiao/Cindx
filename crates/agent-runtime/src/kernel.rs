@@ -1,11 +1,12 @@
 use crate::{
     advance_with_model_response, append_internal_instruction, append_steering_instruction,
     append_tool_observation, model_request_for_turn_with_context_budget,
-    model_request_for_turn_with_context_budget_and_overlays, persisted_tool_input_placeholder,
+    model_request_for_turn_with_context_budget_and_overlays,
     record_persisted_tool_outcome_with_risk, record_tool_outcome_with_risk,
     repeated_tool_failure_count, tool_invocation_from_request, AgentAdvance, AgentLoopState,
     AgentTaskStateSnapshot, AgentToolRequest, AgentTurnBudgetExhausted, ContextGovernorReport,
-    ContextInvariantViolation, WorkspaceVerificationPolicy,
+    ContextInvariantViolation, GroundedCompletionReceipt, OutcomeClaimDecision,
+    WorkspaceVerificationPolicy,
 };
 use agent_core::{
     Message, MessageRole, Metadata, ToolCallId, ToolInvocation, ToolOutcomeStatus, ToolRisk,
@@ -38,6 +39,13 @@ pub struct AgentKernelInstruction {
 pub struct PreparedAgentTurn {
     pub request: ModelRequest,
     pub context: ContextGovernorReport,
+    pub visible_contract_evidence_sequences: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroundedCompletionDecision {
+    Deliver(GroundedCompletionReceipt),
+    Repair(AgentKernelInstruction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,46 +156,22 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
     ) -> Result<PreparedAgentTurn, AgentTurnPreparationError> {
         crate::turn_budget::ensure_model_turn_available(self.state)?;
         let has_grounding_evidence = self.state.task_contract.has_prompt_evidence();
+        let steer_epoch = self.state.task_contract.prompt_evidence_epoch();
+        let required_evidence = self
+            .state
+            .task_contract
+            .grounded_completion_required_evidence_sequences(steer_epoch)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         let prompt_evidence_contexts = self.state.task_contract.prompt_evidence_contexts();
         let observation_token_budget = grounding_observation_token_budget(
             context_window_tokens,
             prompt_evidence_contexts.len(),
         );
         let evidence_contexts = prompt_evidence_contexts
-            .into_iter()
+            .iter()
             .map(|context| {
-                let requirement_id = context.requirement_id;
-                let source = context.source;
-                let observation =
-                    bounded_grounding_observation(&context.observation, observation_token_budget);
-                Message {
-                    role: MessageRole::Reviewer,
-                    content: serde_json::json!({
-                        "type": "grounding_evidence",
-                        "trust": "untrusted_tool_data",
-                        "requirementId": requirement_id.clone(),
-                        "source": source.clone(),
-                        "observation": observation,
-                    })
-                    .to_string(),
-                    metadata: [
-                        ("internal".to_string(), "true".to_string()),
-                        ("kind".to_string(), "grounding_evidence_capsule".to_string()),
-                        (
-                            "evidence_schema".to_string(),
-                            "cindx.grounding-evidence.v1".to_string(),
-                        ),
-                        ("required_grounding".to_string(), "true".to_string()),
-                        (
-                            "prompt_contract_epoch".to_string(),
-                            self.state.task_contract.prompt_evidence_epoch().to_string(),
-                        ),
-                        ("requirement_id".to_string(), requirement_id),
-                        ("source".to_string(), source),
-                    ]
-                    .into_iter()
-                    .collect(),
-                }
+                grounding_evidence_message(context, observation_token_budget, steer_epoch)
             })
             .collect::<Vec<_>>();
         let runtime_context = merged_runtime_context(
@@ -195,8 +179,17 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             contract_context.as_deref(),
             has_grounding_evidence,
         );
-        if !evidence_contexts.is_empty() {
-            let (request, context) = model_request_for_turn_with_context_budget_and_overlays(
+        let (mut request, mut context) = if evidence_contexts.is_empty() {
+            model_request_for_turn_with_context_budget(
+                self.state,
+                self.tools,
+                user_instructions,
+                runtime_context.as_deref(),
+                context_window_tokens,
+                max_output_tokens,
+            )
+        } else {
+            model_request_for_turn_with_context_budget_and_overlays(
                 self.state,
                 self.tools,
                 user_instructions,
@@ -204,20 +197,61 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 &evidence_contexts,
                 context_window_tokens,
                 max_output_tokens,
+            )
+        };
+        context.validate_required_invariants()?;
+        if required_evidence.is_empty() {
+            return Ok(PreparedAgentTurn {
+                request,
+                context,
+                visible_contract_evidence_sequences: Vec::new(),
+            });
+        }
+        let initially_visible = crate::grounded_context::visible_required_evidence_sequences(
+            &request.messages,
+            &required_evidence,
+        )
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        let missing_capsules = crate::grounded_context::required_tool_evidence_capsules(
+            self.state,
+            steer_epoch,
+            &initially_visible,
+        );
+        if !missing_capsules.is_empty() {
+            let observation_token_budget = grounding_observation_token_budget(
+                context_window_tokens,
+                prompt_evidence_contexts.len() + missing_capsules.len(),
+            );
+            let overlays = missing_capsules
+                .iter()
+                .map(|capsule| {
+                    contract_tool_evidence_message(capsule, observation_token_budget, steer_epoch)
+                })
+                .collect::<Vec<_>>();
+            reproject_prepared_request_with_overlays(
+                &mut request,
+                &mut context,
+                self.tools,
+                &overlays,
+                context_window_tokens,
+                max_output_tokens,
             );
             context.validate_required_invariants()?;
-            return Ok(PreparedAgentTurn { request, context });
         }
-        let (request, context) = model_request_for_turn_with_context_budget(
-            self.state,
-            self.tools,
-            user_instructions,
-            runtime_context.as_deref(),
-            context_window_tokens,
-            max_output_tokens,
-        );
-        context.validate_required_invariants()?;
-        Ok(PreparedAgentTurn { request, context })
+        let visible_contract_evidence_sequences = if missing_capsules.is_empty() {
+            initially_visible.into_iter().collect()
+        } else {
+            crate::grounded_context::visible_required_evidence_sequences(
+                &request.messages,
+                &required_evidence,
+            )
+        };
+        Ok(PreparedAgentTurn {
+            request,
+            context,
+            visible_contract_evidence_sequences,
+        })
     }
 
     pub fn advance_model_response(&mut self, response: ModelResponse) -> AgentAdvance {
@@ -264,6 +298,63 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 kind: AgentKernelInstructionKind::CompletionVerification,
                 content,
             }))
+    }
+
+    pub fn decide_grounded_completion(
+        &mut self,
+        steer_epoch: u64,
+        answer: &str,
+        visible_evidence_sequences: &[u64],
+    ) -> Result<GroundedCompletionDecision, crate::AgentFailure> {
+        let gate = self.completion_gate_for_task();
+        match gate {
+            Ok(Some(instruction)) => {
+                self.state.task_contract.observe_completion_candidate(
+                    steer_epoch,
+                    self.state.turn,
+                    answer,
+                    OutcomeClaimDecision::RepairRequired,
+                );
+                Ok(GroundedCompletionDecision::Repair(instruction))
+            }
+            Ok(None) => match self.state.task_contract.grounded_completion_receipt(
+                steer_epoch,
+                self.state.turn,
+                answer,
+                visible_evidence_sequences,
+            ) {
+                Ok(receipt) => {
+                    self.state.task_contract.observe_completion_candidate(
+                        steer_epoch,
+                        self.state.turn,
+                        answer,
+                        OutcomeClaimDecision::Accepted,
+                    );
+                    Ok(GroundedCompletionDecision::Deliver(receipt))
+                }
+                Err(issue) => {
+                    self.state.task_contract.observe_completion_candidate(
+                        steer_epoch,
+                        self.state.turn,
+                        answer,
+                        OutcomeClaimDecision::ContractFailed,
+                    );
+                    Err(crate::AgentFailure::contract(
+                        "grounded_completion_invalid",
+                        format!("grounded completion invariant failed: {issue:?}"),
+                    ))
+                }
+            },
+            Err(failure) => {
+                self.state.task_contract.observe_completion_candidate(
+                    steer_epoch,
+                    self.state.turn,
+                    answer,
+                    OutcomeClaimDecision::ContractFailed,
+                );
+                Err(failure)
+            }
+        }
     }
 
     pub fn require_tool_success(&mut self, tool_name: impl Into<String>) {
@@ -330,6 +421,19 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             .replace_prompt_evidence_requirements(epoch, requirements);
     }
 
+    pub fn bind_prompt_evidence_targets(
+        &mut self,
+        epoch: u64,
+        targets: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeSet<crate::EvidenceTargetAnchor>,
+        >,
+    ) {
+        self.state
+            .task_contract
+            .bind_prompt_evidence_targets(epoch, targets);
+    }
+
     pub fn record_prompt_evidence_for_requirement_at(
         &mut self,
         epoch: u64,
@@ -383,6 +487,13 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         risk: Option<&ToolRisk>,
         observation: &str,
     ) {
+        let evidence_watermark = self
+            .state
+            .task_contract
+            .evidence()
+            .last()
+            .map(|evidence| evidence.sequence)
+            .unwrap_or_default();
         record_tool_outcome_with_risk(self.state, &request.tool_name, &request.input, status, risk);
         if matches!(status, ToolOutcomeStatus::Succeeded) {
             let evidence_tool =
@@ -399,6 +510,18 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 );
         }
         append_tool_observation(self.state, request.call_id.clone(), observation);
+        let new_evidence = self
+            .state
+            .task_contract
+            .evidence()
+            .iter()
+            .filter(|evidence| evidence.sequence > evidence_watermark)
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::grounded_context::annotate_latest_tool_observation(
+            &mut self.state.messages,
+            &new_evidence,
+        );
     }
 
     pub fn apply_persisted_tool_observation(
@@ -406,10 +529,18 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         call_id: ToolCallId,
         tool_name: &str,
         input_fingerprint: &str,
+        target_witness: Option<&str>,
         status: &ToolOutcomeStatus,
         risk: Option<&ToolRisk>,
         observation: &str,
     ) {
+        let evidence_watermark = self
+            .state
+            .task_contract
+            .evidence()
+            .last()
+            .map(|evidence| evidence.sequence)
+            .unwrap_or_default();
         record_persisted_tool_outcome_with_risk(
             self.state,
             tool_name,
@@ -419,18 +550,159 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         );
         if matches!(status, ToolOutcomeStatus::Succeeded) {
             let evidence_epoch = self.state.task_contract.prompt_evidence_epoch();
-            let persisted_input = persisted_tool_input_placeholder(input_fingerprint);
+            let mut persisted_input = serde_json::json!({
+                "permission_input_fingerprint": input_fingerprint,
+            });
+            if let Some(target_witness) = target_witness {
+                persisted_input["evidence_target_witness"] =
+                    serde_json::Value::String(target_witness.to_string());
+            }
             self.state
                 .task_contract
-                .record_prompt_tool_evidence_observation_at(
+                .record_persisted_prompt_tool_evidence_observation_at(
                     evidence_epoch,
                     tool_name,
                     tool_name,
-                    &persisted_input,
+                    &persisted_input.to_string(),
                     observation,
                 );
         }
         append_tool_observation(self.state, call_id, observation);
+        let new_evidence = self
+            .state
+            .task_contract
+            .evidence()
+            .iter()
+            .filter(|evidence| evidence.sequence > evidence_watermark)
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::grounded_context::annotate_latest_tool_observation(
+            &mut self.state.messages,
+            &new_evidence,
+        );
+    }
+}
+
+fn reproject_prepared_request_with_overlays(
+    request: &mut ModelRequest,
+    context: &mut ContextGovernorReport,
+    tools: &[ToolSpec],
+    overlays: &[Message],
+    context_window_tokens: u64,
+    max_output_tokens: u64,
+) {
+    let Some(system) = request
+        .messages
+        .first()
+        .filter(|message| message.role == MessageRole::System)
+    else {
+        return;
+    };
+    let previous = context.clone();
+    let (messages, mut reprojected) = crate::context_governor::govern_model_messages_with_overlays(
+        &request.messages[1..],
+        system.content.clone(),
+        overlays,
+        tools,
+        context_window_tokens,
+        max_output_tokens,
+    );
+    reprojected.applied |= previous.applied;
+    reprojected.repair_attempted |= previous.repair_attempted;
+    reprojected.repair_succeeded |= previous.repair_succeeded;
+    reprojected.original_messages = previous.original_messages;
+    reprojected.estimated_original_tokens = reprojected
+        .estimated_original_tokens
+        .max(previous.estimated_original_tokens);
+    reprojected.omitted_messages = reprojected
+        .omitted_messages
+        .saturating_add(previous.omitted_messages);
+    reprojected.omitted_context_sources = previous
+        .omitted_context_sources
+        .into_iter()
+        .chain(reprojected.omitted_context_sources)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for (source, tokens) in previous.omitted_source_tokens {
+        *reprojected.omitted_source_tokens.entry(source).or_default() += tokens;
+    }
+    request.messages = messages;
+    reprojected.insert_metadata(&mut request.metadata);
+    *context = reprojected;
+}
+
+fn grounding_evidence_message(
+    context: &crate::PromptEvidenceContext,
+    observation_token_budget: u64,
+    steer_epoch: u64,
+) -> Message {
+    let observation = bounded_grounding_observation(&context.observation, observation_token_budget);
+    Message {
+        role: MessageRole::Reviewer,
+        content: serde_json::json!({
+            "type": "grounding_evidence",
+            "trust": "untrusted_tool_data",
+            "requirementId": context.requirement_id,
+            "source": context.source,
+            "observation": observation,
+        })
+        .to_string(),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), "grounding_evidence_capsule".to_string()),
+            (
+                "evidence_schema".to_string(),
+                "cindx.grounding-evidence.v1".to_string(),
+            ),
+            ("required_grounding".to_string(), "true".to_string()),
+            ("prompt_contract_epoch".to_string(), steer_epoch.to_string()),
+            ("requirement_id".to_string(), context.requirement_id.clone()),
+            ("source".to_string(), context.source.clone()),
+            (
+                "contract_evidence_sequence".to_string(),
+                context.evidence_sequence.to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
+fn contract_tool_evidence_message(
+    capsule: &crate::grounded_context::RequiredEvidenceCapsule,
+    observation_token_budget: u64,
+    steer_epoch: u64,
+) -> Message {
+    let observation = bounded_grounding_observation(&capsule.observation, observation_token_budget);
+    Message {
+        role: MessageRole::Reviewer,
+        content: serde_json::json!({
+            "type": "contract_tool_evidence",
+            "trust": "untrusted_tool_data",
+            "sources": capsule.sources,
+            "observation": observation,
+        })
+        .to_string(),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            (
+                "kind".to_string(),
+                "contract_tool_evidence_capsule".to_string(),
+            ),
+            (
+                "evidence_schema".to_string(),
+                "cindx.contract-tool-evidence.v1".to_string(),
+            ),
+            ("required_grounding".to_string(), "true".to_string()),
+            ("prompt_contract_epoch".to_string(), steer_epoch.to_string()),
+            (
+                crate::CONTRACT_EVIDENCE_SEQUENCES_METADATA_KEY.to_string(),
+                serde_json::to_string(&capsule.sequences).unwrap_or_else(|_| "[]".to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect(),
     }
 }
 
@@ -617,6 +889,7 @@ mod tests {
                 ToolCallId(call_id.to_string()),
                 &request.tool_name,
                 &input_fingerprint,
+                None,
                 &ToolOutcomeStatus::Denied,
                 Some(&ToolRisk::ReadOnly),
                 "tool=file.read\nstatus=denied\noutput=permission denied",
@@ -659,9 +932,51 @@ mod tests {
             ToolCallId("persisted-success-1".to_string()),
             &request.tool_name,
             &input_fingerprint,
+            None,
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::ReadOnly),
             "tool=file.read\nstatus=succeeded\noutput=workspace evidence",
+        );
+
+        assert_eq!(kernel.completion_gate_for_task(), Ok(None));
+    }
+
+    #[test]
+    fn persisted_permission_witness_preserves_explicit_target_grounding() {
+        let mut state = start_agent_loop(
+            TaskId("persisted-target".to_string()),
+            "open the documented URL",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![ToolSpec::builtin(
+            "browser.open",
+            "browser",
+            "open",
+            ToolRisk::UsesNetwork,
+            r#"{"type":"object"}"#,
+        )];
+        let input = r#"{"url":"https://docs.rs/tokio/latest/tokio/"}"#;
+        let input_fingerprint = crate::tool_input_fingerprint("browser.open", input);
+        let anchors = std::collections::BTreeSet::from([crate::EvidenceTargetAnchor::ExternalUrl(
+            "https://docs.rs/tokio/latest/tokio".to_string(),
+        )]);
+        let witness =
+            crate::evidence_target_witness(input, &anchors, "browser.open", &input_fingerprint, 4)
+                .expect("matching URL should produce a witness");
+        let mut kernel = AgentKernel::new(&mut state, &tools);
+        kernel.replace_prompt_evidence_requirement(4, Some("browser"), ["browser.open"]);
+        kernel.bind_prompt_evidence_targets(
+            4,
+            std::collections::BTreeMap::from([("browser".to_string(), anchors)]),
+        );
+        kernel.apply_persisted_tool_observation(
+            ToolCallId("persisted-browser".to_string()),
+            "browser.open",
+            &input_fingerprint,
+            Some(&witness),
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::UsesNetwork),
+            "substantive browser evidence",
         );
 
         assert_eq!(kernel.completion_gate_for_task(), Ok(None));
@@ -942,5 +1257,124 @@ mod tests {
             .expect_err("invalid projection must be rejected locally");
 
         assert!(matches!(error, AgentTurnPreparationError::Context(_)));
+    }
+
+    #[test]
+    fn prepared_turn_exposes_every_required_action_and_verification_sequence() {
+        let mut state = start_agent_loop(
+            TaskId("grounded-visibility".to_string()),
+            "change and verify the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        state.task_contract.require_tool_success("file.write");
+        state.task_contract.merge_workspace_verification_policy(
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
+        let tools = vec![
+            ToolSpec::builtin(
+                "file.write",
+                "file",
+                "Write a file",
+                ToolRisk::WritesWorkspace,
+                r#"{"type":"object"}"#,
+            ),
+            ToolSpec::builtin(
+                "process.run",
+                "process",
+                "Run tests",
+                ToolRisk::ExecutesProcess,
+                r#"{"type":"object"}"#,
+            ),
+        ];
+        let mut kernel = AgentKernel::new(&mut state, &tools);
+        kernel.apply_tool_observation(
+            &AgentToolRequest {
+                call_id: ToolCallId("write-1".to_string()),
+                tool_name: "file.write".to_string(),
+                input: r#"{"path":"src/lib.rs"}"#.to_string(),
+            },
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+            "tool=file.write\nstatus=succeeded\noutput=updated src/lib.rs",
+        );
+        let write_sequences = crate::message_contract_evidence_sequences(
+            kernel.state().messages.last().expect("write observation"),
+        );
+        assert_eq!(write_sequences.len(), 2, "one call carries both lineages");
+        kernel.apply_tool_observation(
+            &AgentToolRequest {
+                call_id: ToolCallId("verify-1".to_string()),
+                tool_name: "process.run".to_string(),
+                input: r#"{"command":"cargo test"}"#.to_string(),
+            },
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ExecutesProcess),
+            "tool=process.run\nstatus=succeeded\noutput=tests passed",
+        );
+        let required = kernel
+            .state()
+            .task_contract
+            .grounded_completion_required_evidence_sequences(0);
+        let prepared = kernel
+            .prepare_model_turn(None, None, 16_384, 2_048)
+            .expect("verified grounded turn should prepare");
+
+        assert_eq!(prepared.visible_contract_evidence_sequences, required);
+        assert_eq!(
+            prepared.visible_contract_evidence_sequences,
+            crate::grounded_context::visible_required_evidence_sequences(
+                &prepared.request.messages,
+                &required.iter().copied().collect(),
+            )
+        );
+    }
+
+    #[test]
+    fn grounded_completion_decision_delivers_only_with_request_visible_evidence() {
+        let mut state = start_agent_loop(
+            TaskId("grounded-decision".to_string()),
+            "read the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        state.task_contract.require_tool_success("file.read");
+        let tools = vec![read_tool()];
+        let request = request();
+        let mut kernel = AgentKernel::new(&mut state, &tools);
+        kernel.apply_tool_observation(
+            &request,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            "tool=file.read\nstatus=succeeded\noutput=workspace facts",
+        );
+        let prepared = kernel
+            .prepare_model_turn(None, None, 16_384, 2_048)
+            .expect("grounded turn should prepare");
+        assert!(matches!(
+            kernel.decide_grounded_completion(0, "grounded answer", &[]),
+            Err(_)
+        ));
+
+        let mut clean_state = start_agent_loop(
+            TaskId("grounded-decision-visible".to_string()),
+            "read the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        clean_state.task_contract.require_tool_success("file.read");
+        let mut clean_kernel = AgentKernel::new(&mut clean_state, &tools);
+        clean_kernel.apply_tool_observation(
+            &request,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            "tool=file.read\nstatus=succeeded\noutput=workspace facts",
+        );
+        let visible = clean_kernel
+            .prepare_model_turn(None, None, 16_384, 2_048)
+            .expect("grounded turn should prepare")
+            .visible_contract_evidence_sequences;
+        assert!(matches!(
+            clean_kernel.decide_grounded_completion(0, "grounded answer", &visible),
+            Ok(GroundedCompletionDecision::Deliver(_))
+        ));
+        assert!(!prepared.visible_contract_evidence_sequences.is_empty());
     }
 }

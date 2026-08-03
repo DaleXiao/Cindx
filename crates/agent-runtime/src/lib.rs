@@ -11,14 +11,17 @@ const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 
 mod anytime_parallel;
+mod completion_intent;
 mod context_engine;
 mod context_governor;
 mod context_projection;
 mod context_token_ledger;
 mod control;
 mod control_steer;
+mod evidence_target;
 mod execution;
 mod failure;
+mod grounded_context;
 mod grounding_policy;
 #[cfg(test)]
 mod grounding_policy_tests;
@@ -40,6 +43,10 @@ mod worker_policy;
 mod worker_runtime;
 
 pub use anytime_parallel::{AnytimeQuorumExecution, AnytimeQuorumPolicy};
+pub use completion_intent::{
+    prompt_completion_intent, prompt_evidence_target_anchors, PromptCompletionIntent,
+    PromptToolRequirement,
+};
 pub use context_engine::{
     context_prompt_reserve, estimate_context_tokens, estimate_message_tokens, estimate_text_tokens,
     is_user_turn_start, ContextCompactionPlan, ContextCompactionPolicy, ContextEngine,
@@ -55,16 +62,25 @@ pub use control::{
     RunStageUsageSnapshot, RunSteer, RunSteerBatchCommit, RunSteerRequestCommit, RunStopReason,
     RunTerminalCommit, RunToolCallBatchStart, RunToolCallStart,
 };
+pub use evidence_target::{
+    evidence_input_matches_anchors, evidence_target_anchors, evidence_target_witness,
+    EvidenceTargetAnchor,
+};
 pub use execution::{
     run_no_tool_agent, AgentEvidenceCandidate, AgentEvidencePacket, AgentExecutionGuidance,
     NoToolAgentOutcome, NoToolAgentRequest, AGENT_EVIDENCE_PACKET_SCHEMA,
 };
 pub use failure::{AgentFailure, AgentFailureClass, AgentRecoveryAction};
+pub use grounded_context::{
+    message_contract_evidence_sequences, CONTRACT_EVIDENCE_SEQUENCES_METADATA_KEY,
+};
 pub use grounding_policy::{prompt_evidence_scopes, PromptEvidenceScope};
-pub use grounding_tools::{pin_prompt_evidence_tools, tool_matches_evidence_scope};
+pub use grounding_tools::{
+    pin_evidence_scope_tools, pin_prompt_evidence_tools, tool_matches_evidence_scope,
+};
 pub use kernel::{
     AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind, AgentTurnPreparationError,
-    PreparedAgentTurn,
+    GroundedCompletionDecision, PreparedAgentTurn,
 };
 pub use model_transport::{
     exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
@@ -89,14 +105,17 @@ pub use run_budget::{
 pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use task_contract::{
-    AgentTaskContract, ContractEvidence, ContractEvidenceKind, OutcomeClaim, OutcomeClaimDecision,
+    AgentTaskContract, ContractEvidence, ContractEvidenceKind, GroundedCompletionBasis,
+    GroundedCompletionIssue, GroundedCompletionReceipt, OutcomeClaim, OutcomeClaimDecision,
     OutcomeClaimEvidenceStatus, OutcomeClaimKind, OutcomeClaimQuality, OutcomeEvidence,
     OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase, OutcomeLedgerShadow,
     OutcomeObligation, OutcomeObligationKind, OutcomePostcondition, OutcomePostconditionKind,
     OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope, OutcomeTerminal,
     OutcomeTerminalObservation, OutcomeTruncation, PromptEvidenceContext,
-    WorkspaceVerificationPolicy, OUTCOME_LEDGER_DIGEST_METADATA_KEY,
-    OUTCOME_LEDGER_MAX_METADATA_BYTES, OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
+    WorkspaceVerificationPolicy, GROUNDED_COMPLETION_DIGEST_METADATA_KEY,
+    GROUNDED_COMPLETION_METADATA_KEY, GROUNDED_COMPLETION_SCHEMA,
+    OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
+    OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
 };
 pub use task_state::{
     AgentTaskStateError, AgentTaskStateSnapshot, PersistedInteractionSurface,

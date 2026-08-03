@@ -1,10 +1,20 @@
+use crate::evidence_target::{
+    evidence_input_matches_anchors, evidence_target_witness_matches, EvidenceTargetAnchor,
+};
 use crate::{AgentFailure, InteractionSurface};
 use agent_core::{ToolOutcomeStatus, ToolRisk, ToolSpec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod grounded_completion;
 mod outcome_ledger;
+
+pub use grounded_completion::{
+    GroundedCompletionBasis, GroundedCompletionIssue, GroundedCompletionReceipt,
+    GROUNDED_COMPLETION_DIGEST_METADATA_KEY, GROUNDED_COMPLETION_METADATA_KEY,
+    GROUNDED_COMPLETION_SCHEMA,
+};
 
 pub use outcome_ledger::{
     OutcomeClaim, OutcomeClaimDecision, OutcomeClaimEvidenceStatus, OutcomeClaimKind,
@@ -71,6 +81,7 @@ pub struct PromptEvidenceContext {
     pub requirement_id: String,
     pub source: String,
     pub observation: String,
+    pub evidence_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +89,7 @@ struct PromptEvidenceReceipt {
     source: String,
     observation: String,
     context_backed: bool,
+    evidence_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -85,6 +97,8 @@ struct PromptEvidenceReceipt {
 struct PromptEvidenceRequirement {
     #[serde(default)]
     tools: BTreeSet<String>,
+    #[serde(skip, default)]
+    target_anchors: BTreeSet<EvidenceTargetAnchor>,
     // Observations are request-scoped model context, not durable state. A cold
     // restore therefore fails closed and re-observes instead of persisting
     // potentially sensitive tool output or claiming evidence the model cannot see.
@@ -298,6 +312,7 @@ impl AgentTaskContract {
                         id,
                         PromptEvidenceRequirement {
                             tools,
+                            target_anchors: BTreeSet::new(),
                             receipt: None,
                         },
                     )
@@ -307,6 +322,21 @@ impl AgentTaskContract {
                 .retain(|key, _| !key.starts_with("prompt_evidence:"));
         }
         self.prompt_evidence_epoch = epoch;
+    }
+
+    /// Binds conservative, runtime-only targets to the current prompt evidence
+    /// requirements. Raw targets are deliberately excluded from snapshots.
+    pub fn bind_prompt_evidence_targets(
+        &mut self,
+        epoch: u64,
+        targets: BTreeMap<String, BTreeSet<EvidenceTargetAnchor>>,
+    ) {
+        if self.prompt_evidence_epoch != epoch {
+            return;
+        }
+        for (requirement_id, requirement) in &mut self.prompt_evidence_requirements {
+            requirement.target_anchors = targets.get(requirement_id).cloned().unwrap_or_default();
+        }
     }
 
     pub fn replace_prompt_evidence_requirement<I, S>(
@@ -347,7 +377,15 @@ impl AgentTaskContract {
         receipt: &str,
         observation: &str,
     ) -> bool {
-        self.record_prompt_evidence_at(epoch, requirement_id, source, receipt, observation, false)
+        self.record_prompt_evidence_at(
+            epoch,
+            requirement_id,
+            source,
+            receipt,
+            observation,
+            false,
+            false,
+        )
     }
 
     pub fn record_prompt_context_evidence_for_requirement_at(
@@ -358,7 +396,15 @@ impl AgentTaskContract {
         receipt: &str,
         observation: &str,
     ) -> bool {
-        self.record_prompt_evidence_at(epoch, requirement_id, source, receipt, observation, true)
+        self.record_prompt_evidence_at(
+            epoch,
+            requirement_id,
+            source,
+            receipt,
+            observation,
+            true,
+            false,
+        )
     }
 
     fn record_prompt_evidence_at(
@@ -369,6 +415,7 @@ impl AgentTaskContract {
         receipt: &str,
         observation: &str,
         context_backed: bool,
+        target_witness_trusted: bool,
     ) -> bool {
         if self.prompt_evidence_epoch != epoch
             || source.trim().is_empty()
@@ -376,23 +423,40 @@ impl AgentTaskContract {
         {
             return false;
         }
+        let Some(requirement) = self.prompt_evidence_requirements.get(requirement_id) else {
+            return false;
+        };
+        if requirement.tools.contains(source)
+            && !evidence_input_matches_anchors(receipt, &requirement.target_anchors)
+            && !(target_witness_trusted
+                && evidence_target_witness_matches(
+                    receipt,
+                    &requirement.target_anchors,
+                    source,
+                    epoch,
+                ))
+        {
+            return false;
+        }
+        if requirement.receipt.is_some() {
+            return true;
+        }
+        self.record_evidence(ContractEvidenceKind::Grounding, source, receipt);
+        let evidence_sequence = self.next_sequence;
         let Some(requirement) = self.prompt_evidence_requirements.get_mut(requirement_id) else {
             return false;
         };
-        let first_receipt = requirement.receipt.is_none();
         requirement.receipt = Some(PromptEvidenceReceipt {
             source: source.to_string(),
             observation: bounded_grounding_excerpt(observation),
             context_backed,
+            evidence_sequence,
         });
         let gate_key = format!(
             "prompt_evidence:{}:{requirement_id}",
             self.prompt_evidence_epoch
         );
         self.gate_attempts.remove(&gate_key);
-        if first_receipt {
-            self.record_evidence(ContractEvidenceKind::Grounding, source, receipt);
-        }
         true
     }
 
@@ -403,6 +467,43 @@ impl AgentTaskContract {
         source: &str,
         receipt: &str,
         observation: &str,
+    ) -> bool {
+        self.record_prompt_tool_evidence_observation_with_trust_at(
+            epoch,
+            tool_name,
+            source,
+            receipt,
+            observation,
+            false,
+        )
+    }
+
+    pub fn record_persisted_prompt_tool_evidence_observation_at(
+        &mut self,
+        epoch: u64,
+        tool_name: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+    ) -> bool {
+        self.record_prompt_tool_evidence_observation_with_trust_at(
+            epoch,
+            tool_name,
+            source,
+            receipt,
+            observation,
+            true,
+        )
+    }
+
+    fn record_prompt_tool_evidence_observation_with_trust_at(
+        &mut self,
+        epoch: u64,
+        tool_name: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+        target_witness_trusted: bool,
     ) -> bool {
         if self.prompt_evidence_epoch != epoch || !substantive_observation(observation) {
             return false;
@@ -415,12 +516,14 @@ impl AgentTaskContract {
             .collect::<Vec<_>>();
         let mut recorded = false;
         for requirement_id in requirement_ids {
-            recorded |= self.record_prompt_evidence_for_requirement_at(
+            recorded |= self.record_prompt_evidence_at(
                 epoch,
                 &requirement_id,
                 source,
                 receipt,
                 observation,
+                false,
+                target_witness_trusted,
             );
         }
         recorded
@@ -435,6 +538,7 @@ impl AgentTaskContract {
                         requirement_id: requirement_id.clone(),
                         source: receipt.source.clone(),
                         observation: receipt.observation.clone(),
+                        evidence_sequence: receipt.evidence_sequence,
                     })
                 })
             })
@@ -445,6 +549,18 @@ impl AgentTaskContract {
         self.prompt_evidence_requirements
             .values()
             .any(|requirement| requirement.receipt.is_some())
+    }
+
+    pub fn prompt_evidence_sequence(&self, epoch: u64, requirement_id: &str) -> Option<u64> {
+        (self.prompt_evidence_epoch == epoch)
+            .then(|| {
+                self.prompt_evidence_requirements
+                    .get(requirement_id)?
+                    .receipt
+                    .as_ref()
+                    .map(|receipt| receipt.evidence_sequence)
+            })
+            .flatten()
     }
 
     pub fn prompt_evidence_epoch(&self) -> u64 {

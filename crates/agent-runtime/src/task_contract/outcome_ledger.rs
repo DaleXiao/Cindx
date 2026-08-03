@@ -721,10 +721,14 @@ impl AgentTaskContract {
         }
         for (requirement_id, requirement) in &self.prompt_evidence_requirements {
             let evidence_sequence = requirement.receipt.as_ref().and_then(|receipt| {
-                self.latest_evidence_sequence(|evidence| {
-                    evidence.kind == ContractEvidenceKind::Grounding
-                        && evidence.source == receipt.source
-                })
+                self.evidence
+                    .iter()
+                    .find(|evidence| {
+                        evidence.sequence == receipt.evidence_sequence
+                            && evidence.kind == ContractEvidenceKind::Grounding
+                            && evidence.source == receipt.source
+                    })
+                    .map(|evidence| evidence.sequence)
             });
             obligations.push(OutcomeObligation {
                 id: outcome_id(&format!(
@@ -734,7 +738,7 @@ impl AgentTaskContract {
                 kind: OutcomeObligationKind::Grounding,
                 scope: OutcomeScope::Steer,
                 steer_epoch: Some(self.prompt_evidence_epoch),
-                satisfaction: if requirement.receipt.is_some() {
+                satisfaction: if evidence_sequence.is_some() {
                     OutcomeSatisfaction::Satisfied
                 } else {
                     OutcomeSatisfaction::Pending

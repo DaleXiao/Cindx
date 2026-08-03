@@ -30,6 +30,30 @@ fn terminal_selection_stage(
         .unwrap_or_else(|| fallback_stage.to_string())
 }
 
+fn terminal_selection_is_eligible(
+    candidate: &agent_runtime::BestKnownResult,
+    delivered_answer: &str,
+    exact_content_required: bool,
+) -> bool {
+    candidate.deliverable && (!exact_content_required || candidate.content == delivered_answer)
+}
+
+fn grounded_completion_quality(basis: agent_runtime::GroundedCompletionBasis) -> ResultQuality {
+    match basis {
+        agent_runtime::GroundedCompletionBasis::SelfContained => ResultQuality::Substantive,
+        agent_runtime::GroundedCompletionBasis::EvidenceVisible => ResultQuality::Grounded,
+        agent_runtime::GroundedCompletionBasis::PostconditionVerified => ResultQuality::Verified,
+    }
+}
+
+fn grounded_completion_basis_label(basis: agent_runtime::GroundedCompletionBasis) -> &'static str {
+    match basis {
+        agent_runtime::GroundedCompletionBasis::SelfContained => "self_contained",
+        agent_runtime::GroundedCompletionBasis::EvidenceVisible => "evidence_visible",
+        agent_runtime::GroundedCompletionBasis::PostconditionVerified => "postcondition_verified",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_agent_completion(
     app: &tauri::AppHandle,
@@ -45,26 +69,38 @@ pub(crate) fn finalize_agent_completion(
     session_id: Option<&str>,
     streamed_output: bool,
     answer: String,
+    mut grounded_completion_receipt: agent_runtime::GroundedCompletionReceipt,
     epoch_lease: agent_runtime::RunEpochLease,
 ) -> Result<AgentCompletionOutcome, String> {
     if !cancellation.execution_epoch_lease_is_current(epoch_lease) {
         emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
         return Ok(AgentCompletionOutcome::RestartAfterSteer);
     }
+    let receipt_sequences = grounded_completion_receipt
+        .visible_evidence_sequences
+        .clone();
+    grounded_completion_receipt = runtime
+        .task_contract
+        .rebind_grounded_completion_receipt(
+            &grounded_completion_receipt,
+            epoch_lease.epoch(),
+            runtime.turn,
+            &answer,
+            &receipt_sequences,
+        )
+        .map_err(|issue| format!("executor receipt validation failed: {issue:?}"))?;
     let (completion_evidence, routing_learning_eligible) = completion_learning_signal(runtime);
     let tool_evidence =
         crate::agent_result_evidence::completion_tool_evidence(runtime, epoch_lease.epoch());
+    let executor_quality = grounded_completion_quality(grounded_completion_receipt.basis);
     cancellation.record_best_known_result_at(
         epoch_lease.epoch(),
         "executor",
         &answer,
-        if tool_evidence.grounded_count > 0 {
-            ResultQuality::Grounded
-        } else {
-            ResultQuality::Substantive
-        },
-        tool_evidence.grounded_count,
-        false,
+        executor_quality,
+        grounded_completion_receipt.visible_evidence_sequences.len(),
+        grounded_completion_receipt.basis
+            == agent_runtime::GroundedCompletionBasis::PostconditionVerified,
         true,
     );
 
@@ -82,8 +118,47 @@ pub(crate) fn finalize_agent_completion(
             run_context,
             collaboration,
             cancellation,
+            &grounded_completion_receipt.visible_evidence_sequences,
         ) {
-            Ok(answer) => (answer.content, true, answer.stream_request_id),
+            Ok(synthesized_answer) => {
+                match runtime.task_contract.rebind_grounded_completion_receipt(
+                    &grounded_completion_receipt,
+                    epoch_lease.epoch(),
+                    runtime.turn,
+                    &synthesized_answer.content,
+                    &synthesized_answer.visible_evidence_sequences,
+                ) {
+                    Ok(receipt) => {
+                        grounded_completion_receipt = receipt;
+                        (
+                            synthesized_answer.content,
+                            true,
+                            synthesized_answer.stream_request_id,
+                        )
+                    }
+                    Err(_) => {
+                        emit_agent_stream_delta(
+                            app,
+                            &synthesized_answer.stream_request_id,
+                            session_id,
+                            "",
+                            false,
+                            true,
+                            None,
+                        );
+                        emit_agent_stream_delta(
+                            app,
+                            &synthesized_answer.stream_request_id,
+                            session_id,
+                            &answer,
+                            false,
+                            false,
+                            None,
+                        );
+                        (answer.clone(), false, synthesized_answer.stream_request_id)
+                    }
+                }
+            }
             Err(_)
                 if !cancellation.execution_epoch_lease_is_current(epoch_lease)
                     && !agent_run_should_stop(cancellation) =>
@@ -120,35 +195,35 @@ pub(crate) fn finalize_agent_completion(
 
     let terminal_result_stage = if synthesized {
         "synthesizer"
-    } else if tool_evidence.verified_postcondition_count > 0 {
+    } else if grounded_completion_receipt.basis
+        == agent_runtime::GroundedCompletionBasis::PostconditionVerified
+    {
         "verified_executor"
-    } else if tool_evidence.grounded_count > 0 {
+    } else if grounded_completion_receipt.basis
+        == agent_runtime::GroundedCompletionBasis::EvidenceVisible
+    {
         "grounded_executor"
     } else {
         "executor"
     };
-    let terminal_result_quality = if synthesized {
-        ResultQuality::Synthesized
-    } else if tool_evidence.verified_postcondition_count > 0 {
-        ResultQuality::Verified
-    } else if tool_evidence.grounded_count > 0 {
-        ResultQuality::Grounded
-    } else {
-        ResultQuality::Substantive
-    };
-    let terminal_result_verified = tool_evidence.verified_postcondition_count > 0;
+    let terminal_result_quality = grounded_completion_quality(grounded_completion_receipt.basis);
+    let terminal_result_verified = grounded_completion_receipt.basis
+        == agent_runtime::GroundedCompletionBasis::PostconditionVerified;
     cancellation.record_best_known_result_at(
         epoch_lease.epoch(),
         terminal_result_stage,
         &final_answer,
         terminal_result_quality,
-        tool_evidence.grounded_count,
+        grounded_completion_receipt.visible_evidence_sequences.len(),
         terminal_result_verified,
         true,
     );
-    let terminal_selection = cancellation
-        .best_known_result()
-        .filter(|candidate| candidate.deliverable);
+    let exact_content_required = synthesized
+        || grounded_completion_receipt.basis
+            != agent_runtime::GroundedCompletionBasis::SelfContained;
+    let terminal_selection = cancellation.best_known_result().filter(|candidate| {
+        terminal_selection_is_eligible(candidate, &final_answer, exact_content_required)
+    });
     let terminal_selection_override =
         terminal_selection_overrides(terminal_selection.as_ref(), &final_answer);
     let persist_selected_terminal_message = synthesized || terminal_selection_override;
@@ -167,6 +242,16 @@ pub(crate) fn finalize_agent_completion(
             false,
             None,
         );
+        grounded_completion_receipt = runtime
+            .task_contract
+            .rebind_grounded_completion_receipt(
+                &grounded_completion_receipt,
+                epoch_lease.epoch(),
+                runtime.turn,
+                &final_answer,
+                &grounded_completion_receipt.visible_evidence_sequences,
+            )
+            .map_err(|issue| format!("terminal receipt rebind failed: {issue:?}"))?;
     }
     let delivered_selection =
         terminal_selection_for_delivered(terminal_selection.as_ref(), &final_answer);
@@ -180,25 +265,180 @@ pub(crate) fn finalize_agent_completion(
                 model_turn: runtime.turn,
                 answer: &final_answer,
                 selected_stage: &terminal_selected_stage,
-                selector_quality: delivered_selection
-                    .map(|candidate| candidate.quality)
-                    .unwrap_or(terminal_result_quality),
-                selector_marked_verified: delivered_selection
-                    .map(|candidate| candidate.verified)
-                    .unwrap_or(terminal_result_verified),
-                selector_marked_deliverable: delivered_selection
-                    .map(|candidate| candidate.deliverable)
-                    .unwrap_or(true),
-                selector_evidence_count: delivered_selection
-                    .map(|candidate| candidate.evidence_count)
-                    .unwrap_or(tool_evidence.grounded_count),
-                trusted_evidence_sequences: &tool_evidence.trusted_contract_sequences,
+                selector_quality: terminal_result_quality,
+                selector_marked_verified: terminal_result_verified,
+                selector_marked_deliverable: true,
+                selector_evidence_count: grounded_completion_receipt
+                    .visible_evidence_sequences
+                    .len(),
+                trusted_evidence_sequences: &grounded_completion_receipt.visible_evidence_sequences,
             });
 
     let completion_progress = cancellation.progress();
     let completion_resources = cancellation.resource_usage();
     let completion_usage =
         crate::model_resource_runtime::learning_usage_completeness(&completion_resources);
+    let selected_terminal_message_metadata = if persist_selected_terminal_message {
+        let mut metadata = metadata_with_context(
+            [
+                (
+                    "collaboration_final".to_string(),
+                    collaboration.is_some().to_string(),
+                ),
+                ("terminal_selected".to_string(), "true".to_string()),
+                (
+                    "model".to_string(),
+                    if terminal_selection_override {
+                        "result-frontier".to_string()
+                    } else {
+                        config.model_for_role(&ModelRole::Summarizer)
+                    },
+                ),
+                (
+                    "terminal_selected_stage".to_string(),
+                    terminal_selected_stage.clone(),
+                ),
+                (
+                    "terminal_selection_override".to_string(),
+                    terminal_selection_override.to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        );
+        if !grounded_completion_receipt.insert_metadata(&mut metadata) {
+            return Err("invalid grounded completion receipt for terminal message".to_string());
+        }
+        Some(metadata)
+    } else {
+        None
+    };
+    let mut terminal_metadata = [
+        ("answer_length".to_string(), final_answer.len().to_string()),
+        (
+            "collaboration".to_string(),
+            collaboration.is_some().to_string(),
+        ),
+        (
+            "collaboration_synthesized".to_string(),
+            synthesized.to_string(),
+        ),
+        (
+            "terminal_selected_stage".to_string(),
+            terminal_selected_stage.clone(),
+        ),
+        (
+            "terminal_selection_override".to_string(),
+            terminal_selection_override.to_string(),
+        ),
+        (
+            "elapsed_ms".to_string(),
+            completion_progress.elapsed.as_millis().to_string(),
+        ),
+        (
+            "model_calls".to_string(),
+            completion_progress.model_calls.to_string(),
+        ),
+        (
+            "tool_calls".to_string(),
+            completion_progress.tool_calls.to_string(),
+        ),
+        (
+            "agent_turns".to_string(),
+            completion_progress.agent_turns.to_string(),
+        ),
+        (
+            "repair_attempts".to_string(),
+            completion_progress.repair_attempts.to_string(),
+        ),
+        (
+            "completion_evidence".to_string(),
+            completion_evidence.to_string(),
+        ),
+        (
+            "successful_tool_evidence".to_string(),
+            tool_evidence.grounded_count.to_string(),
+        ),
+        (
+            "verified_postcondition_evidence".to_string(),
+            tool_evidence.verified_postcondition_count.to_string(),
+        ),
+        (
+            "completion_verification_state".to_string(),
+            grounded_completion_basis_label(grounded_completion_receipt.basis).to_string(),
+        ),
+        (
+            "grounded_completion_basis".to_string(),
+            grounded_completion_basis_label(grounded_completion_receipt.basis).to_string(),
+        ),
+        (
+            "user_approval_state".to_string(),
+            "not_observed".to_string(),
+        ),
+        (
+            "routing_learning_eligible".to_string(),
+            routing_learning_eligible.to_string(),
+        ),
+        (
+            "verification_gate_requests".to_string(),
+            runtime.verification_gate_requests.to_string(),
+        ),
+        (
+            "interaction_verification_gate_requests".to_string(),
+            runtime.interaction_verification_gate_requests.to_string(),
+        ),
+        (
+            "verified_interactions".to_string(),
+            runtime.verified_interactions.to_string(),
+        ),
+        (
+            "pending_interaction_verifications".to_string(),
+            runtime.pending_interaction_verifications.len().to_string(),
+        ),
+        (
+            "checkpoints".to_string(),
+            completion_progress.checkpoints.to_string(),
+        ),
+        (
+            "observations".to_string(),
+            completion_progress.observations.to_string(),
+        ),
+        (
+            "budget_extensions".to_string(),
+            completion_progress.budget_extensions.to_string(),
+        ),
+        ("last_stage".to_string(), completion_progress.stage.clone()),
+        ("steer_epoch".to_string(), epoch_lease.epoch().to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    if let Some(collaboration) = collaboration {
+        terminal_metadata.insert("collaboration_id".to_string(), collaboration.id.clone());
+    }
+    crate::model_resource_runtime::add_model_resource_snapshot_metadata(
+        &mut terminal_metadata,
+        &completion_resources,
+    );
+    if !grounded_completion_receipt.insert_metadata(&mut terminal_metadata) {
+        return Err("invalid grounded completion receipt".to_string());
+    }
+    terminal_metadata.insert(
+        "grounded_completion_status".to_string(),
+        "recorded".to_string(),
+    );
+    if !terminal_outcome_ledger.insert_metadata(&mut terminal_metadata) {
+        return Err("invalid terminal outcome ledger".to_string());
+    }
+    terminal_metadata.insert("outcome_ledger_status".to_string(), "recorded".to_string());
+    if agent_runtime::GroundedCompletionReceipt::from_terminal_metadata(
+        &terminal_metadata,
+        &final_answer,
+    )
+    .is_none()
+    {
+        return Err("grounded terminal lineage validation failed".to_string());
+    }
     let terminal_commit = cancellation.commit_terminal_result_with(epoch_lease, || {
         let mut store = state
             .store
@@ -206,40 +446,13 @@ pub(crate) fn finalize_agent_completion(
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         store
             .with_immediate_transaction(|store| {
-                if persist_selected_terminal_message {
+                if let Some(message_metadata) = selected_terminal_message_metadata {
                     append_message_event_with_metadata(
                         store,
                         &runtime.task_id,
                         MessageRole::Assistant,
                         &final_answer,
-                        metadata_with_context(
-                            [
-                                (
-                                    "collaboration_final".to_string(),
-                                    collaboration.is_some().to_string(),
-                                ),
-                                ("terminal_selected".to_string(), "true".to_string()),
-                                (
-                                    "model".to_string(),
-                                    if terminal_selection_override {
-                                        "result-frontier".to_string()
-                                    } else {
-                                        config.model_for_role(&ModelRole::Summarizer)
-                                    },
-                                ),
-                                (
-                                    "terminal_selected_stage".to_string(),
-                                    terminal_selected_stage.clone(),
-                                ),
-                                (
-                                    "terminal_selection_override".to_string(),
-                                    terminal_selection_override.to_string(),
-                                ),
-                            ]
-                            .into_iter()
-                            .collect(),
-                            run_context,
-                        ),
+                        message_metadata,
                     )?;
                 }
                 let workflow_terminal = collaboration.and_then(|collaboration| {
@@ -261,130 +474,22 @@ pub(crate) fn finalize_agent_completion(
                                     == Some(epoch_lease.epoch())
                         })
                 });
-                let mut terminal_metadata = [
-                    ("answer_length".to_string(), final_answer.len().to_string()),
-                    (
-                        "collaboration".to_string(),
-                        collaboration.is_some().to_string(),
+                let mut terminal_metadata = terminal_metadata;
+                let learning_tool_evidence = crate::agent_result_evidence::CompletionToolEvidence {
+                    grounded_count: grounded_completion_receipt.visible_evidence_sequences.len(),
+                    verified_postcondition_count: usize::from(
+                        grounded_completion_receipt.basis
+                            == agent_runtime::GroundedCompletionBasis::PostconditionVerified,
                     ),
-                    (
-                        "collaboration_synthesized".to_string(),
-                        synthesized.to_string(),
-                    ),
-                    (
-                        "terminal_selected_stage".to_string(),
-                        terminal_selected_stage.clone(),
-                    ),
-                    (
-                        "terminal_selection_override".to_string(),
-                        terminal_selection_override.to_string(),
-                    ),
-                    (
-                        "elapsed_ms".to_string(),
-                        completion_progress.elapsed.as_millis().to_string(),
-                    ),
-                    (
-                        "model_calls".to_string(),
-                        completion_progress.model_calls.to_string(),
-                    ),
-                    (
-                        "tool_calls".to_string(),
-                        completion_progress.tool_calls.to_string(),
-                    ),
-                    (
-                        "agent_turns".to_string(),
-                        completion_progress.agent_turns.to_string(),
-                    ),
-                    (
-                        "repair_attempts".to_string(),
-                        completion_progress.repair_attempts.to_string(),
-                    ),
-                    (
-                        "completion_evidence".to_string(),
-                        completion_evidence.to_string(),
-                    ),
-                    (
-                        "successful_tool_evidence".to_string(),
-                        tool_evidence.grounded_count.to_string(),
-                    ),
-                    (
-                        "verified_postcondition_evidence".to_string(),
-                        tool_evidence.verified_postcondition_count.to_string(),
-                    ),
-                    (
-                        "completion_verification_state".to_string(),
-                        if tool_evidence.verified_postcondition_count > 0 {
-                            "verified_postcondition"
-                        } else {
-                            "not_verified"
-                        }
-                        .to_string(),
-                    ),
-                    (
-                        "user_approval_state".to_string(),
-                        "not_observed".to_string(),
-                    ),
-                    (
-                        "routing_learning_eligible".to_string(),
-                        routing_learning_eligible.to_string(),
-                    ),
-                    (
-                        "verification_gate_requests".to_string(),
-                        runtime.verification_gate_requests.to_string(),
-                    ),
-                    (
-                        "interaction_verification_gate_requests".to_string(),
-                        runtime.interaction_verification_gate_requests.to_string(),
-                    ),
-                    (
-                        "verified_interactions".to_string(),
-                        runtime.verified_interactions.to_string(),
-                    ),
-                    (
-                        "pending_interaction_verifications".to_string(),
-                        runtime.pending_interaction_verifications.len().to_string(),
-                    ),
-                    (
-                        "checkpoints".to_string(),
-                        completion_progress.checkpoints.to_string(),
-                    ),
-                    (
-                        "observations".to_string(),
-                        completion_progress.observations.to_string(),
-                    ),
-                    (
-                        "budget_extensions".to_string(),
-                        completion_progress.budget_extensions.to_string(),
-                    ),
-                    ("last_stage".to_string(), completion_progress.stage.clone()),
-                    ("steer_epoch".to_string(), epoch_lease.epoch().to_string()),
-                ]
-                .into_iter()
-                .collect::<Metadata>();
-                if let Some(collaboration) = collaboration {
-                    terminal_metadata
-                        .insert("collaboration_id".to_string(), collaboration.id.clone());
-                }
-                crate::model_resource_runtime::add_model_resource_snapshot_metadata(
-                    &mut terminal_metadata,
-                    &completion_resources,
-                );
-                let outcome_ledger_recorded =
-                    terminal_outcome_ledger.insert_metadata(&mut terminal_metadata);
-                terminal_metadata.insert(
-                    "outcome_ledger_status".to_string(),
-                    if outcome_ledger_recorded {
-                        "recorded"
-                    } else {
-                        "omitted_invalid"
-                    }
-                    .to_string(),
-                );
+                    trusted_contract_sequences: grounded_completion_receipt
+                        .visible_evidence_sequences
+                        .clone(),
+                };
                 let learning_evidence = crate::agent_result_evidence::completion_learning_evidence(
                     run_context,
                     completion_usage,
                     epoch_lease.epoch(),
-                    tool_evidence,
+                    learning_tool_evidence,
                     workflow_terminal.as_ref(),
                 );
                 if let Some(encoded) = learning_evidence.to_metadata_value() {
@@ -486,5 +591,42 @@ mod tests {
             "verified_executor"
         );
         assert_eq!(terminal_selection_stage(None, "synthesizer"), "synthesizer");
+    }
+
+    #[test]
+    fn evidence_bound_result_cannot_be_replaced_by_an_unreceipted_frontier_candidate() {
+        let selected = candidate("different", "frontier");
+        assert!(!terminal_selection_is_eligible(&selected, "answer", true));
+        assert!(terminal_selection_is_eligible(&selected, "answer", false));
+        let exact = candidate("answer", "frontier");
+        assert!(terminal_selection_is_eligible(&exact, "answer", true));
+    }
+
+    #[test]
+    fn successful_synthesis_is_not_replaced_by_a_different_executor_candidate() {
+        let longer_executor = candidate("a much longer executor draft", "executor");
+        assert!(!terminal_selection_is_eligible(
+            &longer_executor,
+            "short synthesis",
+            true
+        ));
+    }
+
+    #[test]
+    fn synthesis_stage_never_inflates_epistemic_quality() {
+        assert_eq!(
+            grounded_completion_quality(agent_runtime::GroundedCompletionBasis::SelfContained),
+            ResultQuality::Substantive
+        );
+        assert_eq!(
+            grounded_completion_quality(agent_runtime::GroundedCompletionBasis::EvidenceVisible),
+            ResultQuality::Grounded
+        );
+        assert_eq!(
+            grounded_completion_quality(
+                agent_runtime::GroundedCompletionBasis::PostconditionVerified
+            ),
+            ResultQuality::Verified
+        );
     }
 }
