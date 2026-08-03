@@ -50,17 +50,15 @@ fn bind_matched_prompt_evidence(
     candidate_id: &str,
     stable_id: &str,
 ) {
-    model
-        .attempts
-        .retain(|_, attempt| {
-            let profiles = attempt
-                .started
-                .treatments
-                .iter()
-                .map(|treatment| treatment.profile_id.as_str())
-                .collect::<BTreeSet<_>>();
-            profiles != BTreeSet::from([candidate_id, stable_id])
-        });
+    model.attempts.retain(|_, attempt| {
+        let profiles = attempt
+            .started
+            .treatments
+            .iter()
+            .map(|treatment| treatment.profile_id.as_str())
+            .collect::<BTreeSet<_>>();
+        profiles != BTreeSet::from([candidate_id, stable_id])
+    });
     let cases = model
         .observations
         .iter()
@@ -1725,6 +1723,48 @@ fn adaptive_quality_gate_is_bounded_and_requires_safe_passing_score() {
 }
 
 #[test]
+fn default_provider_quality_review_prefers_a_distinct_hidden_evaluator_model() {
+    let openai = ProviderConfig::default();
+    let openai_participants = [
+        openai.model_for_conductor(),
+        openai.model_for_role(&ModelRole::Planner),
+        openai.model_for_role(&ModelRole::Executor),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        adaptive_quality_reviewer_models(&openai, &openai_participants)
+            .first()
+            .map(String::as_str),
+        Some("gpt-4.1-mini")
+    );
+
+    let alibaba = ProviderConfig {
+        provider_id: PROVIDER_ALIBABA_CN.to_string(),
+        model: "qwen3.7-plus".to_string(),
+        conductor_model: "qwen3.7-plus".to_string(),
+        planner_model: "qwen3.7-plus".to_string(),
+        executor_model: "qwen3.7-plus".to_string(),
+        reviewer_model: "qwen3.7-plus".to_string(),
+        summarizer_model: "qwen3.7-flash".to_string(),
+        ..ProviderConfig::default()
+    };
+    let alibaba_participants = [
+        alibaba.model_for_conductor(),
+        alibaba.model_for_role(&ModelRole::Planner),
+        alibaba.model_for_role(&ModelRole::Executor),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        adaptive_quality_reviewer_models(&alibaba, &alibaba_participants)
+            .first()
+            .map(String::as_str),
+        Some("qwen3.7-flash")
+    );
+}
+
+#[test]
 fn adaptive_quality_search_preserves_the_safest_highest_scoring_anchor() {
     let anchor = CollaborationQualityPayload {
         pass: false,
@@ -2178,11 +2218,9 @@ fn recovery_identity_stays_on_root_prompt_after_steer() {
     ]
     .into_iter()
     .collect();
-    let recovery = crate::agent_recovery_identity::resolve_agent_recovery_identity(
-        &events,
-        &recovery_context,
-    )
-        .expect("recovery identity should resolve");
+    let recovery =
+        crate::agent_recovery_identity::resolve_agent_recovery_identity(&events, &recovery_context)
+            .expect("recovery identity should resolve");
     assert_eq!(recovery.identity.source_run_id, "run-a");
     assert_eq!(recovery.identity.user_turn_sequence, 21);
     assert_eq!(
@@ -3913,15 +3951,31 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
 
 #[test]
 fn completed_gepa_canary_persists_a_verified_frozen_profile() {
-    let stable = ConductorPromptGenome::seed_for_effort("auto");
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let stable = seed
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("seed should have an evolved stable profile");
     let candidate = stable
         .mutations()
         .into_iter()
         .next()
-        .expect("seed should have an evolved candidate");
+        .expect("stable profile should have an evolved candidate");
     let mut rollout = default_prompt_rollout("auto");
+    rollout.stable_profile_id = stable.id.clone();
+    rollout.frozen_profile = Some(
+        FrozenPromptProfileSnapshot::new_gepa(
+            "auto",
+            stable.clone(),
+            seed.id,
+            "a".repeat(64),
+            "b".repeat(64),
+        )
+        .expect("existing stable profile should have a valid frozen snapshot"),
+    );
     rollout.canary_profile_id = Some(candidate.id.clone());
-    rollout.canary_percent = 100;
+    rollout.canary_percent = 50;
     rollout.status = "canary".to_string();
     let mut model = PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
@@ -4035,10 +4089,48 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
     };
 
     bind_matched_prompt_evidence(&mut model, "auto", &candidate.id, &stable.id);
+    assert!(prompt_rollout_transition_has_canonical_evidence(
+        &model,
+        "auto",
+        None,
+        &model.rollouts["auto"],
+    ));
+
+    let previous_frozen = model.rollouts["auto"].frozen_profile.clone();
+    let mut missing_model = model.clone();
+    missing_model.genomes.clear();
+    let missing_profile = reconcile_prompt_rollout(&mut missing_model, "auto", &evaluation);
+    assert_eq!(missing_profile.status, "rolled_back");
+    assert!(missing_profile.canary_profile_id.is_none());
+    assert_eq!(missing_profile.canary_percent, 0);
+    assert_eq!(missing_profile.rollback_count, 1);
+    assert_eq!(missing_profile.stable_profile_id, stable.id);
+    assert_eq!(missing_profile.frozen_profile, previous_frozen);
+    assert!(missing_profile
+        .last_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("freeze_failed:")));
+
+    let mut non_gepa_model = model.clone();
+    non_gepa_model.genomes[0].evolution_method = None;
+    let non_gepa_profile = reconcile_prompt_rollout(&mut non_gepa_model, "auto", &evaluation);
+    assert_eq!(non_gepa_profile.status, "rolled_back");
+    assert!(non_gepa_profile.canary_profile_id.is_none());
+    assert_eq!(non_gepa_profile.canary_percent, 0);
+    assert_eq!(non_gepa_profile.rollback_count, 1);
+    assert_eq!(non_gepa_profile.stable_profile_id, stable.id);
+    assert_eq!(non_gepa_profile.frozen_profile, previous_frozen);
+    assert!(non_gepa_profile
+        .last_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("freeze_failed:")));
+
     let promoted = reconcile_prompt_rollout(&mut model, "auto", &evaluation);
 
     assert_eq!(promoted.status, "promoted");
     assert_eq!(promoted.stable_profile_id, candidate.id);
+    assert!(promoted.canary_profile_id.is_none());
+    assert_eq!(promoted.canary_percent, 0);
     let snapshot = promoted
         .frozen_profile
         .expect("GEPA promotion should freeze its evidence-bound profile");
@@ -4051,7 +4143,13 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
 }
 
 #[test]
-fn prompt_rollout_rebuilds_from_durable_events() {
+fn prompt_rollout_rebuild_rejects_canary_without_canonical_evidence() {
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let candidate = seed
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("Auto seed should provide a canary");
     let event = Event {
         id: EventId("rollout-update".to_string()),
         task_id: phase16_task_id(),
@@ -4061,8 +4159,8 @@ fn prompt_rollout_rebuilds_from_durable_events() {
         summary: "Conductor prompt rollout updated".to_string(),
         metadata: [
             ("prompt_effort".to_string(), "auto".to_string()),
-            ("stable_profile".to_string(), "stable-auto".to_string()),
-            ("canary_profile".to_string(), "candidate-auto".to_string()),
+            ("stable_profile".to_string(), seed.id.clone()),
+            ("canary_profile".to_string(), candidate.id.clone()),
             ("canary_percent".to_string(), "25".to_string()),
             ("rollout_status".to_string(), "canary".to_string()),
             (
@@ -4072,25 +4170,14 @@ fn prompt_rollout_rebuilds_from_durable_events() {
             ("promotion_confidence".to_string(), "0.61".to_string()),
             ("evidence_checkpoint".to_string(), "8".to_string()),
             ("live_checkpoint".to_string(), "3".to_string()),
-            ("rollback_count".to_string(), "2".to_string()),
+            ("rollback_count".to_string(), "0".to_string()),
         ]
         .into_iter()
         .collect(),
     };
 
     let model = build_prompt_evolution_read_model(&[event], 7, 1);
-    let rollout = model
-        .rollouts
-        .get("auto")
-        .expect("durable rollout should rebuild");
-
-    assert_eq!(rollout.stable_profile_id, "stable-auto");
-    assert_eq!(rollout.canary_profile_id.as_deref(), Some("candidate-auto"));
-    assert_eq!(rollout.canary_percent, 25);
-    assert_eq!(rollout.evidence_checkpoint, 8);
-    assert_eq!(rollout.live_checkpoint, 3);
-    assert_eq!(rollout.rollback_count, 2);
-    assert_eq!(rollout.promotion_confidence, Some(0.61));
+    assert!(model.rollouts.is_empty());
 }
 
 #[test]
@@ -4156,7 +4243,7 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
         rollouts: BTreeMap::new(),
         datasets: BTreeMap::new(),
     };
-    let rollout = PromptRolloutState {
+    let mut rollout = PromptRolloutState {
         stable_profile_id: certified.id.clone(),
         canary_profile_id: None,
         canary_percent: 0,
@@ -4188,6 +4275,29 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
     apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, &Metadata::new(), "auto");
 
     assert_eq!(evaluation.next_profile, certified);
+
+    let available_canary = certified
+        .mutations()
+        .into_iter()
+        .next()
+        .expect("stable profile should have an evolved canary");
+    rollout.canary_profile_id = Some(available_canary.id.clone());
+    rollout.canary_percent = 100;
+    evaluation.population = vec![available_canary];
+    evaluation.next_profile = ConductorPromptGenome::seed_for_effort("auto");
+    apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, &Metadata::new(), "auto");
+
+    assert_eq!(evaluation.next_profile, certified);
+    assert_eq!(evaluation.next_mode, "stable");
+
+    rollout.canary_profile_id = Some("missing-canary".to_string());
+    rollout.canary_percent = 50;
+    evaluation.population.clear();
+    evaluation.next_profile = ConductorPromptGenome::seed_for_effort("auto");
+    apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, &Metadata::new(), "auto");
+
+    assert_eq!(evaluation.next_profile, certified);
+    assert_eq!(evaluation.next_mode, "stable");
 }
 
 #[test]
@@ -5129,10 +5239,7 @@ fn agent_effort_keeps_auto_and_pro_under_dynamic_policy_selection() {
     );
     assert_eq!(AgentPolicy::parse_ingress("unknown"), AgentPolicy::Auto);
     assert_eq!(persisted_agent_policy(None), Ok(AgentPolicy::Auto));
-    assert_eq!(
-        persisted_agent_policy(Some("pro")),
-        Ok(AgentPolicy::Pro)
-    );
+    assert_eq!(persisted_agent_policy(Some("pro")), Ok(AgentPolicy::Pro));
     assert!(persisted_agent_policy(Some("Pro")).is_err());
     assert!(persisted_agent_policy(Some("future")).is_err());
 }
@@ -5149,7 +5256,10 @@ fn typed_agent_policy_provenance_preserves_the_legacy_runtime_wire() {
         planned
             .apply_to_context(&mut context)
             .expect("typed policy should adapt to the stable metadata wire");
-        assert_eq!(context.get("agent_effort").map(String::as_str), Some(policy.label()));
+        assert_eq!(
+            context.get("agent_effort").map(String::as_str),
+            Some(policy.label())
+        );
         assert_eq!(
             context.get("requested_policy").map(String::as_str),
             Some(expected_policy)
@@ -5560,7 +5670,9 @@ fn retry_recovers_effort_from_the_active_run() {
         Ok(AgentPolicy::Pro)
     );
 
-    event.metadata.insert("agent_effort".to_string(), "future".to_string());
+    event
+        .metadata
+        .insert("agent_effort".to_string(), "future".to_string());
     assert!(persisted_agent_policy_from_active_events(&[event]).is_err());
     assert_eq!(
         persisted_agent_policy_from_active_events(&[]),
@@ -7527,10 +7639,8 @@ fn prompt_evolution_uses_training_results_to_select_a_new_generation() {
                 },
             }
         });
-        let evaluation_id = scoped_prompt_evaluation_id(
-            "project-a",
-            &format!("pair-{evaluation_index}"),
-        );
+        let evaluation_id =
+            scoped_prompt_evaluation_id("project-a", &format!("pair-{evaluation_index}"));
         let observation = PromptEvolutionObservation {
             profile_id: seed.id.clone(),
             evaluation_id,
@@ -8351,6 +8461,21 @@ fn test_auto_teacher_case(output: &str) -> PromptAutoTeacherCase {
         profile_id: genome.id.clone(),
         profile_sha256: prompt_genome_sha256(&genome).unwrap(),
         output_sha256: sha256_hex(output.as_bytes()),
+        source_context: orchestrator::AutoTeacherSourceContextV1 {
+            schema: orchestrator::AUTO_TEACHER_SOURCE_CONTEXT_SCHEMA_V1.to_string(),
+            provider_sha256: "1".repeat(64),
+            model_pool_sha256: "2".repeat(64),
+            system_prompt_sha256: "3".repeat(64),
+            policy_sha256: "4".repeat(64),
+            budget_sha256: "5".repeat(64),
+            tool_contract_sha256: "6".repeat(64),
+            source_revision_sha256: "7".repeat(64),
+            workspace_revision_sha256: "8".repeat(64),
+            evaluator_identity_sha256: "9".repeat(64),
+            evaluator_receipt_sha256: "a".repeat(64),
+            checkpoint_sha256: "b".repeat(64),
+            learning_receipt_sha256: "c".repeat(64),
+        },
         genome,
         plan,
         steps: vec![PromptAutoTeacherStep {
@@ -8450,6 +8575,20 @@ fn auto_transfer_digest_tracks_teacher_identity_without_mutating_the_normal_coho
         PromptEvaluationSplit::Train,
     )
     .is_none());
+
+    let mut malformed_source = first.clone();
+    malformed_source[0]
+        .auto_teacher
+        .as_mut()
+        .unwrap()
+        .source_context
+        .checkpoint_sha256 = "legacy-missing-checkpoint".to_string();
+    assert!(prompt_auto_transfer_dataset_digest(
+        &malformed_source,
+        &teacher.profile_id,
+        &teacher.profile_sha256,
+    )
+    .is_none());
 }
 
 #[test]
@@ -8522,6 +8661,7 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             )
         })
         .collect::<Vec<_>>();
+    let transfer_source_context = test_auto_teacher_case("attested").source_context;
     observations.extend((0..3).map(|index| {
         let run_id = format!("transfer-{index}");
         observation(
@@ -8535,13 +8675,17 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
                 sha256_hex(profile_id.as_bytes()),
                 auto_profile_sha256.clone(),
             )
-            .with_transfer(PromptTransferProvenance::auto_to_pro(
-                format!("auto-run-{index}"),
-                0,
-                auto_profile_id,
-                auto_profile_sha256.clone(),
-                sha256_hex(format!("auto-output-{index}").as_bytes()),
-            )),
+            .with_transfer(
+                PromptTransferProvenance::auto_to_pro(
+                    format!("auto-run-{index}"),
+                    0,
+                    auto_profile_id,
+                    auto_profile_sha256.clone(),
+                    sha256_hex(format!("auto-output-{index}").as_bytes()),
+                )
+                .with_source_context(&transfer_source_context)
+                .unwrap(),
+            ),
         )
     }));
 
@@ -8568,6 +8712,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
     let teacher = test_auto_teacher_case("Verified Auto answer");
     let mut checkpoint =
         WorkflowExecutionCheckpoint::new("auto-resume-key", teacher.plan.clone(), 30);
+    checkpoint.prompt_genome_json = serde_json::to_string(&teacher.genome).unwrap();
     checkpoint
         .complete_step(
             "final",
@@ -8587,7 +8732,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
         orchestrator::LearningUsageCompleteness::Complete,
         0,
         "a".repeat(64),
-        orchestrator::IndependentQualitySource::CollaborationQualityGate,
+        orchestrator::IndependentQualitySource::AnytimeSelector,
         9_000,
         true,
     );
@@ -8596,6 +8741,11 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
         ("project_id".to_string(), "project-a".to_string()),
         ("session_id".to_string(), "session-a".to_string()),
         ("steer_epoch".to_string(), "0".to_string()),
+        ("project_root".to_string(), "/tmp/project-a".to_string()),
+        (
+            "collaboration_policy".to_string(),
+            "auto_router".to_string(),
+        ),
     ]
     .into_iter()
     .collect::<Metadata>();
@@ -8608,9 +8758,117 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
         summary: summary.to_string(),
         metadata: metadata_with_context(metadata, &base),
     };
+    let coordinator_stage = event(
+        30,
+        EventKind::ModelRequestFinished,
+        "Collaboration conductor_plan finished",
+        [
+            (
+                "collaboration_id".to_string(),
+                teacher.plan.workflow_id.clone(),
+            ),
+            ("request_id".to_string(), "conductor-request-1".to_string()),
+            ("stage".to_string(), "conductor_plan".to_string()),
+            ("role".to_string(), "planner".to_string()),
+            ("model".to_string(), "auto-coordinator".to_string()),
+            ("status".to_string(), "completed".to_string()),
+            ("usage_source".to_string(), "provider".to_string()),
+            ("output".to_string(), teacher.plan.to_json().unwrap()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let worker_stage = event(
+        50,
+        EventKind::ModelRequestFinished,
+        "Collaboration worker_1 finished",
+        [
+            (
+                "collaboration_id".to_string(),
+                teacher.plan.workflow_id.clone(),
+            ),
+            ("request_id".to_string(), "worker-request-1".to_string()),
+            ("stage".to_string(), "worker_1".to_string()),
+            ("role".to_string(), "summarizer".to_string()),
+            ("model".to_string(), "auto-worker".to_string()),
+            ("status".to_string(), "completed".to_string()),
+            ("usage_source".to_string(), "provider".to_string()),
+            ("workflow_step_id".to_string(), "final".to_string()),
+            ("output".to_string(), "Verified Auto answer".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let provider_started = event(
+        59,
+        EventKind::ModelRequestStarted,
+        "Collaboration quality_gate started",
+        [
+            (
+                "collaboration_id".to_string(),
+                teacher.plan.workflow_id.clone(),
+            ),
+            ("request_id".to_string(), "quality-request-1".to_string()),
+            ("stage".to_string(), "quality_gate".to_string()),
+            ("role".to_string(), "reviewer".to_string()),
+            ("model".to_string(), "auto-reviewer".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let provider_stage = event(
+        60,
+        EventKind::ModelRequestFinished,
+        "Collaboration quality_gate completed",
+        [
+            (
+                "collaboration_id".to_string(),
+                teacher.plan.workflow_id.clone(),
+            ),
+            ("request_id".to_string(), "quality-request-1".to_string()),
+            ("stage".to_string(), "quality_gate".to_string()),
+            ("role".to_string(), "reviewer".to_string()),
+            ("model".to_string(), "auto-reviewer".to_string()),
+            ("status".to_string(), "completed".to_string()),
+            ("usage_source".to_string(), "provider".to_string()),
+            ("total_tokens".to_string(), "10".to_string()),
+            (
+                "output".to_string(),
+                r#"{"pass":true,"score":0.9,"issues":[],"safety_violations":0}"#.to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let evaluator = orchestrator::AutoTeacherProviderIdentityV1::new(
+        "openai",
+        "",
+        "https://api.openai.com/v1",
+        "auto-reviewer",
+    )
+    .unwrap();
+    let evaluator_receipt = orchestrator::AutoTeacherEvaluatorReceiptV1 {
+        schema: orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_SCHEMA_V1.to_string(),
+        protocol: orchestrator::AUTO_TEACHER_PROVIDER_REVIEW_PROTOCOL_V1.to_string(),
+        evaluator,
+        stage: "quality_gate".to_string(),
+        request_id_sha256: sha256_hex(b"quality-request-1"),
+        stage_event_sha256: crate::prompt_learning_runtime::prompt_event_sha256(&provider_stage)
+            .unwrap(),
+        evaluated_artifact_sha256: orchestrator::auto_teacher_evaluated_artifact_sha256(
+            "Verified Auto answer",
+        )
+        .unwrap(),
+        system_prompt_sha256: sha256_hex(b"test-system-prompt"),
+        tool_contract_sha256: sha256_hex(b"test-tool-contract"),
+        source_revision_sha256: sha256_hex(b"test-source-revision"),
+        quality_score_bps: 9_000,
+        passed: true,
+        safety_violations: 0,
+    };
     let mut events = vec![
         event(
-            1,
+            10,
             EventKind::TaskStatusChanged,
             "Agent task started",
             [
@@ -8624,7 +8882,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
             .collect(),
         ),
         event(
-            2,
+            20,
             EventKind::TaskStatusChanged,
             "Conductor prompt profile selected",
             [
@@ -8643,7 +8901,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
             .collect(),
         ),
         event(
-            3,
+            40,
             EventKind::TaskStatusChanged,
             "Collaboration workflow planned",
             [
@@ -8656,8 +8914,32 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
             .into_iter()
             .collect(),
         ),
+        coordinator_stage,
+        worker_stage,
+        provider_started,
+        provider_stage,
         event(
-            4,
+            70,
+            EventKind::TaskStatusChanged,
+            "Collaboration quality gate evaluated",
+            [
+                (
+                    "collaboration_id".to_string(),
+                    teacher.plan.workflow_id.clone(),
+                ),
+                ("quality_pass".to_string(), "true".to_string()),
+                ("quality_score".to_string(), "0.900".to_string()),
+                ("safety_violations".to_string(), "0".to_string()),
+                (
+                    orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_METADATA_KEY.to_string(),
+                    serde_json::to_string(&evaluator_receipt).unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        event(
+            80,
             EventKind::TaskStatusChanged,
             "Collaboration workflow checkpoint finalized",
             [
@@ -8678,21 +8960,21 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
             .collect(),
         ),
         event(
-            5,
+            90,
             EventKind::MessageAdded,
             "Assistant answer",
             [
                 ("role".to_string(), "assistant".to_string()),
                 (
                     "display_content".to_string(),
-                    "Verified Auto answer".to_string(),
+                    "A downstream user-facing answer that was not reviewed".to_string(),
                 ),
             ]
             .into_iter()
             .collect(),
         ),
         event(
-            6,
+            100,
             EventKind::TaskStatusChanged,
             "Agent task completed",
             [
@@ -8738,16 +9020,371 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
         .as_ref()
         .expect("verified Auto workflow should become a teacher");
     assert_eq!(captured.final_output, "Verified Auto answer");
+    assert_eq!(
+        captured.participant_models,
+        vec!["auto-coordinator".to_string(), "auto-worker".to_string()]
+    );
     assert_eq!(captured.quality_score_bps, 9_000);
     assert_eq!(captured.profile_sha256, teacher.profile_sha256);
+    assert_eq!(
+        reconstruct_prompt_auto_teacher_from_canonical_events(
+            &events,
+            "project-a",
+            "verified-auto-run",
+        )
+        .expect("canonical source events should replay the accepted teacher")
+        .source_context,
+        captured.source_context,
+    );
+
+    let pro_profile = ConductorPromptGenome::seed_for_effort("pro");
+    let pro_profile_sha256 = prompt_genome_sha256(&pro_profile).unwrap();
+    let transfer_case_id = "canonical-auto-transfer";
+    let transfer_evaluation_id = scoped_prompt_evaluation_id("project-a", transfer_case_id);
+    let transfer_dataset = PromptDatasetIdentityV1::new(
+        "project-a",
+        0,
+        vec![PromptDatasetCaseIdentityV1 {
+            case_id: transfer_case_id.to_string(),
+            objective_sha256: "d".repeat(64),
+            task_family_sha256: "e".repeat(64),
+            split: PromptEvaluationSplit::Train,
+        }],
+    )
+    .unwrap();
+    let transfer_cohort = PromptLearningCohortV1::new(
+        transfer_dataset,
+        PromptExecutionContextV1 {
+            schema: PROMPT_EXECUTION_CONTEXT_SCHEMA_V1.to_string(),
+            provider_sha256: "1".repeat(64),
+            model_pool_sha256: "2".repeat(64),
+            harness_sha256: "3".repeat(64),
+            system_prompt_sha256: "4".repeat(64),
+            policy: AgentPolicy::Pro,
+            policy_sha256: "5".repeat(64),
+            budget_sha256: "6".repeat(64),
+            tool_contract_sha256: "7".repeat(64),
+            source_revision_sha256: "8".repeat(64),
+            workspace_revision_sha256: "9".repeat(64),
+        },
+    )
+    .unwrap();
+    let matched_transfer = PromptMatchedEvaluationIdentityV1::new(
+        transfer_evaluation_id.clone(),
+        &transfer_cohort,
+        transfer_case_id,
+        PromptEvaluationSplit::Train,
+        PromptEvaluationMode::PairedExecution,
+    )
+    .unwrap();
+    let transfer = PromptTransferProvenance::auto_to_pro(
+        captured.source_run_id.clone(),
+        captured.steer_epoch,
+        captured.profile_id.clone(),
+        captured.profile_sha256.clone(),
+        captured.output_sha256.clone(),
+    )
+    .with_source_context(&captured.source_context)
+    .unwrap();
+    let transfer_observation = |profile_id: &str,
+                                opponent_profile_id: &str,
+                                profile_sha256: String,
+                                opponent_sha256: String,
+                                relative_reward: f64| {
+        PromptEvolutionObservation {
+            profile_id: profile_id.to_string(),
+            evaluation_id: transfer_evaluation_id.clone(),
+            case_id: transfer_case_id.to_string(),
+            opponent_profile_id: Some(opponent_profile_id.to_string()),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::PairedExecution,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 10,
+            total_tokens: 20,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(relative_reward),
+            step_credits: Vec::new(),
+            reflection_packet: None,
+            provenance: PromptEvaluationProvenance::blind_pairwise_swap(
+                vec!["independent-transfer-reviewer".to_string()],
+                vec!["pro-worker".to_string(), "auto-worker".to_string()],
+                transfer_cohort.dataset.dataset_sha256.clone(),
+                profile_sha256,
+                opponent_sha256,
+            )
+            .with_transfer(transfer.clone())
+            .with_matched_evaluation(matched_transfer.clone()),
+        }
+    };
+    let transfer_observations = vec![
+        transfer_observation(
+            &pro_profile.id,
+            &captured.profile_id,
+            pro_profile_sha256.clone(),
+            captured.profile_sha256.clone(),
+            0.2,
+        ),
+        transfer_observation(
+            &captured.profile_id,
+            &pro_profile.id,
+            captured.profile_sha256.clone(),
+            pro_profile_sha256,
+            -0.2,
+        ),
+    ];
+    let mut transfer_event = event(
+        9,
+        EventKind::TaskStatusChanged,
+        "Conductor Auto transfer evaluation",
+        [
+            ("prompt_effort".to_string(), "pro".to_string()),
+            ("evaluation_id".to_string(), transfer_evaluation_id.clone()),
+            (
+                "auto_teacher_profile".to_string(),
+                captured.profile_id.clone(),
+            ),
+            (
+                "auto_teacher_run_id".to_string(),
+                captured.source_run_id.clone(),
+            ),
+            (
+                "prompt_observations".to_string(),
+                serde_json::to_string(&transfer_observations).unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    transfer_event.metadata.remove("agent_run_id");
+    transfer_event.metadata.remove("collaboration_id");
+    let mut full_events = events.clone();
+    full_events.push(transfer_event.clone());
+    let full_projection = build_prompt_evolution_read_model(
+        &full_events,
+        transfer_event.sequence,
+        full_events.len() as u64,
+    );
+
+    let mut store = SqliteStore::in_memory().unwrap();
+    for source_event in events.iter().cloned() {
+        store.append(source_event).unwrap();
+    }
+    let before_transfer = load_prompt_evolution_read_model(&mut store).unwrap();
+    assert!(before_transfer
+        .observations
+        .iter()
+        .all(|(_, observation)| observation.case_id != transfer_case_id));
+    store.append(transfer_event).unwrap();
+    let incremental_projection = load_prompt_evolution_read_model(&mut store).unwrap();
+    let transfer_records = |model: &PromptEvolutionReadModel| {
+        model
+            .observations
+            .iter()
+            .filter(|(_, observation)| observation.case_id == transfer_case_id)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(transfer_records(&full_projection).len(), 2);
+    assert_eq!(
+        transfer_records(&incremental_projection),
+        transfer_records(&full_projection),
+        "incremental projection must query the canonical source run and match full replay"
+    );
+
     assert_eq!(
         prompt_learning_dataset(&events, "project-a", None).len(),
         1,
         "only a typed, verified prompt-learning receipt may enter replay"
     );
 
+    let mut unattested = events.clone();
+    unattested
+        .iter_mut()
+        .find(|event| event.summary == "Collaboration quality gate evaluated")
+        .unwrap()
+        .metadata
+        .remove(orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_METADATA_KEY);
+    assert!(prompt_offline_dataset(&unattested, "project-a", None)[0]
+        .auto_teacher
+        .is_none());
+
+    let mut output_mismatch = events.clone();
+    let quality_event = output_mismatch
+        .iter_mut()
+        .find(|event| event.summary == "Collaboration quality gate evaluated")
+        .unwrap();
+    let mut mismatched_receipt: orchestrator::AutoTeacherEvaluatorReceiptV1 = serde_json::from_str(
+        quality_event
+            .metadata
+            .get(orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_METADATA_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    mismatched_receipt.evaluated_artifact_sha256 =
+        orchestrator::auto_teacher_evaluated_artifact_sha256("unreviewed replacement").unwrap();
+    quality_event.metadata.insert(
+        orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_METADATA_KEY.to_string(),
+        serde_json::to_string(&mismatched_receipt).unwrap(),
+    );
+    assert!(
+        prompt_offline_dataset(&output_mismatch, "project-a", None)[0]
+            .auto_teacher
+            .is_none()
+    );
+
+    let mut forged_request_receipt = events.clone();
+    let quality_event = forged_request_receipt
+        .iter_mut()
+        .find(|event| event.summary == "Collaboration quality gate evaluated")
+        .unwrap();
+    let mut forged_receipt: orchestrator::AutoTeacherEvaluatorReceiptV1 = serde_json::from_str(
+        quality_event
+            .metadata
+            .get(orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_METADATA_KEY)
+            .unwrap(),
+    )
+    .unwrap();
+    forged_receipt.request_id_sha256 = sha256_hex(b"worker-request-1");
+    quality_event.metadata.insert(
+        orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_METADATA_KEY.to_string(),
+        serde_json::to_string(&forged_receipt).unwrap(),
+    );
+    assert!(
+        prompt_offline_dataset(&forged_request_receipt, "project-a", None)[0]
+            .auto_teacher
+            .is_none(),
+        "a forged receipt cannot rebind the evaluator to a participant request"
+    );
+
+    let mut mismatched_checkpoint = events.clone();
+    let checkpoint_event = mismatched_checkpoint
+        .iter_mut()
+        .find(|event| event.summary == "Collaboration workflow checkpoint finalized")
+        .unwrap();
+    let mut mismatched = WorkflowExecutionCheckpoint::from_json(
+        checkpoint_event
+            .metadata
+            .get("workflow_checkpoint")
+            .unwrap(),
+        &["auto-worker".to_string()],
+    )
+    .unwrap();
+    mismatched.prompt_genome_json =
+        serde_json::to_string(&ConductorPromptGenome::seed_for_effort("pro")).unwrap();
+    checkpoint_event.metadata.insert(
+        "workflow_checkpoint".to_string(),
+        mismatched.to_json().unwrap(),
+    );
+    assert!(
+        prompt_offline_dataset(&mismatched_checkpoint, "project-a", None)[0]
+            .auto_teacher
+            .is_none()
+    );
+
+    let mut runtime_model_overlap = events.clone();
+    runtime_model_overlap
+        .iter_mut()
+        .find(|event| event.metadata.get("stage").map(String::as_str) == Some("worker_1"))
+        .unwrap()
+        .metadata
+        .insert("model".to_string(), "auto-reviewer".to_string());
+    runtime_model_overlap
+        .iter_mut()
+        .find(|event| event.metadata.get("stage").map(String::as_str) == Some("conductor_plan"))
+        .unwrap()
+        .metadata
+        .insert("model".to_string(), "auto-reviewer".to_string());
+    let plan_event = runtime_model_overlap
+        .iter_mut()
+        .find(|event| event.summary == "Collaboration workflow planned")
+        .unwrap();
+    let mut runtime_plan = WorkflowPlanIr::from_json(
+        plan_event.metadata.get("workflow_ir").unwrap(),
+        &["auto-coordinator".to_string(), "auto-worker".to_string()],
+    )
+    .unwrap();
+    runtime_plan.coordinator_model = "auto-reviewer".to_string();
+    plan_event
+        .metadata
+        .insert("workflow_ir".to_string(), runtime_plan.to_json().unwrap());
+    let checkpoint_event = runtime_model_overlap
+        .iter_mut()
+        .find(|event| event.summary == "Collaboration workflow checkpoint finalized")
+        .unwrap();
+    let mut runtime_checkpoint = WorkflowExecutionCheckpoint::from_json(
+        checkpoint_event
+            .metadata
+            .get("workflow_checkpoint")
+            .unwrap(),
+        &["auto-worker".to_string()],
+    )
+    .unwrap();
+    runtime_checkpoint.plan.coordinator_model = "auto-reviewer".to_string();
+    runtime_checkpoint.steps.get_mut("final").unwrap().model = "auto-reviewer".to_string();
+    checkpoint_event.metadata.insert(
+        "workflow_checkpoint".to_string(),
+        runtime_checkpoint.to_json().unwrap(),
+    );
+    let same_model_teacher = prompt_offline_dataset(&runtime_model_overlap, "project-a", None)[0]
+        .auto_teacher
+        .clone()
+        .expect("a separately receipted evaluator request may reuse the participant model");
+    assert!(same_model_teacher
+        .participant_models
+        .contains(&"auto-reviewer".to_string()));
+    assert_eq!(
+        same_model_teacher.source_context.evaluator_identity_sha256,
+        evaluator_receipt.evaluator.identity_sha256
+    );
+
+    let mut reused_evaluator_request = runtime_model_overlap.clone();
+    reused_evaluator_request
+        .iter_mut()
+        .find(|event| event.metadata.get("stage").map(String::as_str) == Some("worker_1"))
+        .unwrap()
+        .metadata
+        .insert("request_id".to_string(), "quality-request-1".to_string());
+    assert!(
+        prompt_offline_dataset(&reused_evaluator_request, "project-a", None)[0]
+            .auto_teacher
+            .is_none(),
+        "the evaluator request itself cannot also attest a participant output"
+    );
+
+    let mut repair_author_overlap = events.clone();
+    repair_author_overlap.push(event(
+        55,
+        EventKind::ModelRequestFinished,
+        "Collaboration quality_repair_1 finished",
+        [
+            (
+                "collaboration_id".to_string(),
+                teacher.plan.workflow_id.clone(),
+            ),
+            ("request_id".to_string(), "repair-request-1".to_string()),
+            ("stage".to_string(), "quality_repair_1".to_string()),
+            ("role".to_string(), "summarizer".to_string()),
+            ("model".to_string(), "auto-reviewer".to_string()),
+            ("status".to_string(), "completed".to_string()),
+            ("usage_source".to_string(), "provider".to_string()),
+            ("output".to_string(), "repaired intermediate".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    ));
+    assert!(
+        prompt_offline_dataset(&repair_author_overlap, "project-a", None)[0]
+            .auto_teacher
+            .is_some(),
+        "model overlap alone must not erase a separately receipted evaluator request"
+    );
+
     events.push(event(
-        5,
+        95,
         EventKind::PermissionResolved,
         "Permission denied",
         [("decision".to_string(), "deny".to_string())]
@@ -9115,9 +9752,9 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
     );
     unsafe_packet.input =
         "unredacted eyJhbGciOiJIUzI1NiJ9.abcdefghijklmno.pqrstuvwxyz123456".to_string();
-    assert!(crate::prompt_learning_runtime::prompt_text_contains_residual_secret(
-        &unsafe_packet.input
-    ));
+    assert!(
+        crate::prompt_learning_runtime::prompt_text_contains_residual_secret(&unsafe_packet.input)
+    );
     assert!(
         !prompt_evaluation_feedback::prompt_reflection_packet_is_safe(&unsafe_packet, &[]),
         "residual secret patterns must fail the reflection boundary"

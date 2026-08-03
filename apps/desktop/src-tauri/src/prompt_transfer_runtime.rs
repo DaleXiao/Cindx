@@ -14,11 +14,11 @@ use agent_core::{Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use model_provider::MODEL_REQUEST_CANCELLED;
 use orchestrator::{
-    prompt_genome_sha256, ConductorPromptGenome, PromptEvaluationAttemptEventV1,
-    PromptEvaluationAttemptStatus, PromptEvaluationMode, PromptEvaluationProvenance,
-    PromptEvaluationSplit, PromptEvolutionObservation, PromptLearningCohortV1,
-    PromptDatasetIdentityV1,
-    PromptMatchedEvaluationIdentityV1, PromptTransferProvenance, PromptTreatmentIdentityV1,
+    prompt_genome_sha256, ConductorPromptGenome, PromptDatasetIdentityV1,
+    PromptEvaluationAttemptEventV1, PromptEvaluationAttemptStatus, PromptEvaluationMode,
+    PromptEvaluationProvenance, PromptEvaluationSplit, PromptEvolutionObservation,
+    PromptLearningCohortV1, PromptMatchedEvaluationIdentityV1, PromptTransferProvenance,
+    PromptTreatmentIdentityV1,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -58,6 +58,14 @@ fn prompt_auto_teacher_candidate(teacher: &PromptAutoTeacherCase) -> PromptExecu
             total_tokens: teacher.total_tokens,
         },
     }
+}
+
+fn prompt_transfer_treatment_failed(
+    has_plan: bool,
+    execution_succeeded: bool,
+    quality_gate_met: bool,
+) -> bool {
+    !has_plan || !execution_succeeded || !quality_gate_met
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -133,15 +141,24 @@ fn run_prompt_auto_transfer_evaluation(
         &transfer_cohort,
         transfer_started,
     )?;
-    let candidate_failed = candidate.plan.plan.is_none()
-        || !candidate.execution.succeeded
-        || !candidate.execution.quality_gate_met;
-    if candidate_failed {
+    if prompt_transfer_treatment_failed(
+        candidate.plan.plan.is_some(),
+        candidate.execution.succeeded,
+        candidate.execution.quality_gate_met,
+    ) {
+        if let Err(error) = transfer_control.absorb() {
+            transfer_attempt.finish(
+                PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                "reviewer_accounting_failed",
+            )?;
+            return Err(error);
+        }
         transfer_attempt.mark_treatment_failures([true, false]);
         transfer_attempt.finish(
             PromptEvaluationAttemptStatus::TreatmentFailure,
             "treatment_execution_failed",
         )?;
+        return Ok(());
     }
     let forward_control = transfer_control.lane(0);
     let reverse_control = transfer_control.lane(1);
@@ -223,7 +240,9 @@ fn run_prompt_auto_transfer_evaluation(
     }
     let lease = match control.execution_epoch_lease() {
         agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
-        agent_runtime::RunEpochLeaseOutcome::Stopped(agent_runtime::RunStopReason::UserCancelled) => {
+        agent_runtime::RunEpochLeaseOutcome::Stopped(
+            agent_runtime::RunStopReason::UserCancelled,
+        ) => {
             transfer_attempt.finish(
                 PromptEvaluationAttemptStatus::ForegroundPreempted,
                 "foreground_preempted",
@@ -246,6 +265,7 @@ fn run_prompt_auto_transfer_evaluation(
             effort,
             mode,
             [&observations[0], &observations[1]],
+            teacher,
         )
     });
     match transfer_commit {
@@ -274,14 +294,7 @@ fn run_prompt_auto_transfer_evaluation(
             return Err(error);
         }
     }
-    if candidate_failed {
-        transfer_attempt.finish(
-            PromptEvaluationAttemptStatus::TreatmentFailure,
-            "treatment_execution_failed",
-        )?;
-    } else {
-        transfer_attempt.finish(PromptEvaluationAttemptStatus::CompletedPair, "")?;
-    }
+    transfer_attempt.finish(PromptEvaluationAttemptStatus::CompletedPair, "")?;
     Ok(())
 }
 
@@ -300,6 +313,7 @@ fn evaluate_prompt_auto_transfer_pair(
     forward_control: &Arc<AgentRunControl>,
     reverse_control: &Arc<AgentRunControl>,
 ) -> Result<[PromptEvolutionObservation; 2], String> {
+    teacher.source_context.validate()?;
     let teacher_candidate = prompt_auto_teacher_candidate(teacher);
     let participant_models = prompt_candidate_models([candidate, &teacher_candidate])
         .into_iter()
@@ -329,7 +343,8 @@ fn evaluate_prompt_auto_transfer_pair(
         teacher.profile_id.clone(),
         teacher.profile_sha256.clone(),
         teacher.output_sha256.clone(),
-    );
+    )
+    .with_source_context(&teacher.source_context)?;
     let candidate_observation = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate,
         &teacher_candidate,
@@ -405,8 +420,7 @@ pub(crate) fn run_prompt_auto_transfer_evaluations(
     reviewer_model: &str,
     candidates: [&PromptExecutionCandidate; 2],
 ) -> Result<(), String> {
-    let (Some(teacher), Some((auto_profile, auto_profile_sha256))) =
-        (teacher, auto_stable_profile)
+    let (Some(teacher), Some((auto_profile, auto_profile_sha256))) = (teacher, auto_stable_profile)
     else {
         return Ok(());
     };
@@ -476,20 +490,34 @@ pub(crate) fn run_prompt_auto_transfer_evaluations(
             )
         });
         [
-            current.join().unwrap_or_else(|_| {
-                Err("current Auto transfer evaluation panicked".to_string())
-            }),
+            current
+                .join()
+                .unwrap_or_else(|_| Err("current Auto transfer evaluation panicked".to_string())),
             challenger.join().unwrap_or_else(|_| {
                 Err("challenger Auto transfer evaluation panicked".to_string())
             }),
         ]
     });
-    if results
-        .iter()
-        .any(|result| result.as_ref().is_err_and(|error| error == MODEL_REQUEST_CANCELLED))
-    {
+    if results.iter().any(|result| {
+        result
+            .as_ref()
+            .is_err_and(|error| error == MODEL_REQUEST_CANCELLED)
+    }) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     results.into_iter().collect::<Result<Vec<_>, _>>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transfer_treatment_failure_predicate_covers_all_execution_failures() {
+        assert!(prompt_transfer_treatment_failed(false, true, true));
+        assert!(prompt_transfer_treatment_failed(true, false, true));
+        assert!(prompt_transfer_treatment_failed(true, true, false));
+        assert!(!prompt_transfer_treatment_failed(true, true, true));
+    }
 }

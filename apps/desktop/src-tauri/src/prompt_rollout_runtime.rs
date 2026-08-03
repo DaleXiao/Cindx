@@ -23,14 +23,13 @@ fn prompt_attempt_has_complete_pair(
         .iter()
         .filter(|(_, observation)| {
             (if transfer {
-                observation.is_strict_matched_transfer_evidence()
+                observation.is_strict_source_attested_transfer_evidence()
             } else {
                 observation.is_strict_matched_evidence()
-            })
-                && crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
-                    observation,
-                    &attempt.started,
-                )
+            }) && crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
+                observation,
+                &attempt.started,
+            )
         })
         .count()
         == 2
@@ -51,11 +50,13 @@ fn prompt_active_pair_cohort(
                 .get(&attempt.started.identity.cohort_sha256)
                 .map(|sequence| (sequence, attempt.started.identity.cohort_sha256.as_str()))
         })
-        .max_by(|(left_sequence, left_digest), (right_sequence, right_digest)| {
-            left_sequence
-                .cmp(right_sequence)
-                .then_with(|| left_digest.cmp(right_digest))
-        })
+        .max_by(
+            |(left_sequence, left_digest), (right_sequence, right_digest)| {
+                left_sequence
+                    .cmp(right_sequence)
+                    .then_with(|| left_digest.cmp(right_digest))
+            },
+        )
         .map(|(_, digest)| digest.to_string())
 }
 
@@ -69,13 +70,7 @@ fn evaluate_trusted_prompt_promotion_gate(
     let failures = active_cohort
         .as_deref()
         .map(|cohort_sha256| {
-            prompt_promotion_failure_penalties(
-                model,
-                cohort_sha256,
-                candidate_id,
-                stable_id,
-                false,
-            )
+            prompt_promotion_failure_penalties(model, cohort_sha256, candidate_id, stable_id, false)
         })
         .unwrap_or_default();
     let result = evaluate_prompt_promotion_gate_with_failures_in_cohort(
@@ -104,15 +99,17 @@ fn prompt_promotion_failure_penalties(
         .values()
         .filter(|attempt| attempt.started.identity.cohort_sha256 == cohort_sha256)
         .filter(|attempt| prompt_attempt_matches_profiles(attempt, candidate_id, stable_id))
-        .filter(|attempt| !prompt_attempt_has_complete_pair(&model.observations, attempt, transfer))
+        .filter(|attempt| {
+            attempt.terminal.as_ref().is_some_and(|terminal| {
+                terminal.status == PromptEvaluationAttemptStatus::TreatmentFailure
+            }) || !prompt_attempt_has_complete_pair(&model.observations, attempt, transfer)
+        })
         .filter_map(|attempt| {
             let treatment_failures = match attempt.terminal.as_ref() {
                 None => [true; 2],
-                Some(terminal)
-                    if terminal
-                        .treatment_failures
-                        .into_iter()
-                        .any(|failed| failed) => terminal.treatment_failures,
+                Some(terminal) if terminal.treatment_failures.into_iter().any(|failed| failed) => {
+                    terminal.treatment_failures
+                }
                 Some(terminal) if terminal.status.enters_effect_denominator() => [true; 2],
                 Some(_) => return None,
             };
@@ -262,8 +259,7 @@ pub(crate) fn next_prompt_canary_stage(current: u8) -> u8 {
     match current {
         0..=9 => 10,
         10..=24 => 25,
-        25..=49 => 50,
-        _ => 100,
+        _ => 50,
     }
 }
 
@@ -315,21 +311,25 @@ pub(crate) fn stable_prompt_profile_fingerprint(
     Ok((genome, fingerprint))
 }
 
-fn frozen_prompt_profile_for_promotion(
+pub(crate) fn frozen_prompt_profile_for_promotion(
     model: &PromptEvolutionReadModel,
     effort: &str,
     candidate_id: &str,
     stable_profile_id: &str,
-) -> Result<Option<FrozenPromptProfileSnapshot>, String> {
+) -> Result<FrozenPromptProfileSnapshot, String> {
     let Some(record) = model
         .genomes
         .iter()
         .find(|record| record.effort == effort && record.genome.id == candidate_id)
     else {
-        return Ok(None);
+        return Err(format!(
+            "GEPA promotion profile {candidate_id} is unavailable"
+        ));
     };
     if record.evolution_method != Some(PromptEvolutionMethod::GepaReflectivePaired) {
-        return Ok(None);
+        return Err(format!(
+            "profile {candidate_id} is not a GEPA reflective paired candidate"
+        ));
     }
 
     let observations = model
@@ -353,7 +353,7 @@ fn frozen_prompt_profile_for_promotion(
         stable_profile_id,
     );
     let Some(cohort_sha256) = active_cohort else {
-        return Ok(None);
+        return Err("active GEPA cohort is unavailable".to_string());
     };
     let observations = observations
         .into_iter()
@@ -400,7 +400,7 @@ fn frozen_prompt_profile_for_promotion(
         paired_evidence_sha256,
     )?;
     if effort != "pro" {
-        return Ok(Some(snapshot));
+        return Ok(snapshot);
     }
 
     let (auto_profile, auto_profile_sha256) = stable_prompt_profile_fingerprint(model, "auto")?;
@@ -409,7 +409,7 @@ fn frozen_prompt_profile_for_promotion(
         .iter()
         .filter(|(observed_effort, observation)| {
             observed_effort == effort
-                && observation.is_strict_matched_transfer_evidence()
+                && observation.is_strict_source_attested_transfer_evidence()
                 && ((observation.profile_id == candidate_id
                     && observation.opponent_profile_id.as_deref()
                         == Some(auto_profile.id.as_str()))
@@ -456,17 +456,53 @@ fn frozen_prompt_profile_for_promotion(
         &serde_json::to_vec(&transfer_evidence)
             .map_err(|error| format!("Auto transfer evidence serialization failed: {error}"))?,
     );
-    snapshot
-        .with_auto_teacher_evidence(FrozenPromptTransferEvidence {
-            source_effort: "auto".to_string(),
-            source_profile_id: auto_profile.id,
-            source_profile_sha256: auto_profile_sha256,
-            dataset_sha256: transfer_dataset_sha256,
-            cohort_sha256: Some(active_transfer_cohort),
-            paired_evidence_sha256: transfer_evidence_sha256,
-            promotion_gate_protocol: orchestrator::PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
-        })
-        .map(Some)
+    snapshot.with_auto_teacher_evidence(FrozenPromptTransferEvidence {
+        source_effort: "auto".to_string(),
+        source_profile_id: auto_profile.id,
+        source_profile_sha256: auto_profile_sha256,
+        dataset_sha256: transfer_dataset_sha256,
+        cohort_sha256: Some(active_transfer_cohort),
+        paired_evidence_sha256: transfer_evidence_sha256,
+        promotion_gate_protocol: orchestrator::PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
+    })
+}
+
+pub(crate) fn prompt_rollout_transition_has_canonical_evidence(
+    model: &PromptEvolutionReadModel,
+    effort: &str,
+    previous: Option<&PromptRolloutState>,
+    next: &PromptRolloutState,
+) -> bool {
+    match next.status.as_str() {
+        "canary" => next
+            .canary_profile_id
+            .as_deref()
+            .is_some_and(|candidate_id| {
+                frozen_prompt_profile_for_promotion(
+                    model,
+                    effort,
+                    candidate_id,
+                    &next.stable_profile_id,
+                )
+                .is_ok()
+            }),
+        "promoted" => {
+            let seed_profile_id = ConductorPromptGenome::seed_for_effort(effort).id;
+            let stable_profile_id = previous
+                .map(|rollout| rollout.stable_profile_id.as_str())
+                .unwrap_or(seed_profile_id.as_str());
+            next.frozen_profile.as_ref().is_some_and(|snapshot| {
+                frozen_prompt_profile_for_promotion(
+                    model,
+                    effort,
+                    &next.stable_profile_id,
+                    stable_profile_id,
+                )
+                .is_ok_and(|expected| expected == *snapshot)
+            })
+        }
+        _ => true,
+    }
 }
 
 pub(crate) fn reconcile_prompt_rollout(
@@ -536,19 +572,30 @@ pub(crate) fn reconcile_prompt_rollout(
             match stable_prompt_profile_fingerprint(model, "auto") {
                 Ok(profile) => profile,
                 Err(error) => {
-                    rollout.status = "evaluating".to_string();
-                    rollout.last_reason = Some(format!("auto_transfer_gate_pending:{error}"));
+                    if rollout.canary_profile_id.as_deref() == Some(candidate_id) {
+                        rollout.canary_profile_id = None;
+                        rollout.canary_percent = 0;
+                        rollout.rollback_count = rollout.rollback_count.saturating_add(1);
+                        rollout.status = "rolled_back".to_string();
+                        rollout.last_reason = Some(format!("auto_transfer_gate_regressed:{error}"));
+                    } else {
+                        rollout.status = "evaluating".to_string();
+                        rollout.last_reason = Some(format!("auto_transfer_gate_pending:{error}"));
+                    }
                     model.rollouts.insert(effort.to_string(), rollout.clone());
                     return rollout;
                 }
             };
-        Some(evaluate_trusted_prompt_auto_transfer_gate(
-            model,
-            &effort_observations,
-            candidate_id,
-            &auto_profile.id,
-            &auto_profile_sha256,
-        ).0)
+        Some(
+            evaluate_trusted_prompt_auto_transfer_gate(
+                model,
+                &effort_observations,
+                candidate_id,
+                &auto_profile.id,
+                &auto_profile_sha256,
+            )
+            .0,
+        )
     } else {
         None
     };
@@ -569,8 +616,7 @@ pub(crate) fn reconcile_prompt_rollout(
                 rollout.canary_percent = 0;
                 rollout.rollback_count = rollout.rollback_count.saturating_add(1);
                 rollout.status = "rolled_back".to_string();
-                rollout.last_reason =
-                    Some(format!("auto_transfer_gate_regressed:{blocker}"));
+                rollout.last_reason = Some(format!("auto_transfer_gate_regressed:{blocker}"));
             } else {
                 rollout.status = "evaluating".to_string();
                 rollout.last_reason = Some(format!("auto_transfer_gate_pending:{blocker}"));
@@ -610,7 +656,7 @@ pub(crate) fn reconcile_prompt_rollout(
         >= 2;
     let enough_live_traffic = live_runs.saturating_sub(rollout.live_checkpoint) >= 1;
     if enough_new_evidence && enough_live_traffic {
-        if rollout.canary_percent >= 100 {
+        if rollout.canary_percent >= 50 {
             let frozen_profile = match frozen_prompt_profile_for_promotion(
                 model,
                 effort,
@@ -619,14 +665,17 @@ pub(crate) fn reconcile_prompt_rollout(
             ) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    rollout.status = "evaluating".to_string();
+                    rollout.canary_profile_id = None;
+                    rollout.canary_percent = 0;
+                    rollout.rollback_count = rollout.rollback_count.saturating_add(1);
+                    rollout.status = "rolled_back".to_string();
                     rollout.last_reason = Some(format!("freeze_failed:{error}"));
                     model.rollouts.insert(effort.to_string(), rollout.clone());
                     return rollout;
                 }
             };
             rollout.stable_profile_id = candidate_id.to_string();
-            rollout.frozen_profile = frozen_profile;
+            rollout.frozen_profile = Some(frozen_profile);
             rollout.canary_profile_id = None;
             rollout.canary_percent = 0;
             rollout.status = "promoted".to_string();
@@ -672,27 +721,45 @@ pub(crate) fn apply_prompt_rollout_selection(
             .map(String::as_str)
             .unwrap_or("run")
     );
+    let effective_canary_percent = if rollout.canary_percent <= 50 {
+        rollout.canary_percent
+    } else {
+        0
+    };
     let canary_selected = rollout
         .canary_profile_id
         .as_ref()
-        .is_some_and(|_| prompt_rollout_bucket(&rollout_key) < rollout.canary_percent);
-    let selected_id = if canary_selected {
-        rollout.canary_profile_id.as_deref()
-    } else {
-        Some(rollout.stable_profile_id.as_str())
-    };
-    let frozen_stable = (!canary_selected)
-        .then_some(rollout.frozen_profile.as_ref())
-        .flatten()
+        .is_some_and(|_| prompt_rollout_bucket(&rollout_key) < effective_canary_percent);
+    let frozen_stable = rollout
+        .frozen_profile
+        .as_ref()
         .filter(|snapshot| {
             snapshot.validate().is_ok()
                 && snapshot.effort == effort
                 && snapshot.genome.id == rollout.stable_profile_id
         })
         .map(|snapshot| snapshot.genome.clone());
-    let selected = frozen_stable
+    let stable = frozen_stable
         .or_else(|| {
-            selected_id.and_then(|id| {
+            evaluation
+                .population
+                .iter()
+                .find(|profile| profile.id == rollout.stable_profile_id)
+                .cloned()
+                .or_else(|| {
+                    model
+                        .genomes
+                        .iter()
+                        .find(|record| {
+                            record.effort == effort && record.genome.id == rollout.stable_profile_id
+                        })
+                        .map(|record| record.genome.clone())
+                })
+        })
+        .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(effort));
+    let canary = canary_selected
+        .then(|| {
+            rollout.canary_profile_id.as_deref().and_then(|id| {
                 evaluation
                     .population
                     .iter()
@@ -705,12 +772,14 @@ pub(crate) fn apply_prompt_rollout_selection(
                             .find(|record| record.effort == effort && record.genome.id == id)
                             .map(|record| record.genome.clone())
                     })
+                    .filter(|profile| profile.validate().is_ok())
             })
         })
-        .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(effort));
-    evaluation.next_profile = selected;
-    evaluation.next_mode = if canary_selected {
-        format!("canary_{}", rollout.canary_percent)
+        .flatten();
+    let canary_applied = canary.is_some();
+    evaluation.next_profile = canary.unwrap_or(stable);
+    evaluation.next_mode = if canary_applied {
+        format!("canary_{effective_canary_percent}")
     } else {
         "stable".to_string()
     };

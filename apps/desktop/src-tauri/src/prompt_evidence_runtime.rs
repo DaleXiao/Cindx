@@ -59,14 +59,13 @@ fn prompt_auto_teacher_case(
         return None;
     }
     let quality_score_bps = learning_evidence.quality_bps?;
-    let total_tokens = crate::learning_evidence_runtime::learning_lineage_usage_from_metadata(
-        &terminal.metadata,
-    )
-    .filter(|usage| {
-        usage.completeness == learning_evidence.usage_completeness
-            && usage.completeness != LearningUsageCompleteness::Missing
-    })?
-    .total_tokens;
+    let total_tokens =
+        crate::learning_evidence_runtime::learning_lineage_usage_from_metadata(&terminal.metadata)
+            .filter(|usage| {
+                usage.completeness == learning_evidence.usage_completeness
+                    && usage.completeness != LearningUsageCompleteness::Missing
+            })?
+            .total_tokens;
     if run_events.iter().any(|event| {
         event_steer_epoch(event) == stable_epoch
             && ((event.kind == EventKind::PermissionResolved
@@ -97,9 +96,7 @@ fn prompt_auto_teacher_case(
     if profile_event.metadata.get("prompt_profile") != Some(&genome.id) {
         return None;
     }
-    let profile_sha256 = serde_json::to_vec(&genome)
-        .ok()
-        .map(|encoded| sha256_hex(&encoded))?;
+    let profile_sha256 = prompt_genome_sha256(&genome).ok()?;
 
     let plan_event = run_events.iter().rev().find(|event| {
         event.summary == "Collaboration workflow planned"
@@ -112,6 +109,19 @@ fn prompt_auto_teacher_case(
     let unchecked_plan = serde_json::from_str::<WorkflowPlanIr>(encoded_plan).ok()?;
     let mut allowed_models = std::iter::once(unchecked_plan.coordinator_model.clone())
         .chain(unchecked_plan.steps.iter().map(|step| step.model.clone()))
+        .chain(
+            run_events
+                .iter()
+                .filter(|event| event.sequence < terminal.sequence)
+                .filter(|event| event_steer_epoch(event) == stable_epoch)
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        EventKind::ModelRequestStarted | EventKind::ModelRequestFinished
+                    )
+                })
+                .filter_map(|event| event.metadata.get("model").cloned()),
+        )
         .filter(|model| !model.trim().is_empty())
         .collect::<Vec<_>>();
     allowed_models.sort();
@@ -139,6 +149,18 @@ fn prompt_auto_teacher_case(
     if !checkpoint.finalized || checkpoint.plan.workflow_id != plan.workflow_id {
         return None;
     }
+    let canonical_genome = serde_json::to_string(&genome).ok()?;
+    if checkpoint.prompt_genome_json != canonical_genome {
+        return None;
+    }
+    let evaluator_receipt =
+        crate::prompt_teacher_attestation_runtime::prompt_auto_teacher_evaluator_receipt(
+            run_events,
+            terminal,
+            collaboration_id,
+            stable_epoch,
+            quality_score_bps,
+        )?;
     let steps = plan
         .steps
         .iter()
@@ -172,30 +194,6 @@ fn prompt_auto_teacher_case(
         })
         .collect::<Option<Vec<_>>>()?;
 
-    let output = run_events.iter().rev().find_map(|event| {
-        (event.kind == EventKind::MessageAdded
-            && event.metadata.get("role").map(String::as_str) == Some("assistant")
-            && event.metadata.get("internal").map(String::as_str) != Some("true")
-            && event_steer_epoch(event) == stable_epoch
-            && event.sequence >= profile_event.sequence
-            && event.sequence <= terminal.sequence)
-            .then(|| {
-                event
-                    .metadata
-                    .get("display_content")
-                    .or_else(|| event.metadata.get("content"))
-                    .or_else(|| event.metadata.get("model_content"))
-                    .map(String::as_str)
-            })
-            .flatten()
-            .filter(|content| !content.trim().is_empty())
-    })?;
-    let redacted_output = crate::prompt_learning_runtime::redact_prompt_learning_text(output);
-    if redacted_output.text.trim().is_empty() || redacted_output.residual_sensitive_data {
-        return None;
-    }
-    let output_sha256 = sha256_hex(redacted_output.text.as_bytes());
-    let final_output = truncate_for_collaboration(&redacted_output.text, 12_000);
     let plan_objective =
         crate::prompt_learning_runtime::redact_prompt_learning_text(&plan.objective);
     if plan_objective.residual_sensitive_data {
@@ -209,15 +207,41 @@ fn prompt_auto_teacher_case(
         }
         step.subtask = truncate_for_collaboration(&subtask.text, 2_000);
     }
-    let mut participant_models = std::iter::once(plan.coordinator_model.clone())
-        .chain(plan.steps.iter().map(|step| step.model.clone()))
-        .filter(|model| !model.trim().is_empty())
-        .collect::<Vec<_>>();
-    participant_models.sort();
-    participant_models.dedup();
-    if participant_models.is_empty() {
+    let (participant_models, evaluated_artifact) =
+        crate::prompt_teacher_attestation_runtime::prompt_auto_teacher_runtime_attestation(
+            run_events,
+            terminal,
+            collaboration_id,
+            stable_epoch,
+            &checkpoint,
+            &evaluator_receipt,
+        )?;
+    let redacted_output =
+        crate::prompt_learning_runtime::redact_prompt_learning_text(&evaluated_artifact);
+    if redacted_output.text.trim().is_empty() || redacted_output.residual_sensitive_data {
         return None;
     }
+    let final_output = truncate_for_collaboration(&redacted_output.text, 12_000);
+    if orchestrator::auto_teacher_evaluated_artifact_sha256(&final_output).ok()?
+        != evaluator_receipt.evaluated_artifact_sha256
+    {
+        return None;
+    }
+    let output_sha256 = sha256_hex(final_output.as_bytes());
+    let source_context =
+        crate::prompt_teacher_attestation_runtime::prompt_auto_teacher_source_context(
+            project_id,
+            stable_epoch,
+            run_events,
+            profile_event,
+            &plan,
+            &checkpoint,
+            &learning_evidence,
+            &learning_receipt,
+            &participant_models,
+            &evaluator_receipt,
+            &profile_sha256,
+        )?;
 
     Some(PromptAutoTeacherCase {
         source_run_id: run_id.to_string(),
@@ -225,6 +249,7 @@ fn prompt_auto_teacher_case(
         profile_id: genome.id.clone(),
         profile_sha256,
         output_sha256,
+        source_context,
         genome,
         plan,
         steps,
@@ -236,6 +261,97 @@ fn prompt_auto_teacher_case(
             .saturating_sub(profile_event.timestamp_ms),
         total_tokens,
     })
+}
+
+pub(crate) fn reconstruct_prompt_auto_teacher_from_canonical_events(
+    events: &[Event],
+    project_id: &str,
+    source_run_id: &str,
+) -> Option<PromptAutoTeacherCase> {
+    let mut run_events = events
+        .iter()
+        .filter(|event| {
+            event.metadata.get("agent_run_id").map(String::as_str) == Some(source_run_id)
+        })
+        .collect::<Vec<_>>();
+    run_events.sort_by_key(|event| event.sequence);
+    let terminal = run_events
+        .iter()
+        .rev()
+        .find(|event| is_agent_run_terminal(event))?;
+    if !run_events
+        .iter()
+        .any(|event| event.metadata.get("project_id").map(String::as_str) == Some(project_id))
+    {
+        return None;
+    }
+    let stable_epoch = terminal
+        .metadata
+        .get("steer_epoch")
+        .map(String::as_str)
+        .unwrap_or("0");
+    let stable_epoch_number = stable_epoch.parse::<u64>().ok()?;
+    let decision = run_events.iter().rev().find(|event| {
+        event.summary == "Agent run decision selected" && event_steer_epoch(event) == stable_epoch
+    });
+    if decision.is_none() && stable_epoch != "0" {
+        return None;
+    }
+    let reconstructed_objective = cumulative_effective_prompt_objective(
+        run_events
+            .iter()
+            .filter(|event| event.kind == EventKind::MessageAdded)
+            .filter(|event| {
+                event.metadata.get("role").map(String::as_str) == Some("user")
+                    && event.metadata.get("internal").map(String::as_str) != Some("true")
+            })
+            .filter(|event| {
+                event
+                    .metadata
+                    .get("steer_epoch")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_default()
+                    <= stable_epoch_number
+            })
+            .filter_map(|event| {
+                event
+                    .metadata
+                    .get("display_content")
+                    .or_else(|| event.metadata.get("content"))
+                    .or_else(|| event.metadata.get("model_content"))
+                    .cloned()
+            }),
+    );
+    let objective = decision
+        .and_then(|event| event.metadata.get("effective_prompt_objective"))
+        .or(reconstructed_objective.as_ref())
+        .or_else(|| decision.and_then(|event| event.metadata.get("prompt_objective")))
+        .or_else(|| {
+            run_events
+                .iter()
+                .find(|event| AgentRunEvent::from_event(event).is_some_and(AgentRunEvent::is_start))
+                .and_then(|event| event.metadata.get("prompt"))
+        })
+        .map(|objective| crate::prompt_learning_runtime::redact_prompt_learning_text(objective))
+        .filter(|objective| objective.text.chars().count() >= 4)?;
+    let task_class = decision
+        .and_then(|event| event.metadata.get("task_class"))
+        .or_else(|| {
+            run_events
+                .iter()
+                .find_map(|event| event.metadata.get("task_class"))
+        })
+        .cloned()
+        .unwrap_or_else(|| "general".to_string());
+    prompt_auto_teacher_case(
+        source_run_id,
+        project_id,
+        &task_class,
+        &objective,
+        &run_events,
+        terminal,
+        stable_epoch,
+    )
 }
 
 pub(crate) fn prompt_profile_evidence_counts(
@@ -255,8 +371,7 @@ pub(crate) fn prompt_profile_training_evidence_count(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
 ) -> usize {
-    let Some(cohort_sha256) =
-        orchestrator::latest_scientific_training_dataset_digest(observations)
+    let Some(cohort_sha256) = orchestrator::latest_scientific_training_dataset_digest(observations)
     else {
         return 0;
     };
@@ -266,9 +381,7 @@ pub(crate) fn prompt_profile_training_evidence_count(
         .filter(|observation| observation.split == PromptEvaluationSplit::Train)
         .filter(|observation| observation.mode == PromptEvaluationMode::PairedExecution)
         .filter(|observation| observation.is_scientific_evidence())
-        .filter(|observation| {
-            observation.scientific_cohort_sha256() == Some(cohort_sha256)
-        })
+        .filter(|observation| observation.scientific_cohort_sha256() == Some(cohort_sha256))
         .map(PromptEvolutionObservation::evidence_identity)
         .collect::<BTreeSet<_>>()
         .len()
@@ -300,9 +413,7 @@ fn prompt_unique_evidence_counts<'a>(
     let mut replay = BTreeSet::new();
     for observation in observations
         .filter(|observation| observation.is_scientific_evidence())
-        .filter(|observation| {
-            observation.scientific_cohort_sha256() == Some(cohort_sha256)
-        })
+        .filter(|observation| observation.scientific_cohort_sha256() == Some(cohort_sha256))
     {
         if observation.mode.is_paired_execution() {
             paired.insert(observation.evidence_identity());
@@ -755,18 +866,21 @@ pub(crate) fn select_prompt_auto_transfer_case(
                     .iter()
                     .filter(|observation| {
                         observation.profile_id == profile_id
-                            && observation.opponent_profile_id.as_deref()
-                                == Some(auto_profile_id)
+                            && observation.opponent_profile_id.as_deref() == Some(auto_profile_id)
                             && observation.split == split
-                            && observation.is_strict_matched_transfer_evidence()
+                            && observation.is_strict_source_attested_transfer_evidence()
                             && observation.provenance.dataset_sha256 == dataset_sha256
                             && active_cohort.is_some_and(|cohort| {
                                 observation.scientific_cohort_sha256() == Some(cohort)
                             })
-                            && observation.provenance.transfer.as_ref().is_some_and(|transfer| {
-                                transfer.source_profile_id == auto_profile_id
-                                    && transfer.source_profile_sha256 == auto_profile_sha256
-                            })
+                            && observation
+                                .provenance
+                                .transfer
+                                .as_ref()
+                                .is_some_and(|transfer| {
+                                    transfer.source_profile_id == auto_profile_id
+                                        && transfer.source_profile_sha256 == auto_profile_sha256
+                                })
                             && case_id.is_none_or(|case_id| observation.case_id == case_id)
                     })
                     .map(PromptEvolutionObservation::evidence_identity)
@@ -816,18 +930,22 @@ pub(crate) fn prompt_auto_transfer_dataset_identity(
         .iter()
         .filter_map(|case| {
             let teacher = case.auto_teacher.as_ref()?;
-            (teacher.profile_id == auto_profile_id
-                && teacher.profile_sha256 == auto_profile_sha256)
+            let source_context_sha256 = teacher.source_context.digest().ok()?;
+            (teacher.profile_id == auto_profile_id && teacher.profile_sha256 == auto_profile_sha256)
                 .then(|| orchestrator::PromptDatasetCaseIdentityV1 {
                     case_id: case.id.clone(),
                     objective_sha256: sha256_hex(
                         format!(
-                            "auto_to_pro_transfer_v1\n{}\n{}\n{}\n{}\n{}",
+                            "auto_to_pro_transfer_v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
                             sha256_hex(case.objective.trim().as_bytes()),
                             teacher.source_run_id,
                             teacher.steer_epoch,
                             teacher.profile_sha256,
                             teacher.output_sha256,
+                            source_context_sha256,
+                            teacher.source_context.evaluator_receipt_sha256,
+                            teacher.source_context.checkpoint_sha256,
+                            teacher.source_context.learning_receipt_sha256,
                         )
                         .as_bytes(),
                     ),
@@ -897,10 +1015,8 @@ pub(crate) fn append_prompt_offline_dataset_snapshot(
         .collect::<BTreeMap<_, _>>();
     let split_manifest = serde_json::to_string(&split_manifest)
         .map_err(|error| format!("offline split manifest serialization failed: {error}"))?;
-    let dataset_identity = crate::prompt_learning_runtime::prompt_dataset_identity(
-        dataset,
-        generation,
-    )?;
+    let dataset_identity =
+        crate::prompt_learning_runtime::prompt_dataset_identity(dataset, generation)?;
     let dataset_digest = dataset_identity.dataset_sha256.clone();
     let dataset_identity = serde_json::to_string(&dataset_identity)
         .map_err(|error| format!("offline dataset identity serialization failed: {error}"))?;

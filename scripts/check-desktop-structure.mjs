@@ -3651,9 +3651,25 @@ assert(
     rustLib.includes("reconcile_prompt_rollout") &&
     rustLib.includes("next_prompt_canary_stage") &&
     rustLib.includes("prompt_canary_degraded") &&
-    rustLib.includes('status == "promoted" && frozen_profile.is_none()') &&
+    rustLib.includes("prompt_rollout_transition_is_valid") &&
+    rustLib.includes('next.status == "promoted"') &&
+    rustLib.includes(
+      "previous.canary_profile_id.as_deref() == Some(next.stable_profile_id.as_str())"
+    ) &&
+    rustLib.includes(
+      "snapshot.stable_profile_id == previous.stable_profile_id"
+    ) &&
+    rustLib.includes(
+      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 6"
+    ) &&
     rustLib.includes("snapshot.genome.id == rollout.stable_profile_id") &&
     rustLib.includes("promoted_prompt_rollout_without_a_valid_frozen_profile_is_ignored") &&
+    rustLib.includes(
+      "prompt_rollout_replay_rejects_forged_stable_canary_and_status"
+    ) &&
+    rustLib.includes(
+      "prompt_rollout_transition_accepts_legal_rollback_and_atomic_promotion"
+    ) &&
     rustLib.includes("stable_prompt_rollout_uses_the_evidence_bound_frozen_genome") &&
     rustLib.includes('"Conductor prompt rollout updated"') &&
     rustLib.includes('"evaluation_required"') &&

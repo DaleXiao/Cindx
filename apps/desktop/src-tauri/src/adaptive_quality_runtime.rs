@@ -75,12 +75,65 @@ fn distinct_quality_models(models: impl IntoIterator<Item = String>) -> Vec<Stri
     distinct
 }
 
-fn adaptive_quality_reviewer_models(config: &ProviderConfig) -> Vec<String> {
-    distinct_quality_models([
+pub(crate) fn adaptive_quality_reviewer_models(
+    config: &ProviderConfig,
+    participant_models: &BTreeSet<String>,
+) -> Vec<String> {
+    let candidates = distinct_quality_models([
         config.model_for_role(&ModelRole::Reviewer),
+        config.model_for_role(&ModelRole::Summarizer),
         config.model_for_conductor(),
         config.model_for_role(&ModelRole::Planner),
-    ])
+        config.model_for_role(&ModelRole::Executor),
+        config.model.clone(),
+    ]);
+    let (independent, overlapping): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|model| !participant_models.contains(model));
+    independent.into_iter().chain(overlapping).collect()
+}
+
+fn adaptive_quality_participant_models(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+) -> BTreeSet<String> {
+    let mut models = [
+        config.model_for_conductor(),
+        config.model_for_role(&ModelRole::Planner),
+        config.model_for_role(&ModelRole::Executor),
+        config.model.clone(),
+    ]
+    .into_iter()
+    .filter(|model| !model.trim().is_empty())
+    .collect::<BTreeSet<_>>();
+    let stable_epoch = run_context_steer_epoch(run_context).to_string();
+    let events = state.store.lock().ok().and_then(|store| {
+        store
+            .list_by_task_and_metadata(task_id, "collaboration_id", collaboration_id)
+            .ok()
+    });
+    for event in events.into_iter().flatten().filter(|event| {
+        matches!(
+            event.kind,
+            EventKind::ModelRequestStarted | EventKind::ModelRequestFinished
+        ) && event.metadata.get("steer_epoch").map(String::as_str) == Some(stable_epoch.as_str())
+            && !event.metadata.get("stage").is_some_and(|stage| {
+                stage == "quality_gate" || stage.starts_with("quality_recheck_")
+            })
+    }) {
+        if let Some(model) = event
+            .metadata
+            .get("model")
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+        {
+            models.insert(model.to_string());
+        }
+    }
+    models
 }
 
 fn adaptive_quality_repair_models(config: &ProviderConfig) -> Vec<String> {
@@ -92,15 +145,141 @@ fn adaptive_quality_repair_models(config: &ProviderConfig) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn adaptive_quality_evaluator_receipt(
+    config: &ProviderConfig,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    reviewer_model: &str,
+    evaluated_artifact: &str,
+    gate: &CollaborationQualityPayload,
+    events: &[Event],
+) -> Option<orchestrator::AutoTeacherEvaluatorReceiptV1> {
+    let stable_epoch = run_context_steer_epoch(run_context).to_string();
+    let stage_event = events.iter().rev().find(|event| {
+        event.kind == EventKind::ModelRequestFinished
+            && event.metadata.get("collaboration_id").map(String::as_str) == Some(collaboration_id)
+            && event.metadata.get("stage").map(String::as_str) == Some(stage)
+            && event.metadata.get("role").map(String::as_str) == Some("reviewer")
+            && event.metadata.get("model").map(String::as_str) == Some(reviewer_model)
+            && event.metadata.get("status").map(String::as_str) == Some("completed")
+            && event.metadata.get("usage_source").map(String::as_str) == Some("provider")
+            && event.metadata.contains_key("output")
+            && event.metadata.get("steer_epoch").map(String::as_str) == Some(stable_epoch.as_str())
+    })?;
+    let request_id = stage_event.metadata.get("request_id")?.trim();
+    let project_root = run_context.get("project_root")?.trim();
+    if request_id.is_empty() || project_root.is_empty() {
+        return None;
+    }
+    let evaluator = orchestrator::AutoTeacherProviderIdentityV1::new(
+        &config.provider_id,
+        &config.provider_resource,
+        &config.base_url,
+        reviewer_model,
+    )
+    .ok()?;
+    let persisted_score = format!("{:.3}", gate.score.clamp(0.0, 1.0));
+    let quality_score_bps = (persisted_score.parse::<f64>().ok()? * 10_000.0).round() as u16;
+    let source_revision = crate::prompt_learning_runtime::prompt_source_revision().ok()?;
+    let receipt = orchestrator::AutoTeacherEvaluatorReceiptV1 {
+        schema: orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_SCHEMA_V1.to_string(),
+        protocol: orchestrator::AUTO_TEACHER_PROVIDER_REVIEW_PROTOCOL_V1.to_string(),
+        evaluator,
+        stage: stage.to_string(),
+        request_id_sha256: sha256_hex(request_id.as_bytes()),
+        stage_event_sha256: crate::prompt_learning_runtime::prompt_event_sha256(stage_event)
+            .ok()?,
+        evaluated_artifact_sha256: orchestrator::auto_teacher_evaluated_artifact_sha256(
+            evaluated_artifact,
+        )
+        .ok()?,
+        system_prompt_sha256: sha256_hex(
+            collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context)
+                .as_bytes(),
+        ),
+        tool_contract_sha256:
+            crate::prompt_learning_runtime::prompt_evaluation_tool_contract_sha256(
+                std::path::Path::new(project_root),
+            ),
+        source_revision_sha256: sha256_hex(source_revision.as_bytes()),
+        quality_score_bps,
+        passed: gate.pass,
+        safety_violations: gate.safety_violations,
+    };
+    receipt.validate().ok()?;
+    Some(receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_adaptive_quality_gate_event(
     state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,
     collaboration_id: &str,
+    stage: &str,
+    reviewer_model: &str,
+    evaluated_artifact: &str,
     gate: &CollaborationQualityPayload,
     review_index: usize,
     repair_budget: usize,
 ) {
+    let events = state.store.lock().ok().and_then(|store| {
+        store
+            .list_by_task_and_metadata_before(
+                task_id,
+                "collaboration_id",
+                collaboration_id,
+                u64::MAX,
+                8,
+            )
+            .ok()
+    });
+    let receipt = events
+        .as_deref()
+        .and_then(|events| {
+            adaptive_quality_evaluator_receipt(
+                config,
+                run_context,
+                collaboration_id,
+                stage,
+                reviewer_model,
+                evaluated_artifact,
+                gate,
+                events,
+            )
+        })
+        .and_then(|receipt| serde_json::to_string(&receipt).ok());
+    let mut metadata = [
+        ("collaboration_id".to_string(), collaboration_id.to_string()),
+        ("quality_pass".to_string(), gate.pass.to_string()),
+        (
+            "quality_score".to_string(),
+            format!("{:.3}", gate.score.clamp(0.0, 1.0)),
+        ),
+        (
+            "quality_issues".to_string(),
+            truncate_for_collaboration(&gate.issues.join(" | "), 4_000),
+        ),
+        (
+            "safety_violations".to_string(),
+            gate.safety_violations.to_string(),
+        ),
+        ("quality_review_index".to_string(), review_index.to_string()),
+        (
+            "quality_repair_budget".to_string(),
+            repair_budget.to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    if let Some(receipt) = receipt {
+        metadata.insert(
+            orchestrator::AUTO_TEACHER_EVALUATOR_RECEIPT_METADATA_KEY.to_string(),
+            receipt,
+        );
+    }
     let Ok(mut store) = state.store.lock() else {
         return;
     };
@@ -109,32 +288,7 @@ pub(crate) fn record_adaptive_quality_gate_event(
         task_id,
         EventKind::TaskStatusChanged,
         "Collaboration quality gate evaluated",
-        metadata_with_context(
-            [
-                ("collaboration_id".to_string(), collaboration_id.to_string()),
-                ("quality_pass".to_string(), gate.pass.to_string()),
-                (
-                    "quality_score".to_string(),
-                    format!("{:.3}", gate.score.clamp(0.0, 1.0)),
-                ),
-                (
-                    "quality_issues".to_string(),
-                    truncate_for_collaboration(&gate.issues.join(" | "), 4_000),
-                ),
-                (
-                    "safety_violations".to_string(),
-                    gate.safety_violations.to_string(),
-                ),
-                ("quality_review_index".to_string(), review_index.to_string()),
-                (
-                    "quality_repair_budget".to_string(),
-                    repair_budget.to_string(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-            run_context,
-        ),
+        metadata_with_context(metadata, run_context),
     );
 }
 
@@ -159,7 +313,9 @@ pub(crate) fn quality_gate_adaptive_output(
             issues: Vec::new(),
         };
     }
-    let reviewer_models = adaptive_quality_reviewer_models(config);
+    let participant_models =
+        adaptive_quality_participant_models(state, config, task_id, run_context, collaboration_id);
+    let reviewer_models = adaptive_quality_reviewer_models(config, &participant_models);
     let repair_models = adaptive_quality_repair_models(config);
     let repair_budget = adaptive_quality_repair_budget(verification);
     let mut candidate = output.to_string();
@@ -191,6 +347,8 @@ pub(crate) fn quality_gate_adaptive_output(
         } else {
             format!("quality_recheck_{review_index}")
         };
+        let evaluated_artifact =
+            orchestrator::canonical_auto_teacher_evaluated_artifact(&candidate);
         let raw_gate = match run_collaboration_stage(
             state,
             config,
@@ -204,7 +362,7 @@ pub(crate) fn quality_gate_adaptive_output(
                 "Evaluate whether this adaptive team guidance is sufficient for a separate tool-using executor to satisfy the user request. Check branch coverage, evidence-ledger provenance, unsupported claims, contradictions, concrete next actions, and safety. Treat worker prose as proposals unless supported by tool evidence. Return only strict JSON: {{\"pass\":true,\"score\":0.0,\"issues\":[\"...\"],\"safety_violations\":0}}. Use a score from 0 to 1 and count concrete unsafe or scope-violating instructions.\n\nUser request:\n{}\n\nTeam guidance revision {}:\n{}",
                 user_prompt,
                 review_index,
-                truncate_for_collaboration(&candidate, 14_000)
+                evaluated_artifact
             ),
         ) {
             Ok(raw_gate) => raw_gate,
@@ -250,9 +408,13 @@ pub(crate) fn quality_gate_adaptive_output(
         });
         record_adaptive_quality_gate_event(
             state,
+            config,
             task_id,
             run_context,
             collaboration_id,
+            &stage,
+            &reviewer_model,
+            &evaluated_artifact,
             &gate,
             review_index,
             repair_budget,

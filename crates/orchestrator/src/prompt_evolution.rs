@@ -1,3 +1,4 @@
+mod auto_teacher_source;
 mod fitness;
 mod genome;
 mod learning_dataset;
@@ -7,6 +8,7 @@ mod pareto;
 mod search;
 mod snapshot;
 
+pub use auto_teacher_source::*;
 pub use genome::*;
 pub use learning_dataset::*;
 pub use matched_evaluation::*;
