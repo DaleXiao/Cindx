@@ -279,6 +279,9 @@ pub(crate) fn is_sensitive_assignment_key(value: &str) -> bool {
         .filter(|character| character.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect::<String>();
+    if matches!(compact.as_str(), "token" | "secret") {
+        return true;
+    }
     [
         "apikey",
         "xapikey",
@@ -287,8 +290,13 @@ pub(crate) fn is_sensitive_assignment_key(value: &str) -> bool {
         "accesstoken",
         "refreshtoken",
         "authtoken",
+        "sessiontoken",
+        "githubtoken",
         "clientsecret",
+        "webhooksecret",
         "secretkey",
+        "awssecretaccesskey",
+        "privatekey",
         "password",
     ]
     .iter()

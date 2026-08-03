@@ -198,7 +198,7 @@ pub(crate) struct PromptReplayCase {
     pub(crate) task_class: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct PromptAutoTeacherStep {
     pub(crate) id: String,
     pub(crate) role: String,
@@ -212,7 +212,7 @@ pub(crate) struct PromptAutoTeacherStep {
     pub(crate) evidence_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct PromptAutoTeacherCase {
     pub(crate) source_run_id: String,
     pub(crate) steer_epoch: u64,
@@ -229,7 +229,7 @@ pub(crate) struct PromptAutoTeacherCase {
     pub(crate) total_tokens: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct PromptOfflineCase {
     pub(crate) id: String,
     pub(crate) objective: String,
@@ -237,5 +237,6 @@ pub(crate) struct PromptOfflineCase {
     pub(crate) project_id: String,
     pub(crate) source_run_id: String,
     pub(crate) split: PromptEvaluationSplit,
+    pub(crate) learning_receipt: Option<PromptLearningEligibilityReceiptV1>,
     pub(crate) auto_teacher: Option<PromptAutoTeacherCase>,
 }

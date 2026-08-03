@@ -1223,12 +1223,35 @@ assert(
     runTauriSource.includes('args[0] === "build"') &&
     runTauriSource.includes("nextPatchVersion") &&
     runTauriSource.includes("rollbackDesktopVersion") &&
-    runTauriSource.includes("stable-aarch64-apple-darwin"),
-  "desktop Tauri builds must increment the patch version and retain the Rust toolchain PATH"
+    runTauriSource.includes("stable-aarch64-apple-darwin") &&
+    runTauriSource.includes('["rev-parse", "HEAD"]') &&
+    runTauriSource.includes("/^[0-9a-f]{40}$/") &&
+    runTauriSource.includes('"status", "--porcelain=v1", "-z"') &&
+    runTauriSource.includes('"diff", "--binary", "--no-ext-diff"') &&
+    runTauriSource.includes('crypto.createHash("sha256")') &&
+    runTauriSource.includes('"cindx.dirty-source.v1\\0"') &&
+    runTauriSource.includes("CINDX_SOURCE_REVISION: sourceRevision"),
+  "desktop Tauri runs must increment build versions, retain the Rust toolchain PATH, and stamp a verified source revision"
 );
 assert(
   releaseWorkflow.includes("tauriScript: ./node_modules/.bin/tauri"),
   "release workflow must bypass the local auto-versioning wrapper"
+);
+const githubSourceRevisionStamp = "CINDX_SOURCE_REVISION: ${{ github.sha }}";
+const ciDirectTauriBuildSteps = ciWorkflow
+  .split(/\n(?=      - name: )/)
+  .filter((step) => step.includes("npm exec tauri build"));
+const releaseDirectTauriBuildSteps = releaseWorkflow
+  .split(/\n(?=      - name: )/)
+  .filter((step) => step.includes("uses: tauri-apps/tauri-action@v1"));
+assert(
+  ciDirectTauriBuildSteps.length === 1 &&
+    ciDirectTauriBuildSteps.every((step) => step.includes(githubSourceRevisionStamp)) &&
+    releaseDirectTauriBuildSteps.length === 3 &&
+    releaseDirectTauriBuildSteps.every((step) =>
+      step.includes(githubSourceRevisionStamp)
+    ),
+  "every direct CI and release Tauri build must stamp the exact GitHub source revision"
 );
 assert(
   releaseWorkflow.includes("id: apple-signing") &&
@@ -3657,6 +3680,22 @@ assert(
     !settingsPageSource.includes("prompt-evolution-efforts") &&
     !settingsPageSource.includes("prompt-evolution-profiles"),
   "Conductor workflows must run executable harness evolution with confidence-gated canary rollout"
+);
+assert(
+  orchestratorSource.includes('"cindx.prompt-learning-eligibility.v1"') &&
+    orchestratorSource.includes('"cindx.prompt-dataset-identity.v1"') &&
+    orchestratorSource.includes('"cindx.prompt-evaluation-attempt.v1"') &&
+    orchestratorSource.includes("PromptLearningQualificationInput") &&
+    rustLib.includes("PromptEvaluationAttemptGuard::start") &&
+    orchestratorSource.includes("is_strict_matched_evidence") &&
+    rustLib.includes(
+      "frozen prompt dataset is incomplete; refusing cohort substitution"
+    ) &&
+    promptEvolutionReadModelSource.includes(
+      "PROMPT_EVALUATION_ATTEMPT_RETENTION: usize = 1_024"
+    ) &&
+    localBuildScript.includes("CINDX_SOURCE_REVISION"),
+  "Prompt learning must remain eligibility-gated, cohort-bound, matched, auditable, and source-versioned"
 );
 
 const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]

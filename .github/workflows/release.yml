@@ -130,6 +130,7 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CINDX_SOURCE_REVISION: ${{ github.sha }}
           APPLE_SIGNING_IDENTITY: ${{ steps.apple-signing.outputs.identity }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -154,6 +155,7 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CINDX_SOURCE_REVISION: ${{ github.sha }}
           APPLE_SIGNING_IDENTITY: ${{ steps.apple-signing.outputs.identity }}
         with:
           projectPath: apps/desktop
@@ -175,6 +177,7 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CINDX_SOURCE_REVISION: ${{ github.sha }}
         with:
           projectPath: apps/desktop
           tauriScript: ./node_modules/.bin/tauri

@@ -1,5 +1,179 @@
 use super::*;
 
+fn prompt_attempt_matches_profiles(
+    attempt: &PromptEvaluationAttemptState,
+    candidate_id: &str,
+    stable_id: &str,
+) -> bool {
+    let profiles = attempt
+        .started
+        .treatments
+        .iter()
+        .map(|treatment| treatment.profile_id.as_str())
+        .collect::<BTreeSet<_>>();
+    profiles == BTreeSet::from([candidate_id, stable_id])
+}
+
+fn prompt_attempt_has_complete_pair(
+    observations: &[(String, PromptEvolutionObservation)],
+    attempt: &PromptEvaluationAttemptState,
+    transfer: bool,
+) -> bool {
+    observations
+        .iter()
+        .filter(|(_, observation)| {
+            (if transfer {
+                observation.is_strict_matched_transfer_evidence()
+            } else {
+                observation.is_strict_matched_evidence()
+            })
+                && crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
+                    observation,
+                    &attempt.started,
+                )
+        })
+        .count()
+        == 2
+}
+
+fn prompt_active_pair_cohort(
+    model: &PromptEvolutionReadModel,
+    candidate_id: &str,
+    stable_id: &str,
+) -> Option<String> {
+    model
+        .attempts
+        .values()
+        .filter(|attempt| prompt_attempt_matches_profiles(attempt, candidate_id, stable_id))
+        .filter_map(|attempt| {
+            model
+                .cohort_sequences
+                .get(&attempt.started.identity.cohort_sha256)
+                .map(|sequence| (sequence, attempt.started.identity.cohort_sha256.as_str()))
+        })
+        .max_by(|(left_sequence, left_digest), (right_sequence, right_digest)| {
+            left_sequence
+                .cmp(right_sequence)
+                .then_with(|| left_digest.cmp(right_digest))
+        })
+        .map(|(_, digest)| digest.to_string())
+}
+
+fn evaluate_trusted_prompt_promotion_gate(
+    model: &PromptEvolutionReadModel,
+    observations: &[PromptEvolutionObservation],
+    candidate_id: &str,
+    stable_id: &str,
+) -> (PromptPromotionGateResult, Option<String>) {
+    let active_cohort = prompt_active_pair_cohort(model, candidate_id, stable_id);
+    let failures = active_cohort
+        .as_deref()
+        .map(|cohort_sha256| {
+            prompt_promotion_failure_penalties(
+                model,
+                cohort_sha256,
+                candidate_id,
+                stable_id,
+                false,
+            )
+        })
+        .unwrap_or_default();
+    let result = evaluate_prompt_promotion_gate_with_failures_in_cohort(
+        observations,
+        &failures,
+        candidate_id,
+        stable_id,
+        active_cohort.as_deref().unwrap_or("missing-matched-cohort"),
+        prompt_promotion_gate_config(),
+    );
+    (result, active_cohort)
+}
+
+fn prompt_promotion_failure_penalties(
+    model: &PromptEvolutionReadModel,
+    cohort_sha256: &str,
+    candidate_id: &str,
+    stable_id: &str,
+    transfer: bool,
+) -> Vec<PromptPromotionFailurePenalty> {
+    let Some(cohort) = model.cohorts.get(cohort_sha256) else {
+        return Vec::new();
+    };
+    model
+        .attempts
+        .values()
+        .filter(|attempt| attempt.started.identity.cohort_sha256 == cohort_sha256)
+        .filter(|attempt| prompt_attempt_matches_profiles(attempt, candidate_id, stable_id))
+        .filter(|attempt| !prompt_attempt_has_complete_pair(&model.observations, attempt, transfer))
+        .filter_map(|attempt| {
+            let treatment_failures = match attempt.terminal.as_ref() {
+                None => [true; 2],
+                Some(terminal)
+                    if terminal
+                        .treatment_failures
+                        .into_iter()
+                        .any(|failed| failed) => terminal.treatment_failures,
+                Some(terminal) if terminal.status.enters_effect_denominator() => [true; 2],
+                Some(_) => return None,
+            };
+            let case = cohort.dataset.case(&attempt.started.identity.case_id)?;
+            let candidate_index = attempt
+                .started
+                .treatments
+                .iter()
+                .position(|treatment| treatment.profile_id == candidate_id)?;
+            let stable_index = attempt
+                .started
+                .treatments
+                .iter()
+                .position(|treatment| treatment.profile_id == stable_id)?;
+            Some(PromptPromotionFailurePenalty {
+                evaluation_id: attempt.started.identity.evaluation_id.clone(),
+                cohort_sha256: cohort_sha256.to_string(),
+                case_id: case.case_id.clone(),
+                task_class: case.task_family_sha256.clone(),
+                split: case.split,
+                candidate_profile_id: candidate_id.to_string(),
+                stable_profile_id: stable_id.to_string(),
+                candidate_failed: treatment_failures[candidate_index],
+                stable_failed: treatment_failures[stable_index],
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn evaluate_trusted_prompt_auto_transfer_gate(
+    model: &PromptEvolutionReadModel,
+    observations: &[PromptEvolutionObservation],
+    candidate_id: &str,
+    auto_profile_id: &str,
+    auto_profile_sha256: &str,
+) -> (PromptPromotionGateResult, Option<String>) {
+    let active_cohort = prompt_active_pair_cohort(model, candidate_id, auto_profile_id);
+    let failures = active_cohort
+        .as_deref()
+        .map(|cohort_sha256| {
+            prompt_promotion_failure_penalties(
+                model,
+                cohort_sha256,
+                candidate_id,
+                auto_profile_id,
+                true,
+            )
+        })
+        .unwrap_or_default();
+    let result = evaluate_prompt_auto_transfer_gate_in_cohort_with_failures(
+        observations,
+        &failures,
+        candidate_id,
+        auto_profile_id,
+        auto_profile_sha256,
+        active_cohort.as_deref().unwrap_or("missing-matched-cohort"),
+        prompt_promotion_gate_config(),
+    );
+    (result, active_cohort)
+}
+
 pub(crate) fn evaluate_prompt_evolution_read_model(
     model: &PromptEvolutionReadModel,
     effort: &str,
@@ -172,21 +346,25 @@ fn frozen_prompt_profile_for_promotion(
         })
         .map(|(_, observation)| observation.clone())
         .collect::<Vec<_>>();
-    let Some(dataset_sha256) =
-        orchestrator::latest_scientific_dataset_digest(&observations).map(str::to_string)
-    else {
+    let (gate, active_cohort) = evaluate_trusted_prompt_promotion_gate(
+        model,
+        &observations,
+        candidate_id,
+        stable_profile_id,
+    );
+    let Some(cohort_sha256) = active_cohort else {
         return Ok(None);
     };
     let observations = observations
         .into_iter()
-        .filter(|observation| observation.provenance.dataset_sha256 == dataset_sha256)
+        .filter(|observation| {
+            observation.scientific_cohort_sha256() == Some(cohort_sha256.as_str())
+        })
         .collect::<Vec<_>>();
-    let gate = evaluate_prompt_promotion_gate(
-        &observations,
-        candidate_id,
-        stable_profile_id,
-        prompt_promotion_gate_config(),
-    );
+    let dataset_sha256 = observations
+        .first()
+        .map(|observation| observation.provenance.dataset_sha256.clone())
+        .ok_or_else(|| "active GEPA cohort has no evidence".to_string())?;
     if !gate.eligible {
         let blockers = gate
             .blockers
@@ -231,7 +409,7 @@ fn frozen_prompt_profile_for_promotion(
         .iter()
         .filter(|(observed_effort, observation)| {
             observed_effort == effort
-                && observation.is_scientific_transfer_evidence()
+                && observation.is_strict_matched_transfer_evidence()
                 && ((observation.profile_id == candidate_id
                     && observation.opponent_profile_id.as_deref()
                         == Some(auto_profile.id.as_str()))
@@ -240,13 +418,15 @@ fn frozen_prompt_profile_for_promotion(
         })
         .map(|(_, observation)| observation.clone())
         .collect::<Vec<_>>();
-    let transfer_gate = evaluate_prompt_auto_transfer_gate(
+    let (transfer_gate, active_transfer_cohort) = evaluate_trusted_prompt_auto_transfer_gate(
+        model,
         &transfer_observations,
         candidate_id,
         &auto_profile.id,
         &auto_profile_sha256,
-        prompt_promotion_gate_config(),
     );
+    let active_transfer_cohort = active_transfer_cohort
+        .ok_or_else(|| "Auto transfer evidence has no active matched cohort".to_string())?;
     if !transfer_gate.eligible {
         let blockers = transfer_gate
             .blockers
@@ -260,13 +440,16 @@ fn frozen_prompt_profile_for_promotion(
     }
     let transfer_dataset_sha256 = transfer_observations
         .iter()
-        .rev()
-        .find(|observation| observation.is_scientific_transfer_evidence())
+        .find(|observation| {
+            observation.scientific_cohort_sha256() == Some(active_transfer_cohort.as_str())
+        })
         .map(|observation| observation.provenance.dataset_sha256.clone())
         .ok_or_else(|| "Auto transfer evidence has no active dataset".to_string())?;
     let mut transfer_evidence = transfer_observations
         .into_iter()
-        .filter(|observation| observation.provenance.dataset_sha256 == transfer_dataset_sha256)
+        .filter(|observation| {
+            observation.scientific_cohort_sha256() == Some(active_transfer_cohort.as_str())
+        })
         .collect::<Vec<_>>();
     transfer_evidence.sort_by_key(PromptEvolutionObservation::evidence_identity);
     let transfer_evidence_sha256 = sha256_hex(
@@ -279,6 +462,7 @@ fn frozen_prompt_profile_for_promotion(
             source_profile_id: auto_profile.id,
             source_profile_sha256: auto_profile_sha256,
             dataset_sha256: transfer_dataset_sha256,
+            cohort_sha256: Some(active_transfer_cohort),
             paired_evidence_sha256: transfer_evidence_sha256,
             promotion_gate_protocol: orchestrator::PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
         })
@@ -319,11 +503,11 @@ pub(crate) fn reconcile_prompt_rollout(
         .filter(|(observed_effort, _)| observed_effort == effort)
         .map(|(_, observation)| observation.clone())
         .collect::<Vec<_>>();
-    let promotion_gate = evaluate_prompt_promotion_gate(
+    let (promotion_gate, _) = evaluate_trusted_prompt_promotion_gate(
+        model,
         &effort_observations,
         candidate_id,
         &rollout.stable_profile_id,
-        prompt_promotion_gate_config(),
     );
     let confidence = &promotion_gate.confidence;
     rollout.promotion_confidence = Some(confidence.wilson_lower_bound);
@@ -358,13 +542,13 @@ pub(crate) fn reconcile_prompt_rollout(
                     return rollout;
                 }
             };
-        Some(evaluate_prompt_auto_transfer_gate(
+        Some(evaluate_trusted_prompt_auto_transfer_gate(
+            model,
             &effort_observations,
             candidate_id,
             &auto_profile.id,
             &auto_profile_sha256,
-            prompt_promotion_gate_config(),
-        ))
+        ).0)
     } else {
         None
     };

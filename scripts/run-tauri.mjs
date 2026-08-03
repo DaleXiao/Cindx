@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +7,96 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const desktopRoot = path.join(repoRoot, "apps", "desktop");
+const sourceRevisionByteLimit = 64 * 1024 * 1024;
+
+function gitOutput(args, maxBuffer = sourceRevisionByteLimit) {
+  const result = spawnSync("git", args, {
+    cwd: repoRoot,
+    encoding: null,
+    maxBuffer
+  });
+  if (result.error) throw result.error;
+  if ((result.status ?? 1) !== 0) {
+    throw new Error(`git ${args.join(" ")} failed while fingerprinting Cindx source`);
+  }
+  return result.stdout ?? Buffer.alloc(0);
+}
+
+function hashUntrackedFile(hash, relativePath, consumedBytes) {
+  const absolutePath = path.resolve(repoRoot, relativePath);
+  if (
+    absolutePath === repoRoot ||
+    !absolutePath.startsWith(`${repoRoot}${path.sep}`)
+  ) {
+    throw new Error("Git returned an unsafe untracked source path");
+  }
+  hash.update(relativePath);
+  hash.update("\0");
+  const metadata = fs.lstatSync(absolutePath);
+  if (metadata.isSymbolicLink()) {
+    const target = fs.readlinkSync(absolutePath);
+    consumedBytes.value += Buffer.byteLength(target);
+    hash.update("symlink\0");
+    hash.update(target);
+  } else if (metadata.isFile()) {
+    const descriptor = fs.openSync(absolutePath, "r");
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    try {
+      for (;;) {
+        const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+        if (bytesRead === 0) break;
+        consumedBytes.value += bytesRead;
+        if (consumedBytes.value > sourceRevisionByteLimit) {
+          throw new Error("Dirty Cindx source exceeds the fingerprint byte limit");
+        }
+        hash.update(buffer.subarray(0, bytesRead));
+      }
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } else {
+    hash.update("non-file\0");
+  }
+  hash.update("\0");
+}
+
+function resolveSourceRevision() {
+  const head = gitOutput(["rev-parse", "HEAD"], 1024).toString("utf8").trim();
+  if (!/^[0-9a-f]{40}$/.test(head)) {
+    throw new Error("A full Git source revision is required to run Cindx");
+  }
+  const status = gitOutput(
+    ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    8 * 1024 * 1024
+  );
+  if (status.length === 0) return head;
+
+  const diff = gitOutput(["diff", "--binary", "--no-ext-diff", "HEAD", "--"]);
+  const untracked = gitOutput(
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    8 * 1024 * 1024
+  )
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .sort();
+  const hash = crypto.createHash("sha256");
+  hash.update("cindx.dirty-source.v1\0");
+  hash.update(head);
+  hash.update("\0");
+  hash.update(status);
+  hash.update(diff);
+  const consumedBytes = { value: status.length + diff.length };
+  if (consumedBytes.value > sourceRevisionByteLimit) {
+    throw new Error("Dirty Cindx source exceeds the fingerprint byte limit");
+  }
+  for (const relativePath of untracked) {
+    hashUntrackedFile(hash, relativePath, consumedBytes);
+  }
+  return hash.digest("hex");
+}
+
+const sourceRevision = resolveSourceRevision();
 const paths = {
   cargoLock: path.join(desktopRoot, "src-tauri", "Cargo.lock"),
   cargoToml: path.join(desktopRoot, "src-tauri", "Cargo.toml"),
@@ -132,6 +223,7 @@ const result = spawnSync(executable, args, {
   cwd: desktopRoot,
   env: {
     ...process.env,
+    CINDX_SOURCE_REVISION: sourceRevision,
     PATH: ["/opt/homebrew/opt/rustup/bin", stableToolchain, process.env.PATH]
       .filter(Boolean)
       .join(path.delimiter)

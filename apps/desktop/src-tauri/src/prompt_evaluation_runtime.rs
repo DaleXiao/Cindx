@@ -652,7 +652,7 @@ pub(crate) fn append_prompt_evaluation_status(
     if let Some(error) = error {
         metadata.insert(
             "error".to_string(),
-            truncate_for_collaboration(error, 2_000),
+            truncate_for_collaboration(&redact_sensitive_text(error), 2_000),
         );
     }
     let mut store = state
@@ -678,6 +678,24 @@ pub(crate) fn append_prompt_pairwise_observations(
     observations: [&PromptEvolutionObservation; 2],
     genomes: [&ConductorPromptGenome; 2],
 ) -> Result<(), String> {
+    if !observations
+        .iter()
+        .all(|observation| observation.is_strict_matched_transfer_evidence())
+        || observations[0].provenance.matched_evaluation
+            != observations[1].provenance.matched_evaluation
+        || observations[0].profile_id
+            != observations[1]
+                .opponent_profile_id
+                .as_deref()
+                .unwrap_or_default()
+        || observations[1].profile_id
+            != observations[0]
+                .opponent_profile_id
+                .as_deref()
+                .unwrap_or_default()
+    {
+        return Err("prompt transfer pair is not strict matched evidence".to_string());
+    }
     let encoded_observations = serde_json::to_string(&observations)
         .map_err(|error| format!("prompt observations serialization failed: {error}"))?;
     let encoded_genomes = serde_json::to_string(&genomes)
@@ -686,6 +704,30 @@ pub(crate) fn append_prompt_pairwise_observations(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let model = load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
+    let identity = observations[0]
+        .provenance
+        .matched_evaluation
+        .as_ref()
+        .ok_or_else(|| "prompt transfer pair is missing matched identity".to_string())?;
+    let cohort = model
+        .cohorts
+        .get(&identity.cohort_sha256)
+        .ok_or_else(|| "prompt transfer cohort is not persisted".to_string())?;
+    let attempt = model
+        .attempts
+        .get(&identity.evaluation_id)
+        .ok_or_else(|| "prompt transfer attempt is not persisted".to_string())?;
+    if !crate::prompt_attempt_runtime::prompt_matched_identity_belongs_to_cohort(identity, cohort)
+        || !observations.iter().all(|observation| {
+            crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
+                observation,
+                &attempt.started,
+            )
+        })
+    {
+        return Err("prompt transfer pair does not match its persisted attempt".to_string());
+    }
     append_event(
         &mut store,
         task_id,

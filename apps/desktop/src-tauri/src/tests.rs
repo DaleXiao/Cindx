@@ -19,11 +19,13 @@ use crate::collaboration_stage_runtime::{
 use crate::conductor_health_runtime::{
     conductor_health_outcome, ConductorHealthLedger, ConductorHealthOutcome,
 };
+use crate::prompt_learning_runtime::prompt_dataset_identity;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
     AdaptiveWorkflow, AdaptiveWorkflowStep, AgentExecutionMode, AgentRunDecisionHarness,
-    AgentRunDecisionRequest, AgentVerificationPolicy,
+    AgentRunDecisionRequest, AgentVerificationPolicy, PromptDatasetCaseIdentityV1,
+    PromptExecutionContextV1, PromptTransferProvenance, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -38,6 +40,142 @@ fn test_prompt_evaluation_provenance(
         sha256_hex(candidate_id.as_bytes()),
         sha256_hex(opponent_id.as_bytes()),
     )
+}
+
+fn bind_matched_prompt_evidence(
+    model: &mut PromptEvolutionReadModel,
+    effort: &str,
+    candidate_id: &str,
+    stable_id: &str,
+) {
+    model
+        .attempts
+        .retain(|_, attempt| {
+            let profiles = attempt
+                .started
+                .treatments
+                .iter()
+                .map(|treatment| treatment.profile_id.as_str())
+                .collect::<BTreeSet<_>>();
+            profiles != BTreeSet::from([candidate_id, stable_id])
+        });
+    let cases = model
+        .observations
+        .iter()
+        .filter(|(observed_effort, observation)| {
+            observed_effort == effort
+                && observation.mode.is_execution()
+                && ((observation.profile_id == candidate_id
+                    && observation.opponent_profile_id.as_deref() == Some(stable_id))
+                    || (observation.profile_id == stable_id
+                        && observation.opponent_profile_id.as_deref() == Some(candidate_id)))
+        })
+        .map(|(_, observation)| {
+            (
+                (observation.case_id.clone(), observation.split),
+                PromptDatasetCaseIdentityV1 {
+                    case_id: observation.case_id.clone(),
+                    objective_sha256: sha256_hex(observation.case_id.as_bytes()),
+                    task_family_sha256: sha256_hex(observation.task_class.as_bytes()),
+                    split: observation.split,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect::<Vec<_>>();
+    let dataset = PromptDatasetIdentityV1::new("test-project", 1, cases).unwrap();
+    let cohort = PromptLearningCohortV1::new(
+        dataset,
+        PromptExecutionContextV1 {
+            schema: PROMPT_EXECUTION_CONTEXT_SCHEMA_V1.to_string(),
+            provider_sha256: "1".repeat(64),
+            model_pool_sha256: "2".repeat(64),
+            harness_sha256: "3".repeat(64),
+            system_prompt_sha256: "4".repeat(64),
+            policy: AgentPolicy::parse_ingress(effort),
+            policy_sha256: "5".repeat(64),
+            budget_sha256: "6".repeat(64),
+            tool_contract_sha256: "7".repeat(64),
+            source_revision_sha256: "8".repeat(64),
+            workspace_revision_sha256: "9".repeat(64),
+        },
+    )
+    .unwrap();
+    let mut pairs = BTreeMap::<String, Vec<usize>>::new();
+    for (index, (observed_effort, observation)) in model.observations.iter().enumerate() {
+        if observed_effort == effort
+            && observation.mode.is_execution()
+            && ((observation.profile_id == candidate_id
+                && observation.opponent_profile_id.as_deref() == Some(stable_id))
+                || (observation.profile_id == stable_id
+                    && observation.opponent_profile_id.as_deref() == Some(candidate_id)))
+        {
+            pairs
+                .entry(observation.evaluation_id.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+    for indices in pairs.into_values().filter(|indices| indices.len() == 2) {
+        let first = &model.observations[indices[0]].1;
+        let identity = PromptMatchedEvaluationIdentityV1::new(
+            first.evaluation_id.clone(),
+            &cohort,
+            first.case_id.clone(),
+            first.split,
+            first.mode,
+        )
+        .unwrap();
+        for index in &indices {
+            let observation = &mut model.observations[*index].1;
+            observation.provenance.dataset_sha256 = cohort.dataset.dataset_sha256.clone();
+            observation.provenance.matched_evaluation = Some(identity.clone());
+        }
+        let candidate = indices
+            .iter()
+            .map(|index| &model.observations[*index].1)
+            .find(|observation| observation.profile_id == candidate_id)
+            .unwrap();
+        let stable = indices
+            .iter()
+            .map(|index| &model.observations[*index].1)
+            .find(|observation| observation.profile_id == stable_id)
+            .unwrap();
+        let started = PromptEvaluationAttemptEventV1::started(
+            identity,
+            &cohort,
+            [
+                PromptTreatmentIdentityV1 {
+                    profile_id: candidate_id.to_string(),
+                    prompt_sha256: candidate.provenance.candidate_prompt_sha256.clone(),
+                },
+                PromptTreatmentIdentityV1 {
+                    profile_id: stable_id.to_string(),
+                    prompt_sha256: stable.provenance.candidate_prompt_sha256.clone(),
+                },
+            ],
+        )
+        .unwrap();
+        let terminal = PromptEvaluationAttemptEventV1::terminal(
+            &started,
+            PromptEvaluationAttemptStatus::CompletedPair,
+            [false; 2],
+            "",
+        )
+        .unwrap();
+        model.attempts.insert(
+            started.identity.evaluation_id.clone(),
+            PromptEvaluationAttemptState {
+                started,
+                terminal: Some(terminal),
+            },
+        );
+    }
+    model
+        .cohort_sequences
+        .insert(cohort.cohort_sha256.clone(), 1);
+    model.cohorts.insert(cohort.cohort_sha256.clone(), cohort);
 }
 
 fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> ConductorHarness {
@@ -3224,7 +3362,7 @@ fn prompt_evolution_read_model_only_indexes_evaluation_evidence() {
     let initial = load_prompt_evolution_read_model(&mut store)
         .expect("prompt evolution read model should build");
     assert_eq!(initial.genomes.len(), 1);
-    assert_eq!(initial.observations.len(), 1);
+    assert!(initial.observations.is_empty());
 
     append_message_event_with_metadata(
         &mut store,
@@ -3239,7 +3377,7 @@ fn prompt_evolution_read_model_only_indexes_evaluation_evidence() {
     let updated = load_prompt_evolution_read_model(&mut store)
         .expect("prompt evolution read model should advance");
     assert_eq!(updated.genomes.len(), 1);
-    assert_eq!(updated.observations.len(), 1);
+    assert!(updated.observations.is_empty());
     assert!(updated.revision > initial.revision);
 }
 
@@ -3406,7 +3544,7 @@ fn prompt_evolution_read_model_restores_an_atomic_observation_pair() {
     };
     let observation_a = PromptEvolutionObservation {
         profile_id: genome_a.id.clone(),
-        evaluation_id: "atomic-pair".to_string(),
+        evaluation_id: scoped_prompt_evaluation_id("project-a", "atomic-pair"),
         case_id: "atomic-case".to_string(),
         opponent_profile_id: Some(genome_b.id.clone()),
         task_class: "coding".to_string(),
@@ -3439,6 +3577,7 @@ fn prompt_evolution_read_model_restores_an_atomic_observation_pair() {
         "Conductor pairwise evaluation",
         [
             ("prompt_effort".to_string(), "auto".to_string()),
+            ("project_id".to_string(), "project-a".to_string()),
             (
                 "prompt_genomes".to_string(),
                 serde_json::to_string(&[&genome_a, &genome_b]).expect("genomes should serialize"),
@@ -3458,7 +3597,7 @@ fn prompt_evolution_read_model_restores_an_atomic_observation_pair() {
     assert_eq!(model.genomes.len(), 2);
     assert_eq!(model.observations.len(), 2);
     assert!(model.observations.iter().all(|(_, observation)| {
-        observation.evaluation_id == "atomic-pair"
+        observation.evaluation_id == scoped_prompt_evaluation_id("project-a", "atomic-pair")
             && observation.mode == PromptEvaluationMode::ReplayExecution
     }));
 }
@@ -3601,6 +3740,9 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         event_count: 0,
         genomes: Vec::new(),
         observations: Vec::new(),
+        attempts: BTreeMap::new(),
+        cohorts: BTreeMap::new(),
+        cohort_sequences: BTreeMap::new(),
         rollouts: BTreeMap::new(),
         datasets: BTreeMap::new(),
     };
@@ -3688,6 +3830,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             .push(("auto".to_string(), stable_observation));
     }
 
+    bind_matched_prompt_evidence(&mut model, "auto", &candidate.id, &stable.id);
     let started = reconcile_prompt_rollout(&mut model, "auto", &evaluation(8));
     assert_eq!(started.canary_profile_id.as_deref(), Some("candidate-auto"));
     assert_eq!(started.canary_percent, 10);
@@ -3730,6 +3873,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             .observations
             .push(("auto".to_string(), stable_observation));
     }
+    bind_matched_prompt_evidence(&mut model, "auto", &candidate.id, &stable.id);
     let advanced = reconcile_prompt_rollout(&mut model, "auto", &evaluation(10));
     assert_eq!(advanced.canary_percent, 25);
 
@@ -3787,6 +3931,9 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
             evolution_method: Some(PromptEvolutionMethod::GepaReflectivePaired),
         }],
         observations: Vec::new(),
+        attempts: BTreeMap::new(),
+        cohorts: BTreeMap::new(),
+        cohort_sequences: BTreeMap::new(),
         rollouts: BTreeMap::from([("auto".to_string(), rollout)]),
         datasets: BTreeMap::new(),
     };
@@ -3883,6 +4030,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         mutation_trajectories: Vec::new(),
     };
 
+    bind_matched_prompt_evidence(&mut model, "auto", &candidate.id, &stable.id);
     let promoted = reconcile_prompt_rollout(&mut model, "auto", &evaluation);
 
     assert_eq!(promoted.status, "promoted");
@@ -3998,6 +4146,9 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
             evolution_method: Some(PromptEvolutionMethod::GepaReflectivePaired),
         }],
         observations: Vec::new(),
+        attempts: BTreeMap::new(),
+        cohorts: BTreeMap::new(),
+        cohort_sequences: BTreeMap::new(),
         rollouts: BTreeMap::new(),
         datasets: BTreeMap::new(),
     };
@@ -7022,9 +7173,13 @@ fn prompt_evolution_uses_training_results_to_select_a_new_generation() {
                 },
             }
         });
+        let evaluation_id = scoped_prompt_evaluation_id(
+            "project-a",
+            &format!("pair-{evaluation_index}"),
+        );
         let observation = PromptEvolutionObservation {
             profile_id: seed.id.clone(),
-            evaluation_id: format!("pair-{evaluation_index}"),
+            evaluation_id,
             case_id: format!("case-{evaluation_index}"),
             opponent_profile_id: Some("baseline-opponent".to_string()),
             task_class: "coding".to_string(),
@@ -7051,6 +7206,15 @@ fn prompt_evolution_uses_training_results_to_select_a_new_generation() {
             reflection_packet,
             provenance: test_prompt_evaluation_provenance(&seed.id, "baseline-opponent"),
         };
+        let mut opponent_observation = observation.clone();
+        opponent_observation.profile_id = "baseline-opponent".to_string();
+        opponent_observation.opponent_profile_id = Some(seed.id.clone());
+        opponent_observation.quality_score = 0.7;
+        opponent_observation.relative_reward = Some(-0.2);
+        opponent_observation.step_credits.clear();
+        opponent_observation.reflection_packet = None;
+        opponent_observation.provenance =
+            test_prompt_evaluation_provenance("baseline-opponent", &seed.id);
         events.push(Event {
             id: EventId(format!("pair-event-{evaluation_index}")),
             task_id: phase16_task_id(),
@@ -7060,9 +7224,10 @@ fn prompt_evolution_uses_training_results_to_select_a_new_generation() {
             summary: "Conductor pairwise evaluation".to_string(),
             metadata: [
                 ("prompt_effort".to_string(), "auto".to_string()),
+                ("project_id".to_string(), "project-a".to_string()),
                 (
-                    "prompt_observation".to_string(),
-                    serde_json::to_string(&observation).unwrap(),
+                    "prompt_observations".to_string(),
+                    serde_json::to_string(&[observation, opponent_observation]).unwrap(),
                 ),
             ]
             .into_iter()
@@ -7694,6 +7859,7 @@ fn offline_prompt_dataset_stays_frozen_within_a_generation() {
             project_id: "project-a".to_string(),
             source_run_id: format!("run-{id}"),
             split: PromptEvaluationSplit::Train,
+            learning_receipt: None,
             auto_teacher: None,
         })
         .collect::<Vec<_>>();
@@ -7702,10 +7868,12 @@ fn offline_prompt_dataset_stays_frozen_within_a_generation() {
         .take(4)
         .map(|case| case.id.clone())
         .collect::<Vec<_>>();
+    let frozen_identity = prompt_dataset_identity(&discovered[..4], 2).unwrap();
     let previous = PromptOfflineDatasetState {
         effort: "auto".to_string(),
         project_id: "project-a".to_string(),
-        digest: "d".repeat(64),
+        digest: frozen_identity.dataset_sha256.clone(),
+        identity: Some(frozen_identity),
         generation: 2,
         case_ids: frozen_ids.clone(),
         case_count: frozen_ids.len(),
@@ -7717,9 +7885,9 @@ fn offline_prompt_dataset_stays_frozen_within_a_generation() {
     };
 
     let same_generation =
-        prompt_offline_dataset_for_generation(discovered.clone(), Some(&previous), 2);
+        prompt_offline_dataset_for_generation(discovered.clone(), Some(&previous), 2).unwrap();
     let next_generation =
-        prompt_offline_dataset_for_generation(discovered.clone(), Some(&previous), 3);
+        prompt_offline_dataset_for_generation(discovered.clone(), Some(&previous), 3).unwrap();
 
     assert_eq!(
         same_generation
@@ -7729,6 +7897,46 @@ fn offline_prompt_dataset_stays_frozen_within_a_generation() {
         frozen_ids
     );
     assert_eq!(next_generation, discovered);
+
+    let incomplete = discovered
+        .iter()
+        .filter(|case| case.id != frozen_ids[0])
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(prompt_offline_dataset_for_generation(incomplete, Some(&previous), 2).is_err());
+
+    let assert_identity_change_is_rejected = |changed| {
+        assert_eq!(
+            prompt_offline_dataset_for_generation(changed, Some(&previous), 2).unwrap_err(),
+            "frozen prompt dataset identity changed; refusing cohort substitution"
+        );
+    };
+    let mut changed_objective = discovered.clone();
+    changed_objective[0].objective = "Different objective".to_string();
+    assert_identity_change_is_rejected(changed_objective);
+
+    let mut changed_task_family = discovered.clone();
+    changed_task_family[0].task_class = "analysis".to_string();
+    assert_identity_change_is_rejected(changed_task_family);
+
+    let mut changed_split = discovered.clone();
+    changed_split[0].split = PromptEvaluationSplit::Holdout;
+    assert_identity_change_is_rejected(changed_split);
+
+    let mut changed_case_id = discovered.clone();
+    changed_case_id[0].id = "different-case".to_string();
+    assert_eq!(
+        prompt_offline_dataset_for_generation(changed_case_id, Some(&previous), 2).unwrap_err(),
+        "frozen prompt dataset is incomplete; refusing cohort substitution"
+    );
+
+    let mut legacy_snapshot = previous;
+    legacy_snapshot.identity = None;
+    assert_eq!(
+        prompt_offline_dataset_for_generation(discovered.clone(), Some(&legacy_snapshot), 2,)
+            .unwrap(),
+        discovered
+    );
 }
 
 #[test]
@@ -7740,6 +7948,7 @@ fn offline_prompt_dataset_digest_tracks_the_frozen_cohort_not_source_runs() {
         project_id: "project-a".to_string(),
         source_run_id: source_run_id.to_string(),
         split,
+        learning_receipt: None,
         auto_teacher: None,
     };
     let original = vec![case("run-a", PromptEvaluationSplit::Train)];
@@ -7824,6 +8033,7 @@ fn current_stable_auto_teacher_outranks_stale_higher_score() {
             project_id: "project-a".to_string(),
             source_run_id: teacher.source_run_id.clone(),
             split: PromptEvaluationSplit::Train,
+            learning_receipt: None,
             auto_teacher: Some(teacher),
         }
     };
@@ -7849,6 +8059,7 @@ fn auto_transfer_digest_tracks_teacher_identity_without_mutating_the_normal_coho
         project_id: "project-a".to_string(),
         source_run_id: teacher.source_run_id.clone(),
         split: PromptEvaluationSplit::Train,
+        learning_receipt: None,
         auto_teacher: Some(teacher),
     };
     let first = vec![case(test_auto_teacher_case("first verified output"))];
@@ -7869,6 +8080,7 @@ fn auto_transfer_digest_tracks_teacher_identity_without_mutating_the_normal_coho
         &first,
         &[],
         ["pro-stable", "pro-challenger"],
+        [None, None],
         &teacher.profile_id,
         &teacher.profile_sha256,
         PromptEvaluationSplit::Train,
@@ -7878,6 +8090,7 @@ fn auto_transfer_digest_tracks_teacher_identity_without_mutating_the_normal_coho
         &first,
         &[],
         ["pro-stable", "pro-challenger"],
+        [None, None],
         &teacher.profile_id,
         &sha256_hex(b"stale-auto-profile"),
         PromptEvaluationSplit::Train,
@@ -8102,6 +8315,10 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
                     "workflow_checkpoint".to_string(),
                     checkpoint.to_json().unwrap(),
                 ),
+                (
+                    "anytime_prompt_learning_eligible".to_string(),
+                    "true".to_string(),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -8169,6 +8386,11 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
     assert_eq!(captured.final_output, "Verified Auto answer");
     assert_eq!(captured.quality_score_bps, 9_000);
     assert_eq!(captured.profile_sha256, teacher.profile_sha256);
+    assert_eq!(
+        prompt_learning_dataset(&events, "project-a", None).len(),
+        1,
+        "only a typed, verified prompt-learning receipt may enter replay"
+    );
 
     events.push(event(
         5,
@@ -8181,6 +8403,7 @@ fn completed_verified_auto_workflow_becomes_teacher_and_denied_runs_fail_closed(
     assert!(prompt_offline_dataset(&events, "project-a", None)[0]
         .auto_teacher
         .is_none());
+    assert!(prompt_learning_dataset(&events, "project-a", None).is_empty());
 }
 
 #[test]
@@ -8198,6 +8421,7 @@ fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
         project_id: "project-a".to_string(),
         source_run_id: format!("run-{id}"),
         split: PromptEvaluationSplit::Train,
+        learning_receipt: None,
         auto_teacher: None,
     })
     .collect::<Vec<_>>();
@@ -8516,6 +8740,63 @@ fn pairwise_observation_keeps_relative_and_per_step_credit() {
     assert!(!encoded.contains("runtime-reflection-token"));
     assert!(encoded.contains("[REDACTED]"));
     assert_eq!(packet.steps[0].tool_calls.len(), 1);
+
+    let mut unsafe_packet = packet.clone();
+    unsafe_packet.input = secret.clone();
+    assert!(
+        !prompt_evaluation_feedback::prompt_reflection_packet_is_safe(
+            &unsafe_packet,
+            std::slice::from_ref(&secret),
+        ),
+        "configured sensitive values must fail the reflection boundary"
+    );
+    let escaped_secret = "evaluation-\"secret".to_string();
+    unsafe_packet.input = escaped_secret.clone();
+    assert!(
+        !prompt_evaluation_feedback::prompt_reflection_packet_is_safe(
+            &unsafe_packet,
+            std::slice::from_ref(&escaped_secret),
+        ),
+        "serialized configured sensitive values must fail the reflection boundary"
+    );
+    unsafe_packet.input =
+        "unredacted eyJhbGciOiJIUzI1NiJ9.abcdefghijklmno.pqrstuvwxyz123456".to_string();
+    assert!(crate::prompt_learning_runtime::prompt_text_contains_residual_secret(
+        &unsafe_packet.input
+    ));
+    assert!(
+        !prompt_evaluation_feedback::prompt_reflection_packet_is_safe(&unsafe_packet, &[]),
+        "residual secret patterns must fail the reflection boundary"
+    );
+
+    let mut residual_candidate = candidate.clone();
+    residual_candidate.execution.final_output = unsafe_packet.input;
+    let residual_observation = prompt_evaluation_feedback::prompt_pairwise_observation(
+        &residual_candidate,
+        &opponent,
+        "Fix the project and run tests",
+        "pair-3",
+        "coding",
+        PromptEvaluationSplit::Train,
+        PromptEvaluationMode::PairedExecution,
+        0.85,
+        0.55,
+        0,
+        &[("verify".to_string(), 0.78)].into_iter().collect(),
+        ActionableSideInformation {
+            summary: "candidate verified more completely".to_string(),
+            ..ActionableSideInformation::default()
+        },
+        &[],
+        test_prompt_evaluation_provenance(
+            &residual_candidate.plan.genome.id,
+            &opponent.plan.genome.id,
+        ),
+    );
+    assert!(
+        residual_observation.reflection_packet.is_none(),
+        "unsafe learning material must be omitted without affecting the observation"
+    );
 }
 
 #[test]

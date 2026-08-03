@@ -361,14 +361,42 @@ pub(crate) fn prompt_observation_records_from_event(
                 .map(|observation| vec![observation])
         })
         .unwrap_or_default();
-    if is_transfer {
+    if !is_transfer {
+        let Some([candidate, opponent]) = observations.as_slice().first_chunk::<2>() else {
+            return Vec::new();
+        };
+        let Some(project_id) = event.metadata.get("project_id") else {
+            return Vec::new();
+        };
+        let matched_identity_present = candidate.provenance.matched_evaluation.is_some()
+            || opponent.provenance.matched_evaluation.is_some();
+        if observations.len() != 2
+            || !candidate.is_scientific_evidence()
+            || !opponent.is_scientific_evidence()
+            || candidate.evaluation_id != opponent.evaluation_id
+            || candidate.case_id != opponent.case_id
+            || candidate.split != opponent.split
+            || candidate.mode != opponent.mode
+            || candidate.opponent_profile_id.as_deref() != Some(opponent.profile_id.as_str())
+            || opponent.opponent_profile_id.as_deref() != Some(candidate.profile_id.as_str())
+            || !prompt_observation_matches_scope(candidate, project_id)
+            || !prompt_observation_matches_scope(opponent, project_id)
+            || (matched_identity_present
+                && (!candidate.is_strict_matched_evidence()
+                    || !opponent.is_strict_matched_evidence()
+                    || candidate.provenance.matched_evaluation
+                        != opponent.provenance.matched_evaluation))
+        {
+            return Vec::new();
+        }
+    } else {
         let Some([candidate, teacher]) = observations.as_slice().first_chunk::<2>() else {
             return Vec::new();
         };
         if observations.len() != 2
             || effort != "pro"
-            || !candidate.is_scientific_transfer_evidence()
-            || !teacher.is_scientific_transfer_evidence()
+            || !candidate.is_strict_matched_transfer_evidence()
+            || !teacher.is_strict_matched_transfer_evidence()
             || candidate.evaluation_id != teacher.evaluation_id
             || candidate.case_id != teacher.case_id
             || candidate.split != teacher.split
@@ -376,6 +404,8 @@ pub(crate) fn prompt_observation_records_from_event(
             || candidate.opponent_profile_id.as_deref() != Some(teacher.profile_id.as_str())
             || teacher.opponent_profile_id.as_deref() != Some(candidate.profile_id.as_str())
             || candidate.provenance.transfer != teacher.provenance.transfer
+            || candidate.provenance.matched_evaluation
+                != teacher.provenance.matched_evaluation
         {
             return Vec::new();
         }
@@ -500,11 +530,50 @@ pub(crate) fn prompt_evolution_read_model_for_scope(
     let mut scoped = model.clone();
     scoped.genomes.retain(|record| record.scope == scope);
     scoped
-        .observations
-        .retain(|(_, observation)| prompt_observation_matches_scope(observation, scope));
-    scoped
         .datasets
         .retain(|_, dataset| dataset.project_id == scope);
+    scoped.attempts.retain(|_, attempt| {
+        prompt_evaluation_id_matches_scope(&attempt.started.identity.evaluation_id, scope)
+    });
+    let cohort_ids = scoped
+        .attempts
+        .values()
+        .map(|attempt| attempt.started.identity.cohort_sha256.clone())
+        .collect::<BTreeSet<_>>();
+    scoped
+        .cohorts
+        .retain(|cohort_sha256, _| cohort_ids.contains(cohort_sha256));
+    scoped
+        .cohort_sequences
+        .retain(|cohort_sha256, _| cohort_ids.contains(cohort_sha256));
+    let attempts = &scoped.attempts;
+    let cohorts = &scoped.cohorts;
+    scoped.observations.retain(|(_, observation)| {
+        prompt_observation_matches_scope(observation, scope)
+            && match observation.provenance.matched_evaluation.as_ref() {
+                Some(identity) => cohorts
+                    .get(&identity.cohort_sha256)
+                    .is_some_and(|cohort| {
+                        crate::prompt_attempt_runtime::prompt_matched_identity_belongs_to_cohort(
+                            identity, cohort,
+                        )
+                            && attempts
+                                .get(&identity.evaluation_id)
+                                .is_some_and(|attempt| {
+                                    attempt.started.identity == *identity
+                                        && crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
+                                            observation,
+                                            &attempt.started,
+                                        )
+                                        && attempt.terminal.as_ref().is_some_and(|terminal| {
+                                            terminal.identity == *identity
+                                                && terminal.enters_effect_denominator()
+                                        })
+                                })
+                    }),
+                None => observation.mode == PromptEvaluationMode::Live,
+            }
+    });
     scoped.rollouts = ["fast", "auto", "pro"]
         .into_iter()
         .filter_map(|effort| {
@@ -517,6 +586,70 @@ pub(crate) fn prompt_evolution_read_model_for_scope(
         })
         .collect();
     scoped
+}
+
+fn prompt_evaluation_id_matches_scope(evaluation_id: &str, scope: &str) -> bool {
+    evaluation_id
+        .split_once(PROMPT_EVIDENCE_SCOPE_SEPARATOR)
+        .is_some_and(|(observed_scope, _)| observed_scope == scope)
+}
+
+pub(crate) const PROMPT_EVALUATION_ATTEMPT_RETENTION: usize = 1_024;
+
+pub(crate) fn upsert_prompt_evaluation_attempt(
+    attempts: &mut BTreeMap<String, PromptEvaluationAttemptState>,
+    event: PromptEvaluationAttemptEventV1,
+) {
+    let key = event.identity.evaluation_id.clone();
+    if event.status == orchestrator::PromptEvaluationAttemptStatus::Started {
+        if !attempts.contains_key(&key) && attempts.len() >= PROMPT_EVALUATION_ATTEMPT_RETENTION {
+            let removable = attempts
+                .iter()
+                .find(|(_, state)| state.terminal.is_some())
+                .map(|(key, _)| key.clone());
+            let Some(removable) = removable else {
+                return;
+            };
+            attempts.remove(&removable);
+        }
+        attempts.entry(key).or_insert(PromptEvaluationAttemptState {
+            started: event,
+            terminal: None,
+        });
+    } else if let Some(state) = attempts.get_mut(&key) {
+        if state.terminal.is_none()
+            && state.started.identity == event.identity
+            && state.started.treatments == event.treatments
+        {
+            state.terminal = Some(event);
+        }
+    }
+}
+
+fn upsert_prompt_learning_cohort(
+    cohorts: &mut BTreeMap<String, PromptLearningCohortV1>,
+    cohort_sequences: &mut BTreeMap<String, u64>,
+    cohort: PromptLearningCohortV1,
+    sequence: u64,
+) {
+    let digest = cohort.cohort_sha256.clone();
+    cohorts.entry(digest.clone()).or_insert(cohort);
+    cohort_sequences.insert(digest, sequence);
+    while cohorts.len() > crate::prompt_attempt_runtime::PROMPT_LEARNING_COHORT_RETENTION {
+        let Some(oldest) = cohort_sequences
+            .iter()
+            .min_by(|(left_digest, left_sequence), (right_digest, right_sequence)| {
+                left_sequence
+                    .cmp(right_sequence)
+                    .then_with(|| left_digest.cmp(right_digest))
+            })
+            .map(|(digest, _)| digest.clone())
+        else {
+            break;
+        };
+        cohort_sequences.remove(&oldest);
+        cohorts.remove(&oldest);
+    }
 }
 
 pub(crate) fn persist_scoped_prompt_rollout(
@@ -586,12 +719,22 @@ pub(crate) fn prompt_dataset_record_from_event(
         .and_then(|encoded| serde_json::from_str::<Vec<String>>(encoded).ok())
         .unwrap_or_default();
     let key = prompt_dataset_key(&effort, &project_id);
+    let identity = event
+        .metadata
+        .get("dataset_identity_v1")
+        .and_then(|encoded| serde_json::from_str::<PromptDatasetIdentityV1>(encoded).ok())
+        .filter(|identity| {
+            identity.validate().is_ok()
+                && identity.dataset_sha256 == digest
+                && identity.scope_sha256 == sha256_hex(project_id.as_bytes())
+        });
     Some((
         key,
         PromptOfflineDatasetState {
             effort,
             project_id,
             digest,
+            identity,
             generation: event
                 .metadata
                 .get("dataset_generation")
@@ -654,6 +797,9 @@ pub(crate) fn build_prompt_evolution_read_model(
     let mut genomes = Vec::new();
     let mut rollouts = BTreeMap::new();
     let mut datasets = BTreeMap::new();
+    let mut attempts = BTreeMap::new();
+    let mut cohorts = BTreeMap::new();
+    let mut cohort_sequences = BTreeMap::new();
     for event in events {
         for record in prompt_genome_records_from_event(event) {
             upsert_prompt_genome(&mut genomes, record);
@@ -664,6 +810,19 @@ pub(crate) fn build_prompt_evolution_read_model(
         if let Some((key, dataset)) = prompt_dataset_record_from_event(event) {
             datasets.insert(key, dataset);
         }
+        if let Some(attempt) = crate::prompt_attempt_runtime::prompt_evaluation_attempt_from_event(event)
+        {
+            upsert_prompt_evaluation_attempt(&mut attempts, attempt);
+        }
+        if let Some(cohort) = crate::prompt_attempt_runtime::prompt_learning_cohort_from_event(event)
+        {
+            upsert_prompt_learning_cohort(
+                &mut cohorts,
+                &mut cohort_sequences,
+                cohort,
+                event.sequence,
+            );
+        }
     }
     PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
@@ -672,6 +831,9 @@ pub(crate) fn build_prompt_evolution_read_model(
         event_count,
         genomes,
         observations: prompt_evolution_observations_from_events(events),
+        attempts,
+        cohorts,
+        cohort_sequences,
         rollouts,
         datasets,
     }
@@ -708,6 +870,9 @@ pub(crate) fn load_prompt_evolution_read_model(
         event_count: 0,
         genomes: Vec::new(),
         observations: Vec::new(),
+        attempts: BTreeMap::new(),
+        cohorts: BTreeMap::new(),
+        cohort_sequences: BTreeMap::new(),
         rollouts: BTreeMap::new(),
         datasets: BTreeMap::new(),
     });
@@ -739,6 +904,21 @@ pub(crate) fn load_prompt_evolution_read_model(
             }
             if let Some((key, dataset)) = prompt_dataset_record_from_event(event) {
                 model.datasets.insert(key, dataset);
+            }
+            if let Some(attempt) =
+                crate::prompt_attempt_runtime::prompt_evaluation_attempt_from_event(event)
+            {
+                upsert_prompt_evaluation_attempt(&mut model.attempts, attempt);
+            }
+            if let Some(cohort) =
+                crate::prompt_attempt_runtime::prompt_learning_cohort_from_event(event)
+            {
+                upsert_prompt_learning_cohort(
+                    &mut model.cohorts,
+                    &mut model.cohort_sequences,
+                    cohort,
+                    event.sequence,
+                );
             }
             for (effort, observation) in prompt_observation_records_from_event(event) {
                 upsert_prompt_observation(&mut model.observations, effort, observation);

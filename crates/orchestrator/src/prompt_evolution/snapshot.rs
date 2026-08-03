@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 pub const FROZEN_PROMPT_PROFILE_SCHEMA: &str = "cindx.prompt-profile-snapshot.v1";
 pub const PROMPT_PROMOTION_GATE_PROTOCOL: &str = "paired-wilson-task-diversity-v1";
-pub const PROMPT_AUTO_TRANSFER_GATE_PROTOCOL: &str = "auto-to-pro-paired-wilson-task-diversity-v1";
+pub const PROMPT_AUTO_TRANSFER_GATE_PROTOCOL: &str =
+    "auto-to-pro-matched-cohort-paired-wilson-task-diversity-v2";
+const LEGACY_PROMPT_AUTO_TRANSFER_GATE_PROTOCOL: &str =
+    "auto-to-pro-paired-wilson-task-diversity-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +21,8 @@ pub struct FrozenPromptTransferEvidence {
     pub source_profile_id: String,
     pub source_profile_sha256: String,
     pub dataset_sha256: String,
+    #[serde(default)]
+    pub cohort_sha256: Option<String>,
     pub paired_evidence_sha256: String,
     pub promotion_gate_protocol: String,
 }
@@ -33,7 +38,14 @@ impl FrozenPromptTransferEvidence {
         {
             return Err("frozen prompt transfer fingerprints are invalid".to_string());
         }
-        if self.promotion_gate_protocol != PROMPT_AUTO_TRANSFER_GATE_PROTOCOL {
+        let protocol_valid = match self.promotion_gate_protocol.as_str() {
+            PROMPT_AUTO_TRANSFER_GATE_PROTOCOL => {
+                self.cohort_sha256.as_deref().is_some_and(is_sha256)
+            }
+            LEGACY_PROMPT_AUTO_TRANSFER_GATE_PROTOCOL => self.cohort_sha256.is_none(),
+            _ => false,
+        };
+        if !protocol_valid {
             return Err(format!(
                 "unsupported prompt transfer gate protocol: {}",
                 self.promotion_gate_protocol
@@ -244,6 +256,7 @@ mod tests {
             source_profile_id: "auto-stable-v2".to_string(),
             source_profile_sha256: "c".repeat(64),
             dataset_sha256: "d".repeat(64),
+            cohort_sha256: Some("f".repeat(64)),
             paired_evidence_sha256: "e".repeat(64),
             promotion_gate_protocol: PROMPT_AUTO_TRANSFER_GATE_PROTOCOL.to_string(),
         }

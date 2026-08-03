@@ -1,5 +1,60 @@
 use super::*;
 
+pub(crate) struct PromptTreatmentControlGroup<'a> {
+    parent: &'a AgentRunControl,
+    lanes: Vec<Arc<AgentRunControl>>,
+    absorbed: bool,
+}
+
+impl<'a> PromptTreatmentControlGroup<'a> {
+    pub(crate) fn new(
+        parent: &'a AgentRunControl,
+        lane_count: usize,
+        allocation_divisor: usize,
+    ) -> Result<Self, String> {
+        let lanes = (0..lane_count)
+            .map(|_| {
+                parent
+                    .isolated_treatment(allocation_divisor)
+                    .map(Arc::new)
+                    .map_err(|reason| {
+                        format!("matched treatment budget unavailable: {}", reason.code())
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            parent,
+            lanes,
+            absorbed: false,
+        })
+    }
+
+    pub(crate) fn lane(&self, index: usize) -> Arc<AgentRunControl> {
+        Arc::clone(&self.lanes[index])
+    }
+
+    pub(crate) fn lane_budget(&self) -> RunBudget {
+        self.lanes[0].budget()
+    }
+
+    pub(crate) fn absorb(&mut self) -> Result<(), String> {
+        if self.absorbed {
+            return Ok(());
+        }
+        self.absorbed = true;
+        let lanes = self.lanes.iter().map(Arc::as_ref).collect::<Vec<_>>();
+        self.parent
+            .absorb_isolated_treatments(&lanes)
+            .map_err(|reason| format!("matched treatment accounting failed: {}", reason.code()))
+    }
+}
+
+impl Drop for PromptTreatmentControlGroup<'_> {
+    fn drop(&mut self) {
+        let _ = self.absorb();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_prompt_pairwise_evaluation(
     app: tauri::AppHandle,
@@ -67,7 +122,9 @@ fn prompt_evaluation_model_partition(
     (worker_models.to_vec(), Vec::new())
 }
 
-fn prompt_candidate_models(candidates: [&PromptExecutionCandidate; 2]) -> BTreeSet<String> {
+pub(crate) fn prompt_candidate_models(
+    candidates: [&PromptExecutionCandidate; 2],
+) -> BTreeSet<String> {
     let mut models = BTreeSet::new();
     for candidate in candidates {
         if let Some(plan) = candidate.plan.plan.as_ref() {
@@ -86,130 +143,6 @@ fn prompt_candidate_models(candidates: [&PromptExecutionCandidate; 2]) -> BTreeS
     models
 }
 
-fn prompt_auto_teacher_candidate(teacher: &PromptAutoTeacherCase) -> PromptExecutionCandidate {
-    PromptExecutionCandidate {
-        plan: PromptPlanCandidate {
-            genome: teacher.genome.clone(),
-            plan: Some(teacher.plan.clone()),
-            raw_output: String::new(),
-            latency_ms: 0,
-            total_tokens: 0,
-        },
-        execution: PromptWorkflowExecution {
-            succeeded: true,
-            quality_gate_met: true,
-            final_output: teacher.final_output.clone(),
-            steps: teacher
-                .steps
-                .iter()
-                .map(|step| PromptExecutionStep {
-                    id: step.id.clone(),
-                    role: step.role.clone(),
-                    model: step.model.clone(),
-                    prompt: String::new(),
-                    attempts: step.attempts,
-                    status: step.status.clone(),
-                    output: step.output.clone(),
-                    tool_calls: Vec::new(),
-                    errors: step.errors.clone(),
-                    latency_ms: step.latency_ms,
-                    total_tokens: step.total_tokens,
-                    evidence_count: step.evidence_count,
-                })
-                .collect(),
-            latency_ms: teacher.latency_ms,
-            total_tokens: teacher.total_tokens,
-        },
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn evaluate_prompt_auto_transfer_pair(
-    config: &ProviderConfig,
-    reviewer_model: &str,
-    objective: &str,
-    candidate: &PromptExecutionCandidate,
-    teacher: &PromptAutoTeacherCase,
-    evaluation_id: &str,
-    task_class: &str,
-    split: PromptEvaluationSplit,
-    mode: PromptEvaluationMode,
-    dataset_sha256: &str,
-    control: &Arc<AgentRunControl>,
-) -> Result<[PromptEvolutionObservation; 2], String> {
-    let teacher_candidate = prompt_auto_teacher_candidate(teacher);
-    let participant_models = prompt_candidate_models([candidate, &teacher_candidate])
-        .into_iter()
-        .collect::<Vec<_>>();
-    if participant_models.iter().any(|model| model == reviewer_model) {
-        return Err("Auto transfer reviewer is not independent of the compared workflows".to_string());
-    }
-    let judge = prompt_evaluation_feedback::evaluate_prompt_candidate_pair_position_balanced(
-        config,
-        reviewer_model,
-        objective,
-        candidate,
-        &teacher_candidate,
-        evaluation_id,
-        control,
-    )?;
-    let candidate_sha256 = prompt_genome_sha256(&candidate.plan.genome)?;
-    let transfer = PromptTransferProvenance::auto_to_pro(
-        teacher.source_run_id.clone(),
-        teacher.steer_epoch,
-        teacher.profile_id.clone(),
-        teacher.profile_sha256.clone(),
-        teacher.output_sha256.clone(),
-    );
-    let candidate_observation = prompt_evaluation_feedback::prompt_pairwise_observation(
-        candidate,
-        &teacher_candidate,
-        objective,
-        evaluation_id,
-        task_class,
-        split,
-        mode,
-        judge.score_a,
-        judge.score_b,
-        judge.safety_violations_a,
-        &judge.step_scores_a,
-        judge.feedback_a,
-        std::slice::from_ref(&config.api_key),
-        PromptEvaluationProvenance::blind_pairwise_swap(
-            vec![reviewer_model.to_string()],
-            participant_models.clone(),
-            dataset_sha256.to_string(),
-            candidate_sha256.clone(),
-            teacher.profile_sha256.clone(),
-        )
-        .with_transfer(transfer.clone()),
-    );
-    let teacher_observation = prompt_evaluation_feedback::prompt_pairwise_observation(
-        &teacher_candidate,
-        candidate,
-        objective,
-        evaluation_id,
-        task_class,
-        split,
-        mode,
-        judge.score_b,
-        judge.score_a,
-        judge.safety_violations_b,
-        &judge.step_scores_b,
-        judge.feedback_b,
-        std::slice::from_ref(&config.api_key),
-        PromptEvaluationProvenance::blind_pairwise_swap(
-            vec![reviewer_model.to_string()],
-            participant_models,
-            dataset_sha256.to_string(),
-            teacher.profile_sha256.clone(),
-            candidate_sha256,
-        )
-        .with_transfer(transfer),
-    );
-    Ok([candidate_observation, teacher_observation])
-}
-
 fn prompt_pairwise_campaign_snapshot(
     config: &ProviderConfig,
     effort: &str,
@@ -217,12 +150,13 @@ fn prompt_pairwise_campaign_snapshot(
     evaluation: &PromptEvolutionEvaluation,
     rollout: Option<&PromptRolloutState>,
 ) -> Result<PromptEvolutionCampaignSnapshot, String> {
-    let active_dataset_sha256 =
+    let active_cohort_sha256 =
         orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
     let is_active_scientific = |observation: &&PromptEvolutionObservation| {
         observation.is_scientific_evidence()
-            && active_dataset_sha256
-                .is_some_and(|digest| observation.provenance.dataset_sha256 == digest)
+            && active_cohort_sha256.is_some_and(|digest| {
+                observation.scientific_cohort_sha256() == Some(digest)
+            })
     };
     let paired_runs = evaluation
         .observations
@@ -315,6 +249,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         known_profiles,
         previous_dataset,
         auto_stable_profile,
+        scoped_model,
     ) = {
         let mut store = state
             .store
@@ -341,8 +276,16 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         let preferred_auto_profile = auto_stable_profile
             .as_ref()
             .map(|(profile, sha256)| (profile.id.as_str(), sha256.as_str()));
-        let discovered_dataset =
-            prompt_offline_dataset(&events, project_id, preferred_auto_profile);
+        let discovered_dataset = prompt_learning_dataset(
+            &events,
+            project_id,
+            preferred_auto_profile,
+        )
+        .into_iter()
+        .filter(|case| {
+            crate::prompt_learning_runtime::prompt_learning_case_is_safe(case, config)
+        })
+        .collect();
         (
             evaluate_prompt_evolution_read_model(&scoped_model, effort)?,
             discovered_dataset,
@@ -350,6 +293,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             known_profiles,
             previous_dataset,
             auto_stable_profile,
+            scoped_model,
         )
     };
     let campaign_generation = evaluation
@@ -363,7 +307,12 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         discovered_dataset,
         previous_dataset.as_ref(),
         campaign_generation,
-    );
+    )?;
+    if dataset.iter().any(|case| {
+        !crate::prompt_learning_runtime::prompt_learning_case_is_safe(case, config)
+    }) {
+        return Err("frozen prompt dataset contains residual sensitive data".to_string());
+    }
     if dataset.len() < PROMPT_EVOLUTION_OFFLINE_MIN_CASES {
         let digest = prompt_offline_dataset_digest(&dataset);
         if previous_dataset.as_ref().is_none_or(|snapshot| {
@@ -516,19 +465,19 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     let transfer_case = (effort == "pro")
         .then(|| {
             let (auto_profile, auto_profile_sha256) = auto_stable_profile.as_ref()?;
-            let current_gate = evaluate_prompt_auto_transfer_gate(
+            let (current_gate, current_cohort) = evaluate_trusted_prompt_auto_transfer_gate(
+                &scoped_model,
                 &evaluation.observations,
                 &current_profile.id,
                 &auto_profile.id,
                 auto_profile_sha256,
-                prompt_promotion_gate_config(),
             );
-            let challenger_gate = evaluate_prompt_auto_transfer_gate(
+            let (challenger_gate, challenger_cohort) = evaluate_trusted_prompt_auto_transfer_gate(
+                &scoped_model,
                 &evaluation.observations,
                 &challenger.id,
                 &auto_profile.id,
                 auto_profile_sha256,
-                prompt_promotion_gate_config(),
             );
             (!current_gate.eligible || !challenger_gate.eligible)
                 .then(|| {
@@ -536,6 +485,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                         &dataset,
                         &evaluation.observations,
                         [&current_profile.id, &challenger.id],
+                        [current_cohort.as_deref(), challenger_cohort.as_deref()],
                         &auto_profile.id,
                         auto_profile_sha256,
                         split,
@@ -603,6 +553,53 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             PromptEvaluationMode::Live => "prompt-live",
         }),
     );
+    let mut candidate_lanes = PromptTreatmentControlGroup::new(
+        control.as_ref(),
+        2,
+        PROMPT_MATCHED_EVALUATION_LANES,
+    )?;
+    let current_control = candidate_lanes.lane(0);
+    let challenger_control = candidate_lanes.lane(1);
+    let matched_treatment_budget = candidate_lanes.lane_budget();
+    let execution_context = crate::prompt_learning_runtime::prompt_execution_context(
+        config,
+        effort,
+        policy,
+        &evaluation_worker_models,
+        agent_budget,
+        current_profile,
+        &workspace_root,
+        matched_treatment_budget,
+        control.as_ref(),
+    )?;
+    let learning_cohort = crate::prompt_learning_runtime::prompt_learning_cohort(
+        &dataset,
+        campaign_generation,
+        execution_context,
+    )?;
+    let matched_identity = PromptMatchedEvaluationIdentityV1::new(
+        evaluation_id.clone(),
+        &learning_cohort,
+        selected_case.id.clone(),
+        split,
+        mode,
+    )?;
+    let current_prompt_sha256 = prompt_genome_sha256(current_profile)?;
+    let challenger_prompt_sha256 = prompt_genome_sha256(&challenger)?;
+    let attempt_started = PromptEvaluationAttemptEventV1::started(
+        matched_identity.clone(),
+        &learning_cohort,
+        [
+            PromptTreatmentIdentityV1 {
+                profile_id: current_profile.id.clone(),
+                prompt_sha256: current_prompt_sha256.clone(),
+            },
+            PromptTreatmentIdentityV1 {
+                profile_id: challenger.id.clone(),
+                prompt_sha256: challenger_prompt_sha256.clone(),
+            },
+        ],
+    )?;
     append_prompt_evaluation_status(
         state,
         task_id,
@@ -615,6 +612,16 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         &challenger.id,
         None,
     )?;
+    let mut attempt = crate::prompt_attempt_runtime::PromptEvaluationAttemptGuard::start(
+        state,
+        task_id,
+        run_context,
+        effort,
+        &learning_cohort,
+        attempt_started,
+    )?;
+
+    control.mark_progress("prompt_evaluation", "matched treatment lanes started");
 
     let (current_plan, challenger_plan) = std::thread::scope(|scope| {
         let current = scope.spawn(|| {
@@ -627,7 +634,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 agent_budget,
                 current_profile,
                 &evaluation_id,
-                control,
+                &current_control,
             )
         });
         let challenger_handle = scope.spawn(|| {
@@ -640,7 +647,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 agent_budget,
                 &challenger,
                 &evaluation_id,
-                control,
+                &challenger_control,
             )
         });
         (
@@ -662,7 +669,14 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 }),
         )
     });
-    if control.should_stop() {
+    if [current_control.as_ref(), challenger_control.as_ref()]
+        .into_iter()
+        .any(|lane| lane.stop_reason() == Some(agent_runtime::RunStopReason::UserCancelled))
+    {
+        attempt.finish(
+            PromptEvaluationAttemptStatus::ForegroundPreempted,
+            "foreground_preempted",
+        )?;
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     let (current, challenger) = std::thread::scope(|scope| {
@@ -672,7 +686,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 &workspace_root,
                 &objective,
                 current_plan,
-                control,
+                &current_control,
             )
         });
         let challenger_handle = scope.spawn(|| {
@@ -681,7 +695,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 &workspace_root,
                 &objective,
                 challenger_plan,
-                control,
+                &challenger_control,
             )
         });
         (
@@ -693,11 +707,50 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 .expect("challenger evaluation worker joined"),
         )
     });
-    if control.should_stop() {
+    if [current_control.as_ref(), challenger_control.as_ref()]
+        .into_iter()
+        .any(|lane| lane.stop_reason() == Some(agent_runtime::RunStopReason::UserCancelled))
+    {
+        attempt.finish(
+            PromptEvaluationAttemptStatus::ForegroundPreempted,
+            "foreground_preempted",
+        )?;
         return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    candidate_lanes.absorb()?;
+    let current_execution_context = crate::prompt_learning_runtime::prompt_execution_context(
+        config,
+        effort,
+        policy,
+        &evaluation_worker_models,
+        agent_budget,
+        current_profile,
+        &workspace_root,
+        matched_treatment_budget,
+        control.as_ref(),
+    )?;
+    if current_execution_context != learning_cohort.execution {
+        attempt.finish(
+            PromptEvaluationAttemptStatus::InfrastructureInvalid,
+            "execution_context_changed",
+        )?;
+        return Err("prompt evaluation execution context changed during replay".to_string());
     }
     let candidate_a = &current;
     let candidate_b = &challenger;
+    let treatment_failures = [candidate_a, candidate_b].map(|candidate| {
+        candidate.plan.plan.is_none()
+            || !candidate.execution.succeeded
+            || !candidate.execution.quality_gate_met
+    });
+    let treatment_failed = treatment_failures.into_iter().any(|failed| failed);
+    if treatment_failed {
+        attempt.mark_treatment_failures(treatment_failures);
+        attempt.finish(
+            PromptEvaluationAttemptStatus::TreatmentFailure,
+            "treatment_execution_failed",
+        )?;
+    }
     let participant_models = prompt_candidate_models([candidate_a, candidate_b]);
     let evaluator_models = reserved_evaluator_models
         .into_iter()
@@ -708,17 +761,103 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .cloned()
         .unwrap_or_else(|| config.model_for_role(&ModelRole::Reviewer));
     let participant_models = participant_models.into_iter().collect::<Vec<_>>();
-    let judge = prompt_evaluation_feedback::evaluate_prompt_candidate_pair_position_balanced(
+    let mut reviewer_lanes = match PromptTreatmentControlGroup::new(control.as_ref(), 2, 2) {
+        Ok(lanes) => lanes,
+        Err(error) => {
+            attempt.finish(
+                PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                "reviewer_budget_unavailable",
+            )?;
+            return Err(error);
+        }
+    };
+    let forward_reviewer_control = reviewer_lanes.lane(0);
+    let reverse_reviewer_control = reviewer_lanes.lane(1);
+    let judge_result = prompt_evaluation_feedback::evaluate_prompt_candidate_pair_position_balanced(
         config,
         &reviewer_model,
         &objective,
         candidate_a,
         candidate_b,
         &evaluation_id,
-        control,
-    )?;
-    if control.should_stop() {
+        &forward_reviewer_control,
+        &reverse_reviewer_control,
+    );
+    let reviewer_preempted = [
+        forward_reviewer_control.as_ref(),
+        reverse_reviewer_control.as_ref(),
+    ]
+    .into_iter()
+    .any(|lane| lane.stop_reason() == Some(agent_runtime::RunStopReason::UserCancelled));
+    if let Err(error) = reviewer_lanes.absorb() {
+        attempt.finish(
+            PromptEvaluationAttemptStatus::InfrastructureInvalid,
+            "reviewer_accounting_failed",
+        )?;
+        return Err(error);
+    }
+    let judge = match judge_result {
+        Ok(judge) => judge,
+        Err(error) => {
+            let (status, reason) = if error == MODEL_REQUEST_CANCELLED || reviewer_preempted {
+                (
+                    PromptEvaluationAttemptStatus::ForegroundPreempted,
+                    "foreground_preempted",
+                )
+            } else {
+                (
+                    PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                    "reviewer_invalid",
+                )
+            };
+            attempt.finish(status, reason)?;
+            return Err(error);
+        }
+    };
+    if reviewer_preempted {
+        attempt.finish(
+            PromptEvaluationAttemptStatus::ForegroundPreempted,
+            "foreground_preempted",
+        )?;
         return Err(MODEL_REQUEST_CANCELLED.to_string());
+    }
+    if control.should_stop() {
+        let reason = control.stop_reason();
+        let (status, reason_code, error) = if reason
+            == Some(agent_runtime::RunStopReason::UserCancelled)
+        {
+            (
+                PromptEvaluationAttemptStatus::ForegroundPreempted,
+                "foreground_preempted",
+                MODEL_REQUEST_CANCELLED.to_string(),
+            )
+        } else {
+            (
+                PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                "parent_budget_exhausted",
+                "prompt evaluation parent budget expired before persistence".to_string(),
+            )
+        };
+        attempt.finish(status, reason_code)?;
+        return Err(error);
+    }
+    let final_execution_context = crate::prompt_learning_runtime::prompt_execution_context(
+        config,
+        effort,
+        policy,
+        &evaluation_worker_models,
+        agent_budget,
+        current_profile,
+        &workspace_root,
+        matched_treatment_budget,
+        control.as_ref(),
+    )?;
+    if final_execution_context != learning_cohort.execution {
+        attempt.finish(
+            PromptEvaluationAttemptStatus::InfrastructureInvalid,
+            "execution_context_changed",
+        )?;
+        return Err("prompt evaluation execution context changed before persistence".to_string());
     }
     let split = match mode {
         PromptEvaluationMode::ReplayHoldout | PromptEvaluationMode::ReplayExecution => {
@@ -728,9 +867,9 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         | PromptEvaluationMode::PairedExecution
         | PromptEvaluationMode::Live => PromptEvaluationSplit::Train,
     };
-    let dataset_sha256 = prompt_offline_dataset_digest(&dataset);
-    let prompt_sha_a = prompt_genome_sha256(&candidate_a.plan.genome)?;
-    let prompt_sha_b = prompt_genome_sha256(&candidate_b.plan.genome)?;
+    let dataset_sha256 = learning_cohort.dataset.dataset_sha256.clone();
+    let prompt_sha_a = current_prompt_sha256;
+    let prompt_sha_b = challenger_prompt_sha256;
     let observation_a = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_a,
         candidate_b,
@@ -751,7 +890,8 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             dataset_sha256.clone(),
             prompt_sha_a.clone(),
             prompt_sha_b.clone(),
-        ),
+        )
+        .with_matched_evaluation(matched_identity.clone()),
     );
     let observation_b = prompt_evaluation_feedback::prompt_pairwise_observation(
         candidate_b,
@@ -773,68 +913,99 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             dataset_sha256,
             prompt_sha_b,
             prompt_sha_a,
-        ),
+        )
+        .with_matched_evaluation(matched_identity),
     );
-    append_prompt_pairwise_observations(
+    let lease = match control.execution_epoch_lease() {
+        agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
+        agent_runtime::RunEpochLeaseOutcome::Stopped(agent_runtime::RunStopReason::UserCancelled) => {
+            attempt.finish(
+                PromptEvaluationAttemptStatus::ForegroundPreempted,
+                "foreground_preempted",
+            )?;
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
+        }
+        agent_runtime::RunEpochLeaseOutcome::Stopped(_)
+        | agent_runtime::RunEpochLeaseOutcome::RestartAfterSteer
+        | agent_runtime::RunEpochLeaseOutcome::TerminalCommitted => {
+            attempt.finish(
+                PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                "persistence_lease_unavailable",
+            )?;
+            return Err("prompt evaluation persistence lease is unavailable".to_string());
+        }
+    };
+    let observation_commit = control.commit_execution_step_with(lease, || {
+        append_prompt_pairwise_observations(
+            state,
+            task_id,
+            run_context,
+            effort,
+            mode,
+            [&observation_a, &observation_b],
+            [&candidate_a.plan.genome, &candidate_b.plan.genome],
+        )
+    });
+    match observation_commit {
+        Ok(agent_runtime::RunExecutionStepCommit::Committed(())) => {}
+        Ok(agent_runtime::RunExecutionStepCommit::Stopped(
+            agent_runtime::RunStopReason::UserCancelled,
+        )) => {
+            attempt.finish(
+                PromptEvaluationAttemptStatus::ForegroundPreempted,
+                "foreground_preempted",
+            )?;
+            return Err(MODEL_REQUEST_CANCELLED.to_string());
+        }
+        Ok(agent_runtime::RunExecutionStepCommit::Stopped(_))
+        | Ok(agent_runtime::RunExecutionStepCommit::RestartAfterSteer)
+        | Ok(agent_runtime::RunExecutionStepCommit::TerminalCommitted) => {
+            attempt.finish(
+                PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                "observation_persistence_stopped",
+            )?;
+            return Err("prompt evaluation stopped before observation persistence".to_string());
+        }
+        Err(error) => {
+            attempt.finish(
+                PromptEvaluationAttemptStatus::InfrastructureInvalid,
+                "observation_persistence_failed",
+            )?;
+            return Err(error);
+        }
+    }
+    if treatment_failed {
+        attempt.finish(
+            PromptEvaluationAttemptStatus::TreatmentFailure,
+            "treatment_execution_failed",
+        )?;
+    } else {
+        attempt.finish(PromptEvaluationAttemptStatus::CompletedPair, "")?;
+    }
+    control.mark_progress("prompt_evaluation", "matched treatment pair persisted");
+    crate::prompt_transfer_runtime::run_prompt_auto_transfer_evaluations(
         state,
+        config,
         task_id,
         run_context,
         effort,
+        policy,
+        &evaluation_worker_models,
+        agent_budget,
+        &workspace_root,
+        &dataset,
+        auto_teacher,
+        auto_stable_profile.as_ref(),
+        &selected_case,
+        split,
         mode,
-        [&observation_a, &observation_b],
-        [&candidate_a.plan.genome, &candidate_b.plan.genome],
+        control,
+        &evaluation_id,
+        &objective,
+        &task_class,
+        &reviewer_model,
+        [candidate_a, candidate_b],
     )?;
-    if let (Some(teacher), Some((auto_profile, auto_profile_sha256))) =
-        (auto_teacher, auto_stable_profile.as_ref())
-    {
-        if let Some(transfer_dataset_sha256) = prompt_auto_transfer_dataset_digest(
-            &dataset,
-            &auto_profile.id,
-            auto_profile_sha256,
-        ) {
-            for (label, candidate) in [("current", candidate_a), ("challenger", candidate_b)] {
-                if control.should_stop() {
-                    return Err(MODEL_REQUEST_CANCELLED.to_string());
-                }
-                let transfer_evaluation_id = format!("{evaluation_id}-auto-{label}");
-                match evaluate_prompt_auto_transfer_pair(
-                    config,
-                    &reviewer_model,
-                    &objective,
-                    candidate,
-                    teacher,
-                    &transfer_evaluation_id,
-                    &task_class,
-                    split,
-                    mode,
-                    &transfer_dataset_sha256,
-                    control,
-                ) {
-                    Ok(observations) => append_prompt_transfer_observations(
-                        state,
-                        task_id,
-                        run_context,
-                        effort,
-                        mode,
-                        [&observations[0], &observations[1]],
-                    )?,
-                    Err(error) if error == MODEL_REQUEST_CANCELLED => return Err(error),
-                    Err(error) => append_prompt_evaluation_status(
-                        state,
-                        task_id,
-                        run_context,
-                        "Conductor Auto transfer evaluation failed closed",
-                        &transfer_evaluation_id,
-                        effort,
-                        mode,
-                        &candidate.plan.genome.id,
-                        &teacher.profile_id,
-                        Some(&error),
-                    )?,
-                }
-            }
-        }
-    }
     let next_evaluation = {
         let mut store = state
             .store
