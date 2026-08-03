@@ -1,8 +1,8 @@
 # Current Product Baseline
 
-Current application version: `0.1.93`
+Current application version: `0.1.94`
 
-Last code-fact review: `2026-08-03`
+Last code-fact review: `2026-08-04`
 
 This document describes the current source tree. Evaluation reports describe
 only the revision recorded in each report.
