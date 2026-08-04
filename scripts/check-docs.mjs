@@ -79,6 +79,8 @@ for (const obsolete of [
 const evaluationRoot = path.join(root, "docs/evaluations");
 const allowedEvaluationRootFiles = new Set([
   "README.md",
+  "CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md",
+  "CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.json",
   "CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md",
   "CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md",
   "CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md",
