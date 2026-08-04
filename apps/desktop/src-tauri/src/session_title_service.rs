@@ -390,10 +390,10 @@ pub(super) fn is_meaningful_session_title_prompt(prompt: &str) -> bool {
     let greeting_prefix = ["你好", "您好", "哈喽", "hello", "hey"]
         .iter()
         .any(|prefix| normalized.starts_with(prefix));
-    !(greeting_prefix
-        && character_count <= 16
-        && !normalized.contains("世界")
-        && !normalized.contains("world"))
+    !greeting_prefix
+        || character_count > 16
+        || normalized.contains("世界")
+        || normalized.contains("world")
 }
 
 fn is_uninformative_generated_session_title(title: &str) -> bool {

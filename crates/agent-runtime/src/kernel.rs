@@ -524,6 +524,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_persisted_tool_observation(
         &mut self,
         call_id: ToolCallId,
@@ -1349,10 +1350,9 @@ mod tests {
         let prepared = kernel
             .prepare_model_turn(None, None, 16_384, 2_048)
             .expect("grounded turn should prepare");
-        assert!(matches!(
-            kernel.decide_grounded_completion(0, "grounded answer", &[]),
-            Err(_)
-        ));
+        assert!(kernel
+            .decide_grounded_completion(0, "grounded answer", &[])
+            .is_err());
 
         let mut clean_state = start_agent_loop(
             TaskId("grounded-decision-visible".to_string()),

@@ -288,10 +288,10 @@ fn trusted_successful_tool_message(message: &agent_core::Message, steer_epoch: u
             .get("steer_epoch")
             .and_then(|value| value.parse::<u64>().ok())
             == Some(steer_epoch)
-        && !message
+        && message
             .metadata
             .get("synthetic")
-            .is_some_and(|value| value == "true")
+            .is_none_or(|value| value != "true")
 }
 
 fn tool_status_label(status: &ToolOutcomeStatus) -> &'static str {

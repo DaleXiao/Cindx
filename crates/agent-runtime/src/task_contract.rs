@@ -407,6 +407,7 @@ impl AgentTaskContract {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_prompt_evidence_at(
         &mut self,
         epoch: u64,

@@ -656,9 +656,9 @@ fn env_requires_one_shot(segment: &[String]) -> bool {
     let mut tokens = segment
         .iter()
         .skip_while(|token| is_environment_assignment(token));
-    if !tokens
+    if tokens
         .next()
-        .is_some_and(|token| executable_basename(token) == "env")
+        .is_none_or(|token| executable_basename(token) != "env")
     {
         return false;
     }
