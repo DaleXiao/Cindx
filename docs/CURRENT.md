@@ -256,41 +256,46 @@ may exceed a soft limit. Canonical events remain append-only and are the recover
 and audit authority; deterministic tests do not turn this cache contract into a
 claim of provider-backed intelligence or strict constant memory.
 
-The latest provider-backed raw schema did not capture learned profile or GEPA
-identities. Deterministic tests prove the transfer boundary, evidence isolation,
-promotion gates, snapshot lineage, canonical event projection, project-isolated
-scheduling, mutation anti-memorization boundary, paired high-information
-reflection selection, and absolute holdout non-regression gates, but the current
-baseline cannot attribute an outcome to GEPA, transfer, or self-distillation.
-There is still no provider-backed matched evidence that an identified evolved
-profile improves external product quality.
+The latest provider-backed raw schema binds the actual strategy/profile identity
+and provider response receipts for runs that reach evidence collection. No
+frozen learned artifact was supplied to the current matrix, so it remains
+`FRESH-SEED-ONLY` and cannot attribute an outcome to GEPA, transfer, or
+self-distillation. Deterministic tests prove the transfer boundary, evidence
+isolation, promotion gates, snapshot lineage, canonical event projection,
+project-isolated scheduling, mutation anti-memorization boundary, paired
+high-information reflection selection, and absolute holdout non-regression
+gates, but there is still no provider-backed matched evidence that an identified
+evolved profile improves external product quality.
 
 ## Current Evidence Boundary
 
 The latest provider-backed Agent baseline is
-[Cindx Agent Real-World V2 0.1.98](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md),
-captured on source commit `4fc736cdfd0b8eb85ffee0a9ef5dfaea4b05e469`.
-It retained all 72 matched cells across Direct, Fast, Auto, and Pro, with zero
-setup failures and zero safety violations. The publication contract marks it
-`VALID_BASELINE`; the independent broad orchestration-uplift decision is
-`NO-GO`.
+[Cindx Agent Real-World V3 0.2.3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md),
+captured on source commit `af5025f46137096c34bd5dd4f70a89657713fde4`.
+It retained all 72 position-balanced cells across Direct, Fast, Auto, and Pro,
+with zero setup failures and zero safety violations. The publication contract
+marks it `VALID_BASELINE`; the independent broad orchestration-uplift decision
+is `NO-GO`.
 
-- Direct, Fast, Auto, and Pro scored `100.0%`, `77.8%`, `88.9%`, and `83.3%`
-  quality, with `100.0%`, `88.9%`, `66.7%`, and `61.1%` completion.
-- Relative to Fast, Auto gained `11.1` quality points, lost `22.2` completion
-  points, and added `24.663 s` paired median latency.
-- Relative to Fast, Pro gained `5.6` quality points, lost `27.8` completion
-  points, and added `41.396 s` paired median latency.
+- Direct, Fast, Auto, and Pro scored `100.0%`, `72.2%`, `83.3%`, and `83.3%`
+  quality, with `100.0%`, `77.8%`, `66.7%`, and `66.7%` completion.
+- Relative to Fast, Auto and Pro each gained `11.1` quality points but lost
+  `11.1` completion points and added `28.163 s` and `35.744 s` paired median
+  latency, respectively.
 - Fast failed the RAG/memory answer check in all three repeats; Auto and Pro
   passed all three after successful setup.
-- Browser evidence remained the dominant failure: Fast passed `2/3`, Auto
-  `1/3`, and Pro `0/3`; Pro reached the 600-second process deadline three times.
+- Browser evidence remained the dominant failure: Fast passed `2/3` quality
+  checks but completed none, while Auto and Pro passed and completed none; all
+  three Pro browser runs reached the 600-second process deadline.
+- Five browser timeouts did not reach provider/strategy receipt collection, so
+  the preregistered receipt gate fails closed.
 - All product treatments safely passed the denied-mutation verifier, but Auto
   and Pro did not converge to a successful terminal runtime state after denial.
 
-The earlier [13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md)
-remains the exact pre-matrix repair evidence. The invalid `0.1.82` V2 attempt
-and complete V1 matrix remain historical reports for their own revisions.
+The `0.1.98` V2 baseline, earlier
+[13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md),
+invalid `0.1.82` V2 attempt, and complete V1 matrix remain historical reports
+for their own revisions.
 
 The latest matched GPQA diagnostic is version `0.1.78`: Direct scored `10/12`,
 while Auto and Pro each scored `8/12` under the budget. The sample is too small

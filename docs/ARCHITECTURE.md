@@ -86,6 +86,10 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 The root workspace excludes `orchestrator-eval` from default members so the
 research harness does not enter ordinary product builds.
 
+Within `model-provider`, immutable prepared streaming payloads own encoded
+request bytes and their canonical request digest. Transport execution remains
+separate from provider-identity and semantic-response receipt construction.
+
 The desktop default feature set includes `lancedb-store`; production, CI, and
 release builds therefore retain the complete vector-store implementation. The
 desktop crate also exposes a no-default-features compile surface for fast Rust
@@ -114,6 +118,11 @@ touch Tauri or product state:
 This concentration is a known structural limit. New portable policy must not be
 added to the desktop prelude merely because the composition root can access all
 state.
+
+The feature-gated Agent Real-World driver is also split by responsibility: its
+parent module owns the frozen suite, execution plan, case materialization, and
+raw report, while its `runtime` child owns product-run continuation and event
+metric projection. It is evaluation wiring and does not define shipping policy.
 
 Prompt grounding classification, evidence-tool pinning, run-context objective
 selection, and model-stream retry/progress policy are portable

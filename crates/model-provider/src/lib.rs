@@ -14,6 +14,7 @@ mod dashscope_realtime_provider;
 mod error;
 mod image_provider;
 mod json_wire;
+mod prepared_payload;
 mod prepared_request;
 mod provider_receipt;
 mod provider_validation;
@@ -50,7 +51,7 @@ pub use error::{classify_provider_failure, ProviderFailureClass};
 pub use image_provider::{
     build_image_generation_request_json, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
 };
-pub use prepared_request::PreparedStreamingModelRequest;
+pub use prepared_payload::PreparedStreamingModelRequest;
 pub use provider_validation::parse_model_list_response;
 pub use realtime_provider::{
     build_realtime_session_json, OpenAiCompatibleRealtimeConfig, OpenAiCompatibleRealtimeProvider,
