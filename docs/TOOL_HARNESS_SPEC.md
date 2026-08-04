@@ -117,6 +117,18 @@ declaring a weaker route or selecting a configured model without the required
 tool/vision capability is an explicit preparation error rather than a silent
 downgrade.
 
+Auto value-of-computation calibration cannot weaken that route contract. When
+coordination is not worth its predicted cost, only workflow parallelism,
+quorum, and independent-verification fields are collapsed; the chosen model,
+tool class, vision requirement, risk, retrieval channels, and memory policy are
+preserved. Trace metadata distinguishes the workflow candidate from the final
+direct or grounded-direct route and records the bounded admission inputs.
+
+Every conductor provider request has a 45-second no-progress boundary. A
+single configured conductor therefore degrades through the existing typed
+fallback instead of consuming the whole run deadline without bytes; once a
+response has made progress, the existing response/recovery limits still apply.
+
 The completion-intent parser preserves path and URL tokens while recognizing
 later mutation steps outside quoted or fenced material. A source clause must
 resolve to its own workspace target or explicitly refer back to named workspace

@@ -13,16 +13,24 @@ only the revision recorded in each report.
   shared interactive agent loop.
 - **Auto** asks the configured conductor for a typed `AgentRunDecision`, with a
   maximum requested parallelism of two. The decision may remain direct or
-  select a bounded workflow. Runtime-derived tool and image-input requirements
-  are hard postconditions on both the decision and selected model; the
-  conductor cannot downgrade them.
+  select a bounded workflow. A workflow candidate then passes a runtime
+  value-of-computation check over confidence-weighted predicted benefit,
+  same-shape matched evidence, independent contribution/synthesis/verification
+  cost, and serial-interaction risk. A rejected candidate becomes direct or
+  grounded-direct without another conductor call while preserving its selected
+  model, tools, vision, risk, retrieval, and memory. Runtime-derived tool and
+  image-input requirements remain hard postconditions on both the decision and
+  selected model; neither the conductor nor calibration can downgrade them.
 - **Pro** uses the same decision contract with a maximum requested parallelism
   of three and a larger workflow budget.
 - An invalid conductor response receives bounded repair. Exhausted conductor
   attempts produce an explicit capability-compatible degraded fallback rather
   than an unvalidated workflow. Strong matched direct-anchor evidence
   calibrates an otherwise admissible workflow to direct execution without
-  spending repair or alternate-conductor calls.
+  spending repair or alternate-conductor calls. Every conductor request has a
+  45-second no-progress boundary, including a configuration with only one
+  conductor model; response progress retains the existing bounded recovery
+  behavior.
 
 All three modes ultimately use the same `AgentKernel`, run-control contract,
 tool permission path, persistence path, and completion transaction. They differ
@@ -40,8 +48,10 @@ A new run currently follows this sequence:
 4. Session history is bounded and projected for the current objective.
 5. The active objective, completion intent, current image input, and image
    generation requirement form typed route requirements. Fast chooses a direct
-   decision; Auto and Pro request a conductor decision. Both paths fail clearly
-   when the selected configured model cannot satisfy required tools or vision.
+   decision; Auto and Pro request a conductor decision. Auto alone applies the
+   value-of-computation admission policy after schema and capability validation.
+   Both paths fail clearly when the selected configured model cannot satisfy
+   required tools or vision.
    Compound execution instructions retain filenames and URLs while detecting
    later mutation steps. Local report fields such as `sources` inherit explicit
    workspace provenance instead of creating a web obligation; an objective
@@ -231,6 +241,11 @@ Therefore the current claim is:
   deterministic quality gates have substantial automated coverage.
 - Auto shows a real RAG/memory quality signal in this small matrix, but its
   overall completion and latency regress materially against Fast.
+- The current source now has a deterministic, observable Auto
+  value-of-computation admission mechanism and bounded single-conductor
+  no-progress handling. These contracts have not yet been measured in a fresh
+  provider-backed matched run, so they are not evidence of an intelligence or
+  product-quality uplift.
 - Pro does not provide a broad product advantage over Fast or Auto in the
   current matrix; its browser completion is the clearest measured weakness.
 - No current provider-backed result identifies an evolved profile or proves a
