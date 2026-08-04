@@ -4259,6 +4259,9 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
         canary_percent: 0,
         evidence_checkpoint: 0,
         live_checkpoint: 0,
+        stable_live_checkpoint: 0,
+        quarantined_profile_ids: Vec::new(),
+        distillation_lease: None,
         rollback_count: 0,
         status: "stable".to_string(),
         last_reason: None,
@@ -4292,7 +4295,7 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
         .next()
         .expect("stable profile should have an evolved canary");
     rollout.canary_profile_id = Some(available_canary.id.clone());
-    rollout.canary_percent = 100;
+    rollout.canary_percent = 50;
     evaluation.population = vec![available_canary];
     evaluation.next_profile = ConductorPromptGenome::seed_for_effort("auto");
     apply_prompt_rollout_selection(&mut evaluation, &rollout, &model, &Metadata::new(), "auto");
@@ -4308,6 +4311,25 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
 
     assert_eq!(evaluation.next_profile, certified);
     assert_eq!(evaluation.next_mode, "stable");
+}
+
+#[test]
+fn ordinary_prompt_candidate_ignores_distillation_quarantine_capacity() {
+    let mut rollout = default_prompt_rollout("auto");
+    rollout.quarantined_profile_ids = (0..PROMPT_ROLLOUT_MAX_QUARANTINED_PROFILES)
+        .map(|index| format!("distilled-{index}"))
+        .collect();
+
+    assert!(!prompt_candidate_blocked_by_distillation_quarantine(
+        &rollout,
+        "ordinary-gepa-candidate",
+        false,
+    ));
+    assert!(prompt_candidate_blocked_by_distillation_quarantine(
+        &rollout,
+        "another-distilled-candidate",
+        true,
+    ));
 }
 
 #[test]

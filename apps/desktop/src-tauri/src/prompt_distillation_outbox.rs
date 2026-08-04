@@ -125,6 +125,14 @@ pub(crate) fn dispatch_prompt_pro_distillation_intents(
         {
             continue;
         }
+        if crate::prompt_distillation_runtime::replay_canonical_pro_teacher_snapshot(
+            &scoped_model,
+            &intent.snapshot,
+        )
+        .is_err()
+        {
+            continue;
+        }
         let (auto_profile, _) = stable_prompt_profile_fingerprint(&scoped_model, "auto")?;
         let config = state
             .provider_config

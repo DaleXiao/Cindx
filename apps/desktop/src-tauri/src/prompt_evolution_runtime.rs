@@ -396,6 +396,23 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
                         rollout.live_checkpoint.to_string(),
                     ),
                     (
+                        "stable_live_checkpoint".to_string(),
+                        rollout.stable_live_checkpoint.to_string(),
+                    ),
+                    (
+                        "quarantined_profiles".to_string(),
+                        serde_json::to_string(&rollout.quarantined_profile_ids)
+                            .unwrap_or_else(|_| "[]".to_string()),
+                    ),
+                    (
+                        "distillation_canary_lease".to_string(),
+                        rollout
+                            .distillation_lease
+                            .as_ref()
+                            .and_then(|lease| serde_json::to_string(lease).ok())
+                            .unwrap_or_default(),
+                    ),
+                    (
                         "rollback_count".to_string(),
                         rollout.rollback_count.to_string(),
                     ),

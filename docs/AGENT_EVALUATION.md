@@ -48,6 +48,13 @@ treatment must compare the pre-transfer Pro profile with a promoted
 transfer-trained Pro profile on frozen matched cases before any uplift claim is
 allowed.
 
+The Pro-to-Auto path additionally replays the current Pro champion's two gates,
+transfers only the complete bounded structural delta relative to the stable Pro
+it defeated, and uses an immutable, dual-sided staged canary with conflict-safe
+evidence replay. These are deterministic eligibility and rollback mechanisms;
+they do not establish that a distilled Auto profile improves provider-backed
+answer quality.
+
 ## Evidence Levels
 
 ### 1. Contract tests

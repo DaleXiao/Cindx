@@ -76,15 +76,16 @@ mod tests {
 
     fn distillation_provenance() -> PromptProToAutoDistillationProvenanceV1 {
         let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
-        let mut teacher = ConductorPromptGenome::seed_for_effort("pro");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
         teacher.id = "certified-pro-g1".to_string();
         teacher.generation = 1;
-        teacher.parents = vec!["pro-parent".to_string()];
+        teacher.parents = vec![defeated_stable_pro.id.clone()];
         teacher.retry_policy = PromptRetryPolicy::SameModel;
         let snapshot = FrozenPromptProfileSnapshot::new_gepa(
             "pro",
             teacher,
-            "pro-parent",
+            defeated_stable_pro.id.clone(),
             "a".repeat(64),
             "b".repeat(64),
         )
@@ -104,9 +105,13 @@ mod tests {
         .unwrap();
         let attestation =
             ProTeacherAttestationV1::from_stable_snapshot(&snapshot, &snapshot.genome.id).unwrap();
-        let child =
-            derive_pro_to_auto_distillation_child(&auto_parent, &snapshot, &snapshot.genome.id)
-                .unwrap();
+        let child = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .unwrap();
         PromptProToAutoDistillationProvenanceV1::new(
             attestation,
             auto_parent.id.clone(),

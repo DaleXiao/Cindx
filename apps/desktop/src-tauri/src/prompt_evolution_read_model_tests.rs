@@ -49,6 +49,7 @@ fn prompt_rollout_event(
     canary_profile_id: Option<&str>,
     canary_percent: u8,
     rollback_count: usize,
+    quarantined_profile_ids: &[&str],
     frozen_profile: Option<&FrozenPromptProfileSnapshot>,
 ) -> Event {
     event(
@@ -68,6 +69,12 @@ fn prompt_rollout_event(
             ("rollout_status".to_string(), status.to_string()),
             ("evidence_checkpoint".to_string(), sequence.to_string()),
             ("live_checkpoint".to_string(), sequence.to_string()),
+            ("stable_live_checkpoint".to_string(), sequence.to_string()),
+            (
+                "quarantined_profiles".to_string(),
+                serde_json::to_string(quarantined_profile_ids).unwrap(),
+            ),
+            ("distillation_canary_lease".to_string(), String::new()),
             ("rollback_count".to_string(), rollback_count.to_string()),
             (
                 "frozen_prompt_profile".to_string(),
@@ -77,6 +84,27 @@ fn prompt_rollout_event(
             ),
         ],
     )
+}
+
+fn with_distillation_lease(
+    mut event: Event,
+    stable_profile_id: &str,
+    candidate_profile_id: &str,
+) -> Event {
+    let lease = PromptDistillationCanaryLeaseV1 {
+        schema: PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1.to_string(),
+        candidate_profile_id: candidate_profile_id.to_string(),
+        candidate_profile_sha256: "a".repeat(64),
+        stable_profile_id: stable_profile_id.to_string(),
+        stable_profile_sha256: "b".repeat(64),
+        cohort_sha256: "c".repeat(64),
+        paired_evidence_sha256: "d".repeat(64),
+    };
+    event.metadata.insert(
+        "distillation_canary_lease".to_string(),
+        serde_json::to_string(&lease).unwrap(),
+    );
+    event
 }
 
 fn complete_run_lineage(total_tokens: &str) -> Vec<(String, String)> {
@@ -266,8 +294,19 @@ fn live_observations_reject_invalid_agent_terminal_tags() {
     }
 }
 
+fn assert_negative_live_control(events: &[Event]) -> PromptEvolutionObservation {
+    let observations = prompt_evolution_observations_from_events(events);
+    assert_eq!(observations.len(), 1);
+    let observation = observations[0].1.clone();
+    assert_eq!(observation.mode, PromptEvaluationMode::Live);
+    assert!(!observation.succeeded);
+    assert!(!observation.format_valid);
+    assert!(!observation.is_scientific_evidence());
+    observation
+}
+
 #[test]
-fn verified_postcondition_does_not_train_a_workflow_prompt() {
+fn verified_postcondition_is_only_a_negative_live_control() {
     let evidence = LearningEvidenceV1::verified_postcondition(
         LearningUsageCompleteness::Complete,
         0,
@@ -275,27 +314,26 @@ fn verified_postcondition_does_not_train_a_workflow_prompt() {
     )
     .to_metadata_value()
     .expect("valid learning evidence");
-    let observations = prompt_evolution_observations_from_events(&live_events(
+    let events = live_events(
         "Agent task completed",
         Some(evidence),
         Some("8"),
         false,
         Some("2500"),
-    ));
+    );
 
-    assert!(observations.is_empty());
+    assert_negative_live_control(&events);
 }
 
 #[test]
-fn live_observations_fail_closed_for_untrusted_or_incomplete_runs() {
-    assert!(prompt_evolution_observations_from_events(&live_events(
+fn untrusted_or_incomplete_runs_only_enter_the_live_canary_control_plane() {
+    assert_negative_live_control(&live_events(
         "Agent task completed",
         None,
         Some("20"),
         false,
         None,
-    ))
-    .is_empty());
+    ));
 
     let cancelled = LearningEvidenceV1::censored(
         LearningTermination::Cancelled,
@@ -306,36 +344,34 @@ fn live_observations_fail_closed_for_untrusted_or_incomplete_runs() {
     )
     .to_metadata_value()
     .expect("valid censored evidence");
-    assert!(prompt_evolution_observations_from_events(&live_events(
+    assert_negative_live_control(&live_events(
         "Agent task cancelled",
         Some(cancelled),
         Some("20"),
         false,
         None,
-    ))
-    .is_empty());
+    ));
 
     let trusted = quality_evidence(
         IndependentQualitySource::CollaborationQualityGate,
         8_000,
         true,
     );
-    assert!(prompt_evolution_observations_from_events(&live_events(
+    assert_negative_live_control(&live_events(
         "Agent task completed",
         Some(trusted.clone()),
         None,
         false,
         None,
-    ))
-    .is_empty());
-    assert!(prompt_evolution_observations_from_events(&live_events(
+    ));
+    let denied = assert_negative_live_control(&live_events(
         "Agent task completed",
         Some(trusted),
         Some("20"),
         true,
         None,
-    ))
-    .is_empty());
+    ));
+    assert_eq!(denied.safety_violations, 1);
 
     let trusted = quality_evidence(
         IndependentQualitySource::CollaborationQualityGate,
@@ -357,7 +393,7 @@ fn live_observations_fail_closed_for_untrusted_or_incomplete_runs() {
             "run_lineage_provider_usage_attempts".to_string(),
             "2".to_string(),
         );
-    assert!(prompt_evolution_observations_from_events(&inconsistent_usage).is_empty());
+    assert_negative_live_control(&inconsistent_usage);
 
     let direct_evidence = LearningEvidenceV1::independent_quality(
         LearningTermination::Completed,
@@ -371,14 +407,13 @@ fn live_observations_fail_closed_for_untrusted_or_incomplete_runs() {
     )
     .to_metadata_value()
     .expect("valid direct evidence");
-    assert!(prompt_evolution_observations_from_events(&live_events(
+    assert_negative_live_control(&live_events(
         "Agent task completed",
         Some(direct_evidence),
         Some("20"),
         false,
         None,
-    ))
-    .is_empty());
+    ));
 }
 
 #[test]
@@ -502,7 +537,11 @@ fn live_observations_bind_workflow_and_typed_evidence_to_the_terminal_steer_epoc
                 0,
             ),
         );
-    assert!(prompt_evolution_observations_from_events(&mismatched_evidence).is_empty());
+    let mismatched = prompt_evolution_observations_from_events(&mismatched_evidence);
+    assert_eq!(mismatched.len(), 1);
+    assert!(!mismatched[0].1.succeeded);
+    assert!(!mismatched[0].1.format_valid);
+    assert!(!mismatched[0].1.is_scientific_evidence());
 }
 
 #[test]
@@ -546,6 +585,99 @@ fn malformed_single_pairwise_observation_is_rejected() {
     };
 
     assert!(prompt_evolution_observations_from_events(&[event]).is_empty());
+}
+
+#[test]
+fn exact_observation_replay_is_idempotent_and_incremental_projection_preserves_conflicts() {
+    let project_id = "project-a";
+    let evaluation_id = scoped_prompt_evaluation_id(project_id, "conflicting-replay");
+    let candidate_sha256 = sha256_hex(b"candidate-prompt");
+    let stable_sha256 = sha256_hex(b"stable-prompt");
+    let observations = |candidate_quality: f64| {
+        let candidate = PromptEvolutionObservation {
+            profile_id: "candidate".to_string(),
+            evaluation_id: evaluation_id.clone(),
+            case_id: "holdout-case".to_string(),
+            opponent_profile_id: Some("stable".to_string()),
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Holdout,
+            mode: PromptEvaluationMode::ReplayExecution,
+            format_valid: true,
+            succeeded: true,
+            quality_score: candidate_quality,
+            latency_ms: 100,
+            total_tokens: 100,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: Some(0.2),
+            step_credits: Vec::new(),
+            reflection_packet: None,
+            provenance: PromptEvaluationProvenance::blind_pairwise_swap(
+                vec!["reviewer".to_string()],
+                vec!["worker".to_string()],
+                "d".repeat(64),
+                candidate_sha256.clone(),
+                stable_sha256.clone(),
+            ),
+        };
+        let mut stable = PromptEvolutionObservation {
+            profile_id: "stable".to_string(),
+            opponent_profile_id: Some("candidate".to_string()),
+            quality_score: 0.8,
+            relative_reward: Some(-0.2),
+            ..candidate.clone()
+        };
+        stable.provenance = PromptEvaluationProvenance::blind_pairwise_swap(
+            vec!["reviewer".to_string()],
+            vec!["worker".to_string()],
+            "d".repeat(64),
+            stable_sha256.clone(),
+            candidate_sha256.clone(),
+        );
+        vec![candidate, stable]
+    };
+    let pair_event = |sequence: u64, candidate_quality: f64| {
+        event(
+            sequence,
+            EventKind::TaskStatusChanged,
+            "Conductor pairwise evaluation",
+            [
+                ("project_id".to_string(), project_id.to_string()),
+                ("prompt_effort".to_string(), "auto".to_string()),
+                (
+                    "prompt_observations".to_string(),
+                    serde_json::to_string(&observations(candidate_quality)).unwrap(),
+                ),
+            ],
+        )
+    };
+    let original = pair_event(1, 0.9);
+    let exact_replay = pair_event(2, 0.9);
+    let conflicting_replay = pair_event(3, 0.1);
+
+    let exact = build_prompt_evolution_read_model(&[original.clone(), exact_replay.clone()], 2, 2);
+    assert_eq!(exact.observations.len(), 2);
+
+    let rebuilt = build_prompt_evolution_read_model(
+        &[
+            original.clone(),
+            exact_replay.clone(),
+            conflicting_replay.clone(),
+        ],
+        3,
+        3,
+    );
+    assert_eq!(rebuilt.observations.len(), 3);
+
+    let mut incremental = build_prompt_evolution_read_model(&[original], 1, 1);
+    for replay in [&exact_replay, &conflicting_replay] {
+        for (effort, observation) in
+            prompt_observation_records_from_event_with_canonical_teacher(replay, None)
+        {
+            upsert_prompt_observation(&mut incremental.observations, effort, observation);
+        }
+    }
+    assert_eq!(incremental.observations, rebuilt.observations);
 }
 
 #[test]
@@ -844,9 +976,9 @@ fn prompt_rollout_replay_rejects_forged_stable_canary_and_status() {
         .next()
         .expect("Auto seed should provide a canary");
     let snapshot_only_canary =
-        prompt_rollout_event(2, "canary", &seed.id, Some(&candidate.id), 10, 0, None);
+        prompt_rollout_event(2, "canary", &seed.id, Some(&candidate.id), 10, 0, &[], None);
     let events = vec![
-        prompt_rollout_event(1, "stable", "forged-stable", None, 0, 0, None),
+        prompt_rollout_event(1, "stable", "forged-stable", None, 0, 0, &[], None),
         snapshot_only_canary,
         prompt_rollout_event(
             3,
@@ -855,11 +987,12 @@ fn prompt_rollout_replay_rejects_forged_stable_canary_and_status() {
             Some(&candidate.id),
             20,
             0,
+            &[],
             None,
         ),
-        prompt_rollout_event(4, "canary", &seed.id, Some(&candidate.id), 51, 0, None),
-        prompt_rollout_event(5, "stable", &seed.id, Some(&candidate.id), 10, 0, None),
-        prompt_rollout_event(6, "future", &seed.id, None, 0, 0, None),
+        prompt_rollout_event(4, "canary", &seed.id, Some(&candidate.id), 51, 0, &[], None),
+        prompt_rollout_event(5, "stable", &seed.id, Some(&candidate.id), 10, 0, &[], None),
+        prompt_rollout_event(6, "future", &seed.id, None, 0, 0, &[], None),
     ];
 
     let model = build_prompt_evolution_read_model(&events, 6, events.len() as u64);
@@ -867,7 +1000,7 @@ fn prompt_rollout_replay_rejects_forged_stable_canary_and_status() {
 }
 
 #[test]
-fn prompt_rollout_transition_accepts_legal_rollback_and_atomic_promotion() {
+fn prompt_rollout_transition_accepts_exact_stages_and_atomic_promotion() {
     let seed = ConductorPromptGenome::seed_for_effort("auto");
     let candidate = seed
         .mutations()
@@ -883,12 +1016,11 @@ fn prompt_rollout_transition_accepts_legal_rollback_and_atomic_promotion() {
     )
     .expect("promotion snapshot should be valid");
     let events = vec![
-        prompt_rollout_event(1, "canary", &seed.id, Some(&candidate.id), 10, 0, None),
-        prompt_rollout_event(2, "canary", &seed.id, Some(&candidate.id), 50, 0, None),
-        prompt_rollout_event(3, "rolled_back", &seed.id, None, 0, 1, None),
-        prompt_rollout_event(4, "canary", &seed.id, Some(&candidate.id), 10, 1, None),
-        prompt_rollout_event(5, "promoted", &candidate.id, None, 0, 1, Some(&frozen)),
-        prompt_rollout_event(6, "stable", &candidate.id, None, 0, 1, Some(&frozen)),
+        prompt_rollout_event(1, "canary", &seed.id, Some(&candidate.id), 10, 0, &[], None),
+        prompt_rollout_event(2, "canary", &seed.id, Some(&candidate.id), 25, 0, &[], None),
+        prompt_rollout_event(3, "canary", &seed.id, Some(&candidate.id), 50, 0, &[], None),
+        prompt_rollout_event(4, "promoted", &candidate.id, None, 0, 0, &[], Some(&frozen)),
+        prompt_rollout_event(5, "stable", &candidate.id, None, 0, 0, &[], Some(&frozen)),
     ];
 
     let mut previous = None;
@@ -904,8 +1036,85 @@ fn prompt_rollout_transition_accepts_legal_rollback_and_atomic_promotion() {
     let rollout = previous.expect("legal rollout history should remain structurally valid");
     assert_eq!(rollout.status, "stable");
     assert_eq!(rollout.stable_profile_id, candidate.id);
-    assert_eq!(rollout.rollback_count, 1);
+    assert_eq!(rollout.rollback_count, 0);
     assert_eq!(rollout.frozen_profile.as_ref(), Some(&frozen));
+}
+
+#[test]
+fn prompt_rollout_quarantine_blocks_a_after_a_then_b_roll_back() {
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let candidates = seed.mutations();
+    let candidate_a = &candidates[0].id;
+    let candidate_b = &candidates[1].id;
+    let events = vec![
+        with_distillation_lease(
+            prompt_rollout_event(1, "canary", &seed.id, Some(candidate_a), 10, 0, &[], None),
+            &seed.id,
+            candidate_a,
+        ),
+        prompt_rollout_event(2, "rolled_back", &seed.id, None, 0, 1, &[candidate_a], None),
+        with_distillation_lease(
+            prompt_rollout_event(
+                3,
+                "canary",
+                &seed.id,
+                Some(candidate_b),
+                10,
+                1,
+                &[candidate_a],
+                None,
+            ),
+            &seed.id,
+            candidate_b,
+        ),
+        prompt_rollout_event(
+            4,
+            "rolled_back",
+            &seed.id,
+            None,
+            0,
+            2,
+            &[candidate_a, candidate_b],
+            None,
+        ),
+        with_distillation_lease(
+            prompt_rollout_event(
+                5,
+                "canary",
+                &seed.id,
+                Some(candidate_a),
+                10,
+                2,
+                &[candidate_a, candidate_b],
+                None,
+            ),
+            &seed.id,
+            candidate_a,
+        ),
+    ];
+
+    let mut previous = None;
+    for event in &events[..4] {
+        let (_, effort, rollout) = prompt_rollout_record_from_event(event).unwrap();
+        assert!(prompt_rollout_transition_is_valid(
+            &effort,
+            previous.as_ref(),
+            &rollout
+        ));
+        previous = Some(rollout);
+    }
+    let (_, effort, reentry) = prompt_rollout_record_from_event(&events[4]).unwrap();
+    assert!(!prompt_rollout_transition_is_valid(
+        &effort,
+        previous.as_ref(),
+        &reentry
+    ));
+
+    let rollout = previous.unwrap();
+    assert_eq!(
+        rollout.quarantined_profile_ids,
+        vec![candidate_a.clone(), candidate_b.clone()]
+    );
 }
 
 #[test]
@@ -925,7 +1134,7 @@ fn prompt_rollout_replay_rejects_snapshot_only_initial_promotion() {
     )
     .expect("promotion snapshot should be valid");
     let snapshot_only =
-        prompt_rollout_event(1, "promoted", &candidate.id, None, 0, 0, Some(&frozen));
+        prompt_rollout_event(1, "promoted", &candidate.id, None, 0, 0, &[], Some(&frozen));
     let mut wrong_anchor = frozen.clone();
     wrong_anchor.stable_profile_id = "forged-previous-stable".to_string();
     let invalid = prompt_rollout_event(
@@ -935,6 +1144,7 @@ fn prompt_rollout_replay_rejects_snapshot_only_initial_promotion() {
         None,
         0,
         0,
+        &[],
         Some(&wrong_anchor),
     );
 

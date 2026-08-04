@@ -1,4 +1,7 @@
-use crate::view_models::PromptEvolutionReadModel;
+use crate::runtime_constants::PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1;
+use crate::view_models::{
+    PromptDistillationCanaryLeaseV1, PromptEvolutionReadModel,
+};
 use orchestrator::{
     evaluate_prompt_pro_to_auto_distillation_gate_in_cohort_with_failures, prompt_genome_sha256,
     sha256_hex, FrozenPromptProToAutoDistillationEvidence, FrozenPromptProfileSnapshot,
@@ -16,6 +19,12 @@ pub(crate) struct TrustedPromptDistillationGate {
     pub(crate) cohort_sha256: String,
     pub(crate) provenance: PromptProToAutoDistillationProvenanceV1,
     pub(crate) observations: Vec<PromptEvolutionObservation>,
+}
+
+pub(crate) enum PromptDistillationCanaryAssessment {
+    Pending,
+    Healthy,
+    Degraded(String),
 }
 
 pub(crate) fn prompt_candidate_is_distillation(
@@ -137,6 +146,54 @@ pub(crate) fn evaluate_trusted_prompt_distillation_gate(
         cohort_sha256: active_cohort,
         provenance,
         observations,
+    })
+}
+
+pub(crate) fn prompt_distillation_canary_lease(
+    model: &PromptEvolutionReadModel,
+    candidate_id: &str,
+    auto_parent_id: &str,
+    trusted: &TrustedPromptDistillationGate,
+) -> Result<PromptDistillationCanaryLeaseV1, String> {
+    if !trusted.result.eligible
+        || trusted.provenance.auto_child_profile_id != candidate_id
+        || trusted.provenance.auto_parent_profile_id != auto_parent_id
+    {
+        return Err("Auto distillation canary lease requires an eligible matched gate".to_string());
+    }
+    let candidate = model
+        .genomes
+        .iter()
+        .find(|record| {
+            record.effort == "auto"
+                && record.genome.id == candidate_id
+                && record.evolution_method == Some(PromptEvolutionMethod::ProToAutoDistillation)
+        })
+        .ok_or_else(|| "Auto distillation canary candidate is unavailable".to_string())?;
+    let (stable, stable_sha256) =
+        crate::prompt_rollout_runtime::stable_prompt_profile_fingerprint(model, "auto")?;
+    if stable.id != auto_parent_id {
+        return Err("Auto distillation canary stable profile drifted".to_string());
+    }
+    let candidate_sha256 = prompt_genome_sha256(&candidate.genome)?;
+    if candidate_sha256 != trusted.provenance.auto_child_profile_sha256
+        || stable_sha256 != trusted.provenance.auto_parent_profile_sha256
+    {
+        return Err("Auto distillation canary profile fingerprint drifted".to_string());
+    }
+    let mut observations = trusted.observations.clone();
+    observations.sort_by_key(PromptEvolutionObservation::evidence_identity);
+    let paired_evidence_sha256 = serde_json::to_vec(&("paired", &observations))
+        .map(|encoded| sha256_hex(&encoded))
+        .map_err(|error| format!("Auto distillation canary evidence serialization failed: {error}"))?;
+    Ok(PromptDistillationCanaryLeaseV1 {
+        schema: PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1.to_string(),
+        candidate_profile_id: candidate_id.to_string(),
+        candidate_profile_sha256: candidate_sha256,
+        stable_profile_id: auto_parent_id.to_string(),
+        stable_profile_sha256: stable_sha256,
+        cohort_sha256: trusted.cohort_sha256.clone(),
+        paired_evidence_sha256,
     })
 }
 
@@ -292,22 +349,141 @@ pub(crate) fn frozen_distillation_profile_for_promotion(
     )
 }
 
-pub(crate) fn prompt_distillation_canary_degraded(
+pub(crate) fn prompt_distillation_canary_assessment(
     model: &PromptEvolutionReadModel,
     auto_parent_id: &str,
     candidate_id: &str,
-) -> Option<String> {
-    let recent = |profile_id: &str| {
-        crate::prompt_rollout_runtime::prompt_live_observations(model, "auto", profile_id)
-            .into_iter()
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>()
-    };
-    let candidate = recent(candidate_id);
-    let parent = recent(auto_parent_id);
+    candidate_checkpoint: usize,
+    parent_checkpoint: usize,
+) -> PromptDistillationCanaryAssessment {
+    let candidate_all =
+        crate::prompt_rollout_runtime::prompt_live_observations(model, "auto", candidate_id);
+    let parent_all =
+        crate::prompt_rollout_runtime::prompt_live_observations(model, "auto", auto_parent_id);
+    if candidate_all.len() < candidate_checkpoint || parent_all.len() < parent_checkpoint {
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_checkpoint_regressed".to_string(),
+        );
+    }
+    let candidate_fresh = &candidate_all[candidate_checkpoint..];
+    let parent_fresh = &parent_all[parent_checkpoint..];
+    if candidate_fresh
+        .iter()
+        .any(|observation| observation.safety_violations > 0)
+    {
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_safety_regression".to_string(),
+        );
+    }
+    let candidate_classes = candidate_fresh
+        .iter()
+        .map(|observation| observation.task_class.as_str())
+        .collect::<BTreeSet<_>>();
+    let parent_classes = parent_fresh
+        .iter()
+        .map(|observation| observation.task_class.as_str())
+        .collect::<BTreeSet<_>>();
+    if !candidate_classes.is_subset(&parent_classes) {
+        return PromptDistillationCanaryAssessment::Pending;
+    }
+    let common_classes = candidate_classes
+        .intersection(&parent_classes)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let candidate = candidate_fresh
+        .iter()
+        .copied()
+        .filter(|observation| common_classes.contains(observation.task_class.as_str()))
+        .collect::<Vec<_>>();
+    let parent = parent_fresh
+        .iter()
+        .copied()
+        .filter(|observation| common_classes.contains(observation.task_class.as_str()))
+        .collect::<Vec<_>>();
     if candidate.len() < 2 || parent.len() < 2 {
-        return None;
+        return PromptDistillationCanaryAssessment::Pending;
+    }
+    let rate_regressed = |candidate_passes: usize,
+                          candidate_runs: usize,
+                          parent_passes: usize,
+                          parent_runs: usize| {
+        candidate_passes.saturating_mul(parent_runs)
+            < parent_passes.saturating_mul(candidate_runs)
+    };
+    for task_class in &candidate_classes {
+        let candidate_class = candidate
+            .iter()
+            .copied()
+            .filter(|entry| entry.task_class == *task_class)
+            .collect::<Vec<_>>();
+        let parent_class = parent
+            .iter()
+            .copied()
+            .filter(|entry| entry.task_class == *task_class)
+            .collect::<Vec<_>>();
+        if parent_class.is_empty() {
+            return PromptDistillationCanaryAssessment::Pending;
+        }
+        if rate_regressed(
+            candidate_class.iter().filter(|entry| entry.succeeded).count(),
+            candidate_class.len(),
+            parent_class.iter().filter(|entry| entry.succeeded).count(),
+            parent_class.len(),
+        ) {
+            return PromptDistillationCanaryAssessment::Degraded(format!(
+                "canary_completion_regression:{task_class}"
+            ));
+        }
+        if rate_regressed(
+            candidate_class
+                .iter()
+                .filter(|entry| entry.format_valid)
+                .count(),
+            candidate_class.len(),
+            parent_class.iter().filter(|entry| entry.format_valid).count(),
+            parent_class.len(),
+        ) {
+            return PromptDistillationCanaryAssessment::Degraded(format!(
+                "canary_format_regression:{task_class}"
+            ));
+        }
+        let candidate_class_quality = candidate_class
+            .iter()
+            .map(|entry| entry.quality_score)
+            .sum::<f64>()
+            / candidate_class.len() as f64;
+        let parent_class_quality = parent_class
+            .iter()
+            .map(|entry| entry.quality_score)
+            .sum::<f64>()
+            / parent_class.len() as f64;
+        if candidate_class_quality + AUTO_DISTILLATION_MAX_HOLDOUT_QUALITY_REGRESSION
+            < parent_class_quality
+        {
+            return PromptDistillationCanaryAssessment::Degraded(format!(
+                "canary_quality_regression:{task_class}"
+            ));
+        }
+    }
+    if rate_regressed(
+        candidate.iter().filter(|entry| entry.succeeded).count(),
+        candidate.len(),
+        parent.iter().filter(|entry| entry.succeeded).count(),
+        parent.len(),
+    ) {
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_completion_regression".to_string(),
+        );
+    }
+    if rate_regressed(
+        candidate.iter().filter(|entry| entry.format_valid).count(),
+        candidate.len(),
+        parent.iter().filter(|entry| entry.format_valid).count(),
+        parent.len(),
+    ) {
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_format_regression".to_string(),
+        );
     }
     let candidate_quality = candidate
         .iter()
@@ -320,13 +496,23 @@ pub(crate) fn prompt_distillation_canary_degraded(
         .sum::<f64>()
         / parent.len() as f64;
     if candidate_quality + AUTO_DISTILLATION_MAX_HOLDOUT_QUALITY_REGRESSION < parent_quality {
-        return Some("canary_quality_regression".to_string());
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_quality_regression".to_string(),
+        );
     }
-    let exceeds = |candidate: u128, parent: u128, tolerance_bps: u64| {
-        parent == 0 && candidate > 0
-            || parent > 0
-                && candidate.saturating_mul(10_000)
-                    > parent.saturating_mul(10_000 + u128::from(tolerance_bps))
+    let average_exceeds = |candidate_total: u128,
+                           candidate_count: usize,
+                           parent_total: u128,
+                           parent_count: usize,
+                           tolerance_bps: u64| {
+        parent_total == 0 && candidate_total > 0
+            || parent_total > 0
+                && candidate_total
+                    .saturating_mul(parent_count as u128)
+                    .saturating_mul(10_000)
+                    > parent_total
+                        .saturating_mul(candidate_count as u128)
+                        .saturating_mul(10_000 + u128::from(tolerance_bps))
     };
     let candidate_latency = candidate
         .iter()
@@ -336,12 +522,16 @@ pub(crate) fn prompt_distillation_canary_degraded(
         .iter()
         .map(|observation| u128::from(observation.latency_ms))
         .sum();
-    if exceeds(
+    if average_exceeds(
         candidate_latency,
+        candidate.len(),
         parent_latency,
+        parent.len(),
         AUTO_DISTILLATION_MAX_HOLDOUT_LATENCY_REGRESSION_BPS,
     ) {
-        return Some("canary_latency_regression".to_string());
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_latency_regression".to_string(),
+        );
     }
     let candidate_tokens = candidate
         .iter()
@@ -351,12 +541,18 @@ pub(crate) fn prompt_distillation_canary_degraded(
         .iter()
         .map(|observation| u128::from(observation.total_tokens))
         .sum();
-    exceeds(
+    if average_exceeds(
         candidate_tokens,
+        candidate.len(),
         parent_tokens,
+        parent.len(),
         AUTO_DISTILLATION_MAX_HOLDOUT_TOKEN_REGRESSION_BPS,
-    )
-    .then(|| "canary_token_regression".to_string())
+    ) {
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_token_regression".to_string(),
+        );
+    }
+    PromptDistillationCanaryAssessment::Healthy
 }
 
 #[cfg(test)]
@@ -391,15 +587,16 @@ mod tests {
 
     fn certified_distillation_fixture() -> DistillationRolloutFixture {
         let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
-        let mut pro_teacher = ConductorPromptGenome::seed_for_effort("pro");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut pro_teacher = defeated_stable_pro.clone();
         pro_teacher.id = "certified-pro-g1".to_string();
         pro_teacher.generation = 1;
-        pro_teacher.parents = vec!["pro-parent".to_string()];
+        pro_teacher.parents = vec![defeated_stable_pro.id.clone()];
         pro_teacher.retry_policy = PromptRetryPolicy::SameModel;
         let pro_snapshot = FrozenPromptProfileSnapshot::new_gepa(
             "pro",
             pro_teacher,
-            "pro-parent",
+            defeated_stable_pro.id.clone(),
             "a".repeat(64),
             "b".repeat(64),
         )
@@ -420,6 +617,7 @@ mod tests {
         let auto_child = derive_pro_to_auto_distillation_child(
             &auto_parent,
             &pro_snapshot,
+            &defeated_stable_pro,
             &pro_snapshot.genome.id,
         )
         .unwrap();
@@ -720,17 +918,27 @@ mod tests {
             rolled_back.last_reason.as_deref(),
             Some("promotion_gate_regressed:holdout_latency_regression")
         );
+        let quarantined = reconcile_prompt_rollout(&mut regressed, "auto", &fixture.evaluation);
+        assert_eq!(quarantined.status, "stable");
+        assert!(quarantined.canary_profile_id.is_none());
+        assert_eq!(
+            quarantined.quarantined_profile_ids,
+            vec![fixture.auto_child.id.clone()]
+        );
 
         append_live_pair(&mut fixture, 1);
+        append_live_pair(&mut fixture, 2);
         let stage_25 = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
         assert_eq!(stage_25.canary_percent, 25);
         let still_25 = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
         assert_eq!(still_25.canary_percent, 25);
 
-        append_live_pair(&mut fixture, 2);
+        append_live_pair(&mut fixture, 3);
+        append_live_pair(&mut fixture, 4);
         let stage_50 = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
         assert_eq!(stage_50.canary_percent, 50);
-        append_live_pair(&mut fixture, 3);
+        append_live_pair(&mut fixture, 5);
+        append_live_pair(&mut fixture, 6);
         let promoted = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
         assert_eq!(promoted.status, "promoted");
         assert_eq!(promoted.stable_profile_id, fixture.auto_child.id);
@@ -742,5 +950,72 @@ mod tests {
             PromptEvolutionMethod::ProToAutoDistillation
         );
         assert!(frozen.pro_teacher_evidence.is_some());
+    }
+
+    #[test]
+    fn distillation_canary_waits_for_shared_task_classes() {
+        let mut fixture = certified_distillation_fixture();
+        let started = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
+        assert_eq!(started.canary_percent, 10);
+        append_live_pair(&mut fixture, 1);
+        append_live_pair(&mut fixture, 2);
+        for (_, observation) in &mut fixture.model.observations {
+            if observation.mode == PromptEvaluationMode::Live
+                && observation.profile_id == fixture.auto_parent.id
+            {
+                observation.task_class = "research".to_string();
+            }
+        }
+
+        let pending = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
+
+        assert_eq!(pending.status, "canary");
+        assert_eq!(pending.canary_percent, 10);
+        assert!(pending.quarantined_profile_ids.is_empty());
+    }
+
+    #[test]
+    fn distillation_canary_compares_resource_averages_with_unequal_samples() {
+        let mut fixture = certified_distillation_fixture();
+        let started = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
+        assert_eq!(started.canary_percent, 10);
+        append_live_pair(&mut fixture, 1);
+        append_live_pair(&mut fixture, 2);
+        for (_, observation) in &mut fixture.model.observations {
+            if observation.mode == PromptEvaluationMode::Live
+                && observation.profile_id == fixture.auto_child.id
+            {
+                observation.latency_ms = 190;
+            }
+        }
+        let parent_template = fixture
+            .model
+            .observations
+            .iter()
+            .find(|(_, observation)| {
+                observation.mode == PromptEvaluationMode::Live
+                    && observation.profile_id == fixture.auto_parent.id
+            })
+            .cloned()
+            .unwrap();
+        for index in 3..=4 {
+            let mut extra = parent_template.clone();
+            extra.1.evaluation_id = format!("extra-parent-live-{index}");
+            extra.1.case_id = format!("extra-parent-live-case-{index}");
+            fixture.model.observations.push(extra);
+        }
+
+        let rolled_back =
+            reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
+
+        assert_eq!(rolled_back.status, "rolled_back");
+        assert_eq!(
+            rolled_back.last_reason.as_deref(),
+            Some("canary_latency_regression")
+        );
+        assert_eq!(
+            rolled_back.quarantined_profile_ids,
+            vec![fixture.auto_child.id.clone()]
+        );
     }
 }

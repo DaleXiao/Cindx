@@ -292,6 +292,31 @@ where
     ValidatePair: Fn(&PromptEvolutionObservation, &PromptEvolutionObservation) -> bool,
 {
     let mut blockers = BTreeSet::new();
+    let mut replay_payloads = BTreeMap::<(String, String), &PromptEvolutionObservation>::new();
+    let mut conflicting_replays = BTreeSet::<(String, String)>::new();
+    for observation in observations.iter().filter(|observation| {
+        accept(observation)
+            && matches!(
+                observation.profile_id.as_str(),
+                profile if profile == candidate_id || profile == stable_id
+            )
+    }) {
+        let key = (
+            observation.profile_id.clone(),
+            observation.evaluation_id.clone(),
+        );
+        if replay_payloads
+            .get(&key)
+            .is_some_and(|existing| **existing != *observation)
+        {
+            conflicting_replays.insert(key);
+        } else {
+            replay_payloads.entry(key).or_insert(observation);
+        }
+    }
+    if !conflicting_replays.is_empty() {
+        blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
+    }
     let mut candidate_by_pair = BTreeMap::new();
     let mut stable_by_pair = BTreeMap::new();
     let mut candidate_seen = BTreeSet::new();
@@ -301,12 +326,24 @@ where
             .iter()
             .rev()
             .filter(|observation| accept(observation))
+            .filter(|observation| {
+                !conflicting_replays.contains(&(
+                    observation.profile_id.clone(),
+                    observation.evaluation_id.clone(),
+                ))
+            })
             .find_map(PromptEvolutionObservation::scientific_cohort_sha256)
     });
 
     for observation in observations
         .iter()
         .filter(|observation| accept(observation))
+        .filter(|observation| {
+            !conflicting_replays.contains(&(
+                observation.profile_id.clone(),
+                observation.evaluation_id.clone(),
+            ))
+        })
         .filter(|observation| {
             active_cohort_sha256
                 .is_some_and(|digest| observation.scientific_cohort_sha256() == Some(digest))
@@ -864,6 +901,38 @@ mod tests {
         assert_eq!(result.unique_holdout_cases, 2);
         assert_eq!(result.train_task_classes, 2);
         assert_eq!(result.holdout_task_classes, 2);
+    }
+
+    #[test]
+    fn exact_replays_are_idempotent_but_conflicting_replays_fail_closed() {
+        let evidence = complete_evidence();
+        let exact_replay = evidence
+            .iter()
+            .find(|observation| {
+                observation.profile_id == "candidate" && observation.evaluation_id == "holdout-1"
+            })
+            .expect("candidate holdout evidence exists")
+            .clone();
+        let mut exact = evidence.clone();
+        exact.push(exact_replay.clone());
+        let exact_result = evaluate_prompt_promotion_gate(&exact, "candidate", "stable", config());
+        assert!(exact_result.eligible, "{:?}", exact_result.blockers);
+
+        let mut conflicting_replay = exact_replay;
+        conflicting_replay.quality_score = 0.1;
+        conflicting_replay.latency_ms = 10_000;
+        conflicting_replay.relative_reward = Some(-0.9);
+        let mut conflict_after_original = evidence.clone();
+        conflict_after_original.push(conflicting_replay.clone());
+        let mut conflict_before_original = evidence;
+        conflict_before_original.insert(0, conflicting_replay);
+        for replayed in [conflict_after_original, conflict_before_original] {
+            let result = evaluate_prompt_promotion_gate(&replayed, "candidate", "stable", config());
+            assert!(!result.eligible);
+            assert!(result
+                .blockers
+                .contains(&PromptPromotionBlocker::InvalidEvidenceShape));
+        }
     }
 
     #[test]

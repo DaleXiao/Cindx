@@ -89,6 +89,8 @@ mod project_config_persistence;
 mod project_lifecycle_runtime;
 mod project_session_persistence;
 mod prompt_attempt_runtime;
+mod prompt_canary_outcome_projection;
+mod prompt_canary_runtime;
 mod prompt_distillation_outbox;
 mod prompt_distillation_rollout;
 mod prompt_distillation_runtime;
@@ -191,6 +193,9 @@ use project_commands::*;
 use project_config_persistence::*;
 use project_lifecycle_runtime::*;
 use project_session_persistence::*;
+use prompt_canary_runtime::{
+    prompt_candidate_blocked_by_distillation_quarantine, rollback_prompt_canary,
+};
 use prompt_evaluation_runtime::*;
 use prompt_evidence_runtime::*;
 use prompt_evolution_models::*;

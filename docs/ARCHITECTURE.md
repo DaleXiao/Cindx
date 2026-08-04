@@ -271,8 +271,12 @@ separate Pro-to-Auto distillation track:
    attestation binds both ordinary Pro evidence and the Auto-to-Pro transfer
    evidence that qualified it; legacy or incomplete snapshots cannot teach.
 2. Distillation derives a bounded Auto-compatible child from the stable Auto
-   parent and only the learned delta relative to the Pro seed. It never copies
-   the Pro genome, custom directive, budget, or parallel topology into Auto.
+   parent and the complete one- or two-gene structural delta between the
+   champion and the exact stable Pro profile it defeated. The dispatch boundary
+   first replays both frozen Pro gates. Directive text, larger bundles,
+   unadapted Pro topology, and excess Pro resources fail closed; the child
+   lineage binds the defeated Pro fingerprint and never copies a Pro genome
+   wholesale.
 3. The teacher, Auto parent, child, source datasets, cohorts, receipts, and
    flattened ancestor lineage are fingerprinted. Teacher cases and equivalent
    objectives are excluded from both the fresh train and holdout splits, and a
@@ -285,14 +289,25 @@ separate Pro-to-Auto distillation track:
    distillation while a foreground Agent run is active. Campaign work remains
    bounded, cancellable, project-scoped, and isolated from ordinary Auto
    evolution requests.
-6. A passing matched train/holdout gate starts a 10 percent canary. Fresh live
-   evidence advances it through 25 and 50 percent; safety, quality, latency,
-   token, lineage, or gate regression rolls back to the frozen stable Auto
-   profile. Only the final stage can install a new frozen Auto snapshot.
+6. A passing matched train/holdout gate starts a 10 percent canary under an
+   immutable lease for candidate, stable, cohort, and evidence fingerprints.
+   Each transition through 25 and 50 percent to stable promotion consumes fresh
+   outcomes from both sides. Failed, denied, malformed, and censored assignments
+   count negatively; completion, quality, latency, and token comparisons use
+   contemporaneous rates or averages and include task-class checks. Drift or
+   regression rolls back to the frozen stable Auto profile and quarantines that
+   immutable candidate. Exact evidence replay is idempotent, while a conflicting
+   payload for the same identity invalidates the pair. Only the final stage can
+   install a new frozen Auto snapshot.
 
 These contracts make self-distillation controlled and replayable. Deterministic
 tests establish eligibility, isolation, reachability, and rollback behavior;
 they do not establish provider-backed intelligence improvement.
+
+The desktop boundary keeps live canary outcome projection in
+`prompt_canary_outcome_projection` and bounded canary observation, quarantine,
+and rollback helpers in `prompt_canary_runtime`; the evolution read model and
+rollout reconciler compose those narrower responsibilities.
 
 The evolution read model scopes learned genomes, observations, offline
 datasets, and rollout state by project. Records without a durable scope are

@@ -178,19 +178,31 @@ independently measured quality and resource use break ties.
 
 The current tree also contains a separate controlled Pro-to-Auto distillation
 track. Only the active frozen Pro champion can be a teacher, and its attestation
-must replay both its ordinary Pro gate and Auto-to-Pro source lineage. The
-runtime derives an Auto-bounded child from the stable Auto parent rather than
-copying Pro budgets, topology, directives, or genome wholesale. Teacher and
-ancestor cases or equivalent objectives cannot enter the fresh train/holdout
-cohort; missing manifests, stale teachers, mixed lineage, treatment failures,
-timeouts, or permission denials fail closed.
+must replay both its ordinary Pro gate and Auto-to-Pro source lineage at the
+dispatch boundary. The runtime compares that champion with the exact stable Pro
+profile it defeated and will transfer only a complete, attributable one- or
+two-gene structural delta that already fits the Auto contract. It rejects
+directive wording, unadapted Pro topology, excess Pro resources, and larger
+bundles instead of selecting an untested subset. The child lineage binds the
+teacher, defeated Pro fingerprint, and stable Auto parent rather than copying a
+Pro genome wholesale. Teacher and ancestor cases or equivalent objectives
+cannot enter the fresh train/holdout cohort; missing manifests, stale teachers,
+mixed lineage, treatment failures, timeouts, or permission denials fail closed.
 
 Distillation dispatch is asynchronous, project-scoped, idempotent, bounded, and
 suppressed while a foreground Agent run is active. A real matched gate can
-start a 10 percent Auto canary; fresh live evidence is required for the 25 and
-50 percent stages and final frozen promotion. Safety, quality, latency, token,
-gate, or lineage regression rolls back to the prior stable Auto profile. The
-deterministic suite verifies these mechanism contracts only. No current
+start a 10 percent Auto canary. Its immutable lease binds both profile
+fingerprints, the matched cohort, and the paired evidence. Each 10 to 25, 25 to
+50, and 50 to stable transition requires fresh candidate and stable outcomes;
+failed, denied, malformed, and censored assigned runs remain negative canary
+outcomes rather than disappearing from the completion denominator. Completion,
+format, quality, latency, and token comparisons use rates or averages and check
+each candidate task class against contemporaneous stable traffic. Evidence or
+checkpoint drift, safety failure, or any regression rolls back to the prior
+stable Auto profile, and a rolled-back immutable candidate remains quarantined
+for that stable lineage. Exact evidence replay is idempotent; the same evidence
+identity with a different payload invalidates the pair instead of replacing it.
+The deterministic suite verifies these mechanism contracts only. No current
 provider-backed result demonstrates that the distilled Auto child is more
 intelligent than the stable Auto baseline.
 

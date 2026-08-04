@@ -64,6 +64,25 @@ impl TransferableGene {
             Self::MaxToolCallsPerStep(value) => child.max_tool_calls_per_step = value,
         }
     }
+
+    fn matches(self, genome: &ConductorPromptGenome) -> bool {
+        match self {
+            Self::RetryPolicy(value) => genome.retry_policy == value,
+            Self::TopologyStrategy(value) => genome.topology_strategy == value,
+            Self::RoleStrategy(value) => genome.role_strategy == value,
+            Self::CommitStrategy(value) => genome.commit_strategy == value,
+            Self::Verification(value) => genome.verification == value,
+            Self::GraphDepth(value) => genome.graph_depth == value,
+            Self::ContextPolicy(value) => genome.context_policy == value,
+            Self::MaxParallelBranches(value) => genome.max_parallel_branches == value,
+            Self::MaxStepAttempts(value) => genome.max_step_attempts == value,
+            Self::MaxModelTurnsPerStep(value) => {
+                genome.effective_max_model_turns_per_step() == value
+            }
+            Self::ToolPolicy(value) => genome.tool_policy == value,
+            Self::MaxToolCallsPerStep(value) => genome.effective_max_tool_calls_per_step() == value,
+        }
+    }
 }
 
 pub fn validate_auto_distillation_contract(genome: &ConductorPromptGenome) -> Result<(), String> {
@@ -90,6 +109,7 @@ pub fn validate_auto_distillation_contract(genome: &ConductorPromptGenome) -> Re
 pub fn derive_pro_to_auto_distillation_child(
     auto_parent: &ConductorPromptGenome,
     pro_teacher_snapshot: &FrozenPromptProfileSnapshot,
+    defeated_stable_pro: &ConductorPromptGenome,
     active_stable_pro_profile_id: &str,
 ) -> Result<ConductorPromptGenome, String> {
     validate_auto_distillation_contract(auto_parent)?;
@@ -101,23 +121,37 @@ pub fn derive_pro_to_auto_distillation_child(
     if prompt_genome_sha256(teacher)? != attestation.teacher_profile_sha256 {
         return Err("certified Pro teacher genome fingerprint does not match".to_string());
     }
+    defeated_stable_pro.validate()?;
+    if defeated_stable_pro.id != pro_teacher_snapshot.stable_profile_id {
+        return Err(
+            "certified Pro teacher comparison baseline is not the defeated stable profile"
+                .to_string(),
+        );
+    }
+    let defeated_stable_pro_sha256 = prompt_genome_sha256(defeated_stable_pro)?;
     let auto_parent_sha256 = prompt_genome_sha256(auto_parent)?;
     if auto_parent.id == teacher.id || auto_parent_sha256 == attestation.teacher_profile_sha256 {
         return Err("Pro-to-Auto distillation requires distinct parent and teacher".to_string());
     }
 
-    let pro_seed = ConductorPromptGenome::seed_for_effort("pro");
-    let transferable = transferable_teacher_changes(auto_parent, teacher, &pro_seed);
-    if transferable.is_empty() {
+    let certified_delta = certified_teacher_changes(teacher, defeated_stable_pro)?;
+    if !(1..=MAX_TRANSFERRED_GENES).contains(&certified_delta.len()) {
         return Err(
-            "certified Pro teacher has no learned Auto-compatible strategy change".to_string(),
+            "certified Pro teacher must have one or two fully attributable Auto-compatible strategy changes"
+                .to_string(),
         );
     }
-
-    let selected = transferable
-        .into_iter()
-        .take(MAX_TRANSFERRED_GENES)
+    let selected = certified_delta
+        .iter()
+        .copied()
+        .filter(|gene| !gene.matches(auto_parent))
         .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(
+            "certified Pro teacher strategy delta is already present in the stable Auto parent"
+                .to_string(),
+        );
+    }
     let mut child = auto_parent.clone();
     for gene in &selected {
         gene.apply(&mut child);
@@ -130,11 +164,17 @@ pub fn derive_pro_to_auto_distillation_child(
     child.require_final_synthesis = true;
 
     let teacher_attestation_sha256 = attestation.digest()?;
+    let certified_genes = certified_delta
+        .iter()
+        .map(|gene| gene.name())
+        .collect::<Vec<_>>();
     let transferred_genes = selected.iter().map(|gene| gene.name()).collect::<Vec<_>>();
     let lineage = serde_json::to_vec(&(
         PRO_TO_AUTO_DISTILLATION_CHILD_PROTOCOL_V1,
         auto_parent_sha256,
+        defeated_stable_pro_sha256,
         teacher_attestation_sha256,
+        &certified_genes,
         &transferred_genes,
     ))
     .map_err(|error| format!("distillation lineage serialization failed: {error}"))?;
@@ -147,9 +187,10 @@ pub fn derive_pro_to_auto_distillation_child(
 
     validate_auto_distillation_contract(&child)?;
     let changed_genes = child.changed_genes_from_auto_parent(auto_parent);
-    if !(1..=MAX_TRANSFERRED_GENES).contains(&changed_genes) {
+    if changed_genes != selected.len() || !(1..=MAX_TRANSFERRED_GENES).contains(&changed_genes) {
         return Err(format!(
-            "Auto distillation must change one or two genes, changed {changed_genes}"
+            "Auto distillation must apply its complete certified delta without coupled changes, expected {} and changed {changed_genes}",
+            selected.len()
         ));
     }
     if child.parents != [auto_parent.id.clone(), attestation.teacher_profile_id] {
@@ -158,92 +199,107 @@ pub fn derive_pro_to_auto_distillation_child(
     Ok(child)
 }
 
-fn transferable_teacher_changes(
-    auto_parent: &ConductorPromptGenome,
+fn certified_teacher_changes(
     teacher: &ConductorPromptGenome,
-    pro_seed: &ConductorPromptGenome,
-) -> Vec<TransferableGene> {
+    defeated_stable_pro: &ConductorPromptGenome,
+) -> Result<Vec<TransferableGene>, String> {
+    if teacher.custom_directive.trim() != defeated_stable_pro.custom_directive.trim() {
+        return Err(
+            "certified Pro strategy delta cannot contain prompt wording or custom directives"
+                .to_string(),
+        );
+    }
+    if teacher.require_final_synthesis != defeated_stable_pro.require_final_synthesis {
+        return Err(
+            "certified Pro strategy delta contains an unsupported delivery-contract change"
+                .to_string(),
+        );
+    }
     let mut changes = Vec::new();
-    if teacher.retry_policy != pro_seed.retry_policy
-        && teacher.retry_policy != auto_parent.retry_policy
-    {
+    if teacher.retry_policy != defeated_stable_pro.retry_policy {
         changes.push(TransferableGene::RetryPolicy(teacher.retry_policy));
     }
-    let topology = teacher
-        .topology_strategy
-        .min(PromptTopologyStrategy::AdaptiveDag);
-    if teacher.topology_strategy != pro_seed.topology_strategy
-        && topology != auto_parent.topology_strategy
-    {
-        changes.push(TransferableGene::TopologyStrategy(topology));
+    if teacher.topology_strategy != defeated_stable_pro.topology_strategy {
+        if teacher.topology_strategy > PromptTopologyStrategy::AdaptiveDag {
+            return Err(
+                "certified Pro strategy delta contains an unadapted Pro topology".to_string(),
+            );
+        }
+        changes.push(TransferableGene::TopologyStrategy(
+            teacher.topology_strategy,
+        ));
     }
-    if teacher.role_strategy != pro_seed.role_strategy
-        && teacher.role_strategy != auto_parent.role_strategy
-    {
+    if teacher.role_strategy != defeated_stable_pro.role_strategy {
         changes.push(TransferableGene::RoleStrategy(teacher.role_strategy));
     }
-    if teacher.commit_strategy != pro_seed.commit_strategy
-        && teacher.commit_strategy != auto_parent.commit_strategy
-    {
+    if teacher.commit_strategy != defeated_stable_pro.commit_strategy {
         changes.push(TransferableGene::CommitStrategy(teacher.commit_strategy));
     }
-    if teacher.verification != pro_seed.verification
-        && teacher.verification >= PromptVerification::Evidence
-        && teacher.verification != auto_parent.verification
-    {
+    if teacher.verification != defeated_stable_pro.verification {
+        if teacher.verification < PromptVerification::Evidence {
+            return Err(
+                "certified Pro strategy delta weakens the Auto verification floor".to_string(),
+            );
+        }
         changes.push(TransferableGene::Verification(teacher.verification));
     }
-    if teacher.graph_depth != pro_seed.graph_depth && teacher.graph_depth != auto_parent.graph_depth
-    {
+    if teacher.graph_depth != defeated_stable_pro.graph_depth {
         changes.push(TransferableGene::GraphDepth(teacher.graph_depth));
     }
-    if teacher.context_policy != pro_seed.context_policy
-        && teacher.context_policy != auto_parent.context_policy
-    {
+    if teacher.context_policy != defeated_stable_pro.context_policy {
         changes.push(TransferableGene::ContextPolicy(teacher.context_policy));
     }
 
-    let branches = teacher
-        .max_parallel_branches
-        .min(AUTO_DISTILLATION_MAX_PARALLEL_BRANCHES)
-        .min(auto_parent.max_parallel_branches);
-    if teacher.max_parallel_branches != pro_seed.max_parallel_branches
-        && branches != auto_parent.max_parallel_branches
+    if teacher.max_parallel_branches != defeated_stable_pro.max_parallel_branches {
+        if teacher.max_parallel_branches > AUTO_DISTILLATION_MAX_PARALLEL_BRANCHES {
+            return Err(
+                "certified Pro strategy delta exceeds the Auto parallelism ceiling".to_string(),
+            );
+        }
+        changes.push(TransferableGene::MaxParallelBranches(
+            teacher.max_parallel_branches,
+        ));
+    }
+    if teacher.max_step_attempts != defeated_stable_pro.max_step_attempts {
+        if teacher.max_step_attempts > AUTO_DISTILLATION_MAX_STEP_ATTEMPTS {
+            return Err("certified Pro strategy delta exceeds the Auto retry ceiling".to_string());
+        }
+        changes.push(TransferableGene::MaxStepAttempts(teacher.max_step_attempts));
+    }
+    if teacher.effective_max_model_turns_per_step()
+        != defeated_stable_pro.effective_max_model_turns_per_step()
     {
-        changes.push(TransferableGene::MaxParallelBranches(branches));
+        if teacher.effective_max_model_turns_per_step() > AUTO_DISTILLATION_MAX_MODEL_TURNS_PER_STEP
+        {
+            return Err(
+                "certified Pro strategy delta exceeds the Auto model-turn ceiling".to_string(),
+            );
+        }
+        changes.push(TransferableGene::MaxModelTurnsPerStep(
+            teacher.effective_max_model_turns_per_step(),
+        ));
     }
-    let attempts = teacher
-        .max_step_attempts
-        .min(AUTO_DISTILLATION_MAX_STEP_ATTEMPTS)
-        .min(auto_parent.max_step_attempts);
-    if teacher.max_step_attempts != pro_seed.max_step_attempts
-        && attempts != auto_parent.max_step_attempts
+    if teacher.tool_policy != defeated_stable_pro.tool_policy {
+        if teacher.tool_policy > PromptToolPolicy::EvidenceOnly {
+            return Err(
+                "certified Pro strategy delta contains an unadapted Pro tool policy".to_string(),
+            );
+        }
+        changes.push(TransferableGene::ToolPolicy(teacher.tool_policy));
+    }
+    if teacher.effective_max_tool_calls_per_step()
+        != defeated_stable_pro.effective_max_tool_calls_per_step()
     {
-        changes.push(TransferableGene::MaxStepAttempts(attempts));
+        if teacher.effective_max_tool_calls_per_step() > AUTO_DISTILLATION_MAX_TOOL_CALLS_PER_STEP {
+            return Err(
+                "certified Pro strategy delta exceeds the Auto tool-call ceiling".to_string(),
+            );
+        }
+        changes.push(TransferableGene::MaxToolCallsPerStep(
+            teacher.effective_max_tool_calls_per_step(),
+        ));
     }
-    let turns = teacher
-        .effective_max_model_turns_per_step()
-        .min(AUTO_DISTILLATION_MAX_MODEL_TURNS_PER_STEP)
-        .min(auto_parent.effective_max_model_turns_per_step());
-    if teacher.effective_max_model_turns_per_step() != pro_seed.effective_max_model_turns_per_step()
-        && turns != auto_parent.effective_max_model_turns_per_step()
-    {
-        changes.push(TransferableGene::MaxModelTurnsPerStep(turns));
-    }
-    let tool_policy = teacher.tool_policy.min(PromptToolPolicy::EvidenceOnly);
-    if teacher.tool_policy != pro_seed.tool_policy && tool_policy != auto_parent.tool_policy {
-        changes.push(TransferableGene::ToolPolicy(tool_policy));
-    }
-    let tool_calls = teacher
-        .effective_max_tool_calls_per_step()
-        .min(AUTO_DISTILLATION_MAX_TOOL_CALLS_PER_STEP)
-        .min(auto_parent.effective_max_tool_calls_per_step());
-    if teacher.effective_max_tool_calls_per_step() != pro_seed.effective_max_tool_calls_per_step()
-        && tool_calls != auto_parent.effective_max_tool_calls_per_step()
-    {
-        changes.push(TransferableGene::MaxToolCallsPerStep(tool_calls));
-    }
-    changes
+    Ok(changes)
 }
 
 trait AutoParentDifference {
@@ -279,13 +335,17 @@ mod tests {
     use super::*;
     use crate::FrozenPromptTransferEvidence;
 
-    fn certified_pro_snapshot(mut teacher: ConductorPromptGenome) -> FrozenPromptProfileSnapshot {
+    fn certified_pro_snapshot(
+        mut teacher: ConductorPromptGenome,
+        defeated_stable_pro: &ConductorPromptGenome,
+    ) -> FrozenPromptProfileSnapshot {
+        teacher.id = format!("{}-candidate", defeated_stable_pro.id);
         teacher.generation = 2;
-        teacher.parents = vec!["pro-parent".to_string()];
+        teacher.parents = vec![defeated_stable_pro.id.clone()];
         let snapshot = FrozenPromptProfileSnapshot::new_gepa(
             "pro",
             teacher,
-            "pro-parent",
+            defeated_stable_pro.id.clone(),
             "a".repeat(64),
             "b".repeat(64),
         )
@@ -310,22 +370,26 @@ mod tests {
     #[test]
     fn distillation_child_is_deterministic_bounded_and_not_a_pro_clone() {
         let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
-        let mut teacher = ConductorPromptGenome::seed_for_effort("pro");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
         teacher.retry_policy = PromptRetryPolicy::SameModel;
         teacher.commit_strategy = PromptCommitStrategy::Quorum;
-        teacher.max_parallel_branches = 3;
-        teacher.max_step_attempts = 4;
-        teacher.max_model_turns_per_step = 4;
-        teacher.max_tool_calls_per_step = 8;
-        teacher.custom_directive = "teacher-only text must not cross modes".to_string();
-        let snapshot = certified_pro_snapshot(teacher.clone());
+        let snapshot = certified_pro_snapshot(teacher.clone(), &defeated_stable_pro);
 
-        let first =
-            derive_pro_to_auto_distillation_child(&auto_parent, &snapshot, &snapshot.genome.id)
-                .expect("certified strategy should distill");
-        let second =
-            derive_pro_to_auto_distillation_child(&auto_parent, &snapshot, &snapshot.genome.id)
-                .expect("same lineage should be deterministic");
+        let first = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect("certified strategy should distill");
+        let second = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect("same lineage should be deterministic");
 
         assert_eq!(first, second);
         assert_eq!(first.retry_policy, PromptRetryPolicy::SameModel);
@@ -346,41 +410,56 @@ mod tests {
     #[test]
     fn teacher_defaults_and_raw_directive_are_not_presented_as_learned_strategy() {
         let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
-        let mut teacher = ConductorPromptGenome::seed_for_effort("pro");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
         teacher.custom_directive = "do not copy this".to_string();
-        let snapshot = certified_pro_snapshot(teacher);
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
 
-        let error =
-            derive_pro_to_auto_distillation_child(&auto_parent, &snapshot, &snapshot.genome.id)
-                .expect_err("raw Pro defaults are not distilled learning");
+        let error = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect_err("raw Pro defaults are not distilled learning");
 
-        assert!(error.contains("no learned Auto-compatible strategy"));
+        assert!(error.contains("prompt wording or custom directives"));
     }
 
     #[test]
     fn pro_parallel_deliberation_is_projected_to_the_auto_topology_ceiling() {
         let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
-        let mut teacher = ConductorPromptGenome::seed_for_effort("pro");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
         teacher.topology_strategy = PromptTopologyStrategy::ParallelDeliberation;
-        let snapshot = certified_pro_snapshot(teacher);
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
 
-        let error =
-            derive_pro_to_auto_distillation_child(&auto_parent, &snapshot, &snapshot.genome.id)
-                .expect_err("Pro parallel topology must not cross into Auto");
+        let error = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect_err("Pro parallel topology must not cross into Auto");
 
-        assert!(error.contains("no learned Auto-compatible strategy"));
+        assert!(error.contains("unadapted Pro topology"));
     }
 
     #[test]
     fn uncertified_or_non_active_pro_teacher_is_rejected() {
         let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
-        let mut teacher = ConductorPromptGenome::seed_for_effort("pro");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
         teacher.retry_policy = PromptRetryPolicy::SameModel;
-        let snapshot = certified_pro_snapshot(teacher);
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
 
-        let error =
-            derive_pro_to_auto_distillation_child(&auto_parent, &snapshot, "different-active-pro")
-                .expect_err("stale Pro profile must be rejected");
+        let error = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            "different-active-pro",
+        )
+        .expect_err("stale Pro profile must be rejected");
 
         assert!(error.contains("active stable frozen Pro profile"));
     }
@@ -389,14 +468,112 @@ mod tests {
     fn invalid_auto_parent_contract_is_rejected_before_distillation() {
         let mut auto_parent = ConductorPromptGenome::seed_for_effort("auto");
         auto_parent.max_parallel_branches = 3;
-        let mut teacher = ConductorPromptGenome::seed_for_effort("pro");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
         teacher.retry_policy = PromptRetryPolicy::SameModel;
-        let snapshot = certified_pro_snapshot(teacher);
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
 
-        let error =
-            derive_pro_to_auto_distillation_child(&auto_parent, &snapshot, &snapshot.genome.id)
-                .expect_err("out-of-contract Auto parent must not bootstrap a child");
+        let error = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect_err("out-of-contract Auto parent must not bootstrap a child");
 
         assert!(error.contains("resource contract exceeded"));
+    }
+
+    #[test]
+    fn distillation_uses_only_the_delta_that_defeated_the_stable_pro() {
+        let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
+        let mut defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        defeated_stable_pro.id = "stable-pro-g1".to_string();
+        defeated_stable_pro.generation = 1;
+        defeated_stable_pro.parents = vec!["seed-pro-v1".to_string()];
+        defeated_stable_pro.retry_policy = PromptRetryPolicy::SameModel;
+        let mut teacher = defeated_stable_pro.clone();
+        teacher.commit_strategy = PromptCommitStrategy::Quorum;
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
+
+        let child = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect("the one-gene winning delta should distill");
+
+        assert_eq!(child.commit_strategy, PromptCommitStrategy::Quorum);
+        assert_eq!(child.retry_policy, auto_parent.retry_policy);
+    }
+
+    #[test]
+    fn unaccounted_multi_gene_delta_fails_closed() {
+        let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
+        teacher.retry_policy = PromptRetryPolicy::SameModel;
+        teacher.commit_strategy = PromptCommitStrategy::Quorum;
+        teacher.graph_depth = PromptGraphDepth::Balanced;
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
+
+        let error = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect_err("a bundled three-gene win has no attributable one-or-two-gene delta");
+
+        assert!(error.contains("one or two fully attributable"));
+    }
+
+    #[test]
+    fn unmigratable_pro_resource_delta_fails_closed() {
+        let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
+        teacher.max_step_attempts = 4;
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
+
+        let error = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .expect_err("a Pro-only resource increase must not be silently clipped into Auto");
+
+        assert!(error.contains("Auto retry ceiling"));
+    }
+
+    #[test]
+    fn defeated_baseline_fingerprint_binds_child_lineage() {
+        let auto_parent = ConductorPromptGenome::seed_for_effort("auto");
+        let defeated_stable_pro = ConductorPromptGenome::seed_for_effort("pro");
+        let mut teacher = defeated_stable_pro.clone();
+        teacher.commit_strategy = PromptCommitStrategy::Quorum;
+        let snapshot = certified_pro_snapshot(teacher, &defeated_stable_pro);
+        let mut altered_baseline_record = defeated_stable_pro.clone();
+        altered_baseline_record.generation = 1;
+        altered_baseline_record.parents = vec!["historical-pro-parent".to_string()];
+
+        let canonical_child = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &defeated_stable_pro,
+            &snapshot.genome.id,
+        )
+        .unwrap();
+        let altered_lineage_child = derive_pro_to_auto_distillation_child(
+            &auto_parent,
+            &snapshot,
+            &altered_baseline_record,
+            &snapshot.genome.id,
+        )
+        .unwrap();
+
+        assert_ne!(canonical_child.id, altered_lineage_child.id);
     }
 }
