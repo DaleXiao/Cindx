@@ -15,6 +15,9 @@ pub struct PromptPromotionGateConfig {
     pub minimum_wilson_lower_bound: f64,
     pub maximum_generalization_gap: f64,
     pub maximum_holdout_task_class_regression: f64,
+    pub maximum_holdout_quality_regression: f64,
+    pub maximum_holdout_latency_regression_bps: u64,
+    pub maximum_holdout_token_regression_bps: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -347,7 +350,7 @@ where
         blockers.insert(PromptPromotionBlocker::IncompletePairedEvidence);
     }
 
-    let complete_candidate = candidate_keys
+    let complete_pairs = candidate_keys
         .intersection(&stable_keys)
         .filter_map(|key| {
             let candidate = candidate_by_pair.get(key).copied()?;
@@ -373,7 +376,7 @@ where
             if candidate.safety_violations > 0 || stable.safety_violations > 0 {
                 blockers.insert(PromptPromotionBlocker::SafetyViolation);
             }
-            Some(candidate)
+            Some((key.clone(), candidate, stable))
         })
         .collect::<Vec<_>>();
 
@@ -396,12 +399,13 @@ where
         }
     }
 
-    let complete_candidate = complete_candidate
+    let complete_pairs = complete_pairs
         .into_iter()
-        .filter(|observation| {
-            PairKey::from_observation(observation)
-                .is_some_and(|key| !failure_by_pair.contains_key(&key))
-        })
+        .filter(|(key, _, _)| !failure_by_pair.contains_key(key))
+        .collect::<Vec<_>>();
+    let complete_candidate = complete_pairs
+        .iter()
+        .map(|(_, candidate, _)| *candidate)
         .collect::<Vec<_>>();
 
     let train = complete_candidate
@@ -510,6 +514,69 @@ where
         blockers.insert(PromptPromotionBlocker::HoldoutTaskClassRegression);
     }
 
+    let holdout_pairs = complete_pairs
+        .iter()
+        .filter(|(_, candidate, _)| candidate.split == PromptEvaluationSplit::Holdout)
+        .map(|(_, candidate, stable)| (*candidate, *stable))
+        .collect::<Vec<_>>();
+    if holdout_pairs
+        .iter()
+        .any(|(candidate, stable)| !candidate.succeeded && stable.succeeded)
+        || holdout_failures
+            .iter()
+            .any(|failure| failure.candidate_failed && !failure.stable_failed)
+    {
+        blockers.insert(PromptPromotionBlocker::HoldoutFailureRegression);
+    }
+    if !holdout_pairs.is_empty() {
+        let pair_count = holdout_pairs.len() as f64;
+        let candidate_quality = holdout_pairs
+            .iter()
+            .map(|(candidate, _)| candidate.quality_score)
+            .sum::<f64>()
+            / pair_count;
+        let stable_quality = holdout_pairs
+            .iter()
+            .map(|(_, stable)| stable.quality_score)
+            .sum::<f64>()
+            / pair_count;
+        if candidate_quality + config.maximum_holdout_quality_regression < stable_quality {
+            blockers.insert(PromptPromotionBlocker::HoldoutQualityRegression);
+        }
+
+        let candidate_latency = holdout_pairs
+            .iter()
+            .map(|(candidate, _)| u128::from(candidate.latency_ms))
+            .sum::<u128>();
+        let stable_latency = holdout_pairs
+            .iter()
+            .map(|(_, stable)| u128::from(stable.latency_ms))
+            .sum::<u128>();
+        if exceeds_bps_regression(
+            candidate_latency,
+            stable_latency,
+            config.maximum_holdout_latency_regression_bps,
+        ) {
+            blockers.insert(PromptPromotionBlocker::HoldoutLatencyRegression);
+        }
+
+        let candidate_tokens = holdout_pairs
+            .iter()
+            .map(|(candidate, _)| u128::from(candidate.total_tokens))
+            .sum::<u128>();
+        let stable_tokens = holdout_pairs
+            .iter()
+            .map(|(_, stable)| u128::from(stable.total_tokens))
+            .sum::<u128>();
+        if exceeds_bps_regression(
+            candidate_tokens,
+            stable_tokens,
+            config.maximum_holdout_token_regression_bps,
+        ) {
+            blockers.insert(PromptPromotionBlocker::HoldoutTokenRegression);
+        }
+    }
+
     let confidence = prompt_promotion_confidence_from_relative_rewards(
         holdout
             .iter()
@@ -533,6 +600,13 @@ where
         confidence,
         blockers,
     }
+}
+
+fn exceeds_bps_regression(candidate: u128, baseline: u128, tolerance_bps: u64) -> bool {
+    if baseline == 0 {
+        return candidate > 0;
+    }
+    candidate.saturating_mul(10_000) > baseline.saturating_mul(10_000 + u128::from(tolerance_bps))
 }
 
 #[cfg(test)]
@@ -619,6 +693,9 @@ mod tests {
             minimum_wilson_lower_bound: 0.0,
             maximum_generalization_gap: 0.15,
             maximum_holdout_task_class_regression: 0.05,
+            maximum_holdout_quality_regression: 0.01,
+            maximum_holdout_latency_regression_bps: 500,
+            maximum_holdout_token_regression_bps: 200,
         }
     }
 
@@ -790,6 +867,51 @@ mod tests {
     }
 
     #[test]
+    fn bounded_holdout_measurement_tolerance_preserves_eligibility() {
+        let mut evidence = complete_evidence();
+        for observation in &mut evidence {
+            if observation.profile_id == "candidate"
+                && observation.split == PromptEvaluationSplit::Holdout
+            {
+                observation.quality_score = 0.895;
+                observation.latency_ms = 105;
+                observation.total_tokens = 102;
+            }
+        }
+
+        let result = evaluate_prompt_promotion_gate(&evidence, "candidate", "stable", config());
+
+        assert!(result.eligible, "{:?}", result.blockers);
+    }
+
+    #[test]
+    fn absolute_holdout_regressions_override_a_relative_reward_win() {
+        let mut evidence = complete_evidence();
+        for observation in &mut evidence {
+            if observation.profile_id == "candidate"
+                && observation.split == PromptEvaluationSplit::Holdout
+            {
+                observation.quality_score = 0.88;
+                observation.latency_ms = 106;
+                observation.total_tokens = 103;
+            }
+        }
+
+        let result = evaluate_prompt_promotion_gate(&evidence, "candidate", "stable", config());
+
+        assert!(result.confidence.wins > result.confidence.losses);
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::HoldoutQualityRegression));
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::HoldoutLatencyRegression));
+        assert!(result
+            .blockers
+            .contains(&PromptPromotionBlocker::HoldoutTokenRegression));
+    }
+
+    #[test]
     fn repeated_case_cannot_satisfy_diversity() {
         let mut evidence = complete_evidence();
         for observation in &mut evidence {
@@ -904,6 +1026,9 @@ mod tests {
         assert_eq!(failed.holdout_runs, 3);
         assert_eq!(failed.confidence.losses, 1);
         assert!(failed.holdout_average_reward < 0.9);
+        assert!(failed
+            .blockers
+            .contains(&PromptPromotionBlocker::HoldoutFailureRegression));
 
         let mut recovered = pair(
             "holdout-failed",

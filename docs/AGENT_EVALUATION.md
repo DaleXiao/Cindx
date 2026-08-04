@@ -38,10 +38,15 @@ a particular promoted profile, and it does not establish Fugu Ultra parity.
 The current source contains an Auto-to-Pro transfer gate. Its deterministic
 tests establish evidence qualification, lineage isolation,
 position-balanced comparison, dual-gate promotion, frozen provenance, and
-reserved mutation input. Those are mechanism checks, not answer-quality
-evidence. A future provider-backed treatment must compare the pre-transfer Pro
-profile with a promoted transfer-trained Pro profile on frozen matched cases
-before any uplift claim is allowed.
+strict paired high-information mutation input. The ordinary and transfer gates
+also reject candidate-only failure and absolute holdout quality, latency, or
+token regression against the stable profile, even if relative reviewer reward
+is positive. Those are mechanism checks, not answer-quality evidence. The
+current campaign does not execute the per-run route/retrieval decision layer, so
+no learned routing or retrieval claim is made. A future provider-backed
+treatment must compare the pre-transfer Pro profile with a promoted
+transfer-trained Pro profile on frozen matched cases before any uplift claim is
+allowed.
 
 ## Evidence Levels
 

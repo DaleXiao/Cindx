@@ -236,9 +236,14 @@ the two foreground runtimes:
    observations. They have their own dataset digest and promotion gate. The
    mirrored pair is projected only when both records, project scope, and Auto
    source lineage agree.
-5. Pro mutation reserves reflection capacity for both ordinary Pro evidence and
-   Auto-transfer evidence. Promotion requires both gates, and the frozen Pro
-   snapshot pins the active Auto source and both evidence sets.
+5. The portable reflection selector accepts only complete strict transfer pairs
+   from the active train cohort, ranks their redacted Pro/Auto trajectories by
+   actionable information and strategy contrast, and keeps diverse pairs within
+   the existing six-trajectory mutation budget. The mutation event fingerprints
+   the exact selected set. Promotion requires both gates, and each gate blocks
+   candidate-only failure or holdout quality, latency, and token non-inferiority
+   regression before the frozen Pro snapshot can pin the active Auto source and
+   both evidence sets.
 6. Canary allocation never exceeds 50 percent. Promotion atomically installs a
    valid frozen snapshot; missing or regressed lineage rolls back to the prior
    stable profile.
@@ -297,6 +302,9 @@ canonical replay instead of trusting a structurally compatible stale cache.
 
 Prompt evolution is not the conductor, task graph, or run loop. It cannot alter
 active permissions, transcripts, tool observations, or budgets.
+It currently learns only workflow fields exercised by the matched evolution
+harness. Route, retrieval, and memory stay in the per-run decision layer until
+that layer has its own frozen matched causal evaluation.
 
 ## Persistence and Recovery
 

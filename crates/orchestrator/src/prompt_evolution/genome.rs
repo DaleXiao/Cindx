@@ -436,6 +436,7 @@ impl ConductorPromptGenome {
             concat!(
                 "You are applying GEPA-style reflective evolution to a Cindx Conductor prompt genome. ",
                 "Read every full execution trajectory, including module inputs, outputs, tool results, errors, deterministic checks, and actionable side information. ",
+                "When two trajectories share suite_id, case_id, and run_id but have different candidate_id values, treat them as one matched Auto/Pro comparison: learn only the general strategy contrast, never copy case content. ",
                 "Diagnose which parent instruction or harness gene caused each failure, preserve behavior that passed, and generalize across examples rather than memorizing answers. ",
                 "Return one strict JSON object matching the parent genome schema and no commentary. ",
                 "Change one or two mutable genes only: graph_depth, verification, context_policy, max_parallel_branches, tool_policy, retry_policy, topology_strategy, role_strategy, commit_strategy, max_step_attempts, max_model_turns_per_step, max_tool_calls_per_step, or custom_directive. ",

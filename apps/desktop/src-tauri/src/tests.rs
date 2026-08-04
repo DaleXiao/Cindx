@@ -7675,7 +7675,7 @@ fn prompt_evolution_uses_training_results_to_select_a_new_generation() {
             total_tokens: 800,
             estimated_cost_microusd: 0,
             safety_violations: 0,
-            relative_reward: Some(0.2),
+            relative_reward: Some(0.4),
             step_credits: vec![PromptStepCredit {
                 step_id: "final".to_string(),
                 role: "synthesizer".to_string(),
@@ -7693,7 +7693,7 @@ fn prompt_evolution_uses_training_results_to_select_a_new_generation() {
         opponent_observation.profile_id = "baseline-opponent".to_string();
         opponent_observation.opponent_profile_id = Some(seed.id.clone());
         opponent_observation.quality_score = 0.7;
-        opponent_observation.relative_reward = Some(-0.2);
+        opponent_observation.relative_reward = Some(-0.4);
         opponent_observation.step_credits.clear();
         opponent_observation.reflection_packet = None;
         opponent_observation.provenance =
@@ -8615,15 +8615,16 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
     let profile_id = "pro-parent";
     let auto_profile_id = "auto-stable";
     let auto_profile_sha256 = sha256_hex(b"auto-stable-genome");
-    let packet = |run_id: String, case_id: String| AgentEvaluationReflectionPacket {
+    let packet = |candidate_id: &str, run_id: String, case_id: String| {
+        AgentEvaluationReflectionPacket {
         suite_id: "runtime-prompt-evolution".to_string(),
         suite_version: 2,
         case_id,
         category: "coding".to_string(),
         run_id,
         seed: 0,
-        candidate_id: profile_id.to_string(),
-        candidate_fingerprint: sha256_hex(profile_id.as_bytes()),
+        candidate_id: candidate_id.to_string(),
+        candidate_fingerprint: sha256_hex(candidate_id.as_bytes()),
         model_fingerprints: BTreeMap::new(),
         input: "Implement and verify a change".to_string(),
         steps: Vec::new(),
@@ -8638,13 +8639,16 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             summary: "preserve verification coverage".to_string(),
             ..ActionableSideInformation::default()
         },
+        }
     };
     let observation =
-        |run_id: String,
+        |observed_profile_id: &str,
+         run_id: String,
          case_id: String,
          opponent_profile_id: &str,
+         relative_reward: f64,
          provenance: PromptEvaluationProvenance| PromptEvolutionObservation {
-            profile_id: profile_id.to_string(),
+            profile_id: observed_profile_id.to_string(),
             evaluation_id: run_id.clone(),
             case_id: case_id.clone(),
             opponent_profile_id: Some(opponent_profile_id.to_string()),
@@ -8658,18 +8662,20 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             total_tokens: 800,
             estimated_cost_microusd: 0,
             safety_violations: 0,
-            relative_reward: Some(0.2),
+            relative_reward: Some(relative_reward),
             step_credits: Vec::new(),
-            reflection_packet: Some(packet(run_id, case_id)),
+            reflection_packet: Some(packet(observed_profile_id, run_id, case_id)),
             provenance,
         };
     let mut observations = (0..6)
         .map(|index| {
             let run_id = format!("ordinary-{index}");
             observation(
+                profile_id,
                 run_id.clone(),
                 format!("ordinary-case-{index}"),
                 "pro-baseline",
+                0.4,
                 PromptEvaluationProvenance::blind_pairwise_swap(
                     vec!["independent-judge".to_string()],
                     vec!["candidate-worker".to_string()],
@@ -8681,33 +8687,72 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
         })
         .collect::<Vec<_>>();
     let transfer_source_context = test_auto_teacher_case("attested").source_context;
-    observations.extend((0..3).map(|index| {
+    observations.extend((0..3).flat_map(|index| {
         let run_id = format!("transfer-{index}");
-        observation(
-            run_id.clone(),
-            format!("transfer-case-{index}"),
+        let case_id = format!("transfer-case-{index}");
+        let transfer = PromptTransferProvenance::auto_to_pro(
+            format!("auto-run-{index}"),
+            0,
             auto_profile_id,
-            PromptEvaluationProvenance::blind_pairwise_swap(
-                vec!["independent-judge".to_string()],
-                vec!["candidate-worker".to_string(), "auto-worker".to_string()],
-                "b".repeat(64),
-                sha256_hex(profile_id.as_bytes()),
-                auto_profile_sha256.clone(),
-            )
-            .with_transfer(
-                PromptTransferProvenance::auto_to_pro(
-                    format!("auto-run-{index}"),
-                    0,
-                    auto_profile_id,
-                    auto_profile_sha256.clone(),
-                    sha256_hex(format!("auto-output-{index}").as_bytes()),
-                )
-                .with_source_context(&transfer_source_context)
-                .unwrap(),
-            ),
+            auto_profile_sha256.clone(),
+            sha256_hex(format!("auto-output-{index}").as_bytes()),
         )
+        .with_source_context(&transfer_source_context)
+        .unwrap();
+        let matched = PromptMatchedEvaluationIdentityV1 {
+            schema: orchestrator::PROMPT_MATCHED_EVALUATION_SCHEMA_V1.to_string(),
+            evaluation_id: run_id.clone(),
+            cohort_sha256: "c".repeat(64),
+            dataset_sha256: "b".repeat(64),
+            case_id: case_id.clone(),
+            objective_sha256: sha256_hex(case_id.as_bytes()),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::PairedExecution,
+        };
+        [
+            observation(
+                profile_id,
+                run_id.clone(),
+                case_id.clone(),
+                auto_profile_id,
+                -0.4,
+                PromptEvaluationProvenance::blind_pairwise_swap(
+                    vec!["independent-judge".to_string()],
+                    vec!["candidate-worker".to_string(), "auto-worker".to_string()],
+                    "b".repeat(64),
+                    sha256_hex(profile_id.as_bytes()),
+                    auto_profile_sha256.clone(),
+                )
+                .with_transfer(transfer.clone())
+                .with_matched_evaluation(matched.clone()),
+            ),
+            observation(
+                auto_profile_id,
+                run_id,
+                case_id,
+                profile_id,
+                0.4,
+                PromptEvaluationProvenance::blind_pairwise_swap(
+                    vec!["independent-judge".to_string()],
+                    vec!["candidate-worker".to_string(), "auto-worker".to_string()],
+                    "b".repeat(64),
+                    auto_profile_sha256.clone(),
+                    sha256_hex(profile_id.as_bytes()),
+                )
+                .with_transfer(transfer)
+                .with_matched_evaluation(matched),
+            ),
+        ]
     }));
 
+    assert!(observations
+        .iter()
+        .skip(6)
+        .all(PromptEvolutionObservation::is_strict_source_attested_transfer_evidence));
+    assert_eq!(
+        prompt_transfer_reflection_pairs(&observations, profile_id, 2).len(),
+        4
+    );
     let packets = prompt_mutation_reflection_packets(&observations, profile_id, "pro");
     assert_eq!(packets.len(), 6);
     assert_eq!(
@@ -8715,14 +8760,14 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             .iter()
             .filter(|packet| packet.run_id.starts_with("ordinary-"))
             .count(),
-        3
+        2
     );
     assert_eq!(
         packets
             .iter()
             .filter(|packet| packet.run_id.starts_with("transfer-"))
             .count(),
-        3
+        4
     );
 }
 

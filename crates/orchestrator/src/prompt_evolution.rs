@@ -8,6 +8,7 @@ mod matched_evaluation;
 mod observation;
 mod pareto;
 mod pro_teacher_source;
+mod reflection_selection;
 mod search;
 mod snapshot;
 
@@ -20,6 +21,9 @@ pub use matched_evaluation::*;
 pub use observation::*;
 pub use pareto::*;
 pub use pro_teacher_source::*;
+pub use reflection_selection::{
+    prompt_transfer_reflection_pairs, PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
+};
 pub use snapshot::*;
 
 #[cfg(test)]
@@ -478,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn reflection_selection_uses_only_unique_paired_feedback_executions() {
+    fn reflection_selection_is_deterministic_and_uses_unique_paired_feedback() {
         let profile_id = "seed-auto-v1";
         let packet = |run_id: &str, candidate_id: &str| AgentEvaluationReflectionPacket {
             suite_id: "feedback-suite".to_string(),
@@ -577,8 +581,8 @@ mod tests {
         let selected = prompt_reflection_packets(&observations, profile_id, 6);
 
         assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].run_id, "feedback-2");
-        assert_eq!(selected[1].run_id, "feedback-1");
+        assert_eq!(selected[0].run_id, "feedback-1");
+        assert_eq!(selected[1].run_id, "feedback-2");
     }
 
     #[test]

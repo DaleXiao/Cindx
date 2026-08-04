@@ -6,15 +6,21 @@ pub(crate) fn prompt_mutation_reflection_packets(
     effort: &str,
 ) -> Vec<AgentEvaluationReflectionPacket> {
     let mut transfer = if effort == "pro" {
-        prompt_transfer_reflection_packets(observations, profile_id, 3)
+        prompt_transfer_reflection_pairs(observations, profile_id, 2)
     } else {
         Vec::new()
     };
-    let ordinary_limit = if transfer.is_empty() { 6 } else { 3 };
+    let ordinary_limit = 6usize.saturating_sub(transfer.len());
     let mut packets = prompt_reflection_packets(observations, profile_id, ordinary_limit);
     packets.append(&mut transfer);
     let mut seen = BTreeSet::new();
-    packets.retain(|packet| seen.insert((packet.run_id.clone(), packet.case_id.clone())));
+    packets.retain(|packet| {
+        seen.insert((
+            packet.run_id.clone(),
+            packet.case_id.clone(),
+            packet.candidate_id.clone(),
+        ))
+    });
     packets.truncate(6);
     packets
 }

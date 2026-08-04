@@ -1,10 +1,9 @@
-use crate::prompt_promotion_gate::{evaluate_prompt_pair_gate, PairKey};
+use crate::prompt_promotion_gate::evaluate_prompt_pair_gate;
 use crate::{
-    PromptEvaluationSplit, PromptEvolutionObservation, PromptProToAutoDistillationProvenanceV1,
-    PromptPromotionBlocker, PromptPromotionFailurePenalty, PromptPromotionGateConfig,
-    PromptPromotionGateResult,
+    PromptEvolutionObservation, PromptProToAutoDistillationProvenanceV1, PromptPromotionBlocker,
+    PromptPromotionFailurePenalty, PromptPromotionGateConfig, PromptPromotionGateResult,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub const AUTO_DISTILLATION_MAX_HOLDOUT_LATENCY_REGRESSION_BPS: u64 = 500;
 pub const AUTO_DISTILLATION_MAX_HOLDOUT_TOKEN_REGRESSION_BPS: u64 = 200;
@@ -46,121 +45,9 @@ pub fn evaluate_prompt_pro_to_auto_distillation_gate_in_cohort_with_failures(
         blockers.insert(PromptPromotionBlocker::InvalidEvidenceShape);
     }
 
-    let holdout_pairs = complete_distillation_holdout_pairs(
-        observations,
-        candidate_id,
-        auto_parent_id,
-        cohort_sha256,
-        accepts_lineage,
-    );
-    if failures.iter().any(|failure| {
-        failure.validate().is_ok()
-            && failure.cohort_sha256 == cohort_sha256
-            && failure.candidate_profile_id == candidate_id
-            && failure.stable_profile_id == auto_parent_id
-            && failure.split == PromptEvaluationSplit::Holdout
-            && failure.candidate_failed
-            && !failure.stable_failed
-    }) {
-        blockers.insert(PromptPromotionBlocker::HoldoutFailureRegression);
-    }
-    if !holdout_pairs.is_empty() {
-        let pair_count = holdout_pairs.len() as f64;
-        let candidate_quality = holdout_pairs
-            .iter()
-            .map(|(candidate, _)| candidate.quality_score)
-            .sum::<f64>()
-            / pair_count;
-        let parent_quality = holdout_pairs
-            .iter()
-            .map(|(_, parent)| parent.quality_score)
-            .sum::<f64>()
-            / pair_count;
-        if candidate_quality + AUTO_DISTILLATION_MAX_HOLDOUT_QUALITY_REGRESSION < parent_quality {
-            blockers.insert(PromptPromotionBlocker::HoldoutQualityRegression);
-        }
-
-        let candidate_latency = holdout_pairs
-            .iter()
-            .map(|(candidate, _)| u128::from(candidate.latency_ms))
-            .sum::<u128>();
-        let parent_latency = holdout_pairs
-            .iter()
-            .map(|(_, parent)| u128::from(parent.latency_ms))
-            .sum::<u128>();
-        if exceeds_bps_regression(
-            candidate_latency,
-            parent_latency,
-            AUTO_DISTILLATION_MAX_HOLDOUT_LATENCY_REGRESSION_BPS,
-        ) {
-            blockers.insert(PromptPromotionBlocker::HoldoutLatencyRegression);
-        }
-
-        let candidate_tokens = holdout_pairs
-            .iter()
-            .map(|(candidate, _)| u128::from(candidate.total_tokens))
-            .sum::<u128>();
-        let parent_tokens = holdout_pairs
-            .iter()
-            .map(|(_, parent)| u128::from(parent.total_tokens))
-            .sum::<u128>();
-        if exceeds_bps_regression(
-            candidate_tokens,
-            parent_tokens,
-            AUTO_DISTILLATION_MAX_HOLDOUT_TOKEN_REGRESSION_BPS,
-        ) {
-            blockers.insert(PromptPromotionBlocker::HoldoutTokenRegression);
-        }
-    }
     result.blockers = blockers.into_iter().collect();
     result.eligible = result.blockers.is_empty();
     result
-}
-
-fn complete_distillation_holdout_pairs<'a, Accept>(
-    observations: &'a [PromptEvolutionObservation],
-    candidate_id: &str,
-    auto_parent_id: &str,
-    cohort_sha256: &str,
-    accept: Accept,
-) -> Vec<(
-    &'a PromptEvolutionObservation,
-    &'a PromptEvolutionObservation,
-)>
-where
-    Accept: Fn(&PromptEvolutionObservation) -> bool,
-{
-    let mut candidates = BTreeMap::new();
-    let mut parents = BTreeMap::new();
-    for observation in observations.iter().filter(|observation| {
-        observation.split == PromptEvaluationSplit::Holdout
-            && observation.scientific_cohort_sha256() == Some(cohort_sha256)
-            && accept(observation)
-    }) {
-        let Some(key) = PairKey::from_observation(observation) else {
-            continue;
-        };
-        if observation.profile_id == candidate_id
-            && observation.opponent_profile_id.as_deref() == Some(auto_parent_id)
-        {
-            candidates.entry(key).or_insert(observation);
-        } else if observation.profile_id == auto_parent_id
-            && observation.opponent_profile_id.as_deref() == Some(candidate_id)
-        {
-            parents.entry(key).or_insert(observation);
-        }
-    }
-    candidates
-        .into_iter()
-        .filter_map(|(key, candidate)| parents.get(&key).copied().map(|parent| (candidate, parent)))
-        .collect()
-}
-
-fn exceeds_bps_regression(candidate: u128, baseline: u128, tolerance_bps: u64) -> bool {
-    if baseline == 0 {
-        return candidate > 0;
-    }
-    candidate.saturating_mul(10_000) > baseline.saturating_mul(10_000 + u128::from(tolerance_bps))
 }
 
 #[cfg(test)]
@@ -179,6 +66,11 @@ mod tests {
             minimum_wilson_lower_bound: 0.0,
             maximum_generalization_gap: 0.15,
             maximum_holdout_task_class_regression: 0.05,
+            maximum_holdout_quality_regression: AUTO_DISTILLATION_MAX_HOLDOUT_QUALITY_REGRESSION,
+            maximum_holdout_latency_regression_bps:
+                AUTO_DISTILLATION_MAX_HOLDOUT_LATENCY_REGRESSION_BPS,
+            maximum_holdout_token_regression_bps:
+                AUTO_DISTILLATION_MAX_HOLDOUT_TOKEN_REGRESSION_BPS,
         }
     }
 

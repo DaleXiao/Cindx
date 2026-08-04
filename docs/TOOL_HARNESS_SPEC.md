@@ -64,9 +64,15 @@ only when its configured role or supported prior predicts a useful contribution.
 
 GEPA is an optimizer outside the active loop. It consumes redacted completed or
 replay trajectories, reflects on paired outcomes, and proposes a versioned prompt
-genome. Promotion requires independent evaluation and holdout evidence. A selected
-champion may configure a future Fugu run, but GEPA cannot mutate an in-flight
-transcript, permission decision, tool result, run budget, or workflow checkpoint.
+genome. Auto-to-Pro reflection requires both sides of a strict source-attested
+train pair; deterministic information and diversity selection keeps the exact
+redacted set within six trajectories and records its schema and digest. Promotion
+requires independent train/holdout evidence and blocks candidate-only failure or
+absolute quality, latency, and token non-inferiority regression against the stable
+profile. A selected champion may configure a future Fugu run, but GEPA cannot
+mutate an in-flight transcript, permission decision, tool result, run budget, or
+workflow checkpoint. Route, retrieval, and memory remain per-run decisions until
+their own execution path is included in the matched evaluation protocol.
 
 ## Performance invariants
 
