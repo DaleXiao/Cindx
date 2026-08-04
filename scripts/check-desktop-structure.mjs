@@ -3661,7 +3661,7 @@ assert(
       "snapshot.stable_profile_id == previous.stable_profile_id"
     ) &&
     rustLib.includes(
-      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 6"
+      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 7"
     ) &&
     rustLib.includes("snapshot.genome.id == rollout.stable_profile_id") &&
     rustLib.includes("promoted_prompt_rollout_without_a_valid_frozen_profile_is_ignored") &&
@@ -3669,7 +3669,7 @@ assert(
       "prompt_rollout_replay_rejects_forged_stable_canary_and_status"
     ) &&
     rustLib.includes(
-      "prompt_rollout_transition_accepts_legal_rollback_and_atomic_promotion"
+      "prompt_rollout_transition_accepts_exact_stages_and_atomic_promotion"
     ) &&
     rustLib.includes("stable_prompt_rollout_uses_the_evidence_bound_frozen_genome") &&
     rustLib.includes('"Conductor prompt rollout updated"') &&

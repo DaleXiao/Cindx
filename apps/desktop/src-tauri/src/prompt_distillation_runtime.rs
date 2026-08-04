@@ -8,7 +8,9 @@ use crate::prompt_attempt_runtime::{
 use crate::prompt_evolution_read_model::{
     load_prompt_evolution_read_model, prompt_evolution_read_model_for_scope,
 };
-use crate::prompt_rollout_runtime::stable_prompt_profile_fingerprint;
+use crate::prompt_rollout_runtime::{
+    canonical_prompt_profile_fingerprint_by_id, stable_prompt_profile_fingerprint,
+};
 use crate::view_models::{PromptEvolutionReadModel, PromptRolloutState};
 use agent_core::{Event, EventKind, Metadata, TaskId};
 use orchestrator::{
@@ -68,9 +70,12 @@ pub(crate) fn prepare_prompt_distillation_evaluation(
         return Err("distillation request Auto parent is no longer stable".to_string());
     }
     let pro_rollout = canonical_pro_teacher_rollout(model, snapshot)?;
+    let (defeated_stable_pro, _) =
+        canonical_prompt_profile_fingerprint_by_id(model, "pro", &snapshot.stable_profile_id)?;
     let child = derive_pro_to_auto_distillation_child(
         auto_parent,
         snapshot,
+        &defeated_stable_pro,
         &pro_rollout.stable_profile_id,
     )?;
     let child_sha256 = prompt_genome_sha256(&child)?;
@@ -204,8 +209,14 @@ fn validate_prompt_distillation_lineage(
     if canonical_auto_parent != *auto_parent {
         return Err("distillation Auto parent is no longer canonical stable".to_string());
     }
-    let expected_child =
-        derive_pro_to_auto_distillation_child(auto_parent, snapshot, &rollout.stable_profile_id)?;
+    let (defeated_stable_pro, _) =
+        canonical_prompt_profile_fingerprint_by_id(model, "pro", &snapshot.stable_profile_id)?;
+    let expected_child = derive_pro_to_auto_distillation_child(
+        auto_parent,
+        snapshot,
+        &defeated_stable_pro,
+        &rollout.stable_profile_id,
+    )?;
     let expected = PromptProToAutoDistillationProvenanceV1::new(
         ProTeacherAttestationV1::from_stable_snapshot(snapshot, &rollout.stable_profile_id)?,
         auto_parent.id.clone(),
@@ -235,6 +246,25 @@ fn canonical_pro_teacher_rollout<'a>(
     }
     ProTeacherAttestationV1::from_stable_snapshot(snapshot, &rollout.stable_profile_id)?;
     Ok(rollout)
+}
+
+pub(crate) fn replay_canonical_pro_teacher_snapshot(
+    model: &PromptEvolutionReadModel,
+    snapshot: &FrozenPromptProfileSnapshot,
+) -> Result<(), String> {
+    canonical_pro_teacher_rollout(model, snapshot)?;
+    let replayed = crate::prompt_rollout_runtime::frozen_prompt_profile_for_promotion(
+        model,
+        "pro",
+        &snapshot.genome.id,
+        &snapshot.stable_profile_id,
+    )?;
+    if replayed != *snapshot {
+        return Err(
+            "Pro teacher frozen evidence does not replay from the canonical dual gate".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn prompt_distillation_dataset_identity(
@@ -556,9 +586,10 @@ pub(crate) fn apply_prompt_distillation_event(model: &mut PromptEvolutionReadMod
 mod tests {
     use super::{
         fresh_prompt_distillation_cases, prepare_prompt_distillation_evaluation,
-        prompt_genome_sha256, sha256_hex, ConductorPromptGenome, FrozenPromptProfileSnapshot,
-        ProTeacherAttestationV1, PromptDatasetCaseIdentityV1, PromptDatasetIdentityV1,
-        PromptEvaluationSplit, PromptEvolutionReadModel, PromptOfflineCase, PromptRolloutState,
+        prompt_genome_sha256, replay_canonical_pro_teacher_snapshot, sha256_hex,
+        ConductorPromptGenome, FrozenPromptProfileSnapshot, ProTeacherAttestationV1,
+        PromptDatasetCaseIdentityV1, PromptDatasetIdentityV1, PromptEvaluationSplit,
+        PromptEvolutionReadModel, PromptOfflineCase, PromptRolloutState,
         DISTILLATION_EVALUATION_EVENT,
     };
     use crate::prompt_evolution_read_model::build_prompt_evolution_read_model;
@@ -739,6 +770,9 @@ mod tests {
                 canary_percent: 0,
                 evidence_checkpoint: 0,
                 live_checkpoint: 0,
+                stable_live_checkpoint: 0,
+                quarantined_profile_ids: Vec::new(),
+                distillation_lease: None,
                 rollback_count: 0,
                 status: "stable".to_string(),
                 last_reason: None,
@@ -873,6 +907,16 @@ mod tests {
         .expect("rolled back Pro cannot remain a teacher");
 
         assert!(error.contains("canonical frozen stable champion"));
+    }
+
+    #[test]
+    fn synthetic_teacher_without_replayable_dual_gate_is_rejected_at_dispatch_boundary() {
+        let fixture = certified_fixture(false);
+
+        let error = replay_canonical_pro_teacher_snapshot(&fixture.model, &fixture.snapshot)
+            .expect_err("dispatch must replay the ordinary and Auto-transfer gates");
+
+        assert!(!error.trim().is_empty());
     }
 
     #[test]

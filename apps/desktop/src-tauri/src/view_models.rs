@@ -938,12 +938,29 @@ pub(crate) struct PromptEvolutionReadModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PromptDistillationCanaryLeaseV1 {
+    pub(crate) schema: String,
+    pub(crate) candidate_profile_id: String,
+    pub(crate) candidate_profile_sha256: String,
+    pub(crate) stable_profile_id: String,
+    pub(crate) stable_profile_sha256: String,
+    pub(crate) cohort_sha256: String,
+    pub(crate) paired_evidence_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PromptRolloutState {
     pub(crate) stable_profile_id: String,
     pub(crate) canary_profile_id: Option<String>,
     pub(crate) canary_percent: u8,
     pub(crate) evidence_checkpoint: usize,
     pub(crate) live_checkpoint: usize,
+    #[serde(default)]
+    pub(crate) stable_live_checkpoint: usize,
+    #[serde(default)]
+    pub(crate) quarantined_profile_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) distillation_lease: Option<PromptDistillationCanaryLeaseV1>,
     pub(crate) rollback_count: usize,
     pub(crate) status: String,
     pub(crate) last_reason: Option<String>,

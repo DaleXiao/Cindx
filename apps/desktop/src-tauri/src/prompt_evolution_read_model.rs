@@ -3,10 +3,14 @@ use crate::prompt_evolution_projection_contract::{
     prompt_auto_teacher_source_key, prompt_transfer_matches_canonical_teacher,
     CanonicalPromptAutoTeacher,
 };
+#[cfg(test)]
 use orchestrator::{
-    IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceV1,
-    LearningUsageCompleteness,
+    IndependentQualitySource, LearningEvidenceV1, LearningUsageCompleteness,
 };
+
+fn is_agent_run_terminal(event: &Event) -> bool {
+    AgentRunEvent::from_event(event).is_some_and(|event| event.status().is_terminal())
+}
 
 pub(crate) fn initial_prompt_population(effort: &str) -> Vec<ConductorPromptGenome> {
     let seed = ConductorPromptGenome::seed_for_effort(effort);
@@ -41,14 +45,6 @@ pub(crate) fn initial_prompt_population(effort: &str) -> Vec<ConductorPromptGeno
     population
 }
 
-fn is_agent_run_terminal(event: &Event) -> bool {
-    AgentRunEvent::from_event(event).is_some_and(|event| event.status().is_terminal())
-}
-
-fn is_agent_run_completed(event: &Event) -> bool {
-    AgentRunEvent::from_event(event).map(AgentRunEvent::status) == Some(AgentRunStatus::Completed)
-}
-
 pub(crate) fn prompt_genomes_from_events(
     events: &[Event],
     effort: &str,
@@ -69,215 +65,10 @@ pub(crate) fn prompt_genomes_from_events(
 fn prompt_evolution_observation_records_from_events(
     events: &[Event],
 ) -> Vec<(u64, String, PromptEvolutionObservation)> {
-    let mut workflows = BTreeMap::<String, Vec<&Event>>::new();
-    let mut agent_runs = BTreeMap::<String, Vec<&Event>>::new();
-    for event in events {
-        if let Some(workflow_id) = event.metadata.get("collaboration_id") {
-            workflows
-                .entry(workflow_id.clone())
-                .or_default()
-                .push(event);
-        }
-        if let Some(run_id) = event.metadata.get("agent_run_id") {
-            agent_runs.entry(run_id.clone()).or_default().push(event);
-        }
-    }
-    let mut runs = workflows
-        .into_iter()
-        .filter_map(|(workflow_id, mut workflow_events)| {
-            workflow_events.sort_by_key(|event| event.sequence);
-            let profile_event = workflow_events
-                .iter()
-                .rev()
-                .find(|event| event.summary == "Conductor prompt profile selected")
-                .copied()
-                .or_else(|| {
-                    workflow_events
-                        .iter()
-                        .rev()
-                        .find(|event| event.summary == "Collaboration workflow planned")
-                        .copied()
-                })?;
-            let steer_epoch = profile_event
-                .metadata
-                .get("steer_epoch")
-                .and_then(|value| value.parse::<u64>().ok())?;
-            let stable_workflow_events = workflow_events
-                .iter()
-                .copied()
-                .filter(|event| {
-                    event
-                        .metadata
-                        .get("steer_epoch")
-                        .and_then(|value| value.parse::<u64>().ok())
-                        == Some(steer_epoch)
-                })
-                .collect::<Vec<_>>();
-            let plan = stable_workflow_events
-                .iter()
-                .find(|event| event.summary == "Collaboration workflow planned")
-                .and_then(|event| event.metadata.get("workflow_ir"))
-                .and_then(|value| serde_json::from_str::<WorkflowPlanIr>(value).ok());
-            let profile_id = profile_event
-                .metadata
-                .get("prompt_profile")
-                .cloned()
-                .or_else(|| plan.as_ref().map(|plan| plan.prompt_profile.clone()))?;
-            let effort = profile_event
-                .metadata
-                .get("prompt_effort")
-                .cloned()
-                .or_else(|| plan.as_ref().map(|plan| plan.effort.clone()))?;
-            let evidence_scope = profile_event
-                .metadata
-                .get("project_id")
-                .map(String::as_str)
-                .unwrap_or("global");
-            let bounded_profile = profile_event
-                .metadata
-                .get("collaboration_profile")
-                .map(String::as_str)
-                == Some("bounded");
-            let workflow_terminal = stable_workflow_events.iter().rev().find(|event| {
-                matches!(
-                    event.summary.as_str(),
-                    "Collaboration workflow completed" | "Collaboration workflow failed"
-                ) && event.sequence > profile_event.sequence
-            })?;
-            if workflow_terminal.summary != "Collaboration workflow completed" {
-                return None;
-            }
-            let run_events = profile_event
-                .metadata
-                .get("agent_run_id")
-                .and_then(|run_id| agent_runs.get(run_id));
-            let terminal = if let Some(run_events) = run_events {
-                run_events.iter().rev().find(|event| {
-                    is_agent_run_terminal(event)
-                        && event.metadata.get("collaboration_id").map(String::as_str)
-                            == Some(workflow_id.as_str())
-                        && event.sequence > workflow_terminal.sequence
-                        && event
-                            .metadata
-                            .get("steer_epoch")
-                            .and_then(|value| value.parse::<u64>().ok())
-                            == Some(steer_epoch)
-                })
-            } else {
-                Some(workflow_terminal)
-            }?;
-            let completed = if run_events.is_some() {
-                is_agent_run_completed(terminal)
-            } else {
-                terminal.summary == "Collaboration workflow completed"
-            };
-            if !completed {
-                return None;
-            }
-            let learning_evidence =
-                LearningEvidenceV1::from_metadata(&terminal.metadata).filter(|evidence| {
-                    evidence.is_learnable()
-                        && evidence.steer_epoch == Some(steer_epoch)
-                        && evidence.attribution == LearningAttribution::Workflow
-                        && evidence.independent_quality_source.is_some()
-                        && evidence.usage_completeness != LearningUsageCompleteness::Missing
-                })?;
-            let succeeded = match learning_evidence.disposition {
-                LearningDisposition::Positive => true,
-                LearningDisposition::Negative => false,
-                LearningDisposition::Censored => return None,
-            };
-            let measured_quality = learning_evidence
-                .quality_score()
-                .map(f64::from)
-                .unwrap_or(if succeeded { 1.0 } else { 0.0 });
-            let quality_event = stable_workflow_events
-                .iter()
-                .rev()
-                .find(|event| event.summary == "Collaboration quality gate evaluated");
-            let measured_safety_violations = quality_event
-                .and_then(|event| event.metadata.get("safety_violations"))
-                .and_then(|count| count.parse::<u64>().ok())
-                .unwrap_or_default();
-            let evaluation_events = run_events
-                .map(|events| events.as_slice())
-                .unwrap_or(workflow_events.as_slice())
-                .iter()
-                .copied()
-                .filter(|event| {
-                    event.metadata.get("collaboration_id").map(String::as_str)
-                        == Some(workflow_id.as_str())
-                        && event
-                            .metadata
-                            .get("steer_epoch")
-                            .and_then(|value| value.parse::<u64>().ok())
-                            == Some(steer_epoch)
-                })
-                .collect::<Vec<_>>();
-            let permission_denials = evaluation_events
-                .iter()
-                .filter(|event| {
-                    event.kind == EventKind::PermissionResolved
-                        && event.metadata.get("decision").is_some_and(|decision| {
-                            !matches!(decision.as_str(), "allow_once" | "allow_for_session")
-                        })
-                })
-                .count() as u64;
-            if permission_denials > 0 {
-                return None;
-            }
-            let total_tokens = trusted_run_lineage_total_tokens(terminal, &learning_evidence)?;
-            let step_credits = stable_workflow_events
-                .iter()
-                .rev()
-                .find_map(|event| event.metadata.get("step_credits"))
-                .and_then(|encoded| serde_json::from_str::<Vec<PromptStepCredit>>(encoded).ok())
-                .unwrap_or_default();
-            let relative_reward = if learning_evidence.independent_quality_source
-                == Some(IndependentQualitySource::AnytimeSelector)
-            {
-                workflow_terminal
-                    .metadata
-                    .get("anytime_team_uplift_bps")
-                    .and_then(|uplift| uplift.parse::<i16>().ok())
-                    .filter(|uplift| (-10_000..=10_000).contains(uplift))
-                    .map(|uplift| f64::from(uplift) / 10_000.0)
-            } else {
-                None
-            };
-            Some((
-                terminal.sequence,
-                effort,
-                PromptEvolutionObservation {
-                    profile_id,
-                    evaluation_id: scoped_prompt_evaluation_id(evidence_scope, &workflow_id),
-                    case_id: workflow_id,
-                    opponent_profile_id: None,
-                    task_class: profile_event
-                        .metadata
-                        .get("task_class")
-                        .cloned()
-                        .unwrap_or_else(|| "general".to_string()),
-                    split: PromptEvaluationSplit::Train,
-                    mode: PromptEvaluationMode::Live,
-                    format_valid: plan.is_some() || bounded_profile,
-                    succeeded,
-                    quality_score: measured_quality,
-                    latency_ms: terminal
-                        .timestamp_ms
-                        .saturating_sub(profile_event.timestamp_ms),
-                    total_tokens,
-                    estimated_cost_microusd: 0,
-                    safety_violations: measured_safety_violations
-                        .saturating_add(permission_denials),
-                    relative_reward,
-                    step_credits,
-                    reflection_packet: None,
-                    provenance: Default::default(),
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
+    let mut runs =
+        crate::prompt_canary_outcome_projection::prompt_live_canary_outcome_records_from_events(
+            events,
+        );
     let mut auto_teacher_cache = BTreeMap::<(String, String), Option<PromptAutoTeacherCase>>::new();
     for event in events {
         let source_key = prompt_auto_teacher_source_key(event);
@@ -314,17 +105,6 @@ pub(crate) fn prompt_evolution_observations_from_events(
         .into_iter()
         .map(|(_, effort, observation)| (effort, observation))
         .collect()
-}
-
-fn trusted_run_lineage_total_tokens(
-    terminal: &Event,
-    evidence: &LearningEvidenceV1,
-) -> Option<u64> {
-    let usage =
-        crate::learning_evidence_runtime::learning_lineage_usage_from_metadata(&terminal.metadata)?;
-    (usage.completeness == evidence.usage_completeness
-        && usage.completeness != LearningUsageCompleteness::Missing)
-        .then_some(usage.total_tokens)
 }
 
 pub(crate) fn prompt_genome_records_from_event(event: &Event) -> Vec<PromptGenomeRecord> {
@@ -549,6 +329,40 @@ fn prompt_rollout_record_from_event(event: &Event) -> Option<(String, String, Pr
     if !has_canary && !has_no_canary {
         return None;
     }
+    let stable_live_checkpoint = event
+        .metadata
+        .get("stable_live_checkpoint")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default();
+    let quarantined_profile_ids = match optional_text("quarantined_profiles") {
+        Some(encoded) => serde_json::from_str::<Vec<String>>(&encoded)
+            .ok()
+            .filter(|profile_ids| prompt_quarantine_is_valid(profile_ids))?,
+        None => Vec::new(),
+    };
+    let distillation_lease = match optional_text("distillation_canary_lease") {
+        Some(encoded) => Some(
+            serde_json::from_str::<PromptDistillationCanaryLeaseV1>(&encoded)
+                .ok()
+                .filter(|lease| {
+                    lease.schema == PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1
+                        && canary_profile_id.as_ref() == Some(&lease.candidate_profile_id)
+                        && stable_profile_id == lease.stable_profile_id
+                        && [
+                            lease.candidate_profile_sha256.as_str(),
+                            lease.stable_profile_sha256.as_str(),
+                            lease.cohort_sha256.as_str(),
+                            lease.paired_evidence_sha256.as_str(),
+                        ]
+                        .iter()
+                        .all(|digest| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                })?,
+        ),
+        None => None,
+    };
     Some((
         rollout_key,
         effort,
@@ -558,6 +372,9 @@ fn prompt_rollout_record_from_event(event: &Event) -> Option<(String, String, Pr
             canary_percent,
             evidence_checkpoint: parse_usize("evidence_checkpoint")?,
             live_checkpoint: parse_usize("live_checkpoint")?,
+            stable_live_checkpoint,
+            quarantined_profile_ids,
+            distillation_lease,
             rollback_count: parse_usize("rollback_count")?,
             status,
             last_reason: optional_text("rollout_reason"),
@@ -582,10 +399,19 @@ fn prompt_rollout_transition_is_valid(
             && snapshot.effort == effort
             && snapshot.genome.id == next.stable_profile_id
     };
+    if !prompt_quarantine_is_valid(&next.quarantined_profile_ids)
+        || next
+            .quarantined_profile_ids
+            .iter()
+            .any(|profile_id| profile_id == &next.stable_profile_id)
+    {
+        return false;
+    }
     let Some(previous) = previous else {
         return if next.status == "promoted" {
             next.stable_profile_id != seed_id
                 && next.rollback_count == 0
+                && next.quarantined_profile_ids.is_empty()
                 && next.frozen_profile.as_ref().is_some_and(|snapshot| {
                     frozen_is_valid(snapshot) && snapshot.stable_profile_id == seed_id
                 })
@@ -594,6 +420,8 @@ fn prompt_rollout_transition_is_valid(
                 && next.stable_profile_id == seed_id
                 && next.frozen_profile.is_none()
                 && next.rollback_count == 0
+                && (next.status != "canary" || next.canary_percent == 10)
+                && next.quarantined_profile_ids.is_empty()
         };
     };
     let expected_rollback_count = if next.status == "rolled_back" {
@@ -604,6 +432,14 @@ fn prompt_rollout_transition_is_valid(
     if expected_rollback_count != Some(next.rollback_count) {
         return false;
     }
+    let distillation_transition =
+        previous.distillation_lease.is_some() || next.distillation_lease.is_some();
+    if next.live_checkpoint < previous.live_checkpoint
+        || (distillation_transition
+            && next.stable_live_checkpoint < previous.stable_live_checkpoint)
+    {
+        return false;
+    }
     if previous.canary_profile_id.is_some()
         && !matches!(next.status.as_str(), "canary" | "rolled_back" | "promoted")
     {
@@ -612,9 +448,75 @@ fn prompt_rollout_transition_is_valid(
     if previous.canary_profile_id.is_none() && next.status == "rolled_back" {
         return false;
     }
+    let expected_quarantine =
+        if next.status == "rolled_back" && previous.distillation_lease.is_some() {
+            let Some(previous_candidate) = previous.canary_profile_id.as_ref() else {
+                return false;
+            };
+            let mut profile_ids = previous.quarantined_profile_ids.clone();
+            if profile_ids
+                .iter()
+                .any(|profile_id| profile_id == previous_candidate)
+                || profile_ids.len() >= PROMPT_ROLLOUT_MAX_QUARANTINED_PROFILES
+            {
+                return false;
+            }
+            profile_ids.push(previous_candidate.clone());
+            profile_ids
+        } else if next.status == "promoted" {
+            Vec::new()
+        } else {
+            previous.quarantined_profile_ids.clone()
+        };
+    if next.quarantined_profile_ids != expected_quarantine
+        || (next.status == "rolled_back" && next.distillation_lease.is_some())
+    {
+        return false;
+    }
+    if next.status == "canary" {
+        let Some(next_candidate) = next.canary_profile_id.as_ref() else {
+            return false;
+        };
+        if next
+            .quarantined_profile_ids
+            .iter()
+            .any(|profile_id| profile_id == next_candidate)
+        {
+            return false;
+        }
+        if let Some(previous_candidate) = previous.canary_profile_id.as_ref() {
+            let stage_advanced = matches!(
+                (previous.canary_percent, next.canary_percent),
+                (10, 25) | (25, 50)
+            );
+            let stage_unchanged = previous.canary_percent == next.canary_percent;
+            if previous_candidate != next_candidate
+                || (!stage_advanced && !stage_unchanged)
+                || (stage_advanced
+                    && (next.live_checkpoint <= previous.live_checkpoint
+                        || (distillation_transition
+                            && next.stable_live_checkpoint <= previous.stable_live_checkpoint)))
+                || (stage_unchanged
+                    && (next.live_checkpoint != previous.live_checkpoint
+                        || (distillation_transition
+                            && next.stable_live_checkpoint != previous.stable_live_checkpoint)))
+                || previous.distillation_lease != next.distillation_lease
+            {
+                return false;
+            }
+        } else if next.canary_percent != 10 {
+            return false;
+        }
+    }
     if next.status == "promoted" {
         previous.canary_profile_id.as_deref() == Some(next.stable_profile_id.as_str())
+            && previous.canary_percent == 50
             && next.stable_profile_id != previous.stable_profile_id
+            && next.live_checkpoint > previous.live_checkpoint
+            && (!distillation_transition
+                || next.stable_live_checkpoint > previous.stable_live_checkpoint)
+            && next.distillation_lease.is_none()
+            && next.quarantined_profile_ids.is_empty()
             && next.frozen_profile.as_ref().is_some_and(|snapshot| {
                 frozen_is_valid(snapshot)
                     && snapshot.stable_profile_id == previous.stable_profile_id
@@ -623,6 +525,14 @@ fn prompt_rollout_transition_is_valid(
         next.stable_profile_id == previous.stable_profile_id
             && next.frozen_profile == previous.frozen_profile
     }
+}
+
+fn prompt_quarantine_is_valid(profile_ids: &[String]) -> bool {
+    profile_ids.len() <= PROMPT_ROLLOUT_MAX_QUARANTINED_PROFILES
+        && profile_ids
+            .iter()
+            .all(|profile_id| !profile_id.trim().is_empty())
+        && profile_ids.iter().collect::<BTreeSet<_>>().len() == profile_ids.len()
 }
 
 fn apply_prompt_rollout_event(model: &mut PromptEvolutionReadModel, event: &Event) {
@@ -925,15 +835,15 @@ pub(crate) fn upsert_prompt_observation(
     effort: String,
     observation: PromptEvolutionObservation,
 ) {
-    if let Some(existing) = observations.iter_mut().find(|(existing_effort, existing)| {
+    if observations.iter().any(|(existing_effort, existing)| {
         existing_effort == &effort
             && existing.evaluation_id == observation.evaluation_id
             && existing.profile_id == observation.profile_id
+            && existing == &observation
     }) {
-        *existing = (effort, observation);
-    } else {
-        observations.push((effort, observation));
+        return;
     }
+    observations.push((effort, observation));
 }
 
 pub(crate) fn build_prompt_evolution_read_model(
