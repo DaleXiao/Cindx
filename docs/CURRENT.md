@@ -192,6 +192,14 @@ product quality.
 
 ## Current Evidence Boundary
 
+The latest provider-backed diagnostic is the
+[13A calibration pilot for 0.1.94](evaluations/CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md).
+Its six matched runs are not a baseline. Coding passed in Fast, Auto, and Pro;
+all three long-horizon runs produced the required external effect but failed
+terminal completion because the external-grounding contract remained
+unsatisfied. The pilot therefore stops expansion and does not establish an
+Auto or Pro uplift.
+
 The latest provider-backed collection attempt is
 [Cindx Agent Real-World V2 0.1.82](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md).
 It executed all 72 cells on source commit `6b2ee39`, but four Auto/Pro

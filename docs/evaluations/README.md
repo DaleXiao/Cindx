@@ -5,6 +5,13 @@ source revision and application version recorded inside them.
 
 ## Current Product Decision
 
+- [Cindx Agent Real-World 13A Calibration Pilot 0.1.94](CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md)
+  is a six-run provider-backed calibration subset on source commit `f3e46fa`.
+  All treatments produced the required long-horizon external effect, but all
+  failed terminal completion because the external-grounding contract remained
+  unsatisfied. Its decision is `CALIBRATION_NO_GO`; it is not a baseline and
+  does not replace the complete V1 matrix.
+
 - [Cindx Agent Real-World V2 0.1.82](CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md)
   is the latest provider-backed collection attempt on source commit `6b2ee39`.
   Four RAG/memory cells ended in infrastructure failure, so its decision is
