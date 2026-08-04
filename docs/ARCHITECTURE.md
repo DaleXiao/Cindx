@@ -43,6 +43,7 @@ run_agent_task
        -> plan_agent_run
             Fast: direct decision
             Auto/Pro: conductor -> validated AgentRunDecision
+            Auto workflow candidate: portable value-of-computation admission
        -> recall memory + retrieve workspace evidence
        -> select skills and tools
        -> optional bounded workflow/task graph
@@ -154,6 +155,14 @@ for whether those segments require effects.
 
 - Fast constructs a direct decision without a conductor call.
 - Auto and Pro ask configured conductor candidates for this schema.
+- After validation, Auto workflow candidates pass the portable orchestrator
+  value-of-computation policy. The policy uses the conductor's semantic
+  independent-contribution contract rather than re-routing through prompt
+  keywords, and combines predicted benefit, confidence, exact-shape matched
+  evidence, compute units, and serial-interaction risk. Rejection collapses only
+  workflow coordination fields; model, tools, vision, risk, retrieval, and
+  memory remain intact. Candidate and selected tiers, verdict, value, cost, and
+  evidence support are recorded in route metadata.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
   dependency order and runnable/resumable/degraded/exhausted states.
@@ -171,6 +180,10 @@ for whether those segments require effects.
   model when role capability or supported historical evidence justifies it.
 - Workflow output is a grounded handoff to the interactive loop; it does not
   bypass the final tool, permission, persistence, or terminal contracts.
+- Desktop conductor calls apply a 45-second no-progress boundary even when no
+  alternate model exists. Alternate-model recovery remains a desktop transport
+  concern; value admission and route calibration remain portable orchestrator
+  policy.
 
 ## Context, Memory, and Retrieval Relationship
 

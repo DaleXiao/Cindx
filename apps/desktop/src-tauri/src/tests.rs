@@ -24,8 +24,8 @@ use crate::prompt_learning_runtime::prompt_dataset_identity;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentExecutionMode, AgentRouteRequirements,
-    AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
+    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentDecisionCalibration, AgentExecutionMode,
+    AgentRouteRequirements, AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
     AgentVerificationPolicy, PromptDatasetCaseIdentityV1, PromptExecutionContextV1,
     PromptTransferProvenance, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
 };
@@ -647,8 +647,18 @@ fn goal2_conductor_failover_limits_preserve_quality_after_response_start() {
     let repair = conductor_call_limits(true, true);
     assert_eq!(repair.recovery_window, Some(Duration::from_secs(60)));
     assert_eq!(repair.no_progress_timeout, Some(Duration::from_secs(45)));
-    assert_eq!(conductor_call_limits(false, false), Default::default());
-    assert_eq!(conductor_call_limits(false, true), Default::default());
+    let single_primary = conductor_call_limits(false, false);
+    assert_eq!(single_primary.recovery_window, None);
+    assert_eq!(
+        single_primary.no_progress_timeout,
+        Some(Duration::from_secs(45))
+    );
+    let single_repair = conductor_call_limits(false, true);
+    assert_eq!(single_repair.recovery_window, None);
+    assert_eq!(
+        single_repair.no_progress_timeout,
+        Some(Duration::from_secs(45))
+    );
 }
 
 #[test]
@@ -5611,6 +5621,7 @@ fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
         image_input_required: true,
     };
     let mut decision = route_requirements.apply_to_direct(AgentRunDecision::direct("executor"));
+    decision.calibration = Some(AgentDecisionCalibration::MatchedEvidence);
     decision.calibration_reason = Some("matched evidence rejects workflow".to_string());
     let mut planned = test_planned_agent_run(decision, AgentPolicy::Auto);
     planned.source = AgentPlanningSource::CalibratedDirect;
@@ -5636,6 +5647,14 @@ fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
     assert_eq!(
         run_context.get("decision_calibration").map(String::as_str),
         Some("matched_evidence_direct")
+    );
+    assert_eq!(
+        run_context.get("candidate_route_tier").map(String::as_str),
+        Some("workflow")
+    );
+    assert_eq!(
+        run_context.get("selected_route_tier").map(String::as_str),
+        Some("direct")
     );
     assert_eq!(
         run_context.get("conductor_degraded").map(String::as_str),

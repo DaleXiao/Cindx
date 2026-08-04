@@ -1,7 +1,7 @@
-use super::PlannedAgentRun;
+use super::{requirements::route_decision_metadata, PlannedAgentRun};
 use crate::collaboration_service::truncate_for_collaboration;
 use agent_core::Metadata;
-use orchestrator::{AgentExecutionMode, AgentToolRequirement};
+use orchestrator::{AgentExecutionMode, AgentToolRequirement, AGENT_ROUTE_OBSERVABILITY_KEYS};
 
 impl PlannedAgentRun {
     pub(crate) fn apply_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {
@@ -24,29 +24,18 @@ impl PlannedAgentRun {
             "vision_required".to_string(),
             self.decision.vision_required.to_string(),
         );
-        run_context.insert(
-            "route_minimum_tool_requirement".to_string(),
-            self.route_requirements
-                .minimum_tool_requirement
-                .label()
-                .to_string(),
-        );
-        run_context.insert(
-            "route_image_input_required".to_string(),
-            self.route_requirements.image_input_required.to_string(),
-        );
-        match &self.decision.calibration_reason {
-            Some(reason) => {
-                run_context.insert(
-                    "decision_calibration".to_string(),
-                    "matched_evidence_direct".to_string(),
-                );
+        for key in AGENT_ROUTE_OBSERVABILITY_KEYS {
+            run_context.remove(key);
+        }
+        run_context.extend(route_decision_metadata(self));
+        match (self.decision.calibration, &self.decision.calibration_reason) {
+            (Some(_), Some(reason)) => {
                 run_context.insert(
                     "decision_calibration_reason".to_string(),
                     truncate_for_collaboration(reason, 1_200),
                 );
             }
-            None => {
+            _ => {
                 run_context.remove("decision_calibration");
                 run_context.remove("decision_calibration_reason");
             }
@@ -55,10 +44,7 @@ impl PlannedAgentRun {
             "routing_signature".to_string(),
             self.decision.learning_signature(),
         );
-        run_context.insert(
-            "agent_effort".to_string(),
-            self.policy.label().to_string(),
-        );
+        run_context.insert("agent_effort".to_string(), self.policy.label().to_string());
         run_context.insert(
             "requested_policy".to_string(),
             requested_policy.label().to_string(),
@@ -93,10 +79,7 @@ impl PlannedAgentRun {
             self.decision.primary_model.clone(),
         );
         run_context.insert("router_examples".to_string(), "0".to_string());
-        run_context.insert(
-            "router_source".to_string(),
-            self.source.label().to_string(),
-        );
+        run_context.insert("router_source".to_string(), self.source.label().to_string());
         run_context.insert(
             "conductor_degraded".to_string(),
             self.degradation_reason.is_some().to_string(),

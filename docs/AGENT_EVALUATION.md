@@ -127,6 +127,13 @@ the RAG gain without paying browser and completion regressions, permission
 denial must converge to a truthful terminal state, and learned profiles must be
 identified in future provider-backed evidence before any GEPA claim.
 
+The current source implements the first mechanism as an observable Auto
+value-of-computation admission step and adds a no-progress boundary for a
+single configured conductor. Deterministic tests prove downshift behavior,
+capability and grounding preservation, serial-effect protection, monotonic
+resource cost, and metadata only. Until a fresh matched provider run measures
+this revision, the `0.1.98` `NO-GO` conclusion remains the product evidence.
+
 ## Current Product Gate
 
 `benchmarks/agent/realworld-v2.json` freezes the current matched product

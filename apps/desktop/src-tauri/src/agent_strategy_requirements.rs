@@ -1,8 +1,6 @@
 use super::PlannedAgentRun;
 use agent_core::Metadata;
-use orchestrator::{
-    AgentExecutionMode, AgentRouteRequirements, AgentRunDecision, ModelCandidate,
-};
+use orchestrator::{AgentExecutionMode, AgentRouteRequirements, AgentRunDecision, ModelCandidate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentPlanningSource {
@@ -105,7 +103,7 @@ pub(super) fn selected_conductor_source(
 }
 
 pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
-    [
+    let mut metadata = [
         (
             "route_minimum_tool_requirement".to_string(),
             planned
@@ -118,17 +116,9 @@ pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
             "route_image_input_required".to_string(),
             planned.route_requirements.image_input_required.to_string(),
         ),
-        (
-            "decision_calibration".to_string(),
-            planned
-                .decision
-                .calibration_reason
-                .as_ref()
-                .map(|_| "matched_evidence_direct")
-                .unwrap_or_default()
-                .to_string(),
-        ),
     ]
     .into_iter()
-    .collect()
+    .collect::<Metadata>();
+    metadata.extend(planned.decision.route_observability_metadata());
+    metadata
 }

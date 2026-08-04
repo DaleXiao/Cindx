@@ -26,7 +26,7 @@ pub(crate) fn conductor_call_limits(
         recovery_window: repair
             .then(|| conductor_repair_recovery_window(has_alternate_model))
             .flatten(),
-        no_progress_timeout: has_alternate_model.then_some(CONDUCTOR_NO_PROGRESS_TIMEOUT),
+        no_progress_timeout: Some(CONDUCTOR_NO_PROGRESS_TIMEOUT),
         objective_epoch: None,
     }
 }

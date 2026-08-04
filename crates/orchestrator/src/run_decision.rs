@@ -1,8 +1,9 @@
 use crate::{
-    minimum_team_uplift_bps, ConductorExecutionContract, ConductorFallbackPolicy,
-    ConductorStopPolicy, MatchedCollaborationEvidence, ModelCandidate, OrchestrationPolicy,
-    RoutingContext, RoutingDecision, TaskClass, AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
-    AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+    assess_auto_computation_value, matching_collaboration_evidence, minimum_team_uplift_bps,
+    AgentDecisionCalibration, AutoComputationAssessment, ConductorExecutionContract,
+    ConductorFallbackPolicy, ConductorStopPolicy, MatchedCollaborationEvidence, ModelCandidate,
+    OrchestrationPolicy, RoutingContext, RoutingDecision, TaskClass,
+    AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
@@ -251,6 +252,10 @@ pub struct AgentRunDecision {
     pub rationale: String,
     #[serde(skip)]
     pub calibration_reason: Option<String>,
+    #[serde(skip)]
+    pub calibration: Option<AgentDecisionCalibration>,
+    #[serde(skip)]
+    pub computation_value: Option<AutoComputationAssessment>,
 }
 
 impl AgentRunDecision {
@@ -275,6 +280,8 @@ impl AgentRunDecision {
             stop_policy: ConductorStopPolicy::FirstVerified,
             rationale: "safe direct fallback".to_string(),
             calibration_reason: None,
+            calibration: None,
+            computation_value: None,
         }
     }
 
@@ -463,13 +470,9 @@ impl AgentRunDecision {
             "pro" => minimum_team_uplift_bps("pro"),
             _ => return None,
         };
-        let signature = self.learning_signature();
-        matched_evidence.iter().find(|evidence| {
-            evidence.task_class == self.task_class
-                && evidence.effort.eq_ignore_ascii_case(&normalized_effort)
-                && evidence.routing_signature == signature
-                && evidence.strong_evidence_against_collaboration(required_uplift)
-        }).map(|evidence| {
+        matching_collaboration_evidence(self, &normalized_effort, matched_evidence)
+            .filter(|evidence| evidence.strong_evidence_against_collaboration(required_uplift))
+            .map(|evidence| {
             format!(
                 "matched direct-anchor evidence rejects collaboration for this task shape: samples={} average_uplift={}bps below_admission_floor_lower_confidence={:.2}",
                 evidence.examples,
@@ -479,7 +482,12 @@ impl AgentRunDecision {
         })
     }
 
-    fn calibrated_to_direct(mut self, reason: String) -> Self {
+    fn calibrated_to_direct(
+        mut self,
+        calibration: AgentDecisionCalibration,
+        reason: String,
+        computation_value: Option<AutoComputationAssessment>,
+    ) -> Self {
         self.execution = AgentExecutionMode::Direct;
         self.verification = match self.verification {
             AgentVerificationPolicy::Independent => AgentVerificationPolicy::SelfCheck,
@@ -491,10 +499,12 @@ impl AgentRunDecision {
         self.expected_uplift_bps = 0;
         self.stop_policy = ConductorStopPolicy::FirstVerified;
         self.rationale = bounded_chars(
-            &format!("Calibrated to the direct anchor by trusted matched evidence: {reason}"),
+            &format!("Calibrated to the direct anchor: {reason}"),
             MAX_RUN_DECISION_RATIONALE_CHARS,
         );
+        self.calibration = Some(calibration);
         self.calibration_reason = Some(reason);
+        self.computation_value = computation_value;
         self
     }
 
@@ -585,6 +595,7 @@ impl AgentRunDecision {
             "confidence_bps".to_string(),
             self.confidence_bps.to_string(),
         );
+        metadata.extend(self.route_observability_metadata());
         RoutingDecision {
             policy: self.policy(),
             model: self.primary_model.clone(),
@@ -720,7 +731,7 @@ impl AgentRunDecisionHarness {
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
-                "Workflow admission is enforced after parsing: Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. If you cannot justify those estimates, choose direct.\n",
+                "Workflow admission is enforced after parsing. Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence, then admits collaboration only when confidence-weighted, evidence-adjusted benefit covers the independent branches, synthesis, verification, and serial-interaction cost; otherwise runtime preserves the selected model, tools, vision, retrieval, memory, and risk posture in a direct or grounded-direct route without a repair call. Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. If you cannot justify those estimates, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
                 "Runtime execution constraints are facts, not suggestions. Do not assign required effects or interactive work to a worker that cannot perform them:\n{execution_constraints}\n\n",
                 "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade or omit them.\n\n",
@@ -775,16 +786,49 @@ impl AgentRunDecisionHarness {
         self.request
             .route_requirements
             .validate_decision(&decision, &self.request.model_candidates)?;
-        decision.validate_effort_admission(&self.request.effort)?;
+        let normalized_effort = self.request.effort.trim().to_ascii_lowercase();
+        if normalized_effort != "auto" {
+            decision.validate_effort_admission(&self.request.effort)?;
+        }
         if let Some(reason) = decision.matched_collaboration_rejection(
             &self.request.effort,
             &self.request.matched_collaboration_evidence,
         ) {
-            decision = decision.calibrated_to_direct(reason);
+            decision = decision.calibrated_to_direct(
+                AgentDecisionCalibration::MatchedEvidence,
+                reason,
+                None,
+            );
             decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
             self.request
                 .route_requirements
                 .validate_decision(&decision, &self.request.model_candidates)?;
+        } else if normalized_effort == "auto" && decision.execution == AgentExecutionMode::Workflow
+        {
+            let objective_context = RoutingContext::from_prompt(
+                &self.request.objective,
+                self.request.model_candidates.clone(),
+            );
+            let matched = matching_collaboration_evidence(
+                &decision,
+                &normalized_effort,
+                &self.request.matched_collaboration_evidence,
+            );
+            let assessment = assess_auto_computation_value(&decision, &objective_context, matched);
+            if assessment.admitted() {
+                decision.computation_value = Some(assessment);
+            } else {
+                let reason = assessment.rationale();
+                decision = decision.calibrated_to_direct(
+                    AgentDecisionCalibration::ValueOfComputation,
+                    reason,
+                    Some(assessment),
+                );
+                decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
+                self.request
+                    .route_requirements
+                    .validate_decision(&decision, &self.request.model_candidates)?;
+            }
         }
         Ok(decision)
     }
@@ -803,6 +847,7 @@ fn bounded_chars(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AgentRouteTier, AutoComputationVerdict};
 
     fn request() -> AgentRunDecisionRequest {
         AgentRunDecisionRequest {
@@ -851,8 +896,8 @@ mod tests {
                     "min_successful_branches":2,
                     "distinct_contributions":2,
                     "estimated_steps":4,
-                    "expected_uplift_bps":3200,
-                    "confidence_bps":7200,
+                    "expected_uplift_bps":6000,
+                    "confidence_bps":8000,
                     "stop_policy":"quorum",
                     "rationale":"independent architecture and implementation analysis"
                 }"#,
@@ -893,8 +938,8 @@ mod tests {
                     "min_successful_branches":2,
                     "distinct_contributions":2,
                     "estimated_steps":3,
-                    "expected_uplift_bps":3200,
-                    "confidence_bps":7200,
+                    "expected_uplift_bps":5000,
+                    "confidence_bps":8000,
                     "stop_policy":"quorum",
                     "rationale":"two different solution paths from the strongest model"
                 }"#,
@@ -925,6 +970,8 @@ mod tests {
         assert!(prompt.contains("Memory and workspace retrieval are blocking foreground work"));
         assert!(prompt.contains("missing evidence can materially change answer quality"));
         assert!(prompt.contains("Greetings, capability questions, and self-contained requests"));
+        assert!(prompt.contains("evidence-adjusted benefit covers the independent branches"));
+        assert!(prompt.contains("without a repair call"));
     }
 
     #[test]
@@ -1106,7 +1153,8 @@ mod tests {
         auto.expected_uplift_bps = minimum_team_uplift_bps("pro");
         assert!(auto.validate_effort_admission("pro").is_ok());
 
-        auto.expected_uplift_bps = 3_500;
+        auto.expected_uplift_bps = 8_000;
+        auto.confidence_bps = 9_000;
         let evidence = MatchedCollaborationEvidence {
             task_class: auto.task_class.clone(),
             effort: "auto".to_string(),
@@ -1132,7 +1180,13 @@ mod tests {
         assert_eq!(calibrated.execution, AgentExecutionMode::Direct);
         assert_eq!(calibrated.primary_model, "executor");
         assert!(calibrated.calibration_reason.is_some());
-        assert!(calibrated.rationale.contains("trusted matched evidence"));
+        assert_eq!(
+            calibrated.calibration,
+            Some(AgentDecisionCalibration::MatchedEvidence)
+        );
+        assert!(calibrated
+            .rationale
+            .contains("matched direct-anchor evidence rejects collaboration"));
 
         let mut unrelated = evidence;
         unrelated.routing_signature = "different-task-shape".to_string();
@@ -1143,6 +1197,66 @@ mod tests {
             .unwrap();
         assert_eq!(uncalibrated.execution, AgentExecutionMode::Workflow);
         assert!(uncalibrated.calibration_reason.is_none());
+        assert!(uncalibrated
+            .computation_value
+            .as_ref()
+            .is_some_and(AutoComputationAssessment::admitted));
+    }
+
+    #[test]
+    fn auto_value_downshift_preserves_grounding_and_capabilities_without_repair() {
+        let mut request = request();
+        request.objective =
+            "Inspect the workspace evidence and image before applying the change".to_string();
+        request.route_requirements = AgentRouteRequirements {
+            minimum_tool_requirement: AgentToolRequirement::Effects,
+            image_input_required: true,
+        };
+        let decision = AgentRunDecisionHarness::new(request)
+            .parse(
+                r#"{
+                    "schema":"cindx.agent-run-decision.v1",
+                    "task_class":"coding",
+                    "execution":"workflow",
+                    "primary_model":"executor",
+                    "tool_requirement":"effects",
+                    "vision_required":true,
+                    "risk_level":"high",
+                    "retrieval":{"query":"workspace implementation evidence","channels":["semantic","file_search"],"max_results":6},
+                    "memory":{"policy":"relevant","query":"prior project constraints"},
+                    "verification":"independent",
+                    "max_parallelism":2,
+                    "min_successful_branches":2,
+                    "distinct_contributions":2,
+                    "estimated_steps":4,
+                    "expected_uplift_bps":2999,
+                    "confidence_bps":8000,
+                    "stop_policy":"quorum",
+                    "rationale":"inspect and independently verify"
+                }"#,
+            )
+            .expect("low-value Auto workflow should downshift without a repair call");
+
+        assert_eq!(decision.execution, AgentExecutionMode::Direct);
+        assert_eq!(decision.route_tier(), AgentRouteTier::GroundedDirect);
+        assert_eq!(decision.candidate_route_tier(), AgentRouteTier::Workflow);
+        assert_eq!(decision.primary_model, "executor");
+        assert_eq!(decision.tool_requirement, AgentToolRequirement::Effects);
+        assert!(decision.vision_required);
+        assert_eq!(decision.risk_level, AgentRiskLevel::High);
+        assert!(decision.retrieval.enabled());
+        assert!(decision.memory.enabled());
+        assert_eq!(
+            decision.calibration,
+            Some(AgentDecisionCalibration::ValueOfComputation)
+        );
+        assert_eq!(
+            decision
+                .computation_value
+                .as_ref()
+                .map(|value| value.verdict),
+            Some(AutoComputationVerdict::BelowPredictionFloor)
+        );
     }
 
     #[test]
