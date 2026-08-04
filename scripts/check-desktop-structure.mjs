@@ -1086,10 +1086,23 @@ assert(
     !promptEvolutionRuntimeSource.includes("save_prompt_evolution_read_model") &&
     promptLearningOutboxProjectionSource.includes("list_by_task_after(") &&
     promptLearningOutboxProjectionSource.includes("compare_exchange_read_model(") &&
-    promptLearningOutboxProjectionSource.includes(
-      "PROMPT_LEARNING_OUTBOX_MAX_PENDING"
-    ),
-  "Prompt learning control snapshots must remain canonical-event-first, CAS-published, delta-projected, and bounded"
+    orchestratorSource.includes("pub struct PromptLearningOutboxProjection") &&
+    orchestratorSource.includes("pub struct PromptAutoTransferIntent") &&
+    orchestratorSource.includes("pub struct PromptProDistillationIntent") &&
+    orchestratorSource.includes("insert_auto_transfer_intent") &&
+    orchestratorSource.includes("insert_pro_distillation_intent") &&
+    orchestratorSource.includes("pending_payloads_are_valid") &&
+    orchestratorSource.includes("PROMPT_LEARNING_OUTBOX_MAX_PENDING") &&
+    orchestratorSource.includes("left.sequence") &&
+    !promptLearningOutboxProjectionSource.includes("struct PendingIntentEnvelope") &&
+    !rustLib.includes(".insert_auto_transfer(") &&
+    !rustLib.includes(".insert_pro_distillation(") &&
+    rustLib.includes(
+      "matches_dispatch_marker(project_id, intent_id, &event.metadata)"
+    ) &&
+    !rustLib.includes("struct PromptAutoTransferIntent") &&
+    !rustLib.includes("struct PromptProDistillationIntent"),
+  "Prompt learning control must keep typed identity and FIFO state in orchestrator while desktop retains canonical-event, CAS, and delta adapters"
 );
 assert(
   shippingOrchestratorExamples.length === 0 &&
