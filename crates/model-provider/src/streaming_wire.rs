@@ -1,4 +1,5 @@
 use super::{parse_provider_error, ModelError, ModelToolCall};
+use crate::provider_receipt::provider_identity_metadata;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub(super) struct StreamEvent {
     pub(super) tool_calls: Vec<StreamingToolCallDelta>,
     pub(super) finish_reason: Option<String>,
     pub(super) usage: BTreeMap<String, String>,
+    pub(super) provider_identity: BTreeMap<String, String>,
 }
 
 pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, ModelError> {
@@ -80,6 +82,7 @@ pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, Mode
                 .map(|value| (field.to_string(), value.to_string()))
         })
         .collect::<BTreeMap<_, _>>();
+    let provider_identity = provider_identity_metadata(&value);
     let Some(delta) = value.pointer("/choices/0/delta") else {
         return Ok(Some(StreamEvent {
             finish_reason: value
@@ -87,6 +90,7 @@ pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, Mode
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             usage,
+            provider_identity,
             ..StreamEvent::default()
         }));
     };
@@ -127,6 +131,7 @@ pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, Mode
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         usage,
+        provider_identity,
     }))
 }
 

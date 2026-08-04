@@ -7,6 +7,7 @@ enum PreparedStreamingPayload {
     Deferred(ModelRequest),
     Encoded {
         request_body: Bytes,
+        request_payload_sha256: String,
         estimated_prompt_tokens: u64,
     },
 }
@@ -24,18 +25,27 @@ impl PreparedStreamingModelRequest {
     }
 
     pub(super) fn encoded(request_body: String, estimated_prompt_tokens: u64) -> Self {
+        let request_body = Bytes::from(request_body);
+        let request_payload_sha256 =
+            crate::provider_receipt::request_payload_sha256(request_body.as_ref());
         Self(PreparedStreamingPayload::Encoded {
-            request_body: Bytes::from(request_body),
+            request_body,
+            request_payload_sha256,
             estimated_prompt_tokens,
         })
     }
 
-    pub(super) fn encoded_parts(&self) -> Option<(&Bytes, u64)> {
+    pub(super) fn encoded_parts(&self) -> Option<(&Bytes, u64, &str)> {
         match &self.0 {
             PreparedStreamingPayload::Encoded {
                 request_body,
+                request_payload_sha256,
                 estimated_prompt_tokens,
-            } => Some((request_body, *estimated_prompt_tokens)),
+            } => Some((
+                request_body,
+                *estimated_prompt_tokens,
+                request_payload_sha256,
+            )),
             PreparedStreamingPayload::Deferred(_) => None,
         }
     }
@@ -96,7 +106,7 @@ impl OpenAiCompatibleProvider {
         if !self.config.is_ready() {
             return Err(ModelError::new("provider config is incomplete"));
         }
-        let (request_body, estimated_prompt_tokens) = request
+        let (request_body, estimated_prompt_tokens, request_payload_sha256) = request
             .encoded_parts()
             .ok_or_else(|| ModelError::new("prepared model request did not include a body"))?;
         let request_body = request_body.clone();
@@ -132,6 +142,10 @@ impl OpenAiCompatibleProvider {
             )
             .await
         })?;
+        crate::provider_receipt::attach_request_payload_sha256(
+            &mut response.metadata,
+            request_payload_sha256,
+        );
         normalize_model_usage(&mut response, estimated_prompt_tokens);
         Ok(response)
     }
@@ -193,12 +207,12 @@ mod tests {
             .expect("streaming request should prepare");
         let first = prepared
             .encoded_parts()
-            .map(|(body, _)| body)
+            .map(|(body, _, _)| body)
             .expect("openai-compatible request should have encoded bytes")
             .clone();
         let second = prepared
             .encoded_parts()
-            .map(|(body, _)| body)
+            .map(|(body, _, _)| body)
             .expect("prepared body should remain reusable")
             .clone();
         let repeated = provider
@@ -206,6 +220,8 @@ mod tests {
             .expect("unchanged image should prepare from cache");
         let cache_stats = provider.image_cache.stats();
         let debug = format!("{prepared:?}");
+        let first_digest = prepared.encoded_parts().unwrap().2.to_string();
+        let repeated_digest = repeated.encoded_parts().unwrap().2.to_string();
         let _ = fs::remove_dir_all(root);
 
         assert!(prepared.deferred_request().is_none());
@@ -222,9 +238,15 @@ mod tests {
         assert_eq!(cache_stats.hits, 1);
         assert_eq!(cache_stats.reads, 1);
         assert_eq!(cache_stats.encodes, 1);
+        assert_eq!(first_digest, repeated_digest);
+        assert_eq!(
+            first_digest,
+            crate::provider_receipt::request_payload_sha256(expected.as_bytes())
+        );
         assert!(debug.contains("request_body_bytes"));
         assert!(!debug.contains("Inspect this screenshot"));
         assert!(!debug.contains("base64"));
+        assert!(!debug.contains("secret"));
         println!(
             "{{\"schema\":\"cindx.prepared-image-request-scaling.v1\",\"cache_hits\":{},\"image_reads\":{},\"image_encodes\":{},\"bytes_share_storage\":true}}",
             cache_stats.hits, cache_stats.reads, cache_stats.encodes
@@ -268,6 +290,7 @@ mod tests {
             .prepare_streaming_request(&request)
             .expect("first request should prepare");
         let original = prepared.encoded_parts().unwrap().0.clone();
+        let original_digest = prepared.encoded_parts().unwrap().2.to_string();
         let original_ptr = original.as_ptr();
         fs::write(&replacement, [9, 8, 7, 6]).expect("replacement should write");
         fs::remove_file(&path).expect("first image should remove");
@@ -277,6 +300,7 @@ mod tests {
             .prepare_streaming_request(&request)
             .expect("replacement request should prepare");
         let next_body = next.encoded_parts().unwrap().0;
+        let next_digest = next.encoded_parts().unwrap().2;
         let stable = prepared.encoded_parts().unwrap().0;
         let stats = provider.image_cache.stats();
         let _ = fs::remove_dir_all(root);
@@ -284,6 +308,8 @@ mod tests {
         assert_eq!(stable.as_ptr(), original_ptr);
         assert_eq!(stable.as_ref(), original.as_ref());
         assert_ne!(next_body.as_ref(), original.as_ref());
+        assert_ne!(next_digest, original_digest);
+        assert_eq!(prepared.encoded_parts().unwrap().2, original_digest);
         assert_eq!(stats.misses, 2);
         assert_eq!(stats.reads, 2);
         assert_eq!(stats.encodes, 2);

@@ -2,6 +2,7 @@ use super::{
     collect_response_body, parse_provider_error, ModelError, ModelResponse, HTTP_POLL_INTERVAL,
     MAX_MODEL_RESPONSE_BYTES, MODEL_REQUEST_CANCELLED,
 };
+use crate::provider_receipt::merge_provider_identity;
 use crate::stream_delta_aggregator::FilteredStreamDeltaEmitter;
 use crate::streaming_finish::{finish_streaming_response, StreamingResponseParts};
 use crate::streaming_wire::{parse_stream_event, StreamingToolCall};
@@ -37,6 +38,7 @@ fn apply_stream_line(
                 .merge(delta);
         }
         usage.extend(event.usage);
+        merge_provider_identity(usage, &event.provider_identity);
         return Ok(true);
     }
     Ok(false)

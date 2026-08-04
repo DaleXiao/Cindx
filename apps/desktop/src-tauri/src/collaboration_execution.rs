@@ -796,6 +796,12 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
                 "total_tokens",
                 "usage_source",
                 "usage_estimated",
+                "provider_response_id",
+                "provider_response_model",
+                "provider_system_fingerprint",
+                "request_payload_sha256",
+                "response_semantic_sha256",
+                "provider_receipt_status",
             ] {
                 if let Some(value) = response.metadata.get(key) {
                     usage.insert(key.to_string(), value.clone());

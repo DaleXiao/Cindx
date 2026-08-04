@@ -536,6 +536,7 @@ pub(crate) fn execute_agent_model_turn(
         }
         let mut metadata = Metadata::new();
         metadata.insert("request_id".to_string(), request_id.clone());
+        metadata.insert("model".to_string(), agent_model.to_string());
         metadata.insert("latency_ms".to_string(), latency_ms.to_string());
         if let Some(first_delta_at_ms) = first_delta_at_ms {
             metadata.insert(
@@ -591,6 +592,12 @@ pub(crate) fn execute_agent_model_turn(
             "total_tokens",
             "usage_source",
             "usage_estimated",
+            "provider_response_id",
+            "provider_response_model",
+            "provider_system_fingerprint",
+            "request_payload_sha256",
+            "response_semantic_sha256",
+            "provider_receipt_status",
         ] {
             if let Some(value) = response.metadata.get(key) {
                 metadata.insert(key.to_string(), value.clone());

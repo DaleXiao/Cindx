@@ -110,6 +110,8 @@ pub struct IsolatedWorkerRuntime {
     evidence_repair_used: bool,
     prepared_message_count: usize,
     usage: Metadata,
+    model_response_count: usize,
+    provider_receipts: Vec<Metadata>,
 }
 
 impl IsolatedWorkerRuntime {
@@ -138,6 +140,8 @@ impl IsolatedWorkerRuntime {
             evidence_repair_used: false,
             prepared_message_count: 0,
             usage: Metadata::new(),
+            model_response_count: 0,
+            provider_receipts: Vec::new(),
         }
     }
 
@@ -230,6 +234,8 @@ impl IsolatedWorkerRuntime {
     }
 
     pub fn advance_model_response(&mut self, response: ModelResponse) -> WorkerAdvance {
+        self.model_response_count = self.model_response_count.saturating_add(1);
+        self.record_provider_receipt(&response.metadata);
         self.record_response_usage(&response.metadata);
         let finalization_content = (self.current_phase == WorkerTurnPhase::Finalization)
             .then(|| sanitize_assistant_content(&response.message.content))
@@ -364,6 +370,17 @@ impl IsolatedWorkerRuntime {
             "worker_contract_repair_used".to_string(),
             self.evidence_repair_used.to_string(),
         );
+        usage.insert(
+            "worker_model_responses".to_string(),
+            self.model_response_count.to_string(),
+        );
+        if !self.provider_receipts.is_empty() {
+            usage.insert(
+                "worker_provider_receipts".to_string(),
+                serde_json::to_string(&self.provider_receipts)
+                    .expect("provider receipt metadata must serialize"),
+            );
+        }
         usage
     }
 
@@ -451,6 +468,29 @@ impl IsolatedWorkerRuntime {
             "usage_estimated".to_string(),
             (combined_source != "provider").to_string(),
         );
+    }
+
+    fn record_provider_receipt(&mut self, metadata: &Metadata) {
+        const RECEIPT_KEYS: [&str; 7] = [
+            "model",
+            "request_payload_sha256",
+            "provider_response_id",
+            "provider_response_model",
+            "provider_system_fingerprint",
+            "response_semantic_sha256",
+            "provider_receipt_status",
+        ];
+        let receipt = RECEIPT_KEYS
+            .into_iter()
+            .filter_map(|key| {
+                metadata
+                    .get(key)
+                    .map(|value| (key.to_string(), value.clone()))
+            })
+            .collect::<Metadata>();
+        if !receipt.is_empty() {
+            self.provider_receipts.push(receipt);
+        }
     }
 }
 
@@ -669,6 +709,49 @@ mod tests {
         assert_eq!(usage["total_tokens"], "15");
         assert_eq!(usage["usage_source"], "provider");
         assert_eq!(usage["usage_estimated"], "false");
+    }
+
+    #[test]
+    fn worker_completion_preserves_each_provider_receipt_in_call_order() {
+        let mut worker = IsolatedWorkerRuntime::new(
+            TaskId("worker-receipts".to_string()),
+            "inspect",
+            Vec::new(),
+            1,
+            0,
+        );
+        for (suffix, digest_byte) in [("one", 'a'), ("two", 'b')] {
+            worker.record_provider_receipt(
+                &[
+                    ("model".to_string(), "configured-model".to_string()),
+                    (
+                        "request_payload_sha256".to_string(),
+                        digest_byte.to_string().repeat(64),
+                    ),
+                    (
+                        "provider_response_id".to_string(),
+                        format!("response-{suffix}"),
+                    ),
+                    ("response_semantic_sha256".to_string(), "c".repeat(64)),
+                    (
+                        "provider_receipt_status".to_string(),
+                        "observed".to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+        }
+        worker.model_response_count = 2;
+
+        let usage = worker.completion_usage("test");
+        let receipts = serde_json::from_str::<Vec<Metadata>>(&usage["worker_provider_receipts"])
+            .expect("worker receipts should serialize");
+
+        assert_eq!(usage["worker_model_responses"], "2");
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0]["provider_response_id"], "response-one");
+        assert_eq!(receipts[1]["provider_response_id"], "response-two");
     }
 
     #[test]

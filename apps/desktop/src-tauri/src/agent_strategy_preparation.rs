@@ -169,26 +169,64 @@ pub(super) fn selected_strategy_profile(
     config: &ProviderConfig,
     effort: AgentPolicy,
     run_context: &Metadata,
-) -> (ConductorPromptGenome, String) {
+) -> Result<(ConductorPromptGenome, String), String> {
+    #[cfg(feature = "realworld-eval")]
+    if let Some(profile) = evaluation_frozen_strategy_profile(effort)? {
+        return Ok((profile, "evaluation_frozen_profile".to_string()));
+    }
     if !should_evaluate_strategy_profile(effort, config.prompt_evolution_enabled) {
-        return (
+        return Ok((
             ConductorPromptGenome::seed_for_effort(effort.label()),
             "seed_fallback".to_string(),
-        );
+        ));
     }
-    if let Ok(evaluation) = prompt_evolution_evaluation_for_run(state, effort.label(), run_context) {
-        return (evaluation.next_profile, evaluation.next_mode);
+    if let Ok(evaluation) = prompt_evolution_evaluation_for_run(state, effort.label(), run_context)
+    {
+        return Ok((evaluation.next_profile, evaluation.next_mode));
     }
-    (
+    Ok((
         ConductorPromptGenome::seed_for_effort(effort.label()),
         "seed_fallback".to_string(),
-    )
+    ))
+}
+
+#[cfg(feature = "realworld-eval")]
+fn evaluation_frozen_strategy_profile(
+    effort: AgentPolicy,
+) -> Result<Option<ConductorPromptGenome>, String> {
+    let Some(path) = std::env::var_os("CINDX_AGENT_REALWORLD_PROFILE_PATH") else {
+        return Ok(None);
+    };
+    if !matches!(effort, AgentPolicy::Auto | AgentPolicy::Pro) {
+        return Err("evaluation frozen profiles are valid only for Auto or Pro".to_string());
+    }
+    let encoded = std::fs::read(&path).map_err(|error| {
+        format!(
+            "failed to read evaluation frozen profile {}: {error}",
+            std::path::Path::new(&path).display()
+        )
+    })?;
+    let snapshot = orchestrator::FrozenPromptProfileSnapshot::from_json_slice(&encoded)?;
+    if snapshot.effort != effort.label() {
+        return Err(format!(
+            "evaluation frozen profile effort {} does not match {}",
+            snapshot.effort,
+            effort.label()
+        ));
+    }
+    if let Ok(expected) = std::env::var("CINDX_AGENT_REALWORLD_PROFILE_ARTIFACT_SHA256") {
+        if expected != snapshot.artifact_sha256()? {
+            return Err(
+                "evaluation frozen profile artifact digest changed after preflight".to_string(),
+            );
+        }
+    }
+    Ok(Some(snapshot.genome))
 }
 
 pub(crate) fn should_evaluate_strategy_profile(
     effort: AgentPolicy,
     prompt_evolution_enabled: bool,
 ) -> bool {
-    prompt_evolution_enabled
-        && effort.prompt_evolution() != PromptEvolutionStrategy::Disabled
+    prompt_evolution_enabled && effort.prompt_evolution() != PromptEvolutionStrategy::Disabled
 }

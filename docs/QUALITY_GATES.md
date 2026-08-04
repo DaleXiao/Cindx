@@ -107,3 +107,10 @@ The bounded provider baseline runner documented in `AGENT_EVALUATION.md` is an
 explicit, billable operation and is never launched by an ordinary quality-gate
 profile. Its default mode performs only dataset, Git, and output-boundary preflight;
 only `--execute` reaches the configured provider.
+
+The Agent Real-World V3 runner is likewise outside deterministic profiles. Its
+complete 72-cell publication contract uses a cyclic Latin-square execution order,
+retains every failed or timed-out cell in the denominator, and requires complete
+strategy and observed provider-response receipts before an uplift decision can be
+`GO`. Frozen learned profiles are optional private inputs; without them the report
+must say `FRESH_SEED_ONLY`, even if Auto or Pro outperform Fast.

@@ -18,6 +18,22 @@ const setupFailureCodes = new Set([
   "transient",
   "provider"
 ]);
+const executionOrderProtocol = "cyclic_latin_square_v1";
+const sha256Pattern = /^[0-9a-f]{64}$/;
+const budgetFields = [
+  "max_duration_ms",
+  "model_call_timeout_ms",
+  "tool_call_timeout_ms",
+  "initial_model_calls",
+  "max_model_calls",
+  "initial_tool_calls",
+  "max_tool_calls",
+  "no_progress_timeout_ms",
+  "max_total_tokens",
+  "max_physical_model_attempts",
+  "terminal_token_reserve",
+  "terminal_physical_model_attempt_reserve"
+];
 
 function requireFact(condition, message) {
   if (!condition) throw new Error(message);
@@ -133,7 +149,7 @@ function validateSetupFailure(run, key, infrastructureFailed) {
 }
 
 function validateSuite(suite) {
-  requireFact(suite?.schema === "cindx.agent-realworld-suite.v1", "suite schema mismatch");
+  requireFact(suite?.schema === "cindx.agent-realworld-suite.v2", "suite schema mismatch");
   requireFact(typeof suite.id === "string" && suite.id.length > 0, "suite id is missing");
   requireFact(Number.isInteger(suite.version) && suite.version > 0, "suite version is invalid");
   requireFact(
@@ -151,6 +167,45 @@ function validateSuite(suite) {
     JSON.stringify(suite.treatments) === JSON.stringify(["direct", "fast", "auto", "pro"]),
     "suite treatments must be Direct/Fast/Auto/Pro in frozen order"
   );
+  requireFact(
+    suite.execution_order?.protocol === executionOrderProtocol,
+    "suite execution-order protocol mismatch"
+  );
+  requireFact(
+    JSON.stringify(suite.execution_order.base_treatments) ===
+      JSON.stringify(suite.treatments),
+    "suite execution-order treatments must match the frozen treatment order"
+  );
+  const promotion = suite.promotion_v1;
+  requireFact(
+    promotion?.schema === "cindx.agent-realworld-promotion.v1",
+    "suite promotion contract is missing"
+  );
+  requireFact(promotion.baseline === "fast", "promotion baseline must be fast");
+  requireFact(
+    JSON.stringify(Object.keys(promotion.candidates || {})) === JSON.stringify(["auto", "pro"]),
+    "promotion candidates must be Auto and Pro"
+  );
+  requireFact(promotion.minimum_quality_delta === 0, "promotion quality floor must be zero");
+  requireFact(promotion.minimum_completion_delta === 0, "promotion completion floor must be zero");
+  requireFact(
+    promotion.minimum_any_improvement_runs === 1,
+    "promotion must require at least one additional passing run"
+  );
+  requireFact(promotion.maximum_setup_failures === 0, "promotion setup-failure limit must be zero");
+  requireFact(promotion.maximum_safety_violations === 0, "promotion safety limit must be zero");
+  for (const [candidate, limits] of Object.entries(promotion.candidates)) {
+    requireFact(
+      Number.isFinite(limits.maximum_median_latency_ratio) &&
+        limits.maximum_median_latency_ratio >= 1,
+      `${candidate} latency threshold is invalid`
+    );
+    requireFact(
+      Number.isFinite(limits.maximum_total_token_ratio) &&
+        limits.maximum_total_token_ratio >= 1,
+      `${candidate} token threshold is invalid`
+    );
+  }
   const ids = new Set();
   for (const testCase of suite.cases) {
     requireFact(typeof testCase.id === "string" && !ids.has(testCase.id), "case ids must be unique");
@@ -158,14 +213,229 @@ function validateSuite(suite) {
   }
 }
 
-function validateRun(run, testCase, treatment, replicate) {
+function expectedExecutionEntries(suite) {
+  const entries = [];
+  let blockIndex = 0;
+  for (let replicate = 1; replicate <= suite.default_replicates; replicate += 1) {
+    for (const testCase of suite.cases) {
+      const rotation = blockIndex % suite.treatments.length;
+      for (let position = 0; position < suite.treatments.length; position += 1) {
+        entries.push({
+          replicate,
+          caseId: testCase.id,
+          treatment: suite.treatments[(position + rotation) % suite.treatments.length],
+          executionIndex: entries.length + 1,
+          treatmentPosition: position + 1
+        });
+      }
+      blockIndex += 1;
+    }
+  }
+  return entries;
+}
+
+function validateProfileArtifacts(artifacts) {
+  requireFact(artifacts && typeof artifacts === "object", "profile artifact bindings are missing");
+  requireFact(
+    JSON.stringify(Object.keys(artifacts)) === JSON.stringify(["auto", "pro"]),
+    "profile artifact bindings must contain Auto and Pro"
+  );
+  for (const [effort, artifact] of Object.entries(artifacts)) {
+    requireFact(
+      artifact?.mode === "fresh_seed" || artifact?.mode === "frozen_profile",
+      `${effort} profile artifact mode is invalid`
+    );
+    if (artifact.mode === "fresh_seed") {
+      requireFact(
+        artifact.file_sha256 === null &&
+          artifact.artifact_sha256 === null &&
+          artifact.candidate_sha256 === null &&
+          artifact.evolution_method === null,
+        `${effort} fresh-seed binding must not claim a learned artifact`
+      );
+    } else {
+      requireFact(sha256Pattern.test(artifact.file_sha256), `${effort} profile file hash is invalid`);
+      requireFact(
+        sha256Pattern.test(artifact.artifact_sha256),
+        `${effort} profile artifact hash is invalid`
+      );
+      requireFact(
+        sha256Pattern.test(artifact.candidate_sha256),
+        `${effort} profile candidate hash is invalid`
+      );
+      requireFact(
+        typeof artifact.evolution_method === "string" && artifact.evolution_method.length > 0,
+        `${effort} profile evolution method is missing`
+      );
+    }
+  }
+}
+
+function validateResolvedBudget(run, key) {
+  requireFact(run.resolved_budget && typeof run.resolved_budget === "object", `${key}: resolved budget is missing`);
+  requireFact(
+    JSON.stringify(Object.keys(run.resolved_budget).sort()) === JSON.stringify([...budgetFields].sort()),
+    `${key}: resolved budget fields drifted`
+  );
+  for (const field of budgetFields) {
+    requireFact(
+      Number.isInteger(run.resolved_budget[field]) && run.resolved_budget[field] >= 0,
+      `${key}: resolved budget ${field} is invalid`
+    );
+  }
+  for (const field of [
+    "max_duration_ms",
+    "model_call_timeout_ms",
+    "tool_call_timeout_ms",
+    "max_model_calls",
+    "max_tool_calls",
+    "no_progress_timeout_ms",
+    "max_total_tokens",
+    "max_physical_model_attempts"
+  ]) {
+    requireFact(run.resolved_budget[field] > 0, `${key}: resolved budget ${field} must be positive`);
+  }
+  requireFact(
+    run.resolved_budget.max_model_calls >= run.resolved_budget.initial_model_calls,
+    `${key}: model-call budget is inconsistent`
+  );
+  requireFact(
+    run.resolved_budget.max_tool_calls >= run.resolved_budget.initial_tool_calls,
+    `${key}: tool-call budget is inconsistent`
+  );
+}
+
+function validateStrategyReceipt(run, key, profileArtifacts) {
+  if (run.treatment === "direct") {
+    requireFact(run.strategy_receipt === null, `${key}: Direct must not claim a product strategy`);
+    return;
+  }
+  if (run.strategy_receipt === null) {
+    requireFact(
+      !run.completed && !["completed", "failed"].includes(run.terminal_status),
+      `${key}: executed product run is missing its strategy receipt`
+    );
+    return;
+  }
+  const receipt = run.strategy_receipt;
+  for (const field of [
+    "requested_policy",
+    "effective_policy",
+    "execution_mode",
+    "decision_source",
+    "profile_source",
+    "profile_id"
+  ]) {
+    requireFact(typeof receipt[field] === "string" && receipt[field].length > 0, `${key}: strategy ${field} is missing`);
+  }
+  for (const field of ["decision_sha256", "routing_signature_sha256", "profile_sha256"]) {
+    requireFact(sha256Pattern.test(receipt[field]), `${key}: strategy ${field} is invalid`);
+  }
+  requireFact(
+    Number.isInteger(receipt.profile_generation) && receipt.profile_generation >= 0,
+    `${key}: strategy profile generation is invalid`
+  );
+  requireFact(Array.isArray(receipt.parent_profile_ids), `${key}: strategy parent profiles are missing`);
+  requireFact(
+    typeof receipt.workflow_profile_exercised === "boolean",
+    `${key}: workflow profile receipt is missing`
+  );
+  requireFact(
+    receipt.execution_mode !== "workflow" || receipt.workflow_profile_exercised,
+    `${key}: workflow strategy did not exercise the selected profile`
+  );
+  const artifact = profileArtifacts[run.treatment];
+  if (artifact?.mode === "frozen_profile") {
+    requireFact(
+      receipt.learned_artifact_sha256 === artifact.artifact_sha256,
+      `${key}: strategy artifact does not match the frozen execution plan`
+    );
+    requireFact(
+      receipt.learned_method === artifact.evolution_method,
+      `${key}: strategy evolution method does not match the frozen execution plan`
+    );
+    requireFact(receipt.profile_source === "evaluation_frozen_profile", `${key}: frozen strategy source is invalid`);
+    requireFact(receipt.profile_sha256 === artifact.candidate_sha256, `${key}: frozen strategy profile hash mismatch`);
+    requireFact(typeof receipt.stable_profile_id === "string" && receipt.stable_profile_id.length > 0, `${key}: frozen stable profile is missing`);
+    for (const field of ["dataset_sha256", "paired_evidence_sha256"]) {
+      requireFact(sha256Pattern.test(receipt[field]), `${key}: frozen strategy ${field} is invalid`);
+    }
+    requireFact(
+      typeof receipt.promotion_gate_protocol === "string" &&
+        receipt.promotion_gate_protocol.length > 0,
+      `${key}: frozen strategy promotion protocol is missing`
+    );
+  } else {
+    requireFact(
+      receipt.learned_artifact_sha256 === null && receipt.learned_method === null,
+      `${key}: fresh-seed run must not claim learned-profile evidence`
+    );
+    requireFact(
+      receipt.stable_profile_id === null &&
+        receipt.dataset_sha256 === null &&
+        receipt.paired_evidence_sha256 === null &&
+        receipt.promotion_gate_protocol === null,
+      `${key}: fresh-seed run must not retain learned-profile provenance`
+    );
+  }
+}
+
+function validateModelReceipts(run, key) {
+  requireFact(Array.isArray(run.model_receipts), `${key}: model receipts are missing`);
+  for (const receipt of run.model_receipts) {
+    requireFact(typeof receipt.configured_model === "string" && receipt.configured_model.length > 0, `${key}: receipt configured model is missing`);
+    requireFact(run.configured_models.includes(receipt.configured_model), `${key}: receipt model was not configured for the run`);
+    requireFact(
+      receipt.provider_response_model === null ||
+        (typeof receipt.provider_response_model === "string" && receipt.provider_response_model.length > 0),
+      `${key}: provider response model is invalid`
+    );
+    requireFact(sha256Pattern.test(receipt.request_payload_sha256), `${key}: request payload hash is invalid`);
+    requireFact(sha256Pattern.test(receipt.response_semantic_sha256), `${key}: semantic response hash is invalid`);
+    requireFact(
+      receipt.provider_system_fingerprint_sha256 === null ||
+        sha256Pattern.test(receipt.provider_system_fingerprint_sha256),
+      `${key}: provider system fingerprint hash is invalid`
+    );
+    requireFact(
+      ["observed", "provider_id_missing", "identity_conflict"].includes(receipt.receipt_status),
+      `${key}: model receipt status is invalid`
+    );
+    requireFact(!Object.hasOwn(receipt, "provider_response_id"), `${key}: raw provider response id must not be recorded`);
+    if (receipt.receipt_status === "observed") {
+      requireFact(sha256Pattern.test(receipt.provider_response_id_sha256), `${key}: provider response id hash is missing`);
+    } else if (receipt.receipt_status === "provider_id_missing") {
+      requireFact(receipt.provider_response_id_sha256 === null, `${key}: missing provider id must be explicit`);
+    } else {
+      requireFact(
+        receipt.provider_response_id_sha256 === null || sha256Pattern.test(receipt.provider_response_id_sha256),
+        `${key}: conflicting provider id hash is invalid`
+      );
+    }
+  }
+  requireFact(run.model_receipts.length <= run.metrics.model_responses, `${key}: model receipts exceed response events`);
+  if (run.completed) {
+    requireFact(
+      run.model_receipts.length === run.metrics.model_responses,
+      `${key}: completed run has incomplete provider response receipts`
+    );
+  }
+}
+
+function validateRun(run, testCase, treatment, replicate, expectedEntry, profileArtifacts) {
   const key = `${testCase.id}/${treatment}/r${replicate}`;
   requireFact(run.case_id === testCase.id, `${key}: case id mismatch`);
   requireFact(run.category === testCase.category, `${key}: category mismatch`);
   requireFact(run.treatment === treatment, `${key}: treatment mismatch`);
   requireFact(run.replicate === replicate, `${key}: replicate mismatch`);
+  requireFact(run.execution_index === expectedEntry.executionIndex, `${key}: execution index mismatch`);
+  requireFact(run.treatment_position === expectedEntry.treatmentPosition, `${key}: treatment position mismatch`);
   requireFact(typeof run.completed === "boolean", `${key}: completed flag is missing`);
   requireFact(typeof run.terminal_status === "string", `${key}: terminal status is missing`);
+  requireFact(
+    run.evidence_error === null || typeof run.evidence_error === "string",
+    `${key}: evidence error is invalid`
+  );
   requireFact(Array.isArray(run.configured_models), `${key}: configured models are missing`);
   requireFact(Array.isArray(run.tools_used), `${key}: tool trace is missing`);
   requireFact(/^[0-9a-f]{64}$/.test(run.input_sha256), `${key}: input hash is invalid`);
@@ -181,6 +451,7 @@ function validateRun(run, testCase, treatment, replicate) {
     "latency_ms",
     "setup_latency_ms",
     "model_calls",
+    "model_responses",
     "tool_calls",
     "permission_requests",
     "denied_permissions",
@@ -211,6 +482,9 @@ function validateRun(run, testCase, treatment, replicate) {
     `${key}: external-effect boundary is incorrect`
   );
   finiteNonNegative(run.verification.safety_violations, `${key}: safety violations`);
+  validateResolvedBudget(run, key);
+  validateStrategyReceipt(run, key, profileArtifacts);
+  validateModelReceipts(run, key);
 }
 
 function aggregateRuns(runs) {
@@ -238,6 +512,7 @@ function aggregateRuns(runs) {
     setup_latency_ms_total: sum(runs.map((run) => run.metrics.setup_latency_ms)),
     total_tokens: sum(runs.map((run) => run.metrics.total_tokens)),
     model_calls: sum(runs.map((run) => run.metrics.model_calls)),
+    model_responses: sum(runs.map((run) => run.metrics.model_responses)),
     tool_calls: sum(runs.map((run) => run.metrics.tool_calls)),
     permission_requests: sum(runs.map((run) => run.metrics.permission_requests)),
     denied_permissions: sum(runs.map((run) => run.metrics.denied_permissions)),
@@ -283,15 +558,97 @@ function pairedDeltas(runs, baseline) {
   return result;
 }
 
+function boundedRatio(candidate, baseline) {
+  if (baseline === 0) return candidate === 0 ? 1 : null;
+  return candidate / baseline;
+}
+
+function providerEvidenceComplete(run) {
+  return (
+    run.evidence_error == null &&
+    run.model_receipts.length === run.metrics.model_responses &&
+    run.model_receipts.every((receipt) => receipt.receipt_status === "observed")
+  );
+}
+
+function strategyEvidenceComplete(run) {
+  return run.treatment === "direct" || run.strategy_receipt !== null;
+}
+
+function promotionDecision(suite, runs, aggregates, evidenceComplete, setupFailures, safetyViolations) {
+  const contract = suite.promotion_v1;
+  const baselineRuns = runs.filter((run) => run.treatment === contract.baseline);
+  const baseline = aggregates[contract.baseline];
+  const candidateGates = {};
+  for (const [candidate, limits] of Object.entries(contract.candidates)) {
+    const candidateRuns = runs.filter((run) => run.treatment === candidate);
+    const qualityDeltaRuns =
+      candidateRuns.filter((run) => run.verification.quality_passed).length -
+      baselineRuns.filter((run) => run.verification.quality_passed).length;
+    const completionDeltaRuns =
+      candidateRuns.filter((run) => run.completed).length -
+      baselineRuns.filter((run) => run.completed).length;
+    const latencyRatio = boundedRatio(
+      aggregates[candidate].latency_ms.median,
+      baseline.latency_ms.median
+    );
+    const tokenRatio = boundedRatio(aggregates[candidate].total_tokens, baseline.total_tokens);
+    const gates = {
+      quality_non_regression: qualityDeltaRuns >= contract.minimum_quality_delta,
+      completion_non_regression: completionDeltaRuns >= contract.minimum_completion_delta,
+      improves_at_least_one_run:
+        Math.max(qualityDeltaRuns, completionDeltaRuns) >=
+        contract.minimum_any_improvement_runs,
+      latency_within_limit:
+        latencyRatio !== null && latencyRatio <= limits.maximum_median_latency_ratio,
+      tokens_within_limit:
+        tokenRatio !== null && tokenRatio <= limits.maximum_total_token_ratio
+    };
+    candidateGates[candidate] = {
+      quality_delta_runs: qualityDeltaRuns,
+      completion_delta_runs: completionDeltaRuns,
+      median_latency_ratio: latencyRatio,
+      maximum_median_latency_ratio: limits.maximum_median_latency_ratio,
+      total_token_ratio: tokenRatio,
+      maximum_total_token_ratio: limits.maximum_total_token_ratio,
+      gates,
+      eligible: Object.values(gates).every(Boolean)
+    };
+  }
+  const sharedGates = {
+    receipt_evidence_complete: evidenceComplete,
+    setup_failures_within_limit: setupFailures <= contract.maximum_setup_failures,
+    safety_violations_within_limit: safetyViolations <= contract.maximum_safety_violations,
+    all_candidates_preserve_quality_and_completion: Object.values(candidateGates).every(
+      (candidate) =>
+        candidate.gates.quality_non_regression && candidate.gates.completion_non_regression
+    ),
+    all_candidates_within_resource_limits: Object.values(candidateGates).every(
+      (candidate) => candidate.gates.latency_within_limit && candidate.gates.tokens_within_limit
+    ),
+    at_least_one_candidate_improves: Object.values(candidateGates).some(
+      (candidate) => candidate.gates.improves_at_least_one_run
+    )
+  };
+  return {
+    schema: contract.schema,
+    baseline: contract.baseline,
+    status: Object.values(sharedGates).every(Boolean) ? "GO" : "NO_GO",
+    shared_gates: sharedGates,
+    candidates: candidateGates,
+    minimum_improvement: `${contract.minimum_any_improvement_runs}/${baselineRuns.length}`
+  };
+}
+
 export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
   validateSuite(suite);
-  requireFact(raw?.schema === "cindx.agent-realworld-raw.v1", "raw schema mismatch");
+  requireFact(raw?.schema === "cindx.agent-realworld-raw.v2", "raw schema mismatch");
   requireFact(raw.suite_id === suite.id, "raw suite id mismatch");
   requireFact(raw.suite_version === suite.version, "raw suite version mismatch");
   requireFact(raw.suite_sha256 === sha256(suiteBytes), "frozen suite SHA-256 mismatch");
   requireFact(/^[0-9a-f]{40}$/.test(raw.git_commit), "evaluated Git commit is invalid");
   requireFact(typeof raw.app_version === "string" && raw.app_version.length > 0, "app version is missing");
-  requireFact(typeof raw.provider_id === "string" && raw.provider_id.length > 0, "provider id is missing");
+  requireFact(raw.provider_id == null || typeof raw.provider_id === "string", "provider id is invalid");
   requireFact(endpointIdentity(raw.provider_endpoint) !== "invalid-endpoint", "provider endpoint is invalid");
   finiteNonNegative(raw.generated_at_ms, "capture time");
   requireFact(raw.requested_replicates === suite.default_replicates, "replicate count drifted from suite");
@@ -304,11 +661,30 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
     "treatment selection is incomplete or reordered"
   );
   requireFact(Array.isArray(raw.runs), "raw runs are missing");
+  requireFact(raw.execution_order_protocol === executionOrderProtocol, "raw execution-order protocol mismatch");
+  requireFact(sha256Pattern.test(raw.provider_config_sha256), "raw provider configuration binding is invalid");
+  validateProfileArtifacts(raw.profile_artifacts);
+  const expectedEntries = expectedExecutionEntries(suite);
+  const expectedPlanSha256 = sha256(
+    JSON.stringify({
+      protocol: executionOrderProtocol,
+      suite_sha256: raw.suite_sha256,
+      git_commit: raw.git_commit,
+      replicates: raw.requested_replicates,
+      cases: raw.selected_cases,
+      treatments: raw.selected_treatments,
+      provider_config_sha256: raw.provider_config_sha256,
+      profile_artifacts: raw.profile_artifacts,
+      entries: expectedEntries
+    })
+  );
+  requireFact(raw.execution_plan_sha256 === expectedPlanSha256, "execution plan SHA-256 mismatch");
 
   const byKey = new Map();
-  for (const run of raw.runs) {
+  for (const [index, run] of raw.runs.entries()) {
     const key = `${run.case_id}/${run.treatment}/r${run.replicate}`;
     requireFact(!byKey.has(key), `duplicate run ${key}`);
+    requireFact(run.execution_index === index + 1, `${key}: raw runs are not in execution order`);
     byKey.set(key, run);
   }
   const orderedRuns = [];
@@ -318,7 +694,13 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
         const key = `${testCase.id}/${treatment}/r${replicate}`;
         const run = byKey.get(key);
         requireFact(run, `missing run ${key}`);
-        validateRun(run, testCase, treatment, replicate);
+        const expectedEntry = expectedEntries.find(
+          (entry) =>
+            entry.caseId === testCase.id &&
+            entry.treatment === treatment &&
+            entry.replicate === replicate
+        );
+        validateRun(run, testCase, treatment, replicate, expectedEntry, raw.profile_artifacts);
         orderedRuns.push(run);
       }
     }
@@ -346,8 +728,28 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       (run.treatment !== "direct" && run.verification.external_effect_passed === null)
   );
   const outcomes = summarizeOutcomes(orderedRuns, suite.treatments);
+  const providerEvidenceIncompleteRuns = orderedRuns.filter(
+    (run) => !providerEvidenceComplete(run)
+  );
+  const providerEvidenceCompleteMatrix = providerEvidenceIncompleteRuns.length === 0;
+  const strategyEvidenceIncompleteRuns = orderedRuns.filter(
+    (run) => !strategyEvidenceComplete(run)
+  );
+  const receiptEvidenceCompleteMatrix =
+    providerEvidenceCompleteMatrix && strategyEvidenceIncompleteRuns.length === 0;
+  const promotion = promotionDecision(
+    suite,
+    orderedRuns,
+    aggregates,
+    receiptEvidenceCompleteMatrix && incompleteRuns.length === 0,
+    outcomes.setup_failures,
+    safetyViolations
+  );
+  const frozenProfiles = Object.entries(raw.profile_artifacts)
+    .filter(([, artifact]) => artifact.mode === "frozen_profile")
+    .map(([effort]) => effort);
   return {
-    schema: "cindx.agent-realworld-sanitized.v1",
+    schema: "cindx.agent-realworld-sanitized.v2",
     suite: {
       id: suite.id,
       version: suite.version,
@@ -356,20 +758,30 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       cases: suite.cases.map((testCase) => ({ id: testCase.id, category: testCase.category })),
       treatments: suite.treatments,
       replicates: suite.default_replicates,
-      per_run_timeout_seconds: suite.per_run_timeout_seconds
+      per_run_timeout_seconds: suite.per_run_timeout_seconds,
+      execution_order_protocol: executionOrderProtocol,
+      promotion_v1: suite.promotion_v1
     },
     evidence: {
       raw_sha256: sha256(rawBytes),
       git_commit: raw.git_commit,
       app_version: raw.app_version,
       generated_at_ms: raw.generated_at_ms,
-      provider_id: raw.provider_id,
+      provider_identity: raw.provider_id?.trim()
+        ? { status: "hashed_provider_id", sha256: sha256(raw.provider_id) }
+        : { status: "no_provider_id", sha256: null },
       provider_endpoint: endpointIdentity(raw.provider_endpoint),
       configured_models: raw.configured_models,
       complete_matrix: incompleteRuns.length === 0,
       incomplete_runs: incompleteRuns.length,
       product_runs: orderedRuns.filter((run) => run.product_mechanism_exercised).length,
-      direct_runs: orderedRuns.filter((run) => !run.product_mechanism_exercised).length
+      direct_runs: orderedRuns.filter((run) => !run.product_mechanism_exercised).length,
+      execution_plan_sha256: raw.execution_plan_sha256,
+      profile_artifacts: raw.profile_artifacts,
+      provider_evidence_complete: providerEvidenceCompleteMatrix,
+      provider_evidence_incomplete_runs: providerEvidenceIncompleteRuns.length,
+      strategy_evidence_complete: strategyEvidenceIncompleteRuns.length === 0,
+      strategy_evidence_incomplete_runs: strategyEvidenceIncompleteRuns.length
     },
     decision: {
       status:
@@ -379,13 +791,20 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
             ? "VALID_BASELINE"
             : "SAFETY_FAILURE",
       safety_violations: safetyViolations,
-      uplift_status: "NO_GO",
+      uplift_status: promotion.status,
       uplift_reason:
-        "This descriptive V2 baseline has no preregistered promotion threshold and cannot authorize a broad orchestration-uplift claim.",
+        promotion.status === "GO"
+          ? `The preregistered promotion_v1 gates passed; at least one candidate improved by ${promotion.minimum_improvement} without Auto/Pro quality, completion, latency, token, setup, or safety regression.`
+          : "At least one preregistered promotion_v1 gate failed; failures remain in the denominator and no uplift is authorized.",
+      promotion_v1: promotion,
+      learned_profile_status:
+        frozenProfiles.length > 0 ? "FROZEN_ARTIFACT_EVALUATED" : "FRESH_SEED_ONLY",
       claim_boundary:
         incompleteRuns.length > 0
           ? "Infrastructure failures make this matrix invalid for capability promotion or treatment comparison."
-          : "This is a matched product baseline, not evidence of Fugu Ultra parity or causal intelligence uplift."
+          : frozenProfiles.length === 0
+            ? "This matrix evaluates fresh-seed product quality only. It provides no evidence of GEPA learning, distillation, learned-profile uplift, or Fugu parity."
+            : `This matrix evaluates only the bound frozen ${frozenProfiles.join(" and ")} profile artifact(s); it does not establish general GEPA, distillation, or Fugu parity.`
     },
     aggregates,
     outcomes,
@@ -410,6 +829,8 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       case_id: run.case_id,
       category: run.category,
       treatment: run.treatment,
+      execution_index: run.execution_index,
+      treatment_position: run.treatment_position,
       product_mechanism_exercised: run.product_mechanism_exercised,
       completed: run.completed,
       terminal_status: run.terminal_status,
@@ -426,6 +847,10 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
           }
         : null,
       error_kind: runErrorKind(run),
+      evidence_error: run.evidence_error,
+      resolved_budget: run.resolved_budget,
+      strategy_receipt: run.strategy_receipt,
+      model_receipts: run.model_receipts,
       metrics: run.metrics,
       verification: run.verification
     }))
@@ -466,9 +891,13 @@ export function renderMarkdown(report) {
     `- Suite scope: ${report.suite.description}`,
     `- Raw evidence SHA-256: \`${report.evidence.raw_sha256}\``,
     `- Matrix: ${report.suite.cases.length} cases × ${report.suite.treatments.length} treatments × ${report.suite.replicates} replicates`,
+    `- Execution order: ${report.suite.execution_order_protocol} (plan \`${report.evidence.execution_plan_sha256}\`)`,
     `- Missing or structurally unverifiable cells: ${report.evidence.incomplete_runs}`,
+    `- Provider-evidence incomplete runs: ${report.evidence.provider_evidence_incomplete_runs}`,
+    `- Strategy-evidence incomplete runs: ${report.evidence.strategy_evidence_incomplete_runs}`,
     `- Non-completed runs retained in the denominator: ${report.outcomes.non_completed_runs}`,
-    `- Provider: ${report.evidence.provider_id} (${report.evidence.provider_endpoint})`,
+    `- Provider identity: ${report.evidence.provider_identity.status}${report.evidence.provider_identity.sha256 ? ` (\`${report.evidence.provider_identity.sha256}\`)` : ""}`,
+    `- Provider endpoint: ${report.evidence.provider_endpoint}`,
     "",
     "## Treatment Configuration and Budget",
     "",
@@ -543,14 +972,25 @@ export function renderMarkdown(report) {
     `- Baseline validity: **${report.decision.status}**`,
     `- Broad orchestration uplift: **${report.decision.uplift_status.replace("_", "-")}**`,
     `- Uplift rationale: ${report.decision.uplift_reason}`,
+    `- Learned-profile evidence: **${report.decision.learned_profile_status.replaceAll("_", "-")}**`,
+    `- Required improvement: ${report.decision.promotion_v1.minimum_improvement}`,
+    "",
+    "| Candidate | Quality delta runs | Completion delta runs | Median latency ratio / max | Total token ratio / max | Eligible |",
+    "| --- | ---: | ---: | ---: | ---: | --- |",
+    ...["auto", "pro"].map((candidate) => {
+      const gate = report.decision.promotion_v1.candidates[candidate];
+      return `| ${candidate} | ${gate.quality_delta_runs} | ${gate.completion_delta_runs} | ${gate.median_latency_ratio ?? "n/a"} / ${gate.maximum_median_latency_ratio} | ${gate.total_token_ratio ?? "n/a"} / ${gate.maximum_total_token_ratio} | ${gate.eligible ? "yes" : "no"} |`;
+    }),
     "",
     "## Confounds",
     "",
-    "- Cells ran serially in one frozen order against one provider and one configured role-model set; provider and browser conditions can vary over time.",
+    "- Cells ran serially in a fixed cyclic Latin-square order against one provider and one configured role-model set; the order balances positions but provider and browser conditions can still vary over time.",
     "- The suite contains one fixture per category with three repeats, so category estimates are narrow.",
     "- Direct receives inline fixture evidence and no tools, so it is a reference ceiling rather than an equal product treatment.",
     `- The ${report.suite.per_run_timeout_seconds}-second process deadline is matched, but Fast, Auto, and Pro retain different shipping budgets; timed-out cells can under-report token, call, and resource totals.`,
-    "- Raw v1 evidence does not capture learned profile or GEPA identities, so results cannot be attributed to GEPA, transfer, or self-distillation.",
+    report.decision.learned_profile_status === "FRESH_SEED_ONLY"
+      ? "- No frozen learned artifact was supplied. These results are fresh-seed quality evidence and cannot be attributed to GEPA, transfer, or self-distillation."
+      : "- Learned-profile interpretation is limited to the exact frozen artifact hashes bound into this execution plan.",
     "",
     "## Interpretation Boundary",
     "",

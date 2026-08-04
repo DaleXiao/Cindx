@@ -4,6 +4,9 @@ use crate::json_wire::{
     extract_json_array_after, extract_json_bool_field, extract_json_number_field,
     extract_json_string_field, extract_json_string_field_after, split_top_level_objects,
 };
+use crate::provider_receipt::{
+    attach_response_semantic_sha256, finalize_provider_receipt_status, provider_identity_metadata,
+};
 use crate::{
     ModelError, ModelResponse, ModelToolCall, DSML_INVOKE_CLOSE, DSML_INVOKE_OPEN,
     DSML_PARAMETER_CLOSE, DSML_PARAMETER_OPEN, DSML_TOOL_CALLS_CLOSE, DSML_TOOL_CALLS_OPEN,
@@ -40,6 +43,7 @@ pub fn parse_model_response(text: &str) -> Result<ModelResponse, ModelError> {
         {
             metadata.insert("finish_reason".to_string(), finish_reason.to_string());
         }
+        metadata.extend(provider_identity_metadata(&value));
     }
     if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
         raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));
@@ -49,6 +53,14 @@ pub fn parse_model_response(text: &str) -> Result<ModelResponse, ModelError> {
             metadata.insert(field.to_string(), value);
         }
     }
+    finalize_provider_receipt_status(&mut metadata);
+    let finish_reason = metadata.get("finish_reason").cloned();
+    attach_response_semantic_sha256(
+        &mut metadata,
+        &content,
+        &tool_calls,
+        finish_reason.as_deref(),
+    );
 
     Ok(ModelResponse {
         message: Message {

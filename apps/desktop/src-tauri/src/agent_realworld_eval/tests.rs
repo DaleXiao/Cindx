@@ -1,11 +1,11 @@
-use super::{
-    directory_size, failed_run, selected_replicates, PermissionPolicy, RealworldCase, Treatment,
-    VerificationContract,
-};
 use super::setup::{
     create_fresh_evaluation_data_root, persist_memory_seed_fixture, read_seeded_memory_fixture,
     reject_existing_evaluation_path, validate_evaluation_data_root_paths, SetupFailure,
     SetupFailureCode, SetupFailureStage,
+};
+use super::{
+    directory_size, failed_run, selected_replicates, ExecutionCell, PermissionPolicy,
+    RealworldCase, Treatment, VerificationContract,
 };
 use crate::persistence_runtime::open_app_store_at;
 use agent_core::Metadata;
@@ -18,8 +18,7 @@ fn workspace_size_does_not_follow_external_symlinks() {
     use std::os::unix::fs::symlink;
 
     let external = tempfile::tempdir().expect("external tempdir");
-    fs::write(external.path().join("large.bin"), vec![0_u8; 64 * 1024])
-        .expect("external fixture");
+    fs::write(external.path().join("large.bin"), vec![0_u8; 64 * 1024]).expect("external fixture");
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     fs::write(workspace.path().join("local.txt"), b"local").expect("local fixture");
     symlink(external.path(), workspace.path().join("shared-runtime")).expect("runtime symlink");
@@ -101,8 +100,11 @@ fn evaluation_paths_reject_preexisting_root_and_dangling_database_symlink() {
     let symlink_root = suite.path().join("symlink-eval-data");
     fs::create_dir(&symlink_root).expect("symlink root fixture");
     let dangling_database = symlink_root.join("state.sqlite3");
-    symlink(suite.path().join("missing-production-state.sqlite3"), &dangling_database)
-        .expect("dangling database symlink fixture");
+    symlink(
+        suite.path().join("missing-production-state.sqlite3"),
+        &dangling_database,
+    )
+    .expect("dangling database symlink fixture");
     let database_error =
         reject_existing_evaluation_path(&dangling_database, "evaluation state database")
             .expect_err("dangling database symlink must be rejected");
@@ -134,6 +136,11 @@ fn setup_failure_is_typed_and_preserves_spent_setup_latency() {
             true,
         ),
         37,
+        &ExecutionCell {
+            execution_index: 1,
+            treatment_position: 1,
+            plan_sha256: "a".repeat(64),
+        },
     );
     let json = serde_json::to_value(&run).expect("raw run should serialize");
 

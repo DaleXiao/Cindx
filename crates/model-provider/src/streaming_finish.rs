@@ -1,3 +1,4 @@
+use crate::provider_receipt::{attach_response_semantic_sha256, finalize_provider_receipt_status};
 use crate::response_parser::{normalize_dsml_tool_calls, serialize_tool_calls};
 use crate::streaming_wire::StreamingToolCall;
 use crate::{parse_model_response, ModelError, ModelResponse};
@@ -59,6 +60,9 @@ pub(crate) fn finish_streaming_response(
             "completion_tokens",
             "total_tokens",
             "tool_protocol",
+            "provider_response_id",
+            "provider_response_model",
+            "provider_system_fingerprint",
         ] {
             if let Some(value) = fallback.metadata.get(key) {
                 metadata.insert(key.to_string(), value.clone());
@@ -75,6 +79,14 @@ pub(crate) fn finish_streaming_response(
     if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
         raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));
     }
+    finalize_provider_receipt_status(&mut metadata);
+    let finish_reason = metadata.get("finish_reason").cloned();
+    attach_response_semantic_sha256(
+        &mut metadata,
+        &answer,
+        &tool_calls,
+        finish_reason.as_deref(),
+    );
 
     Ok(ModelResponse {
         message: Message {
