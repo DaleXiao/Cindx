@@ -482,11 +482,10 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 )
                 .map(AgentLoopExecutionOutcome::Finished);
             }
-            AgentAdvance::Retry { instruction } => {
+            AgentAdvance::Retry { .. } => {
                 if visible_stream && streamed_output {
                     emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
                 }
-                let _ = instruction;
                 cancellation.mark_progress_at(
                     run_context_steer_epoch(&run_context),
                     "model_retry",

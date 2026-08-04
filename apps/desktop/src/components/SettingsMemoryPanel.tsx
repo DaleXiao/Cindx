@@ -236,19 +236,18 @@ function MemoryRow({
 }
 
 type MemoryGroupProps = Omit<MemoryRowProps, "item"> & {
-  collapsible?: boolean;
   emptyMessage: string;
   items: ProjectMemoryItem[];
   title: string;
 };
 
-function MemoryGroup({ collapsible = false, emptyMessage, items, title, ...rowProps }: MemoryGroupProps) {
+function MemoryGroup({ emptyMessage, items, title, ...rowProps }: MemoryGroupProps) {
   const contents = items.length === 0
     ? <div className="settings-empty">{emptyMessage}</div>
     : <div className="memory-settings-list">
         {items.map((item) => <MemoryRow key={item.id} item={item} {...rowProps} />)}
       </div>;
-  if (collapsible) return (
+  return (
     <details className="memory-settings-group memory-settings-disclosure" aria-label={title}>
       <summary><h3>
         {title}
@@ -257,12 +256,6 @@ function MemoryGroup({ collapsible = false, emptyMessage, items, title, ...rowPr
       </h3></summary>
       {contents}
     </details>
-  );
-  return (
-    <section className="memory-settings-group" aria-label={title}>
-      <h3>{title} <span className="memory-settings-group-count">{items.length}</span></h3>
-      {contents}
-    </section>
   );
 }
 
@@ -375,7 +368,6 @@ export function SettingsMemoryPanel({
         <div className="memory-settings-groups" aria-live="polite">
           <MemoryGroup
             title="Active"
-            collapsible
             emptyMessage="No active memories."
             items={sections.active}
             {...rowProps}
