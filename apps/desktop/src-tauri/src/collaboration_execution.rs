@@ -789,24 +789,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     let attempt_deadline_reached = attempt_deadline_reached.load(Ordering::Acquire);
     match response {
         Ok(response) => {
-            let mut usage = Metadata::new();
-            for key in [
-                "prompt_tokens",
-                "completion_tokens",
-                "total_tokens",
-                "usage_source",
-                "usage_estimated",
-                "provider_response_id",
-                "provider_response_model",
-                "provider_system_fingerprint",
-                "request_payload_sha256",
-                "response_semantic_sha256",
-                "provider_receipt_status",
-            ] {
-                if let Some(value) = response.metadata.get(key) {
-                    usage.insert(key.to_string(), value.clone());
-                }
-            }
+            let mut usage = collaboration_usage_metadata(&response.metadata, &model);
             if let Some(first_delta_at_ms) = first_delta_at_ms {
                 usage.insert(
                     "first_token_latency_ms".to_string(),
@@ -928,6 +911,28 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     }
 }
 
+fn collaboration_usage_metadata(response_metadata: &Metadata, configured_model: &str) -> Metadata {
+    let mut usage = Metadata::from([("model".to_string(), configured_model.to_string())]);
+    for key in [
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "usage_source",
+        "usage_estimated",
+        "provider_response_id",
+        "provider_response_model",
+        "provider_system_fingerprint",
+        "request_payload_sha256",
+        "response_semantic_sha256",
+        "provider_receipt_status",
+    ] {
+        if let Some(value) = response_metadata.get(key) {
+            usage.insert(key.to_string(), value.clone());
+        }
+    }
+    usage
+}
+
 fn no_tool_collaboration_content(
     response: model_provider::ModelResponse,
     role_name: &str,
@@ -970,6 +975,26 @@ fn no_tool_collaboration_content(
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+
+    #[test]
+    fn collaboration_usage_binds_the_configured_model_with_provider_receipts() {
+        let response = Metadata::from([
+            ("provider_response_id".to_string(), "response-1".to_string()),
+            ("request_payload_sha256".to_string(), "a".repeat(64)),
+            ("response_semantic_sha256".to_string(), "b".repeat(64)),
+            (
+                "provider_receipt_status".to_string(),
+                "observed".to_string(),
+            ),
+        ]);
+
+        let usage = collaboration_usage_metadata(&response, "configured-model");
+
+        assert_eq!(usage["model"], "configured-model");
+        assert_eq!(usage["provider_response_id"], "response-1");
+        assert_eq!(usage["request_payload_sha256"], "a".repeat(64));
+        assert_eq!(usage["response_semantic_sha256"], "b".repeat(64));
+    }
 
     fn synthesis_runtime(status: &str) -> (agent_runtime::AgentLoopState, u64) {
         let mut runtime = agent_runtime::start_agent_loop(
