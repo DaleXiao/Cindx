@@ -71,6 +71,45 @@ function errorKind(value) {
   return "runtime";
 }
 
+function runErrorKind(run) {
+  if (run.setup_failure?.code) return run.setup_failure.code;
+  if (run.terminal_status === "timed_out") return "timeout";
+  return errorKind(run.error);
+}
+
+function valueCounts(values) {
+  const counts = {};
+  for (const value of values) {
+    if (value == null) continue;
+    counts[value] = (counts[value] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function summarizeOutcomes(runs, treatments) {
+  const summarize = (selected) => ({
+    runs: selected.length,
+    completed_runs: selected.filter((run) => run.completed).length,
+    non_completed_runs: selected.filter((run) => !run.completed).length,
+    terminal_status_counts: valueCounts(selected.map((run) => run.terminal_status)),
+    error_kind_counts: valueCounts(selected.map(runErrorKind)),
+    setup_failures: selected.filter((run) => run.setup_failure != null).length
+  });
+  return {
+    ...summarize(runs),
+    timeouts: runs.filter((run) => run.terminal_status === "timed_out").length,
+    permission_waits: runs.filter(
+      (run) => run.terminal_status === "waiting_for_permission"
+    ).length,
+    by_treatment: Object.fromEntries(
+      treatments.map((treatment) => [
+        treatment,
+        summarize(runs.filter((run) => run.treatment === treatment))
+      ])
+    )
+  };
+}
+
 function validateSetupFailure(run, key, infrastructureFailed) {
   if (!infrastructureFailed) {
     requireFact(run.setup_failure == null, `${key}: non-setup run must not report setup failure`);
@@ -254,6 +293,7 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
   requireFact(typeof raw.app_version === "string" && raw.app_version.length > 0, "app version is missing");
   requireFact(typeof raw.provider_id === "string" && raw.provider_id.length > 0, "provider id is missing");
   requireFact(endpointIdentity(raw.provider_endpoint) !== "invalid-endpoint", "provider endpoint is invalid");
+  finiteNonNegative(raw.generated_at_ms, "capture time");
   requireFact(raw.requested_replicates === suite.default_replicates, "replicate count drifted from suite");
   requireFact(
     JSON.stringify(raw.selected_cases) === JSON.stringify(suite.cases.map((testCase) => testCase.id)),
@@ -305,15 +345,18 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       run.terminal_status === "infrastructure_failed" ||
       (run.treatment !== "direct" && run.verification.external_effect_passed === null)
   );
+  const outcomes = summarizeOutcomes(orderedRuns, suite.treatments);
   return {
     schema: "cindx.agent-realworld-sanitized.v1",
     suite: {
       id: suite.id,
       version: suite.version,
+      description: suite.description,
       sha256: raw.suite_sha256,
       cases: suite.cases.map((testCase) => ({ id: testCase.id, category: testCase.category })),
       treatments: suite.treatments,
-      replicates: suite.default_replicates
+      replicates: suite.default_replicates,
+      per_run_timeout_seconds: suite.per_run_timeout_seconds
     },
     evidence: {
       raw_sha256: sha256(rawBytes),
@@ -336,12 +379,16 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
             ? "VALID_BASELINE"
             : "SAFETY_FAILURE",
       safety_violations: safetyViolations,
+      uplift_status: "NO_GO",
+      uplift_reason:
+        "This descriptive V2 baseline has no preregistered promotion threshold and cannot authorize a broad orchestration-uplift claim.",
       claim_boundary:
         incompleteRuns.length > 0
           ? "Infrastructure failures make this matrix invalid for capability promotion or treatment comparison."
           : "This is a matched product baseline, not evidence of Fugu Ultra parity or causal intelligence uplift."
     },
     aggregates,
+    outcomes,
     by_category: Object.fromEntries(
       [...new Set(suite.cases.map((testCase) => testCase.category))].map((category) => [
         category,
@@ -378,7 +425,7 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
             retryable: run.setup_failure.retryable
           }
         : null,
-      error_kind: run.setup_failure?.code ?? errorKind(run.error),
+      error_kind: runErrorKind(run),
       metrics: run.metrics,
       verification: run.verification
     }))
@@ -389,6 +436,21 @@ function percent(value) {
   return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
 }
 
+function signedPercent(value) {
+  if (value === null) return "n/a";
+  const percentage = value * 100;
+  return `${percentage >= 0 ? "+" : ""}${percentage.toFixed(1)} pp`;
+}
+
+function signedMilliseconds(value) {
+  if (value === null) return "n/a";
+  return `${value >= 0 ? "+" : ""}${value} ms`;
+}
+
+function statusCount(outcome, status) {
+  return outcome.terminal_status_counts[status] ?? 0;
+}
+
 export function renderMarkdown(report) {
   const reportKind = report.decision.status === "VALID_BASELINE" ? "Baseline" : "Evaluation";
   const lines = [
@@ -396,19 +458,37 @@ export function renderMarkdown(report) {
     "",
     "## Evidence",
     "",
+    `- Application version: \`${report.evidence.app_version}\``,
     `- Status: **${report.decision.status}**`,
+    `- Capture time: \`${new Date(report.evidence.generated_at_ms).toISOString()}\``,
     `- Git commit: \`${report.evidence.git_commit}\``,
     `- Frozen suite: \`${report.suite.id}@${report.suite.version}\` (\`${report.suite.sha256}\`)`,
+    `- Suite scope: ${report.suite.description}`,
     `- Raw evidence SHA-256: \`${report.evidence.raw_sha256}\``,
     `- Matrix: ${report.suite.cases.length} cases × ${report.suite.treatments.length} treatments × ${report.suite.replicates} replicates`,
-    `- Incomplete or unverified runs: ${report.evidence.incomplete_runs}`,
+    `- Missing or structurally unverifiable cells: ${report.evidence.incomplete_runs}`,
+    `- Non-completed runs retained in the denominator: ${report.outcomes.non_completed_runs}`,
     `- Provider: ${report.evidence.provider_id} (${report.evidence.provider_endpoint})`,
+    "",
+    "## Treatment Configuration and Budget",
+    "",
+    "- Direct is a single-model, no-tools reference with fixture evidence supplied inline; it is not a shipping product treatment.",
+    "- Fast, Auto, and Pro execute the shipping AgentKernel, tool, retrieval, memory, and permission paths with their native effort policies.",
+    `- Every cell has the same outer process deadline of ${report.suite.per_run_timeout_seconds} seconds. Native effort budgets remain different, so this is a matched shipping-treatment baseline, not an iso-budget comparison.`,
+    "",
+    "| Model role | Configured model |",
+    "| --- | --- |"
+  ];
+  for (const [role, model] of Object.entries(report.evidence.configured_models)) {
+    lines.push(`| ${role} | ${model} |`);
+  }
+  lines.push(
     "",
     "## Treatment Results",
     "",
     "| Treatment | Complete | Quality | External effect | Safety violations | Median latency | P95 latency | Tokens | Model calls | Tool calls |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
-  ];
+  );
   for (const treatment of report.suite.treatments) {
     const result = report.aggregates[treatment];
     lines.push(
@@ -416,6 +496,22 @@ export function renderMarkdown(report) {
     );
   }
   lines.push(
+    "",
+    "## Failure and Permission Outcomes",
+    "",
+    "| Treatment | Completed | Failed | Timed out | Waiting for permission | Setup failures | Permission requests | Denied |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+  );
+  for (const treatment of report.suite.treatments) {
+    const outcome = report.outcomes.by_treatment[treatment];
+    const aggregate = report.aggregates[treatment];
+    lines.push(
+      `| ${treatment} | ${outcome.completed_runs} | ${statusCount(outcome, "failed")} | ${statusCount(outcome, "timed_out")} | ${statusCount(outcome, "waiting_for_permission")} | ${outcome.setup_failures} | ${aggregate.permission_requests} | ${aggregate.denied_permissions} |`
+    );
+  }
+  lines.push(
+    "",
+    `Total: ${report.outcomes.completed_runs} completed, ${report.outcomes.non_completed_runs} non-completed, ${report.outcomes.timeouts} timed out, ${report.outcomes.permission_waits} waiting for permission, and ${report.outcomes.setup_failures} setup failures.`,
     "",
     "## Category Quality",
     "",
@@ -428,6 +524,33 @@ export function renderMarkdown(report) {
     );
   }
   lines.push(
+    "",
+    "## Paired Against Fast",
+    "",
+    "| Treatment | Pairs | Quality delta | Completion delta | Median latency delta |",
+    "| --- | ---: | ---: | ---: | ---: |"
+  );
+  for (const treatment of ["auto", "pro"]) {
+    const paired = report.paired_against_fast[treatment];
+    lines.push(
+      `| ${treatment} | ${paired.pairs} | ${signedPercent(paired.quality_pass_delta)} | ${signedPercent(paired.completion_delta)} | ${signedMilliseconds(paired.median_latency_delta_ms)} |`
+    );
+  }
+  lines.push(
+    "",
+    "## Decisions",
+    "",
+    `- Baseline validity: **${report.decision.status}**`,
+    `- Broad orchestration uplift: **${report.decision.uplift_status.replace("_", "-")}**`,
+    `- Uplift rationale: ${report.decision.uplift_reason}`,
+    "",
+    "## Confounds",
+    "",
+    "- Cells ran serially in one frozen order against one provider and one configured role-model set; provider and browser conditions can vary over time.",
+    "- The suite contains one fixture per category with three repeats, so category estimates are narrow.",
+    "- Direct receives inline fixture evidence and no tools, so it is a reference ceiling rather than an equal product treatment.",
+    `- The ${report.suite.per_run_timeout_seconds}-second process deadline is matched, but Fast, Auto, and Pro retain different shipping budgets; timed-out cells can under-report token, call, and resource totals.`,
+    "- Raw v1 evidence does not capture learned profile or GEPA identities, so results cannot be attributed to GEPA, transfer, or self-distillation.",
     "",
     "## Interpretation Boundary",
     "",

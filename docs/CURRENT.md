@@ -186,54 +186,40 @@ Learned genomes, datasets, observations, and rollout state are isolated by
 project. A reflective mutation produced from one project's evidence cannot
 enter another project's candidate population, evaluation, or rollout.
 
-The latest provider-backed baseline recorded `auto_gepa=false` and
-`pro_gepa=false`; it predates the Auto-to-Pro transfer path. Deterministic tests
-prove the transfer boundary, evidence isolation, promotion gates, snapshot
-lineage, canonical event projection, project-isolated scheduling, mutation
-anti-memorization boundary, and mutation-input allocation. There is still no
-provider-backed matched evidence that an evolved profile improves external
-product quality.
+The latest provider-backed raw schema did not capture learned profile or GEPA
+identities. Deterministic tests prove the transfer boundary, evidence isolation,
+promotion gates, snapshot lineage, canonical event projection, project-isolated
+scheduling, mutation anti-memorization boundary, and mutation-input allocation,
+but the current baseline cannot attribute an outcome to GEPA, transfer, or
+self-distillation. There is still no provider-backed matched evidence that an
+identified evolved profile improves external product quality.
 
 ## Current Evidence Boundary
 
-The latest provider-backed diagnostic is the
-[13A repair calibration for 0.1.95](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md).
-Its exact six-cell rerun is not a baseline. All six runs completed with every
-deterministic check passing and no safety violation; the three long-horizon
-runs no longer created the false external-grounding obligation recorded by the
-[0.1.94 pilot](evaluations/CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md).
-The repair permits frozen matrix expansion but does not establish an Auto or
-Pro uplift.
+The latest provider-backed Agent baseline is
+[Cindx Agent Real-World V2 0.1.98](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md),
+captured on source commit `4fc736cdfd0b8eb85ffee0a9ef5dfaea4b05e469`.
+It retained all 72 matched cells across Direct, Fast, Auto, and Pro, with zero
+setup failures and zero safety violations. The publication contract marks it
+`VALID_BASELINE`; the independent broad orchestration-uplift decision is
+`NO-GO`.
 
-The latest provider-backed collection attempt is
-[Cindx Agent Real-World V2 0.1.82](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md).
-It executed all 72 cells on source commit `6b2ee39`, but four Auto/Pro
-RAG-memory cells failed during setup. The publication contract therefore marks
-it `INVALID_BASELINE`; it cannot support capability promotion, treatment
-comparison, or an intelligence-uplift claim. It is retained because the setup
-failures, browser tail latency, and missing Fast permission-denial evidence are
-actionable product evidence.
+- Direct, Fast, Auto, and Pro scored `100.0%`, `77.8%`, `88.9%`, and `83.3%`
+  quality, with `100.0%`, `88.9%`, `66.7%`, and `61.1%` completion.
+- Relative to Fast, Auto gained `11.1` quality points, lost `22.2` completion
+  points, and added `24.663 s` paired median latency.
+- Relative to Fast, Pro gained `5.6` quality points, lost `27.8` completion
+  points, and added `41.396 s` paired median latency.
+- Fast failed the RAG/memory answer check in all three repeats; Auto and Pro
+  passed all three after successful setup.
+- Browser evidence remained the dominant failure: Fast passed `2/3`, Auto
+  `1/3`, and Pro `0/3`; Pro reached the 600-second process deadline three times.
+- All product treatments safely passed the denied-mutation verifier, but Auto
+  and Pro did not converge to a successful terminal runtime state after denial.
 
-The latest complete provider-backed Agent baseline remains
-[Cindx Agent Real-World V1 0.1.82](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md).
-It ran six frozen tasks across Direct, Fast, Auto, and Pro with three matched
-repeats on source commit `4d43e77`, for 72 observations:
-
-- Direct scored `88.9%`, but is a no-tools answer ceiling with evidence inline;
-- Fast, Auto, and Pro each scored `72.2%` on the complete matrix;
-- relative to Fast, Auto had equal quality, `11.1` points lower completion, and
-  `14.3 s` higher paired median latency;
-- relative to Fast, Pro had equal quality, `5.6` points lower completion, and
-  `18.0 s` higher paired median latency;
-- all product treatments passed file, long-horizon, RAG/memory, and denied
-  mutation cases; browser evidence was the dominant failure domain;
-- no denied-mutation safety violation occurred.
-
-Seven coding failures are conservative instrumentation failures: file and test
-checks passed, but the frozen suite did not accept `file.read_many` as read
-evidence. The score remains published unchanged. This defect must be corrected
-in a new suite version before collecting the next matrix; it must not be fixed
-retroactively to improve this result.
+The earlier [13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md)
+remains the exact pre-matrix repair evidence. The invalid `0.1.82` V2 attempt
+and complete V1 matrix remain historical reports for their own revisions.
 
 The latest matched GPQA diagnostic is version `0.1.78`: Direct scored `10/12`,
 while Auto and Pro each scored `8/12` under the budget. The sample is too small
@@ -243,10 +229,12 @@ Therefore the current claim is:
 
 - The control plane, local memory contract, permission boundary, and
   deterministic quality gates have substantial automated coverage.
-- Auto can gather the required evidence in this small matrix, but Auto and Pro
-  are not proven to outperform the direct path in quality, latency, or tokens.
-- Auto and Pro are not proven to outperform Fast; both matched Fast quality and
-  regressed in completion and latency in the current matrix.
+- Auto shows a real RAG/memory quality signal in this small matrix, but its
+  overall completion and latency regress materially against Fast.
+- Pro does not provide a broad product advantage over Fast or Auto in the
+  current matrix; its browser completion is the clearest measured weakness.
+- No current provider-backed result identifies an evolved profile or proves a
+  GEPA, transfer, or self-distillation gain.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
