@@ -5,8 +5,19 @@ source revision and application version recorded inside them.
 
 ## Current Product Decision
 
-- [Cindx Agent Real-World V2 0.1.98](CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md)
+- [Cindx Agent Real-World V3 0.2.3](CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md)
   is the current 72-cell provider-backed baseline on source commit
+  `af5025f46137096c34bd5dd4f70a89657713fde4`. The cyclic Latin-square matrix
+  retained every failure, with zero setup failures and zero safety violations,
+  so scientific validity is `VALID_BASELINE`. Auto and Pro each gained two
+  quality-pass runs over Fast but lost two completed runs; five browser
+  timeouts also failed the preregistered receipt gate. Broad orchestration
+  uplift is `NO-GO`, and the absence of a frozen learned artifact makes the
+  learned-profile status `FRESH-SEED-ONLY`.
+- [Sanitized V3 0.2.3 machine-readable result](CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.json)
+
+- [Cindx Agent Real-World V2 0.1.98](CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md)
+  is the previous 72-cell provider-backed baseline on source commit
   `4fc736cdfd0b8eb85ffee0a9ef5dfaea4b05e469`.
   All cells were retained, with zero setup failures and zero safety violations,
   so the scientific-validity decision is `VALID_BASELINE`. Auto and Pro gained

@@ -8,6 +8,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
+| [Agent Real-World V3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md) | `0.2.3` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 position-balanced provider-backed runs with strategy and provider receipts | `VALID_BASELINE`, zero setup failures, and zero safety violations; receipt evidence fails closed on five browser timeouts, Auto/Pro lose completion despite quality gains, and broad orchestration uplift remains `NO-GO`; no learned artifact was supplied |
 | [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md) | `0.1.98` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 provider-backed runs | `VALID_BASELINE` with zero setup failures and zero safety violations; Auto/Pro trade quality gains for materially lower completion and higher latency, so broad orchestration uplift remains `NO-GO` |
 | [13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md) | `0.1.95` | Exact repair rerun: 2 frozen tool tasks; Fast/Auto/Pro; 6 provider-backed runs | All 6 completed with 7/7 checks and no safety violation; false external grounding is closed on the frozen case; `CALIBRATION_GO` for matrix expansion only |
 | [13A calibration pilot](evaluations/CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md) | `0.1.94` | 2 frozen tool tasks; Fast/Auto/Pro; 6 provider-backed runs | Coding passed in all modes; all long-horizon effects verified but terminal completion failed on the shared external-grounding contract; `CALIBRATION_NO_GO` for matrix expansion |
@@ -16,13 +17,14 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
-The `0.1.98` V2 matrix is the latest complete provider-backed product baseline.
+The `0.2.3` V3 matrix is the latest complete provider-backed product baseline.
 All 72 cells were retained, with no setup failure and no safety violation. Its
-`VALID_BASELINE` status means the evidence is structurally usable; it is not a
-capability `GO`. Relative to Fast, Auto gained `11.1` quality points while
-losing `22.2` completion points and adding `24.663 s` paired median latency.
-Pro gained `5.6` quality points while losing `27.8` completion points and
-adding `41.396 s`. Broad orchestration uplift therefore remains `NO-GO`.
+`VALID_BASELINE` status means the matrix is structurally usable; it is not a
+capability `GO`. Relative to Fast, Auto and Pro each gained `11.1` quality
+points while losing `11.1` completion points and adding `28.163 s` and
+`35.744 s` paired median latency, respectively. Five browser timeouts did not
+reach receipt collection, so the preregistered receipt gate also fails closed.
+Broad orchestration uplift therefore remains `NO-GO`.
 
 The `0.1.95` 13A repair calibration remains the before-matrix confirmation
 that false external grounding was closed on its exact six-run subset. The
@@ -110,41 +112,35 @@ reports are immutable and live under `evaluations/archive/`.
 
 ## Current Real-World Findings
 
-The `0.1.98` V2 baseline contains 72 matched observations. Direct, Fast, Auto,
-and Pro passed `100.0%`, `77.8%`, `88.9%`, and `83.3%` of quality checks.
-Completion was `100.0%`, `88.9%`, `66.7%`, and `61.1%`, respectively. The
-matrix retained 57 completed runs, 10 failed runs, four timeouts, and one run
-waiting for permission. There were no setup failures and no safety violations.
+The `0.2.3` V3 baseline contains 72 position-balanced observations. Direct,
+Fast, Auto, and Pro passed `100.0%`, `72.2%`, `83.3%`, and `83.3%` of quality
+checks. Completion was `100.0%`, `77.8%`, `66.7%`, and `66.7%`, respectively.
+The matrix retained 56 completed runs, 10 failed runs, five timeouts, and one
+run waiting for permission. There were no setup failures and no safety
+violations.
 
-The quality signal is localized rather than broad. Fast failed the RAG/memory
-answer check in all three repeats after setup and execution succeeded, while
-Auto and Pro passed all three. Browser evidence moved in the opposite
-direction: Fast passed `2/3`, Auto `1/3`, and Pro `0/3`; all three Pro browser
-runs reached the frozen 600-second process deadline. Auto and Pro also verified
-the denied-mutation result safely in all repeats but failed to converge on a
-successful terminal runtime state after denial. Those are product behavior
-failures, not evaluation infrastructure failures.
+The signal remains category-specific. Auto and Pro passed all three RAG/memory
+checks where Fast passed none, and all shipping treatments passed all coding
+checks. Browser behavior moved in the opposite direction: Fast passed `2/3`
+quality checks but completed none, while Auto and Pro passed none and completed
+none. All three Pro browser runs reached the frozen 600-second deadline. Auto
+and Pro also verified the denied-mutation effect safely in every repeat but did
+not reach a successful terminal state after denial.
 
-Relative to Fast, neither adaptive treatment improves quality, completion, and
-latency together. The effective 600-second process deadline is matched, but the
-three shipping modes retain different native budgets, so this is not an
-iso-budget causal comparison. Timed-out processes can also under-report token,
-call, and resource totals. The valid scientific conclusion is therefore a
-descriptive baseline; the product-uplift decision remains `NO-GO`.
+Relative to Fast, Auto and Pro each add two quality-pass runs but lose two
+completed runs. Their median latency ratios are `2.60` and `2.67`; token ratios
+are `0.95` and `0.55`, within the separate preregistered ceilings. Because
+completion non-regression fails, neither candidate is eligible. Five browser
+timeouts produced no provider or strategy receipts, which independently makes
+the receipt-evidence gate fail closed. Those timeouts remain product failures
+in the denominator rather than evaluation infrastructure failures.
 
-No run violated the denied-mutation safety check. That is positive evidence for
-this exact permission path, not proof of complete runtime security. The next
-Agent goals have concrete measured targets: value-aware routing must preserve
-the RAG gain without paying browser and completion regressions, permission
-denial must converge to a truthful terminal state, and learned profiles must be
-identified in future provider-backed evidence before any GEPA claim.
-
-The current source implements the first mechanism as an observable Auto
-value-of-computation admission step and adds a no-progress boundary for a
-single configured conductor. Deterministic tests prove downshift behavior,
-capability and grounding preservation, serial-effect protection, monotonic
-resource cost, and metadata only. Until a fresh matched provider run measures
-this revision, the `0.1.98` `NO-GO` conclusion remains the product evidence.
+No frozen Auto or Pro profile artifact was supplied. Strategy receipts identify
+the actual fresh-seed decisions and profiles used by runs that reached evidence
+collection, but V3 provides no evidence of GEPA learning, transfer,
+self-distillation, learned-profile uplift, or Fugu parity. The next measured
+target is therefore narrow: preserve the RAG gain while making browser and
+post-denial convergence at least non-regressive against Fast.
 
 ## Current Product Gate
 
@@ -177,12 +173,11 @@ support a GEPA, transfer, self-distillation, or learned-profile claim. A frozen
 artifact authorizes conclusions only about that exact artifact; it does not
 establish general learning uplift or Fugu parity.
 
-The `0.1.98` V2 collection remains the latest complete provider-backed product
-baseline until a complete V3 report is retained. The earlier `0.1.82` V2
-attempt remains invalid historical evidence and does not affect the current
-decision. V2 and V3 cover structured file mutation, code edit plus tests,
-browser evidence, long-horizon migration, indexed knowledge plus cross-session
-memory, and denied mutation.
+The `0.2.3` V3 collection is the latest complete provider-backed product
+baseline. The `0.1.98` V2 baseline remains historical evidence for its source
+revision, and the earlier `0.1.82` V2 attempt remains invalid. V2 and V3 cover
+structured file mutation, code edit plus tests, browser evidence, long-horizon
+migration, indexed knowledge plus cross-session memory, and denied mutation.
 
 The feature-gated `cindx-agent-realworld-eval` binary drives the shipping Agent,
 tool, permission, RAG, and memory paths. Direct is explicitly marked as a
@@ -201,9 +196,9 @@ the sample's unique temporary root so one treatment cannot contaminate the
 resources or state of the next.
 
 The current provider-backed matrix is recorded in
-[Agent Real-World V2 0.1.98](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md)
-with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.json).
-The invalid `0.1.82` V2 attempt and complete V1 baseline remain linked in the
+[Agent Real-World V3 0.2.3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md)
+with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.json).
+The `0.1.98` V2 baseline, invalid `0.1.82` V2 attempt, and complete V1 baseline remain linked in the
 [evaluation index](evaluations/README.md) as immutable historical evidence.
 Cancellation, interruption/resume, user steering, computer interaction, and
 adversarial instruction resistance still require later frozen suites; they
