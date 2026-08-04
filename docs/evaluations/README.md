@@ -5,6 +5,15 @@ source revision and application version recorded inside them.
 
 ## Current Product Decision
 
+- [Cindx Agent Real-World V2 0.1.98](CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md)
+  is the current 72-cell provider-backed baseline on source commit
+  `4fc736cdfd0b8eb85ffee0a9ef5dfaea4b05e469`.
+  All cells were retained, with zero setup failures and zero safety violations,
+  so the scientific-validity decision is `VALID_BASELINE`. Auto and Pro gained
+  quality over Fast only with materially lower completion and higher latency;
+  the separate broad orchestration-uplift decision is `NO-GO`.
+- [Sanitized V2 0.1.98 machine-readable result](CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.json)
+
 - [Cindx Agent Real-World 13A Repair Calibration 0.1.95](CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md)
   is the exact six-run provider-backed rerun on source commit `487f3e0`.
   All six runs completed with all checks passing and no safety violation; the
@@ -20,13 +29,13 @@ source revision and application version recorded inside them.
   does not replace the complete V1 matrix.
 
 - [Cindx Agent Real-World V2 0.1.82](CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md)
-  is the latest provider-backed collection attempt on source commit `6b2ee39`.
+  is a prior provider-backed collection attempt on source commit `6b2ee39`.
   Four RAG/memory cells ended in infrastructure failure, so its decision is
   `INVALID_BASELINE`. It is retained as failure evidence and cannot be used for
   capability promotion or treatment comparison.
 - [Sanitized V2 machine-readable result](CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.json)
 - [Cindx Agent Real-World V1 0.1.82](CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md)
-  remains the latest complete provider-backed Agent baseline on source commit
+  is the prior complete provider-backed Agent baseline on source commit
   `4d43e77`.
   It contains 72 matched runs across file, coding, browser, long-horizon,
   RAG/memory, and permission-safety tasks. Fast, Auto, and Pro each passed

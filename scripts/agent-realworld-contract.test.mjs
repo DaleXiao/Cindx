@@ -101,12 +101,23 @@ test("validates the complete matrix and removes private output", () => {
   assert.equal(report.decision.status, "VALID_BASELINE");
   assert.equal(report.aggregates.fast.quality_pass_rate, 1);
   assert.equal(report.paired_against_fast.pro.quality_pass_delta, 0);
+  assert.equal(report.suite.per_run_timeout_seconds, 600);
+  assert.equal(report.outcomes.completed_runs, 4);
+  assert.equal(report.outcomes.non_completed_runs, 0);
+  assert.equal(report.decision.uplift_status, "NO_GO");
   assert.equal(report.runs[0].output, undefined);
   assert.equal(report.runs[0].error, undefined);
   assert.equal(report.evidence.provider_endpoint, "https://example.test/v1");
   const markdown = renderMarkdown(report);
   assert.match(markdown, /\| Treatment \| Complete \| Quality \| External effect \| Safety violations \|/);
   assert.match(markdown, /\| coding \| 100\.0% \| 100\.0% \| 100\.0% \| 100\.0% \|/);
+  assert.match(markdown, /Capture time: `1970-01-01T00:00:00\.001Z`/);
+  assert.match(markdown, /## Treatment Configuration and Budget/);
+  assert.match(markdown, /## Failure and Permission Outcomes/);
+  assert.match(markdown, /## Paired Against Fast/);
+  assert.match(markdown, /## Confounds/);
+  assert.match(markdown, /Broad orchestration uplift: \*\*NO-GO\*\*/);
+  assert.doesNotMatch(markdown, /private answer|secret|key=private/);
 });
 
 test("accepts legacy raw without setup failure and keeps error classification", () => {
@@ -123,7 +134,25 @@ test("accepts legacy raw without setup failure and keeps error classification", 
   const report = validateAndSanitize(legacy);
   assert.equal(report.runs[1].setup_failure, null);
   assert.equal(report.runs[1].error_kind, "timeout");
+  assert.equal(report.outcomes.by_treatment.fast.error_kind_counts.timeout, 1);
   assert.equal(report.runs[1].error, undefined);
+});
+
+test("classifies a frozen-deadline terminal status as a timeout", () => {
+  const timedOut = fixture();
+  const failed = timedOut.raw.runs[2];
+  failed.completed = false;
+  failed.terminal_status = "timed_out";
+  failed.error = "evaluation process exceeded the frozen 600s deadline";
+  failed.verification.quality_passed = false;
+  failed.verification.answer_passed = false;
+  failed.verification.external_effect_passed = false;
+  timedOut.rawBytes = Buffer.from(JSON.stringify(timedOut.raw));
+
+  const report = validateAndSanitize(timedOut);
+  assert.equal(report.runs[2].error_kind, "timeout");
+  assert.equal(report.outcomes.timeouts, 1);
+  assert.equal(report.outcomes.by_treatment.auto.terminal_status_counts.timed_out, 1);
 });
 
 test("rejects incomplete and tampered evidence", () => {
@@ -145,6 +174,7 @@ test("records safety failures without hiding the measured run", () => {
   const report = validateAndSanitize(unsafe);
   assert.equal(report.decision.status, "SAFETY_FAILURE");
   assert.equal(report.decision.safety_violations, 1);
+  assert.equal(report.decision.uplift_status, "NO_GO");
 });
 
 test("publishes infrastructure failures only as an invalid baseline", () => {
@@ -165,6 +195,8 @@ test("publishes infrastructure failures only as an invalid baseline", () => {
   assert.equal(report.decision.status, "INVALID_BASELINE");
   assert.equal(report.evidence.complete_matrix, false);
   assert.equal(report.evidence.incomplete_runs, 1);
+  assert.equal(report.outcomes.setup_failures, 1);
+  assert.equal(report.decision.uplift_status, "NO_GO");
   assert.deepEqual(report.runs[2].setup_failure, {
     stage: "memory_seed",
     code: "transient",
@@ -176,7 +208,7 @@ test("publishes infrastructure failures only as an invalid baseline", () => {
   assert.match(report.decision.claim_boundary, /invalid for capability promotion/);
   const markdown = renderMarkdown(report);
   assert.match(markdown, /^# Cindx Agent Real-World Evaluation /);
-  assert.match(markdown, /Incomplete or unverified runs: 1/);
+  assert.match(markdown, /Missing or structurally unverifiable cells: 1/);
 });
 
 test("single-cell environment isolates evaluation data after provider loading", () => {

@@ -8,34 +8,35 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
+| [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md) | `0.1.98` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 provider-backed runs | `VALID_BASELINE` with zero setup failures and zero safety violations; Auto/Pro trade quality gains for materially lower completion and higher latency, so broad orchestration uplift remains `NO-GO` |
 | [13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md) | `0.1.95` | Exact repair rerun: 2 frozen tool tasks; Fast/Auto/Pro; 6 provider-backed runs | All 6 completed with 7/7 checks and no safety violation; false external grounding is closed on the frozen case; `CALIBRATION_GO` for matrix expansion only |
 | [13A calibration pilot](evaluations/CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md) | `0.1.94` | 2 frozen tool tasks; Fast/Auto/Pro; 6 provider-backed runs | Coding passed in all modes; all long-horizon effects verified but terminal completion failed on the shared external-grounding contract; `CALIBRATION_NO_GO` for matrix expansion |
-| [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md) | `0.1.82` | Same 72-cell product matrix with corrected read-evidence equivalence | Latest collection attempt; four infrastructure-failed RAG/memory cells make it `INVALID_BASELINE`; retained for diagnosis only |
+| [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md) | `0.1.82` | Prior 72-cell V2 attempt | Four infrastructure-failed RAG/memory cells make it `INVALID_BASELINE`; retained for diagnosis only |
 | [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md) | `0.1.82` | 6 tool, state, memory, and safety tasks; Direct/Fast/Auto/Pro; 72 matched runs | Fast, Auto, and Pro each scored `72.2%`; Auto and Pro added no quality over Fast and had lower completion plus higher latency; `NO-GO` for orchestration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
-The `0.1.95` 13A repair calibration is the latest provider-backed diagnostic,
-but its six-run subset is intentionally too small to become a baseline. It
-closes the shared false external-grounding failure on the exact frozen rerun:
-all treatments completed both tasks without safety or deterministic quality
-failure. That result permits matrix expansion but does not establish Auto/Pro
-uplift. The `0.1.94` pilot remains the before-repair failure evidence.
+The `0.1.98` V2 matrix is the latest complete provider-backed product baseline.
+All 72 cells were retained, with no setup failure and no safety violation. Its
+`VALID_BASELINE` status means the evidence is structurally usable; it is not a
+capability `GO`. Relative to Fast, Auto gained `11.1` quality points while
+losing `22.2` completion points and adding `24.663 s` paired median latency.
+Pro gained `5.6` quality points while losing `27.8` completion points and
+adding `41.396 s`. Broad orchestration uplift therefore remains `NO-GO`.
 
-The real-world V2 collection is the latest full-matrix attempt, but it is not a baseline:
-four cells failed during memory setup, before product behavior could be
-verified. The real-world V1 matrix therefore remains the latest complete
-product decision baseline because it exercises shipping Agent, tool,
-permission, RAG, and memory paths. Direct is a
-no-tools answer ceiling with task evidence supplied inline, not an equal
-product treatment. The GPQA run is older and measures difficult question
-answering without tools.
+The `0.1.95` 13A repair calibration remains the before-matrix confirmation
+that false external grounding was closed on its exact six-run subset. The
+older invalid V2 attempt and complete V1 matrix remain historical evidence for
+their source revisions. Direct is a no-tools answer reference with fixture
+evidence supplied inline, not an equal product treatment. The GPQA run is an
+older difficult-question diagnostic without tools.
 
-Neither report used a promoted GEPA profile. Neither report establishes Fugu
-Ultra parity.
+The V2 raw schema did not capture learned profile or GEPA identities. The
+result therefore cannot be attributed to GEPA, transfer, self-distillation, or
+a particular promoted profile, and it does not establish Fugu Ultra parity.
 
-The current source adds an Auto-to-Pro transfer gate after those reports. Its
-deterministic tests establish evidence qualification, lineage isolation,
+The current source contains an Auto-to-Pro transfer gate. Its deterministic
+tests establish evidence qualification, lineage isolation,
 position-balanced comparison, dual-gate promotion, frozen provenance, and
 reserved mutation input. Those are mechanism checks, not answer-quality
 evidence. A future provider-backed treatment must compare the pre-transfer Pro
@@ -89,57 +90,51 @@ Every retained provider-backed report must include:
 - raw-evidence digest while keeping secrets and protected benchmark content out
   of Git;
 - explicit confounds and claim boundary;
-- a decision, including `NO-GO` when evidence is insufficient or negative.
+- a scientific-validity decision and a separate product-uplift decision,
+  including `NO-GO` when evidence is insufficient or negative.
 
 Reports with an unknown source revision are not project evidence. Historical
 reports are immutable and live under `evaluations/archive/`.
 
 ## Current Real-World Findings
 
-The latest V2 collection executed all 72 cells once and retained every result.
-Four Auto/Pro RAG-memory cells ended in infrastructure failure, so the contract
-marks the whole collection `INVALID_BASELINE`; no rerun was used to replace
-those failures. Descriptively, Direct, Fast, Auto, and Pro passed `88.9%`,
-`72.2%`, `77.8%`, and `66.7%` of quality checks, but those rates are not valid
-for promotion or treatment comparison because the matrix is incomplete. The
-collection also exposed one Fast safety-verifier failure: the protected file
-was not changed, but the run never produced the required denied-permission
-evidence. Browser runs again dominated tail latency and failure. These are
-diagnostic findings, not an intelligence-uplift result.
+The `0.1.98` V2 baseline contains 72 matched observations. Direct, Fast, Auto,
+and Pro passed `100.0%`, `77.8%`, `88.9%`, and `83.3%` of quality checks.
+Completion was `100.0%`, `88.9%`, `66.7%`, and `61.1%`, respectively. The
+matrix retained 57 completed runs, 10 failed runs, four timeouts, and one run
+waiting for permission. There were no setup failures and no safety violations.
 
-The latest complete `0.1.82` V1 matrix contains 72 matched runs: six frozen cases, four treatments,
-and three repeats. Fast, Auto, and Pro each passed `72.2%` of the complete
-matrix. Relative to Fast, Auto added `0.0` percentage points of quality, lost
-`11.1` points of completion, and added `14.3 s` paired median latency. Pro added
-`0.0` points of quality, lost `5.6` points of completion, and added `18.0 s`.
-Pro also consumed `1,765,259` tokens and recorded `1,296` recovery events,
-without a quality advantage over Fast.
+The quality signal is localized rather than broad. Fast failed the RAG/memory
+answer check in all three repeats after setup and execution succeeded, while
+Auto and Pro passed all three. Browser evidence moved in the opposite
+direction: Fast passed `2/3`, Auto `1/3`, and Pro `0/3`; all three Pro browser
+runs reached the frozen 600-second process deadline. Auto and Pro also verified
+the denied-mutation result safely in all repeats but failed to converge on a
+successful terminal runtime state after denial. Those are product behavior
+failures, not evaluation infrastructure failures.
 
-File mutation, long-horizon migration, RAG/memory recall, and denied mutation
-all passed for every product treatment. Browser evidence was the dominant real
-failure: Fast passed `0/3`, Auto `1/3`, and Pro `0/3`; the path produced two
-600-second timeouts and three unresolved permission waits. Coding scores also
-expose a frozen-suite instrumentation defect: seven runs passed the file and
-test checks but were failed solely because `file.read_many` was not accepted as
-equivalent read evidence. The current verifier now accepts that narrow semantic
-equivalence without treating search or write as read evidence. The published
-scores remain unchanged; only a new matched provider-backed collection can
-measure the effect of the corrected verifier and runtime changes.
+Relative to Fast, neither adaptive treatment improves quality, completion, and
+latency together. The effective 600-second process deadline is matched, but the
+three shipping modes retain different native budgets, so this is not an
+iso-budget causal comparison. Timed-out processes can also under-report token,
+call, and resource totals. The valid scientific conclusion is therefore a
+descriptive baseline; the product-uplift decision remains `NO-GO`.
 
 No run violated the denied-mutation safety check. That is positive evidence for
-this exact permission path, not proof of complete runtime security. The matrix
-rejects a current orchestration-uplift claim and gives the next goals concrete
-targets: browser stop/permission convergence, evidence-aware tool completion,
-and collaboration that must beat Fast under matched verification and latency.
+this exact permission path, not proof of complete runtime security. The next
+Agent goals have concrete measured targets: value-aware routing must preserve
+the RAG gain without paying browser and completion regressions, permission
+denial must converge to a truthful terminal state, and learned profiles must be
+identified in future provider-backed evidence before any GEPA claim.
 
 ## Current Product Gate
 
 `benchmarks/agent/realworld-v2.json` freezes the current matched product
 protocol. V2 changes only the coding verifier's read-evidence equivalence by
 accepting `file.read_many`; objectives, fixtures, treatments, replicates, and
-all other success conditions remain unchanged from V1. The published V1 result
-remains the current measured baseline until a complete V2 matrix is collected.
-The retained V2 attempt is explicitly invalid and does not replace it.
+all other success conditions remain unchanged from V1. The `0.1.98` collection
+is the current complete V2 baseline; the earlier `0.1.82` V2 attempt remains
+invalid historical evidence and does not affect the current decision.
 It covers structured file mutation, code edit plus tests, browser evidence,
 long-horizon migration, indexed knowledge plus cross-session memory, and denied
 mutation. Direct, Fast, Auto, and Pro each receive three matched repeats.
@@ -159,12 +154,11 @@ when Git commit, suite hash, selection, and replicate count still match. Browser
 processes are retired by the sample's unique temporary root so one treatment
 cannot contaminate the resources or state of the next.
 
-The latest invalid V2 attempt is recorded in
-[Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md)
-with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.json).
-The latest complete provider-backed matrix is recorded in
-[Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md)
-with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.json).
+The current provider-backed matrix is recorded in
+[Agent Real-World V2 0.1.98](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md)
+with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.json).
+The invalid `0.1.82` V2 attempt and complete V1 baseline remain linked in the
+[evaluation index](evaluations/README.md) as immutable historical evidence.
 Cancellation, interruption/resume, user steering, computer interaction, and
 adversarial instruction resistance still require later frozen suites; they
 must not be inferred from this baseline.

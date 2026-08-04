@@ -21,16 +21,14 @@ It applies fixed GPQA-Diamond and MRCR v2 samples to the configured direct,
 Auto, and Pro paths, preserves failures in the denominator, and publishes only
 sanitized hashes, scores, latency, and routing evidence.
 
-The latest provider-backed collection attempt is
-[`Cindx Agent Real-World V2 0.1.82`](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md).
-Four infrastructure-failed cells make it `INVALID_BASELINE`, so it cannot be
-used as parity or orchestration-uplift evidence.
-
-The latest complete product decision baseline remains
-[`Cindx Agent Real-World V1 0.1.82`](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md).
-It is not protocol-equivalent to the matrix below and records no quality gain
-from Auto or Pro over Fast, so the Agent-intelligence uplift decision remains
-`NO-GO`.
+The latest provider-backed product baseline is
+[`Cindx Agent Real-World V2 0.1.98`](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md).
+It is a complete `VALID_BASELINE` with zero setup failures and zero safety
+violations, but it is not protocol-equivalent to the external matrix below.
+Auto and Pro gained quality over Fast only with materially lower completion and
+higher latency, so the Agent-intelligence uplift decision remains `NO-GO`.
+The raw schema did not capture learned profile or GEPA identities, preventing
+any causal claim about GEPA, transfer, or self-distillation.
 
 The frozen source is [Fugu: A Model Family for Agentic Intelligence, v1](https://arxiv.org/html/2606.21228v1), Table 1 and Appendix A. The v1 LiveCodeBench score is 92.0. Later values on the product page are not silently substituted.
 
