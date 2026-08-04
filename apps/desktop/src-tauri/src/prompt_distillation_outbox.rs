@@ -8,91 +8,45 @@ use crate::prompt_evolution_read_model::{
 };
 use crate::prompt_rollout_runtime::stable_prompt_profile_fingerprint;
 use crate::runtime_values::phase16_task_id;
-use agent_core::{Event, EventKind, Metadata};
+use agent_core::{Event, EventKind};
 use orchestrator::{
-    sha256_hex, AgentPolicy, FrozenPromptProfileSnapshot, OrchestrationPolicy,
-    ProTeacherAttestationV1,
+    prompt_learning_dispatch_recovery, AgentPolicy, OrchestrationPolicy,
+    PromptLearningDispatchRecovery, PromptLearningOutboxProjection,
+    PromptProDistillationIntent, ProTeacherAttestationV1,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use tauri::Manager;
-
-use crate::prompt_learning_outbox_projection::{
-    prompt_learning_dispatch_recovery, PromptLearningDispatchRecovery,
-    PromptLearningOutboxProjection,
-};
 
 const ROLLOUT_EVENT: &str = "Conductor prompt rollout updated";
 const REQUEST_EVENT: &str = "Conductor prompt evaluation requested";
 const DISPATCHED_EVENT: &str = "Conductor Pro distillation dispatched";
 const INTENT_ID_KEY: &str = "prompt_pro_distillation_intent_id";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct PromptProDistillationIntent {
-    intent_id: String,
-    request_id: String,
-    run_context: Metadata,
-    snapshot: FrozenPromptProfileSnapshot,
-    attestation: ProTeacherAttestationV1,
-}
-
-impl PromptProDistillationIntent {
-    fn from_rollout(event: &Event) -> Option<Self> {
-        if event.summary != ROLLOUT_EVENT
-            || event.metadata.get("prompt_effort").map(String::as_str) != Some("pro")
-            || !matches!(
-                event.metadata.get("rollout_status").map(String::as_str),
-                Some("promoted" | "stable")
-            )
-        {
-            return None;
-        }
-        let project_id = event
-            .metadata
-            .get("prompt_rollout_scope")
-            .or_else(|| event.metadata.get("project_id"))?
-            .trim();
-        let stable_profile_id = event.metadata.get("stable_profile")?.trim();
-        if project_id.is_empty() || stable_profile_id.is_empty() {
-            return None;
-        }
-        let encoded = event.metadata.get("frozen_prompt_profile")?;
-        let snapshot = FrozenPromptProfileSnapshot::from_json_slice(encoded.as_bytes()).ok()?;
-        let attestation =
-            ProTeacherAttestationV1::from_stable_snapshot(&snapshot, stable_profile_id).ok()?;
-        let digest = attestation.digest().ok()?;
-        let run_context = persistent_context(&event.metadata, project_id);
-        let intent_id = pro_distillation_intent_id(project_id, &digest, &run_context).ok()?;
-        Some(Self {
-            request_id: format!("prompt-evaluation-{intent_id}"),
-            intent_id,
-            run_context,
-            snapshot,
-            attestation,
-        })
+fn pro_distillation_intent_from_rollout(event: &Event) -> Option<PromptProDistillationIntent> {
+    if event.summary != ROLLOUT_EVENT
+        || event.metadata.get("prompt_effort").map(String::as_str) != Some("pro")
+        || !matches!(
+            event.metadata.get("rollout_status").map(String::as_str),
+            Some("promoted" | "stable")
+        )
+    {
+        return None;
     }
-
-    fn validate(&self) -> bool {
-        let Some(project_id) = self.run_context.get("project_id") else {
-            return false;
-        };
-        if project_id.trim().is_empty()
-            || self.intent_id.trim().is_empty()
-            || self.request_id != format!("prompt-evaluation-{}", self.intent_id)
-        {
-            return false;
-        }
-        let Ok(expected) =
-            ProTeacherAttestationV1::from_stable_snapshot(&self.snapshot, &self.snapshot.genome.id)
-        else {
-            return false;
-        };
-        expected == self.attestation
-            && self.attestation.digest().is_ok_and(|digest| {
-                pro_distillation_intent_id(project_id, &digest, &self.run_context)
-                    .is_ok_and(|expected_id| self.intent_id == expected_id)
-            })
-    }
+    let project_id = event
+        .metadata
+        .get("prompt_rollout_scope")
+        .or_else(|| event.metadata.get("project_id"))?;
+    let stable_profile_id = event.metadata.get("stable_profile")?;
+    let encoded = event.metadata.get("frozen_prompt_profile")?;
+    let snapshot = orchestrator::FrozenPromptProfileSnapshot::from_json_slice(encoded.as_bytes())
+        .ok()?;
+    PromptProDistillationIntent::new(
+        project_id,
+        stable_profile_id,
+        &event.metadata,
+        snapshot,
+    )
+    .ok()
 }
 
 pub(crate) fn dispatch_prompt_pro_distillation_intents(
@@ -112,15 +66,15 @@ pub(crate) fn dispatch_prompt_pro_distillation_intents(
     let intents = projection
         .pending_pro_distillation()
         .map(|(project_id, intent_id, payload)| {
-            decode_pro_distillation_intent(project_id, intent_id, payload)
+            PromptProDistillationIntent::decode_for_project(project_id, intent_id, payload)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut dispatched_any = false;
-    for (_intent_id, intent) in intents {
+    for intent in intents {
         if !prompt_distillation_outbox_is_idle(&state) {
             return Ok(());
         }
-        let Some(project_id) = intent.run_context.get("project_id") else {
+        let Some(project_id) = intent.project_id() else {
             continue;
         };
         let scoped_model =
@@ -132,21 +86,21 @@ pub(crate) fn dispatch_prompt_pro_distillation_intents(
         let Some(rollout) = scoped_model.rollouts.get("pro") else {
             continue;
         };
-        if rollout.stable_profile_id != intent.snapshot.genome.id
-            || rollout.frozen_profile.as_ref() != Some(&intent.snapshot)
+        if rollout.stable_profile_id != intent.snapshot().genome.id
+            || rollout.frozen_profile.as_ref() != Some(intent.snapshot())
             || !matches!(rollout.status.as_str(), "promoted" | "stable")
             || ProTeacherAttestationV1::from_stable_snapshot(
-                &intent.snapshot,
+                intent.snapshot(),
                 &rollout.stable_profile_id,
             )
             .as_ref()
-                != Ok(&intent.attestation)
+                != Ok(intent.attestation())
         {
             continue;
         }
         if crate::prompt_distillation_runtime::replay_canonical_pro_teacher_snapshot(
             &scoped_model,
-            &intent.snapshot,
+            intent.snapshot(),
         )
         .is_err()
         {
@@ -181,7 +135,7 @@ pub(crate) fn dispatch_prompt_pro_distillation_intents(
         .collect::<Vec<_>>();
         let fresh = crate::prompt_distillation_runtime::fresh_prompt_distillation_cases(
             &scoped_model,
-            &intent.attestation,
+            intent.attestation(),
             &discovered,
         )?;
         if !crate::prompt_distillation_runtime::prompt_distillation_cases_are_sufficient(&fresh) {
@@ -194,7 +148,7 @@ pub(crate) fn dispatch_prompt_pro_distillation_intents(
             .list_by_task_and_metadata(
                 &phase16_task_id(),
                 "prompt_evaluation_request_id",
-                &intent.request_id,
+                intent.request_id(),
             )
             .map_err(|error| error.to_string())?
             .iter()
@@ -213,13 +167,13 @@ pub(crate) fn dispatch_prompt_pro_distillation_intents(
             crate::prompt_evolution_worker::enqueue_prompt_pro_to_auto_distillation(
                 app,
                 &phase16_task_id(),
-                &intent.run_context,
-                intent.request_id.clone(),
+                intent.run_context(),
+                intent.request_id().to_string(),
                 OrchestrationPolicy::AutoRouter.label().to_string(),
                 worker_models,
                 agent_budget,
                 auto_profile.with_effort_delivery_contract(AgentPolicy::Auto.label()),
-                intent.snapshot.clone(),
+                intent.snapshot().clone(),
             )?;
         }
         append_dispatched(&state, &intent)?;
@@ -252,82 +206,23 @@ pub(crate) fn project_pro_distillation_outbox_event(
             .pending_pro_distillation()
             .find(|(pending_project_id, _, _)| *pending_project_id == project_id)
             .and_then(|(_, pending_intent_id, payload)| {
-                let (_, pending) =
-                    decode_pro_distillation_intent(project_id, pending_intent_id, payload).ok()?;
-                let digest = pending.attestation.digest().ok()?;
-                (legacy_pro_distillation_intent_id(&pending.attestation)
-                    .ok()?
-                    .as_str()
-                    == intent_id
-                    || previous_project_scoped_pro_distillation_intent_id(project_id, &digest)
-                        == *intent_id)
+                let pending = PromptProDistillationIntent::decode_for_project(
+                    project_id,
+                    pending_intent_id,
+                    payload,
+                )
+                .ok()?;
+                pending
+                    .matches_dispatch_marker(project_id, intent_id, &event.metadata)
                     .then(|| pending_intent_id.to_string())
             })
             .unwrap_or_else(|| intent_id.to_string());
         return projection.remove_pro_distillation(project_id, &effective_intent_id);
     }
-    let Some(intent) = PromptProDistillationIntent::from_rollout(event) else {
+    let Some(intent) = pro_distillation_intent_from_rollout(event) else {
         return Ok(());
     };
-    let payload = serde_json::to_string(&intent)
-        .map_err(|error| format!("prompt Pro distillation intent serialization failed: {error}"))?;
-    let project_id = intent
-        .run_context
-        .get("project_id")
-        .ok_or_else(|| "prompt Pro distillation project is missing".to_string())?;
-    projection.insert_pro_distillation(project_id, &intent.intent_id, event.sequence, payload)
-}
-
-pub(crate) fn pro_distillation_intent_payload_is_valid(
-    project_id: &str,
-    intent_id: &str,
-    payload: &str,
-) -> bool {
-    decode_pro_distillation_intent(project_id, intent_id, payload).is_ok()
-}
-
-fn decode_pro_distillation_intent(
-    project_id: &str,
-    intent_id: &str,
-    payload: &str,
-) -> Result<(String, PromptProDistillationIntent), String> {
-    let intent = serde_json::from_str::<PromptProDistillationIntent>(payload)
-        .map_err(|error| format!("prompt Pro distillation intent is invalid: {error}"))?;
-    if !intent.validate()
-        || intent.intent_id != intent_id
-        || intent.run_context.get("project_id").map(String::as_str) != Some(project_id)
-    {
-        return Err("prompt Pro distillation intent identity is invalid".to_string());
-    }
-    Ok((intent_id.to_string(), intent))
-}
-
-fn pro_distillation_intent_id(
-    project_id: &str,
-    attestation_digest: &str,
-    run_context: &Metadata,
-) -> Result<String, String> {
-    let context = serde_json::to_vec(run_context)
-        .map_err(|error| format!("prompt Pro distillation context serialization failed: {error}"))?;
-    let context_digest = sha256_hex(&context);
-    let digest = sha256_hex(
-        format!("{project_id}\n{attestation_digest}\n{context_digest}").as_bytes(),
-    );
-    Ok(format!("prompt-pro-distillation-{digest}"))
-}
-
-fn previous_project_scoped_pro_distillation_intent_id(
-    project_id: &str,
-    attestation_digest: &str,
-) -> String {
-    let digest = sha256_hex(format!("{project_id}\n{attestation_digest}").as_bytes());
-    format!("prompt-pro-distillation-{digest}")
-}
-
-fn legacy_pro_distillation_intent_id(
-    attestation: &ProTeacherAttestationV1,
-) -> Result<String, String> {
-    Ok(format!("prompt-pro-distillation-{}", attestation.digest()?))
+    projection.insert_pro_distillation_intent(event.sequence, &intent)
 }
 
 pub(crate) fn prompt_distillation_outbox_is_idle(state: &tauri::State<'_, AppState>) -> bool {
@@ -359,50 +254,29 @@ fn append_dispatched(
         DISPATCHED_EVENT,
         metadata_with_context(
             [
-                (INTENT_ID_KEY.to_string(), intent.intent_id.clone()),
+                (INTENT_ID_KEY.to_string(), intent.intent_id().to_string()),
                 (
                     "prompt_pro_teacher_attestation_sha256".to_string(),
-                    intent.attestation.digest()?,
+                    intent.attestation().digest()?,
                 ),
                 ("prompt_effort".to_string(), "pro".to_string()),
                 ("background_evaluation".to_string(), "true".to_string()),
             ]
             .into_iter()
             .collect(),
-            &intent.run_context,
+            intent.run_context(),
         ),
     )
     .map_err(|error| error.to_string())
 }
 
-fn persistent_context(metadata: &Metadata, project_id: &str) -> Metadata {
-    let mut context = [
-        "agent_run_id",
-        "collaboration_policy",
-        "project_root",
-        "session_id",
-        "task_class",
-    ]
-    .into_iter()
-    .filter_map(|key| {
-        metadata
-            .get(key)
-            .map(|value| (key.to_string(), value.clone()))
-    })
-    .collect::<Metadata>();
-    context.insert("project_id".to_string(), project_id.to_string());
-    context.insert("agent_effort".to_string(), "auto".to_string());
-    context
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        legacy_pro_distillation_intent_id, phase16_task_id,
-        previous_project_scoped_pro_distillation_intent_id, Event, EventKind, Metadata,
+        phase16_task_id, pro_distillation_intent_from_rollout, Event, EventKind,
         PromptProDistillationIntent, DISPATCHED_EVENT, INTENT_ID_KEY, ROLLOUT_EVENT,
     };
-    use agent_core::EventId;
+    use agent_core::{EventId, Metadata};
     use agent_storage::{EventStore, SqliteStore};
     use orchestrator::{
         ConductorPromptGenome, FrozenPromptProfileSnapshot, FrozenPromptSourceProfileLineageV1,
@@ -480,7 +354,7 @@ mod tests {
         };
         event.metadata.insert("prompt_effort".into(), "auto".into());
 
-        assert!(PromptProDistillationIntent::from_rollout(&event).is_none());
+        assert!(pro_distillation_intent_from_rollout(&event).is_none());
     }
 
     #[test]
@@ -495,34 +369,13 @@ mod tests {
     }
 
     #[test]
-    fn pro_intent_identity_is_bound_to_project_scope() {
-        let snapshot = certified_pro_snapshot(0);
-        let project_a =
-            PromptProDistillationIntent::from_rollout(&rollout_event(1, "project-a", &snapshot))
-                .unwrap();
-        let project_b =
-            PromptProDistillationIntent::from_rollout(&rollout_event(2, "project-b", &snapshot))
-                .unwrap();
-
-        assert_ne!(project_a.intent_id, project_b.intent_id);
-        assert!(project_a.validate());
-        assert!(project_b.validate());
-
-        let mut cross_project = project_a;
-        cross_project
-            .run_context
-            .insert("project_id".to_string(), "project-b".to_string());
-        assert!(!cross_project.validate());
-    }
-
-    #[test]
     fn same_project_new_rollout_supersedes_old_pending_across_restart() {
         let first_snapshot = certified_pro_snapshot(0);
         let second_snapshot = certified_pro_snapshot(1);
         let first_event = rollout_event(1, "project", &first_snapshot);
         let second_event = rollout_event(2, "project", &second_snapshot);
-        let first_intent = PromptProDistillationIntent::from_rollout(&first_event).unwrap();
-        let second_intent = PromptProDistillationIntent::from_rollout(&second_event).unwrap();
+        let first_intent = pro_distillation_intent_from_rollout(&first_event).unwrap();
+        let second_intent = pro_distillation_intent_from_rollout(&second_event).unwrap();
         let mut store = SqliteStore::in_memory().unwrap();
         store.append(first_event).unwrap();
         store.append(second_event).unwrap();
@@ -533,7 +386,7 @@ mod tests {
         let pending = projected.pending_pro_distillation().collect::<Vec<_>>();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, "project");
-        assert_eq!(pending[0].1, second_intent.intent_id);
+        assert_eq!(pending[0].1, second_intent.intent_id());
 
         let restarted =
             crate::prompt_evolution_transfer_outbox::load_prompt_learning_outbox(&mut store)
@@ -543,7 +396,7 @@ mod tests {
                 .pending_pro_distillation()
                 .map(|(_, intent_id, _)| intent_id)
                 .collect::<Vec<_>>(),
-            vec![second_intent.intent_id.as_str()]
+            vec![second_intent.intent_id()]
         );
 
         store
@@ -556,7 +409,7 @@ mod tests {
                 summary: DISPATCHED_EVENT.to_string(),
                 metadata: [
                     ("project_id".to_string(), "project".to_string()),
-                    (INTENT_ID_KEY.to_string(), first_intent.intent_id),
+                    (INTENT_ID_KEY.to_string(), first_intent.intent_id().to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -570,7 +423,7 @@ mod tests {
                 .pending_pro_distillation()
                 .map(|(_, intent_id, _)| intent_id)
                 .collect::<Vec<_>>(),
-            vec![second_intent.intent_id.as_str()]
+            vec![second_intent.intent_id()]
         );
     }
 
@@ -585,9 +438,9 @@ mod tests {
         second
             .metadata
             .insert("agent_run_id".to_string(), "run-b".to_string());
-        let expected = PromptProDistillationIntent::from_rollout(&second).unwrap();
-        let first_intent = PromptProDistillationIntent::from_rollout(&first).unwrap();
-        assert_ne!(first_intent.intent_id, expected.intent_id);
+        let expected = pro_distillation_intent_from_rollout(&second).unwrap();
+        let first_intent = pro_distillation_intent_from_rollout(&first).unwrap();
+        assert_ne!(first_intent.intent_id(), expected.intent_id());
         let mut store = SqliteStore::in_memory().unwrap();
         store.append(first).unwrap();
         store.append(second).unwrap();
@@ -596,11 +449,11 @@ mod tests {
             crate::prompt_evolution_transfer_outbox::load_prompt_learning_outbox(&mut store)
                 .unwrap();
         let (_, intent_id, payload) = projection.pending_pro_distillation().next().unwrap();
-        assert_eq!(intent_id, expected.intent_id);
+        assert_eq!(intent_id, expected.intent_id());
         assert_eq!(
-            serde_json::from_str::<PromptProDistillationIntent>(payload)
+            PromptProDistillationIntent::decode_for_project("project", intent_id, payload)
                 .unwrap()
-                .run_context
+                .run_context()
                 .get("agent_run_id")
                 .map(String::as_str),
             Some("run-b")
@@ -611,7 +464,7 @@ mod tests {
     fn dispatch_marker_rejects_cross_project_scope() {
         let snapshot = certified_pro_snapshot(0);
         let rollout = rollout_event(1, "project-a", &snapshot);
-        let intent = PromptProDistillationIntent::from_rollout(&rollout).unwrap();
+        let intent = pro_distillation_intent_from_rollout(&rollout).unwrap();
         let mut store = SqliteStore::in_memory().unwrap();
         store.append(rollout).unwrap();
         crate::prompt_evolution_transfer_outbox::load_prompt_learning_outbox(&mut store).unwrap();
@@ -625,7 +478,7 @@ mod tests {
                 summary: DISPATCHED_EVENT.to_string(),
                 metadata: [
                     ("project_id".to_string(), "project-b".to_string()),
-                    (INTENT_ID_KEY.to_string(), intent.intent_id),
+                    (INTENT_ID_KEY.to_string(), intent.intent_id().to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -639,41 +492,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_dispatch_markers_prevent_duplicate_redispatch() {
-        let snapshot = certified_pro_snapshot(0);
-        let rollout = rollout_event(1, "project", &snapshot);
-        let intent = PromptProDistillationIntent::from_rollout(&rollout).unwrap();
-        let digest = intent.attestation.digest().unwrap();
-        let legacy_ids = [
-            legacy_pro_distillation_intent_id(&intent.attestation).unwrap(),
-            previous_project_scoped_pro_distillation_intent_id("project", &digest),
-        ];
-        for (index, legacy_intent_id) in legacy_ids.into_iter().enumerate() {
-            assert_ne!(legacy_intent_id, intent.intent_id);
-            let mut store = SqliteStore::in_memory().unwrap();
-            store.append(rollout.clone()).unwrap();
-            store
-                .append(Event {
-                    id: EventId(format!("legacy-dispatch-{index}")),
-                    task_id: phase16_task_id(),
-                    sequence: 2,
-                    timestamp_ms: 2,
-                    kind: EventKind::TaskStatusChanged,
-                    summary: DISPATCHED_EVENT.to_string(),
-                    metadata: [
-                        ("project_id".to_string(), "project".to_string()),
-                        (INTENT_ID_KEY.to_string(), legacy_intent_id),
-                    ]
-                    .into_iter()
-                    .collect(),
-                })
-                .unwrap();
-
-            let projection =
-                crate::prompt_evolution_transfer_outbox::load_prompt_learning_outbox(&mut store)
-                    .unwrap();
-            assert_eq!(projection.pending_pro_distillation().count(), 0);
-        }
-    }
 }

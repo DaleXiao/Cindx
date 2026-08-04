@@ -180,13 +180,20 @@ Auto-transfer and Pro-distillation discovery use one durable outbox projection.
 Its versioned cursor uses an indexed tail lookup and reads only new canonical
 events during an ordinary wake; a non-contiguous sequence, corrupt payload hash,
 or invalid snapshot triggers deterministic full replay. The persisted FIFO work
-window contains at most 256 undispatched intents and coalesces only within the
-same project and learning track. Overflow remains in canonical events: after a
+window contains at most 256 undispatched intents, coalesces only within the same
+project and learning track, and dispatches each track by canonical event sequence
+rather than project-name order. Overflow remains in canonical events: after a
 window drains, replay refills the next window instead of discarding or blocking
-the backlog. Exact replay is idempotent, while an identity that changes payload,
-project, or learning track fails closed. Pro intent identity includes the project
-scope. Snapshot publication uses compare-and-swap, retries one observed conflict,
-and stops on a second conflict so a stale worker cannot overwrite newer state.
+the backlog; replacing a retained project while overflowed forces replay before
+dispatch order can change. Exact replay is idempotent, while an identity that
+changes payload, project, or learning track fails closed. The orchestrator owns
+normalized Auto/Pro intent identity, typed payload validation, queue transitions,
+and interruption recovery. A legacy Pro marker is accepted only when its
+normalized run context still identifies the pending intent, so an older rollout
+cannot remove newer coalesced work. Desktop code only maps canonical events and
+performs SQLite/CAS, worker, and provider side effects. Snapshot publication uses
+compare-and-swap, retries one observed conflict, and stops on a second conflict
+so a stale worker cannot overwrite newer state.
 
 The current tree also contains a separate controlled Pro-to-Auto distillation
 track. Only the active frozen Pro champion can be a teacher, and its attestation

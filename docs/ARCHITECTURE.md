@@ -306,14 +306,22 @@ they do not establish provider-backed intelligence improvement.
 
 Auto-transfer and Pro-distillation share a small event-projected outbox read
 model. It stores a 256-intent FIFO work window and a canonical event cursor;
-latest pending work is coalesced only by project and learning track. Normal
-worker wakes use an indexed tail lookup and project the sequence delta. Bad
-snapshots or non-contiguous deltas replay the phase-16 event stream. An overflow
-flag keeps the persisted window bounded; when dispatched markers free capacity,
-full replay refills the next window from canonical events. CAS publication binds
-the observed revision and full payload, with one reload before conflict failure,
-so concurrent workers cannot publish stale discovery state. Dispatch markers
-are project-bound and remove envelopes through the same projection; no canonical
+latest pending work is coalesced only by project and learning track, and each
+track is selected by canonical sequence with deterministic identity tie-breaks.
+The portable orchestrator domain owns the typed Auto/Pro intents, normalized
+identity and legacy aliases, fail-closed queue aggregate, overflow policy, and
+dispatch-recovery decision. Desktop adapters map events into those types, use an
+indexed tail lookup for normal wakes, replay the phase-16 stream after a bad
+snapshot or non-contiguous delta, and perform SQLite/CAS, Tauri, worker, and
+provider effects. An overflow flag keeps the persisted window bounded; when
+dispatched markers free capacity, full replay refills the next window from
+canonical events, and replacing a retained project while overflowed also forces
+replay before FIFO membership changes. Legacy Pro markers must match the pending
+intent's normalized run context before removal, preventing a marker for a
+superseded rollout from deleting newer coalesced work. CAS publication binds the
+observed revision and full payload, with one reload before conflict failure, so
+concurrent workers cannot publish stale discovery state. Dispatch markers are
+project-bound and remove envelopes through the same projection; no canonical
 intent or audit event is deleted.
 
 The desktop boundary keeps live canary outcome projection in
