@@ -3541,9 +3541,10 @@ assert(
   settingsPageFileSource.includes("<SettingsMemoryPanel") &&
     settingsPageFileSource.includes("useMemorySettingsController") &&
     settingsMemoryPanelSource.includes('title="Active"') &&
-    settingsMemoryPanelSource.includes('title="Active"\n            collapsible') &&
+    settingsMemoryPanelSource.includes("function MemoryGroup(") &&
     settingsMemoryPanelSource.includes("memory-settings-disclosure") &&
     settingsMemoryPanelSource.includes('className="settings-disclosure-chevron"') &&
+    !settingsMemoryPanelSource.includes("collapsible?: boolean") &&
     settingsMemoryPanelSource.includes('title="Disabled / inactive"') &&
     settingsMemoryPanelSource.includes('title="Needs review"') &&
     settingsMemoryPanelSource.includes("Save as project requirement") &&
@@ -3559,7 +3560,7 @@ assert(
     tauriBridgeImplementation.includes(
       'invoke<projectMemory.ProjectMemoryState>("update_project_memory", { input })'
     ),
-  "Project memory Settings must keep active entries collapsed by default and controls scoped, reviewable, stale-safe, and trust preserving"
+  "Project memory Settings must keep memory groups collapsed by default and controls scoped, reviewable, stale-safe, and trust preserving"
 );
 assert(
   rustLib.includes("WORKSPACE_KNOWLEDGE_CACHE_TTL") &&
