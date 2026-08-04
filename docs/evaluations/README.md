@@ -5,6 +5,13 @@ source revision and application version recorded inside them.
 
 ## Current Product Decision
 
+- [Cindx Agent Real-World 13A Repair Calibration 0.1.95](CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md)
+  is the exact six-run provider-backed rerun on source commit `487f3e0`.
+  All six runs completed with all checks passing and no safety violation; the
+  three long-horizon runs no longer created a false external-grounding
+  obligation. Its decision is `CALIBRATION_GO` for frozen matrix expansion,
+  not an intelligence-uplift claim or a replacement baseline.
+
 - [Cindx Agent Real-World 13A Calibration Pilot 0.1.94](CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md)
   is a six-run provider-backed calibration subset on source commit `f3e46fa`.
   All treatments produced the required long-horizon external effect, but all
