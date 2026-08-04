@@ -142,6 +142,16 @@ configured model declares the required capabilities. Fast retains its default
 model choice and fails clearly when it is incompatible; Auto and Pro select a
 compatible configured fallback before making conductor calls.
 
+Completion intent classifies compound imperative steps outside quoted or fenced
+material without treating dots in workspace filenames or URLs as sentence
+boundaries. Source clauses resolve their own target or an explicit relation to
+named workspace inputs, so a local output field named `sources` cannot invent
+external grounding and an unrelated workspace path cannot suppress an external
+source request. Target anchors are restricted to active evidence domains before
+the contract is installed. `effect_instruction_segments` owns the one-pass
+literal-aware lexical boundaries; `completion_intent` retains semantic authority
+for whether those segments require effects.
+
 - Fast constructs a direct decision without a conductor call.
 - Auto and Pro ask configured conductor candidates for this schema.
 - A direct decision enters the interactive loop without collaboration.

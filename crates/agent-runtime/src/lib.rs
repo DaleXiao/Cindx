@@ -18,6 +18,7 @@ mod context_projection;
 mod context_token_ledger;
 mod control;
 mod control_steer;
+mod effect_instruction_segments;
 mod evidence_target;
 mod execution;
 mod failure;

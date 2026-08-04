@@ -117,6 +117,14 @@ declaring a weaker route or selecting a configured model without the required
 tool/vision capability is an explicit preparation error rather than a silent
 downgrade.
 
+The completion-intent parser preserves path and URL tokens while recognizing
+later mutation steps outside quoted or fenced material. A source clause must
+resolve to its own workspace target or explicitly refer back to named workspace
+inputs before it is treated as local; an unrelated path cannot suppress an
+external source request. Explicit web provenance still creates a separate
+external evidence obligation, and file effects or post-run verification never
+stand in for that evidence domain.
+
 ## Permission continuation
 
 Each session owns its suspended `AgentLoopState`. An approval resolution executes

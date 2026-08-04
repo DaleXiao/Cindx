@@ -1,3 +1,4 @@
+use crate::effect_instruction_segments::{compound_action_segments, effect_clauses};
 use crate::grounding_policy::{prompt_evidence_scopes, PromptEvidenceScope};
 use crate::run_context::{effective_agent_objective, run_context_steer_epoch};
 use crate::{evidence_target_anchors, EvidenceTargetAnchor};
@@ -58,6 +59,9 @@ pub fn prompt_completion_intent(run_context: &Metadata) -> PromptCompletionInten
     };
     let target_anchors = if tool_requirement != PromptToolRequirement::None {
         candidate_target_anchors
+            .into_iter()
+            .filter(|anchor| evidence_anchor_matches_scopes(anchor, &evidence_scopes))
+            .collect()
     } else {
         BTreeSet::new()
     };
@@ -66,6 +70,20 @@ pub fn prompt_completion_intent(run_context: &Metadata) -> PromptCompletionInten
         evidence_scopes,
         tool_requirement,
         target_anchors,
+    }
+}
+
+fn evidence_anchor_matches_scopes(
+    anchor: &EvidenceTargetAnchor,
+    scopes: &BTreeSet<PromptEvidenceScope>,
+) -> bool {
+    match anchor {
+        EvidenceTargetAnchor::Workspace(_) => scopes.contains(&PromptEvidenceScope::Workspace),
+        EvidenceTargetAnchor::ExternalUrl(_) => {
+            scopes.contains(&PromptEvidenceScope::External)
+                || scopes.contains(&PromptEvidenceScope::Browser)
+        }
+        EvidenceTargetAnchor::ExternalSubject(_) => scopes.contains(&PromptEvidenceScope::External),
     }
 }
 
@@ -147,36 +165,121 @@ fn replaces_prior_objective(value: &str) -> bool {
 }
 
 fn explicit_software_effect_requested(value: &str) -> bool {
-    let objective_has_explicit_location =
-        explicit_workspace_location(value) || explicit_non_workspace_evidence_location(value);
     effect_clauses(value).any(|clause| {
-        let clause = strip_request_prefix(clause.trim());
-        if effect_explicitly_forbidden(clause) || output_only_request(clause) {
-            return false;
-        }
-        let process_effect = starts_with_any(
+        let mut segments = compound_action_segments(
             clause,
-            "run tests|run the tests|build the app|build this app|package the app|install the app|install dependencies|commit the changes|push the changes|运行测试|跑测试|构建应用|打包应用|安装应用|安装依赖|提交改动|推送改动",
-        );
-        if process_effect {
+            starts_with_software_effect_action,
+            chinese_conjunction_follows_target,
+        )
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty());
+        let Some(first) = segments.next().map(strip_request_prefix) else {
+            return false;
+        };
+        if software_effect_action_requested(first, false) {
             return true;
         }
-
-        let explicit_action = starts_with_any(
-            clause,
-            "fix |implement |add |remove |delete |rename |update |modify |edit |refactor |optimize |patch |apply |migrate |revert |upgrade |downgrade |create |write |修复|实现|添加|增加|移除|删除|重命名|更新|修改|编辑|重构|优化|应用|迁移|回滚|升级|降级|创建|写入|写",
-        );
-        let generic_creation = starts_with_any(
-            clause,
-            "implement |add |create |write |实现|添加|增加|创建|写入|写",
-        );
-        explicit_action
-            && software_effect_target(clause)
-            && (!generic_creation
-                || objective_has_explicit_location
-                || explicit_workspace_location(clause)
-                || explicit_non_workspace_evidence_location(clause))
+        if !compound_execution_frame(first) {
+            return false;
+        }
+        let mut inherited_target = software_effect_target(first)
+            || explicit_workspace_location(first)
+            || explicit_non_workspace_evidence_location(first);
+        segments
+            .map(|segment| strip_sequence_prefix(segment.trim()))
+            .any(|segment| {
+                if process_effect_action_requested(segment) {
+                    return true;
+                }
+                if !inherited_target {
+                    if compound_execution_frame(segment)
+                        && (software_effect_target(segment)
+                            || explicit_workspace_location(segment)
+                            || explicit_non_workspace_evidence_location(segment))
+                    {
+                        inherited_target = true;
+                    }
+                    return false;
+                }
+                software_effect_action_requested(segment, true)
+            })
     })
+}
+
+fn software_effect_action_requested(clause: &str, inherited_target: bool) -> bool {
+    if effect_explicitly_forbidden(clause) || output_only_request(clause) {
+        return false;
+    }
+    if process_effect_action_requested(clause) {
+        return true;
+    }
+
+    let explicit_action = starts_with_software_effect_action(clause);
+    let generic_creation = starts_with_any(
+        clause,
+        "implement |add |create |write |实现|添加|增加|创建|写入|写",
+    );
+    let anaphoric_target = inherited_target && anaphoric_effect_target(clause);
+    explicit_action
+        && (software_effect_target(clause) || anaphoric_target)
+        && (!generic_creation
+            || anaphoric_target
+            || explicit_workspace_location(clause)
+            || explicit_non_workspace_evidence_location(clause))
+}
+
+fn process_effect_action_requested(value: &str) -> bool {
+    starts_with_any(
+        value,
+        "run tests|run the tests|build the app|build this app|package the app|install the app|install dependencies|commit the changes|push the changes|运行测试|跑测试|构建应用|打包应用|安装应用|安装依赖|提交改动|推送改动",
+    )
+}
+
+fn starts_with_software_effect_action(value: &str) -> bool {
+    starts_with_any(
+        value,
+        "fix |implement |add |remove |delete |rename |update |modify |edit |refactor |optimize |patch |apply |migrate |revert |upgrade |downgrade |create |write |修复|实现|添加|增加|移除|删除|重命名|更新|修改|编辑|重构|优化|应用|迁移|回滚|升级|降级|创建|写入|写",
+    )
+}
+
+fn anaphoric_effect_target(value: &str) -> bool {
+    contains_any(
+        value,
+        "it|them|that file|this file|the file|that config|this config|the config|that code|this code|the code|that module|this module|the module|that component|this component|the component|that app|this app|the app|它|它们|该文件|这个文件|这些文件|该配置|这个配置|该代码|这段代码|该模块|这个模块|该组件|这个组件|该应用|这个应用",
+    )
+}
+
+fn compound_execution_frame(clause: &str) -> bool {
+    !effect_explicitly_forbidden(clause)
+        && !guidance_or_creative_request(clause)
+        && starts_with_any(
+            clause,
+            "complete |finish |inspect |review |audit |check |verify |validate |investigate |diagnose |open |read |完成|检查|审查|审核|验证|调查|诊断|打开|读取",
+        )
+}
+
+fn strip_sequence_prefix(mut value: &str) -> &str {
+    loop {
+        let trimmed = value.trim_start();
+        let next = [
+            "and then ",
+            "and ",
+            "then ",
+            "next ",
+            "after that ",
+            "并且",
+            "并",
+            "然后",
+            "接着",
+            "再",
+        ]
+        .into_iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix));
+        match next {
+            Some(next) if next.len() < trimmed.len() => value = next,
+            _ => return strip_request_prefix(trimmed),
+        }
+    }
 }
 
 fn output_only_request(value: &str) -> bool {
@@ -250,8 +353,30 @@ fn effect_explicitly_forbidden(value: &str) -> bool {
     )
 }
 
-fn effect_clauses(value: &str) -> impl Iterator<Item = &str> {
-    value.split(['\n', '.', '。', ';', '；', '!', '！'])
+fn chinese_conjunction_follows_target(value: &str) -> bool {
+    let value = value.trim_end();
+    [
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".json", ".toml", ".yaml", ".yml", ".md", ".swift",
+        ".py",
+    ]
+    .into_iter()
+    .any(|extension| value.ends_with(extension))
+        || [
+            "配置",
+            "文件",
+            "代码",
+            "模块",
+            "组件",
+            "应用",
+            "项目",
+            "仓库",
+            "按钮",
+            "侧边栏",
+            "会话",
+            "设置",
+        ]
+        .into_iter()
+        .any(|target| value.ends_with(target))
 }
 
 fn strip_request_prefix(mut value: &str) -> &str {

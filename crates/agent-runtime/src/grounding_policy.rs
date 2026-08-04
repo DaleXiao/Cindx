@@ -74,15 +74,24 @@ fn prompt_evidence_scopes_for_instruction(instruction: &str) -> BTreeSet<PromptE
     }
     let shared_action =
         evidence_action_requested(instruction) || retrieval_action_requested(instruction);
+    let workspace_provenance = explicit_workspace_provenance_requested(instruction);
+    let explicit_external_provenance = explicit_external_target_requested(instruction);
 
     evidence_clauses(instruction)
         .into_iter()
         .filter(|clause| {
             !capability_or_guidance_request(clause)
-                && !(template_or_creative_request(clause)
-                    && !explicit_evidence_execution_request(clause))
+                && (!template_or_creative_request(clause)
+                    || explicit_evidence_execution_request(clause))
         })
-        .filter_map(|clause| prompt_evidence_scope_for_clause(clause, shared_action))
+        .filter_map(|clause| {
+            prompt_evidence_scope_for_clause(
+                clause,
+                shared_action,
+                workspace_provenance,
+                explicit_external_provenance,
+            )
+        })
         .collect()
 }
 
@@ -146,11 +155,8 @@ fn append_bounded_classification_text(
     }
 }
 
-fn prompt_evidence_scope_for_clause(
-    objective: &str,
-    inherited_action: bool,
-) -> Option<PromptEvidenceScope> {
-    let workspace_target = contains_signal(
+fn workspace_target_requested(objective: &str) -> bool {
+    contains_signal(
         objective,
         &[
             "project",
@@ -178,8 +184,42 @@ fn prompt_evidence_scope_for_clause(
             "配置",
             "日志",
         ],
-    ) || contains_workspace_path(objective);
-    let external_target = contains_signal(
+    ) || contains_workspace_path(objective)
+}
+
+fn explicit_workspace_provenance_requested(objective: &str) -> bool {
+    contains_workspace_path(objective)
+        || contains_signal(
+            objective,
+            &[
+                "project",
+                "repo",
+                "repository",
+                "codebase",
+                "workspace",
+                "current code",
+                "implementation",
+                "file",
+                "directory",
+                "config",
+                "log",
+                "项目",
+                "仓库",
+                "代码库",
+                "工作区",
+                "这个实现",
+                "该实现",
+                "现有实现",
+                "文件",
+                "目录",
+                "配置",
+                "日志",
+            ],
+        )
+}
+
+fn explicit_external_target_requested(objective: &str) -> bool {
+    contains_signal(
         objective,
         &[
             "web",
@@ -188,9 +228,17 @@ fn prompt_evidence_scope_for_clause(
             "website",
             "url",
             "link",
-            "sources",
-            "references",
-            "citation",
+            "external source",
+            "external sources",
+            "web source",
+            "web sources",
+            "online source",
+            "online sources",
+            "upstream",
+            "remote source",
+            "remote sources",
+            "third-party source",
+            "third-party sources",
             "news",
             "current version",
             "latest version",
@@ -201,10 +249,11 @@ fn prompt_evidence_scope_for_clause(
             "网页",
             "网址",
             "链接",
-            "来源",
-            "出处",
-            "证据",
-            "引用",
+            "外部来源",
+            "网络来源",
+            "上游来源",
+            "远程来源",
+            "第三方来源",
             "新闻",
             "当前版本",
             "最新版本",
@@ -228,7 +277,18 @@ fn prompt_evidence_scope_for_clause(
                     "文档",
                 ],
             ))
-        || (!workspace_target && contains_signal(objective, &["documentation", "docs", "文档"]));
+        || (!workspace_target_requested(objective)
+            && contains_signal(objective, &["documentation", "docs", "文档"]))
+}
+
+fn prompt_evidence_scope_for_clause(
+    objective: &str,
+    inherited_action: bool,
+    workspace_provenance: bool,
+    explicit_external_provenance: bool,
+) -> Option<PromptEvidenceScope> {
+    let workspace_target = workspace_target_requested(objective);
+    let external_target = explicit_external_target_requested(objective);
     let visual_target = contains_signal(
         objective,
         &[
@@ -401,7 +461,8 @@ fn prompt_evidence_scope_for_clause(
         &[
             "give", "provide", "list", "find", "cite", "给", "提供", "列出", "找", "引用",
         ],
-    );
+    ) && (explicit_external_provenance
+        || !source_request_uses_workspace_provenance(objective, workspace_provenance));
     let temporal_request = contains_signal(
         objective,
         &[
@@ -470,6 +531,35 @@ fn prompt_evidence_scope_for_clause(
         return Some(PromptEvidenceScope::External);
     }
     None
+}
+
+fn source_request_uses_workspace_provenance(
+    clause: &str,
+    instruction_has_workspace_provenance: bool,
+) -> bool {
+    contains_workspace_path(clause)
+        || (instruction_has_workspace_provenance
+            && contains_signal(
+                clause,
+                &[
+                    "input file",
+                    "input files",
+                    "workspace file",
+                    "workspace files",
+                    "both files",
+                    "these files",
+                    "those files",
+                    "listed file",
+                    "listed files",
+                    "the files above",
+                    "输入文件",
+                    "工作区文件",
+                    "两个文件",
+                    "这些文件",
+                    "上述文件",
+                    "列出的文件",
+                ],
+            ))
 }
 
 fn evidence_action_requested(value: &str) -> bool {

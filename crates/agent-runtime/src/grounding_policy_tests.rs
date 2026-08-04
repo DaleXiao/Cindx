@@ -54,6 +54,51 @@ fn prompt_evidence_scope_distinguishes_workspace_external_and_visual_work() {
 }
 
 #[test]
+fn local_source_fields_do_not_become_external_evidence_requests() {
+    let objective = "Inspect docs/requirements.md and config/service.json, then create out/migration-report.json with a sources field listing both authoritative input files.";
+
+    assert_eq!(
+        prompt_evidence_scopes(&run_context(objective)),
+        BTreeSet::from([PromptEvidenceScope::Workspace])
+    );
+
+    assert_eq!(
+        prompt_evidence_scopes(&run_context(
+            "Inspect config/service.json and cite external sources for the proposed update",
+        )),
+        BTreeSet::from([
+            PromptEvidenceScope::Workspace,
+            PromptEvidenceScope::External,
+        ])
+    );
+
+    assert_eq!(
+        prompt_evidence_scopes(&run_context("Provide sources about Rust code")),
+        BTreeSet::from([PromptEvidenceScope::External])
+    );
+
+    assert_eq!(
+        prompt_evidence_scopes(&run_context(
+            "Review README.md and provide sources for the security recommendations",
+        )),
+        BTreeSet::from([
+            PromptEvidenceScope::Workspace,
+            PromptEvidenceScope::External,
+        ])
+    );
+
+    assert_eq!(
+        prompt_evidence_scopes(&run_context(
+            "Review README.md and provide sources from authoritative upstream project files",
+        )),
+        BTreeSet::from([
+            PromptEvidenceScope::Workspace,
+            PromptEvidenceScope::External,
+        ])
+    );
+}
+
+#[test]
 fn dynamic_browser_class_requires_browser_evidence_without_rewriting_the_prompt() {
     let mut context = run_context("Investigate the rendered incident dashboard");
     context.insert("task_class".to_string(), "browser".to_string());
