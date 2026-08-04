@@ -8,12 +8,20 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
+| [13A calibration pilot](evaluations/CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md) | `0.1.94` | 2 frozen tool tasks; Fast/Auto/Pro; 6 provider-backed runs | Coding passed in all modes; all long-horizon effects verified but terminal completion failed on the shared external-grounding contract; `CALIBRATION_NO_GO` for matrix expansion |
 | [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md) | `0.1.82` | Same 72-cell product matrix with corrected read-evidence equivalence | Latest collection attempt; four infrastructure-failed RAG/memory cells make it `INVALID_BASELINE`; retained for diagnosis only |
 | [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md) | `0.1.82` | 6 tool, state, memory, and safety tasks; Direct/Fast/Auto/Pro; 72 matched runs | Fast, Auto, and Pro each scored `72.2%`; Auto and Pro added no quality over Fast and had lower completion plus higher latency; `NO-GO` for orchestration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
-The real-world V2 collection is the latest attempt, but it is not a baseline:
+The `0.1.94` 13A pilot is the latest provider-backed diagnostic, but its six-run
+subset is intentionally too small to become a baseline. It found that all three
+product treatments produced the correct long-horizon external effect while the
+shared external-grounding contract still forced terminal failure and repair
+amplification. The decision is to stop before a full matrix and investigate
+that common contract boundary.
+
+The real-world V2 collection is the latest full-matrix attempt, but it is not a baseline:
 four cells failed during memory setup, before product behavior could be
 verified. The real-world V1 matrix therefore remains the latest complete
 product decision baseline because it exercises shipping Agent, tool,
