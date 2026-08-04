@@ -557,31 +557,7 @@ pub fn prompt_reflection_packets(
     profile_id: &str,
     limit: usize,
 ) -> Vec<AgentEvaluationReflectionPacket> {
-    if limit == 0 {
-        return Vec::new();
-    }
-
-    let Some(active_dataset_sha256) = latest_scientific_training_dataset_digest(observations)
-    else {
-        return Vec::new();
-    };
-    let mut seen_runs = BTreeSet::new();
-    observations
-        .iter()
-        .rev()
-        .filter(|observation| {
-            observation.profile_id == profile_id
-                && observation.split == PromptEvaluationSplit::Train
-                && observation.mode == PromptEvaluationMode::PairedExecution
-                && observation.is_scientific_evidence()
-                && observation.scientific_cohort_sha256() == Some(active_dataset_sha256)
-        })
-        .filter_map(|observation| observation.reflection_packet.as_ref())
-        .filter(|packet| packet.candidate_id == profile_id)
-        .filter(|packet| seen_runs.insert((packet.run_id.clone(), packet.case_id.clone())))
-        .take(limit)
-        .cloned()
-        .collect()
+    super::reflection_selection::prompt_reflection_packets(observations, profile_id, limit)
 }
 
 pub fn prompt_transfer_reflection_packets(
@@ -589,31 +565,7 @@ pub fn prompt_transfer_reflection_packets(
     profile_id: &str,
     limit: usize,
 ) -> Vec<AgentEvaluationReflectionPacket> {
-    if limit == 0 {
-        return Vec::new();
-    }
-
-    let Some(active_dataset_sha256) = latest_scientific_transfer_dataset_digest(observations)
-    else {
-        return Vec::new();
-    };
-    let mut seen_runs = BTreeSet::new();
-    observations
-        .iter()
-        .rev()
-        .filter(|observation| {
-            observation.profile_id == profile_id
-                && observation.split == PromptEvaluationSplit::Train
-                && observation.mode == PromptEvaluationMode::PairedExecution
-                && observation.is_source_attested_transfer_evidence()
-                && observation.scientific_cohort_sha256() == Some(active_dataset_sha256)
-        })
-        .filter_map(|observation| observation.reflection_packet.as_ref())
-        .filter(|packet| packet.candidate_id == profile_id)
-        .filter(|packet| seen_runs.insert((packet.run_id.clone(), packet.case_id.clone())))
-        .take(limit)
-        .cloned()
-        .collect()
+    super::reflection_selection::prompt_transfer_reflection_packets(observations, profile_id, limit)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

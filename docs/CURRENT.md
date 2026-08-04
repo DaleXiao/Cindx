@@ -143,9 +143,22 @@ position-balanced reviewer. Transfer evidence has a separate dataset identity
 and cannot count as ordinary same-effort GEPA evidence. A Pro profile can be
 promoted only when both the ordinary paired/holdout gate and the Auto-transfer
 paired/holdout gate pass. Its frozen snapshot pins both evidence sets and the
-active Auto profile fingerprint. Auto transfer reflections receive reserved
-capacity in Pro mutation input, so they cannot be displaced by a full ordinary
-reflection batch.
+active Auto profile fingerprint. Pro mutation now admits an Auto-transfer
+reflection only as a complete, strict, source-attested train pair from the
+active cohort. It supplies both the Pro execution and its matched Auto teacher
+execution, ranks pairs deterministically by actionable regret, measured
+contrast, runtime failures, and strategy-shape difference, then preserves task
+and strategy diversity. Ordinary and transfer evidence still share the same
+six-trajectory input ceiling, so richer learning evidence does not expand the
+mutation context budget. Mutation events pin the selector schema and the digest
+of the exact redacted trajectory set.
+
+The learned genome continues to govern the evaluated workflow surface:
+topology, branch shape, roles, verification, tool exposure, retry/recovery,
+stopping, context policy, and bounded step budgets. Per-request route,
+retrieval, and memory decisions remain owned by `AgentRunDecision`; the current
+GEPA campaign does not execute that decision layer, so those fields are not
+presented as learned strategy without a matched causal evaluation.
 
 Transfer observations are appended as one mirrored pair and enter the canonical
 evolution read model only when both sides are scientific, project-scoped, and
@@ -184,7 +197,10 @@ intelligent than the stable Auto baseline.
 Canary traffic is capped at 50 percent. A challenger can become the stable
 profile only by first producing a valid immutable frozen snapshot; missing or
 regressed ordinary/transfer lineage rolls the canary back and preserves the
-previous stable profile.
+previous stable profile. Both promotion tracks compare mirrored holdout lanes
+against their stable profile. A candidate-only failure, absolute quality loss
+beyond `0.01`, latency regression beyond `5%`, or token regression beyond `2%`
+is a hard blocker even when the pairwise reviewer prefers the candidate.
 
 Reflective mutations may learn a general strategy from redacted trajectories,
 but a deterministic validator rejects candidate directives that contain case,
@@ -199,10 +215,11 @@ enter another project's candidate population, evaluation, or rollout.
 The latest provider-backed raw schema did not capture learned profile or GEPA
 identities. Deterministic tests prove the transfer boundary, evidence isolation,
 promotion gates, snapshot lineage, canonical event projection, project-isolated
-scheduling, mutation anti-memorization boundary, and mutation-input allocation,
-but the current baseline cannot attribute an outcome to GEPA, transfer, or
-self-distillation. There is still no provider-backed matched evidence that an
-identified evolved profile improves external product quality.
+scheduling, mutation anti-memorization boundary, paired high-information
+reflection selection, and absolute holdout non-regression gates, but the current
+baseline cannot attribute an outcome to GEPA, transfer, or self-distillation.
+There is still no provider-backed matched evidence that an identified evolved
+profile improves external product quality.
 
 ## Current Evidence Boundary
 

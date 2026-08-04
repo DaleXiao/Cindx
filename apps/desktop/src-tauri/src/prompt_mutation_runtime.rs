@@ -99,6 +99,10 @@ pub(crate) fn generate_background_prompt_mutation(
     }
     let mutation_run_id = unique_id("prompt-mutation");
     let reflection_trajectory_count = trajectories.len();
+    let reflection_evidence_sha256 = sha256_hex(
+        &serde_json::to_vec(trajectories)
+            .map_err(|error| format!("reflection evidence serialization failed: {error}"))?,
+    );
     let mutation_prompt = parent.reflective_mutation_prompt(trajectories)?;
     let response = match run_background_prompt_mutation_stage(
         state,
@@ -132,6 +136,14 @@ pub(crate) fn generate_background_prompt_mutation(
                     (
                         "reflection_trajectory_count".to_string(),
                         reflection_trajectory_count.to_string(),
+                    ),
+                    (
+                        "reflection_selector_schema".to_string(),
+                        PROMPT_REFLECTION_SELECTOR_SCHEMA_V1.to_string(),
+                    ),
+                    (
+                        "reflection_evidence_sha256".to_string(),
+                        reflection_evidence_sha256.clone(),
                     ),
                     (
                         "error".to_string(),
@@ -211,6 +223,14 @@ pub(crate) fn generate_background_prompt_mutation(
                         reflection_trajectory_count.to_string(),
                     ),
                     (
+                        "reflection_selector_schema".to_string(),
+                        PROMPT_REFLECTION_SELECTOR_SCHEMA_V1.to_string(),
+                    ),
+                    (
+                        "reflection_evidence_sha256".to_string(),
+                        reflection_evidence_sha256.clone(),
+                    ),
+                    (
                         "mutation_repaired".to_string(),
                         mutation_repaired.to_string(),
                     ),
@@ -255,6 +275,14 @@ pub(crate) fn generate_background_prompt_mutation(
                     (
                         "reflection_trajectory_count".to_string(),
                         reflection_trajectory_count.to_string(),
+                    ),
+                    (
+                        "reflection_selector_schema".to_string(),
+                        PROMPT_REFLECTION_SELECTOR_SCHEMA_V1.to_string(),
+                    ),
+                    (
+                        "reflection_evidence_sha256".to_string(),
+                        reflection_evidence_sha256,
                     ),
                     (
                         "mutation_repaired".to_string(),

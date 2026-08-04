@@ -274,6 +274,9 @@ pub(crate) fn prompt_promotion_gate_config() -> PromptPromotionGateConfig {
         minimum_wilson_lower_bound: PROMPT_EVOLUTION_MIN_PROMOTION_WILSON,
         maximum_generalization_gap: 0.15,
         maximum_holdout_task_class_regression: 0.05,
+        maximum_holdout_quality_regression: 0.01,
+        maximum_holdout_latency_regression_bps: 500,
+        maximum_holdout_token_regression_bps: 200,
     }
 }
 

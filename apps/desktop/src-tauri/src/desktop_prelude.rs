@@ -78,7 +78,7 @@ pub(crate) use orchestrator::{
     evaluate_prompt_convergence, evaluate_prompt_promotion_gate_with_failures_in_cohort,
     parse_candidate_pair_review,
     parse_policy, prompt_genome_sha256, prompt_proposal_minibatch_decision,
-    prompt_reflection_packets, prompt_transfer_reflection_packets, role_label, sha256_hex,
+    prompt_reflection_packets, prompt_transfer_reflection_pairs, role_label, sha256_hex,
     step_prompt, ActionableSideInformation, AgentEngineSession, AgentEvaluationCaseScore,
     AgentEvaluationCheck, AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket,
     AgentEvaluationSplit, AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
@@ -105,6 +105,7 @@ pub(crate) use orchestrator::{
     WorkflowToolPolicy, WorkflowTopologyPrior, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
     AGENT_EVALUATION_TRACE_SCHEMA, CONDUCTOR_MAX_ATTEMPTS, DIRECT_ANCHOR_CANDIDATE_ID,
     MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
+    PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
 };
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use std::cmp::Reverse;
