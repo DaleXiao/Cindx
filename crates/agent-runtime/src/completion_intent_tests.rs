@@ -86,6 +86,7 @@ fn explicit_software_actions_require_effects() {
         "Install dependencies",
         "Create src/report.json",
         "Write tests for this project",
+        "Write a report in this project",
         "Fix the Settings crash in this app and explain how to test it",
         "Do not modify the UI; fix the backend crash in this app",
         "修复会话切换回归",
@@ -107,6 +108,108 @@ fn explicit_software_actions_require_effects() {
             "software effects should retain a workspace evidence scope: {objective}"
         );
     }
+}
+
+#[test]
+fn local_effect_sources_do_not_invent_external_grounding() {
+    let objective = "Complete the migration end to end. Inspect docs/requirements.md and config/service.json, update the config to the approved port and protocol, run node validate.mjs, then create out/migration-report.json with keys port, protocol, approval, validation, and sources. validation must be passed and sources must list both authoritative input files.";
+
+    let intent = prompt_completion_intent(&run_context(objective));
+
+    assert_eq!(intent.tool_requirement, PromptToolRequirement::Effects);
+    assert_eq!(
+        intent.evidence_scopes,
+        BTreeSet::from([PromptEvidenceScope::Workspace])
+    );
+    assert!(intent
+        .target_anchors
+        .contains(&EvidenceTargetAnchor::Workspace(
+            "docs/requirements.md".to_string()
+        )));
+    assert!(intent
+        .target_anchors
+        .contains(&EvidenceTargetAnchor::Workspace(
+            "config/service.json".to_string()
+        )));
+    assert!(intent
+        .target_anchors
+        .iter()
+        .all(|anchor| matches!(anchor, EvidenceTargetAnchor::Workspace(_))));
+}
+
+#[test]
+fn compound_execution_is_not_tied_to_one_prompt_shape() {
+    for objective in [
+        "Review config/service.json and update the config's approved port",
+        "Inspect config/service.json, and update the config's approved protocol",
+        "检查 config/service.json，并更新该配置的获批端口",
+        "检查配置并更新该配置",
+    ] {
+        let intent = prompt_completion_intent(&run_context(objective));
+        assert_eq!(
+            intent.tool_requirement,
+            PromptToolRequirement::Effects,
+            "compound execution should retain effect authority: {objective}"
+        );
+        assert_eq!(
+            intent.evidence_scopes,
+            BTreeSet::from([PromptEvidenceScope::Workspace])
+        );
+    }
+}
+
+#[test]
+fn software_effect_with_explicit_web_source_retains_external_grounding() {
+    let intent = prompt_completion_intent(&run_context(
+        "Inspect the specification at https://example.com/service-spec, then update config/service.json",
+    ));
+
+    assert_eq!(intent.tool_requirement, PromptToolRequirement::Effects);
+    assert_eq!(
+        intent.evidence_scopes,
+        BTreeSet::from([
+            PromptEvidenceScope::Workspace,
+            PromptEvidenceScope::External,
+        ])
+    );
+    assert!(intent
+        .target_anchors
+        .contains(&EvidenceTargetAnchor::ExternalUrl(
+            "https://example.com/service-spec".to_string()
+        )));
+}
+
+#[test]
+fn compound_action_detection_preserves_advisory_and_denial_boundaries() {
+    for objective in [
+        "Explain how to inspect config/service.json, then update the config",
+        "Do not modify, update, or delete config/service.json; inspect only",
+        "Review README.md and write a summary",
+        "Review README.md and quote \"then update config/service.json\"",
+        "Review README.md and quote 'please then update config/service.json'",
+        "Review README.md and quote ‘please then update config/service.json’",
+        "Inspect the create and update code paths in src/service.rs",
+        "检查 src/lib.rs 的合并更新逻辑",
+    ] {
+        assert_ne!(
+            prompt_completion_intent(&run_context(objective)).tool_requirement,
+            PromptToolRequirement::Effects,
+            "advisory or denied action must not gain effect authority: {objective}"
+        );
+    }
+}
+
+#[test]
+fn later_guidance_does_not_erase_an_explicit_compound_effect() {
+    let intent = prompt_completion_intent(&run_context(
+        "Inspect config/service.json, update it, and explain how to verify the result",
+    ));
+
+    assert_eq!(intent.tool_requirement, PromptToolRequirement::Effects);
+    assert_eq!(
+        intent.evidence_scopes,
+        BTreeSet::from([PromptEvidenceScope::Workspace])
+    );
 }
 
 #[test]

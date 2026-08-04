@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.1.94`
+Current application version: `0.1.95`
 
 Last code-fact review: `2026-08-04`
 
@@ -42,6 +42,10 @@ A new run currently follows this sequence:
    generation requirement form typed route requirements. Fast chooses a direct
    decision; Auto and Pro request a conductor decision. Both paths fail clearly
    when the selected configured model cannot satisfy required tools or vision.
+   Compound execution instructions retain filenames and URLs while detecting
+   later mutation steps. Local report fields such as `sources` inherit explicit
+   workspace provenance instead of creating a web obligation; an objective
+   that explicitly combines workspace and web evidence still keeps both scopes.
 6. Durable memory recall and workspace retrieval are prepared without mutating
    canonical conversation history. Independent retrieval channels may execute
    in parallel; graph walk expands from selected seeds.
