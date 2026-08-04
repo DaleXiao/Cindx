@@ -334,7 +334,7 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let mut model =
+    let model =
         load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
     let evidence_scope = run_context
         .get("project_id")
@@ -344,7 +344,6 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
     let mut evaluation = evaluate_prompt_evolution_read_model(&scoped_model, effort)?;
     let previous_rollout = scoped_model.rollouts.get(effort).cloned();
     let rollout = reconcile_prompt_rollout(&mut scoped_model, effort, &evaluation);
-    persist_scoped_prompt_rollout(&mut model, &evidence_scope, effort, rollout.clone());
     apply_prompt_rollout_selection(
         &mut evaluation,
         &rollout,
@@ -353,86 +352,183 @@ pub(crate) fn prompt_evolution_evaluation_for_run(
         effort,
     );
     if previous_rollout.as_ref() != Some(&rollout) {
-        save_prompt_evolution_read_model(&mut store, &model).map_err(|error| error.to_string())?;
-        append_event(
+        append_prompt_rollout_update(
             &mut store,
-            &phase16_task_id(),
-            EventKind::TaskStatusChanged,
-            "Conductor prompt rollout updated",
-            metadata_with_context(
-                [
-                    ("prompt_effort".to_string(), effort.to_string()),
-                    ("prompt_rollout_scope".to_string(), evidence_scope.clone()),
-                    (
-                        "stable_profile".to_string(),
-                        rollout.stable_profile_id.clone(),
-                    ),
-                    (
-                        "canary_profile".to_string(),
-                        rollout.canary_profile_id.clone().unwrap_or_default(),
-                    ),
-                    (
-                        "canary_percent".to_string(),
-                        rollout.canary_percent.to_string(),
-                    ),
-                    ("rollout_status".to_string(), rollout.status.clone()),
-                    (
-                        "rollout_reason".to_string(),
-                        rollout.last_reason.clone().unwrap_or_default(),
-                    ),
-                    (
-                        "promotion_confidence".to_string(),
-                        rollout
-                            .promotion_confidence
-                            .map(|value| format!("{value:.4}"))
-                            .unwrap_or_default(),
-                    ),
-                    (
-                        "evidence_checkpoint".to_string(),
-                        rollout.evidence_checkpoint.to_string(),
-                    ),
-                    (
-                        "live_checkpoint".to_string(),
-                        rollout.live_checkpoint.to_string(),
-                    ),
-                    (
-                        "stable_live_checkpoint".to_string(),
-                        rollout.stable_live_checkpoint.to_string(),
-                    ),
-                    (
-                        "quarantined_profiles".to_string(),
-                        serde_json::to_string(&rollout.quarantined_profile_ids)
-                            .unwrap_or_else(|_| "[]".to_string()),
-                    ),
-                    (
-                        "distillation_canary_lease".to_string(),
-                        rollout
-                            .distillation_lease
-                            .as_ref()
-                            .and_then(|lease| serde_json::to_string(lease).ok())
-                            .unwrap_or_default(),
-                    ),
-                    (
-                        "rollback_count".to_string(),
-                        rollout.rollback_count.to_string(),
-                    ),
-                    (
-                        "frozen_prompt_profile".to_string(),
-                        rollout
-                            .frozen_profile
-                            .as_ref()
-                            .and_then(|snapshot| serde_json::to_string(snapshot).ok())
-                            .unwrap_or_default(),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-                run_context,
-            ),
+            effort,
+            &evidence_scope,
+            &rollout,
+            run_context,
         )
         .map_err(|error| error.to_string())?;
     }
     Ok(evaluation)
+}
+
+fn append_prompt_rollout_update(
+    store: &mut SqliteStore,
+    effort: &str,
+    evidence_scope: &str,
+    rollout: &PromptRolloutState,
+    run_context: &Metadata,
+) -> Result<(), StorageError> {
+    append_event(
+        store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Conductor prompt rollout updated",
+        metadata_with_context(
+            [
+                ("prompt_effort".to_string(), effort.to_string()),
+                (
+                    "prompt_rollout_scope".to_string(),
+                    evidence_scope.to_string(),
+                ),
+                (
+                    "stable_profile".to_string(),
+                    rollout.stable_profile_id.clone(),
+                ),
+                (
+                    "canary_profile".to_string(),
+                    rollout.canary_profile_id.clone().unwrap_or_default(),
+                ),
+                (
+                    "canary_percent".to_string(),
+                    rollout.canary_percent.to_string(),
+                ),
+                ("rollout_status".to_string(), rollout.status.clone()),
+                (
+                    "rollout_reason".to_string(),
+                    rollout.last_reason.clone().unwrap_or_default(),
+                ),
+                (
+                    "promotion_confidence".to_string(),
+                    rollout
+                        .promotion_confidence
+                        .map(|value| format!("{value:.4}"))
+                        .unwrap_or_default(),
+                ),
+                (
+                    "evidence_checkpoint".to_string(),
+                    rollout.evidence_checkpoint.to_string(),
+                ),
+                (
+                    "live_checkpoint".to_string(),
+                    rollout.live_checkpoint.to_string(),
+                ),
+                (
+                    "stable_live_checkpoint".to_string(),
+                    rollout.stable_live_checkpoint.to_string(),
+                ),
+                (
+                    "quarantined_profiles".to_string(),
+                    serde_json::to_string(&rollout.quarantined_profile_ids)
+                        .unwrap_or_else(|_| "[]".to_string()),
+                ),
+                (
+                    "distillation_canary_lease".to_string(),
+                    rollout
+                        .distillation_lease
+                        .as_ref()
+                        .and_then(|lease| serde_json::to_string(lease).ok())
+                        .unwrap_or_default(),
+                ),
+                (
+                    "rollback_count".to_string(),
+                    rollout.rollback_count.to_string(),
+                ),
+                (
+                    "frozen_prompt_profile".to_string(),
+                    rollout
+                        .frozen_profile
+                        .as_ref()
+                        .and_then(|snapshot| serde_json::to_string(snapshot).ok())
+                        .unwrap_or_default(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+}
+
+#[cfg(test)]
+mod prompt_rollout_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn rollout_update_failure_cannot_escape_canonical_event_replay() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let rollout = default_prompt_rollout("auto");
+        let run_context = [("project_id".to_string(), "project-a".to_string())]
+            .into_iter()
+            .collect::<Metadata>();
+        store
+            .execute_batch_for_testing(
+                "
+                create trigger fail_prompt_rollout_event
+                before insert on events
+                begin
+                  select raise(abort, 'injected prompt rollout event failure');
+                end;
+                ",
+            )
+            .expect("failure trigger should install");
+
+        let failed = append_prompt_rollout_update(
+            &mut store,
+            "auto",
+            "project-a",
+            &rollout,
+            &run_context,
+        );
+        assert!(failed.is_err());
+        assert!(store
+            .list_by_task(&phase16_task_id())
+            .expect("events should load")
+            .is_empty());
+        let after_failure =
+            load_prompt_evolution_read_model(&mut store).expect("read model should recover");
+        assert!(prompt_evolution_read_model_for_scope(&after_failure, "project-a")
+            .rollouts
+            .is_empty());
+
+        store
+            .execute_batch_for_testing("drop trigger fail_prompt_rollout_event;")
+            .expect("failure trigger should uninstall");
+        append_prompt_rollout_update(
+            &mut store,
+            "auto",
+            "project-a",
+            &rollout,
+            &run_context,
+        )
+        .expect("retry should append the canonical event");
+
+        let incrementally_loaded =
+            load_prompt_evolution_read_model(&mut store).expect("read model should load");
+        assert_eq!(
+            prompt_evolution_read_model_for_scope(&incrementally_loaded, "project-a")
+                .rollouts
+                .get("auto"),
+            Some(&rollout)
+        );
+        let events = store
+            .list_by_task(&phase16_task_id())
+            .expect("events should load");
+        let revision = store
+            .event_revision(&phase16_task_id())
+            .expect("revision should load");
+        let replayed = build_prompt_evolution_read_model(
+            &events,
+            revision.latest_sequence,
+            revision.event_count,
+        );
+        assert_eq!(
+            serde_json::to_value(incrementally_loaded).expect("snapshot should serialize"),
+            serde_json::to_value(replayed).expect("replay should serialize")
+        );
+    }
 }
 
 #[cfg(test)]

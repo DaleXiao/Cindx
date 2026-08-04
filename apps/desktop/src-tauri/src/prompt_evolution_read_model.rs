@@ -1,12 +1,25 @@
 use super::*;
+use crate::prompt_evolution_hot_state::{
+    compact_prompt_evolution_hot_state, prompt_genome_conflict_keys,
+    prompt_genome_identities_are_valid, prompt_genome_key, prompt_model_genome_conflict_keys,
+    prompt_rollout_references_conflicted_genome, upsert_prompt_genome,
+};
+#[cfg(test)]
+use crate::prompt_evolution_hot_state::{
+    compact_prompt_evolution_hot_state_to_limits, compact_prompt_learning_hot_state_to_limits,
+};
+pub(crate) use crate::prompt_evolution_hot_state::{
+    prompt_evolution_read_model_for_scope, prompt_observation_matches_scope, prompt_rollout_key,
+    scoped_prompt_evaluation_id, PROMPT_EVALUATION_ATTEMPT_RETENTION,
+    PROMPT_EVIDENCE_SCOPE_SEPARATOR,
+};
 use crate::prompt_evolution_projection_contract::{
     prompt_auto_teacher_source_key, prompt_transfer_matches_canonical_teacher,
     CanonicalPromptAutoTeacher,
 };
+use agent_storage::StoredReadModel;
 #[cfg(test)]
-use orchestrator::{
-    IndependentQualitySource, LearningEvidenceV1, LearningUsageCompleteness,
-};
+use orchestrator::{IndependentQualitySource, LearningEvidenceV1, LearningUsageCompleteness};
 
 fn is_agent_run_terminal(event: &Event) -> bool {
     AgentRunEvent::from_event(event).is_some_and(|event| event.status().is_terminal())
@@ -50,16 +63,29 @@ pub(crate) fn prompt_genomes_from_events(
     effort: &str,
 ) -> Vec<ConductorPromptGenome> {
     let mut population = initial_prompt_population(effort);
-    for event in events {
-        for record in prompt_genome_records_from_event(event) {
-            if record.effort == effort {
-                population.push(record.genome);
-            }
+    let records = events
+        .iter()
+        .flat_map(prompt_genome_records_from_event)
+        .collect::<Vec<_>>();
+    let conflicts = prompt_genome_conflict_keys(&records);
+    for record in records {
+        if record.effort == effort && !conflicts.contains(&prompt_genome_key(&record)) {
+            population.push(record.genome);
         }
     }
     let mut ids = BTreeSet::new();
     population.retain(|genome| ids.insert(genome.id.clone()));
     population
+}
+
+fn prompt_agent_run_event_index<'a>(events: &'a [Event]) -> BTreeMap<&'a str, Vec<&'a Event>> {
+    let mut index = BTreeMap::<&str, Vec<&Event>>::new();
+    for event in events {
+        if let Some(run_id) = event.metadata.get("agent_run_id") {
+            index.entry(run_id.as_str()).or_default().push(event);
+        }
+    }
+    index
 }
 
 fn prompt_evolution_observation_records_from_events(
@@ -69,6 +95,7 @@ fn prompt_evolution_observation_records_from_events(
         crate::prompt_canary_outcome_projection::prompt_live_canary_outcome_records_from_events(
             events,
         );
+    let events_by_agent_run = prompt_agent_run_event_index(events);
     let mut auto_teacher_cache = BTreeMap::<(String, String), Option<PromptAutoTeacherCase>>::new();
     for event in events {
         let source_key = prompt_auto_teacher_source_key(event);
@@ -76,8 +103,12 @@ fn prompt_evolution_observation_records_from_events(
             auto_teacher_cache
                 .entry((project_id.clone(), source_run_id.clone()))
                 .or_insert_with(|| {
-                    crate::prompt_evidence_runtime::reconstruct_prompt_auto_teacher_from_canonical_events(
-                        events,
+                    let source_events = events_by_agent_run
+                        .get(source_run_id.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    crate::prompt_evidence_runtime::reconstruct_prompt_auto_teacher_from_indexed_events(
+                        source_events,
                         project_id,
                         source_run_id,
                     )
@@ -561,115 +592,12 @@ fn apply_prompt_rollout_event(model: &mut PromptEvolutionReadModel, event: &Even
     }
 }
 
-const PROMPT_EVIDENCE_SCOPE_SEPARATOR: &str = "::";
-
-pub(crate) fn scoped_prompt_evaluation_id(scope: &str, evaluation_id: &str) -> String {
-    let scope = scope.trim();
-    let scope = if scope.is_empty() { "global" } else { scope };
-    format!("{scope}{PROMPT_EVIDENCE_SCOPE_SEPARATOR}{evaluation_id}")
-}
-
-pub(crate) fn prompt_rollout_key(scope: &str, effort: &str) -> String {
-    scoped_prompt_evaluation_id(scope, effort)
-}
-
-fn prompt_observation_matches_scope(observation: &PromptEvolutionObservation, scope: &str) -> bool {
-    observation
-        .evaluation_id
-        .split_once(PROMPT_EVIDENCE_SCOPE_SEPARATOR)
-        .is_some_and(|(observed_scope, _)| observed_scope == scope)
-}
-
-pub(crate) fn prompt_evolution_read_model_for_scope(
-    model: &PromptEvolutionReadModel,
-    scope: &str,
-) -> PromptEvolutionReadModel {
-    let mut scoped = model.clone();
-    scoped.genomes.retain(|record| record.scope == scope);
-    scoped
-        .datasets
-        .retain(|_, dataset| dataset.project_id == scope);
-    scoped.attempts.retain(|_, attempt| {
-        prompt_evaluation_id_matches_scope(&attempt.started.identity.evaluation_id, scope)
-    });
-    let cohort_ids = scoped
-        .attempts
-        .values()
-        .map(|attempt| attempt.started.identity.cohort_sha256.clone())
-        .collect::<BTreeSet<_>>();
-    scoped
-        .cohorts
-        .retain(|cohort_sha256, _| cohort_ids.contains(cohort_sha256));
-    scoped
-        .cohort_sequences
-        .retain(|cohort_sha256, _| cohort_ids.contains(cohort_sha256));
-    let attempts = &scoped.attempts;
-    let cohorts = &scoped.cohorts;
-    scoped.observations.retain(|(_, observation)| {
-        prompt_observation_matches_scope(observation, scope)
-            && match observation.provenance.matched_evaluation.as_ref() {
-                Some(identity) => cohorts
-                    .get(&identity.cohort_sha256)
-                    .is_some_and(|cohort| {
-                        crate::prompt_attempt_runtime::prompt_matched_identity_belongs_to_cohort(
-                            identity, cohort,
-                        )
-                            && attempts
-                                .get(&identity.evaluation_id)
-                                .is_some_and(|attempt| {
-                                    attempt.started.identity == *identity
-                                        && crate::prompt_attempt_runtime::prompt_observation_matches_attempt(
-                                            observation,
-                                            &attempt.started,
-                                        )
-                                        && attempt.terminal.as_ref().is_some_and(|terminal| {
-                                            terminal.identity == *identity
-                                                && terminal.status
-                                                    == PromptEvaluationAttemptStatus::CompletedPair
-                                        })
-                                })
-                    }),
-                None => observation.mode == PromptEvaluationMode::Live,
-            }
-    });
-    scoped.rollouts = ["fast", "auto", "pro"]
-        .into_iter()
-        .filter_map(|effort| {
-            model
-                .rollouts
-                .get(&prompt_rollout_key(scope, effort))
-                .or_else(|| model.rollouts.get(effort))
-                .cloned()
-                .map(|rollout| (effort.to_string(), rollout))
-        })
-        .collect();
-    scoped
-}
-
-fn prompt_evaluation_id_matches_scope(evaluation_id: &str, scope: &str) -> bool {
-    evaluation_id
-        .split_once(PROMPT_EVIDENCE_SCOPE_SEPARATOR)
-        .is_some_and(|(observed_scope, _)| observed_scope == scope)
-}
-
-pub(crate) const PROMPT_EVALUATION_ATTEMPT_RETENTION: usize = 1_024;
-
 pub(crate) fn upsert_prompt_evaluation_attempt(
     attempts: &mut BTreeMap<String, PromptEvaluationAttemptState>,
     event: PromptEvaluationAttemptEventV1,
 ) {
     let key = event.identity.evaluation_id.clone();
     if event.status == orchestrator::PromptEvaluationAttemptStatus::Started {
-        if !attempts.contains_key(&key) && attempts.len() >= PROMPT_EVALUATION_ATTEMPT_RETENTION {
-            let removable = attempts
-                .iter()
-                .find(|(_, state)| state.terminal.is_some())
-                .map(|(key, _)| key.clone());
-            let Some(removable) = removable else {
-                return;
-            };
-            attempts.remove(&removable);
-        }
         attempts.entry(key).or_insert(PromptEvaluationAttemptState {
             started: event,
             terminal: None,
@@ -693,56 +621,43 @@ fn upsert_prompt_learning_cohort(
     let digest = cohort.cohort_sha256.clone();
     cohorts.entry(digest.clone()).or_insert(cohort);
     cohort_sequences.insert(digest, sequence);
-    while cohorts.len() > crate::prompt_attempt_runtime::PROMPT_LEARNING_COHORT_RETENTION {
-        let Some(oldest) = cohort_sequences
-            .iter()
-            .min_by(
-                |(left_digest, left_sequence), (right_digest, right_sequence)| {
-                    left_sequence
-                        .cmp(right_sequence)
-                        .then_with(|| left_digest.cmp(right_digest))
-                },
-            )
-            .map(|(digest, _)| digest.clone())
-        else {
-            break;
-        };
-        cohort_sequences.remove(&oldest);
-        cohorts.remove(&oldest);
-    }
-}
-
-pub(crate) fn persist_scoped_prompt_rollout(
-    model: &mut PromptEvolutionReadModel,
-    scope: &str,
-    effort: &str,
-    rollout: PromptRolloutState,
-) {
-    model
-        .rollouts
-        .insert(prompt_rollout_key(scope, effort), rollout);
 }
 
 pub(crate) fn visible_prompt_rollout(
     model: &PromptEvolutionReadModel,
     effort: &str,
 ) -> Option<PromptRolloutState> {
-    model.rollouts.get(effort).cloned().or_else(|| {
-        let suffix = format!("{PROMPT_EVIDENCE_SCOPE_SEPARATOR}{effort}");
-        model
-            .rollouts
-            .iter()
-            .filter(|(key, _)| key.ends_with(&suffix))
-            .map(|(_, rollout)| rollout)
-            .max_by_key(|rollout| {
-                (
-                    rollout.evidence_checkpoint,
-                    rollout.live_checkpoint,
-                    rollout.rollback_count,
-                )
-            })
-            .cloned()
-    })
+    let conflicts = prompt_model_genome_conflict_keys(model);
+    model
+        .rollouts
+        .get(effort)
+        .filter(|rollout| {
+            !prompt_rollout_references_conflicted_genome(rollout, "global", effort, &conflicts)
+        })
+        .cloned()
+        .or_else(|| {
+            let suffix = format!("{PROMPT_EVIDENCE_SCOPE_SEPARATOR}{effort}");
+            model
+                .rollouts
+                .iter()
+                .filter(|(key, _)| key.ends_with(&suffix))
+                .filter(|(key, rollout)| {
+                    key.strip_suffix(&suffix).is_some_and(|scope| {
+                        !prompt_rollout_references_conflicted_genome(
+                            rollout, scope, effort, &conflicts,
+                        )
+                    })
+                })
+                .map(|(_, rollout)| rollout)
+                .max_by_key(|rollout| {
+                    (
+                        rollout.evidence_checkpoint,
+                        rollout.live_checkpoint,
+                        rollout.rollback_count,
+                    )
+                })
+                .cloned()
+        })
 }
 
 pub(crate) fn prompt_dataset_key(effort: &str, project_id: &str) -> String {
@@ -815,21 +730,6 @@ pub(crate) fn prompt_dataset_record_from_event(
     ))
 }
 
-pub(crate) fn upsert_prompt_genome(
-    records: &mut Vec<PromptGenomeRecord>,
-    record: PromptGenomeRecord,
-) {
-    if let Some(existing) = records.iter_mut().find(|existing| {
-        existing.scope == record.scope
-            && existing.effort == record.effort
-            && existing.genome.id == record.genome.id
-    }) {
-        *existing = record;
-    } else {
-        records.push(record);
-    }
-}
-
 pub(crate) fn upsert_prompt_observation(
     observations: &mut Vec<(String, PromptEvolutionObservation)>,
     effort: String,
@@ -857,6 +757,7 @@ pub(crate) fn build_prompt_evolution_read_model(
         revision,
         event_count,
         genomes: Vec::new(),
+        genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
@@ -877,7 +778,7 @@ pub(crate) fn build_prompt_evolution_read_model(
     ordered_events.sort_by_key(|event| event.sequence);
     for event in ordered_events {
         for record in prompt_genome_records_from_event(event) {
-            upsert_prompt_genome(&mut model.genomes, record);
+            upsert_prompt_genome(&mut model, record);
         }
         if let Some((key, dataset)) = prompt_dataset_record_from_event(event) {
             model.datasets.insert(key, dataset);
@@ -905,32 +806,52 @@ pub(crate) fn build_prompt_evolution_read_model(
         crate::prompt_distillation_runtime::apply_prompt_distillation_event(&mut model, event);
         apply_prompt_rollout_event(&mut model, event);
     }
+    compact_prompt_evolution_hot_state(&mut model);
     model
 }
 
 pub(crate) fn load_prompt_evolution_read_model(
     store: &mut SqliteStore,
 ) -> Result<PromptEvolutionReadModel, StorageError> {
-    let task_id = phase16_task_id();
-    let revision = store.event_revision(&task_id)?;
-    let stored = store
-        .load_read_model(
+    for publish_attempt in 0..2 {
+        let observed = store.load_read_model(
             PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
             PROMPT_EVOLUTION_READ_MODEL_KEY,
-        )?
-        .and_then(|stored| {
-            serde_json::from_str::<PromptEvolutionReadModel>(&stored.payload)
-                .ok()
-                .filter(|model| {
-                    model.schema == PROMPT_EVOLUTION_READ_MODEL_NAMESPACE
-                        && model.projection_version
-                            == PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION
-                        && model.revision == stored.revision
-                        && model.revision <= revision.latest_sequence
-                        && model.event_count <= revision.event_count
-                        && prompt_genome_scopes_are_valid(model)
-                })
-        });
+        )?;
+        let (model, changed) = project_prompt_evolution_read_model(store, observed.as_ref())?;
+        if !changed {
+            return Ok(model);
+        }
+        if compare_exchange_prompt_evolution_read_model(store, observed.as_ref(), &model)? {
+            return Ok(model);
+        }
+        if publish_attempt == 1 {
+            return Err(StorageError::new(
+                "prompt evolution snapshot publication conflicted twice".to_string(),
+            ));
+        }
+    }
+    unreachable!("prompt evolution publication attempts are bounded")
+}
+
+fn project_prompt_evolution_read_model(
+    store: &mut SqliteStore,
+    observed: Option<&StoredReadModel>,
+) -> Result<(PromptEvolutionReadModel, bool), StorageError> {
+    let task_id = phase16_task_id();
+    let revision = store.event_revision(&task_id)?;
+    let stored = observed.and_then(|stored| {
+        serde_json::from_str::<PromptEvolutionReadModel>(&stored.payload)
+            .ok()
+            .filter(|model| {
+                model.schema == PROMPT_EVOLUTION_READ_MODEL_NAMESPACE
+                    && model.projection_version == PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION
+                    && model.revision == stored.revision
+                    && model.revision <= revision.latest_sequence
+                    && model.event_count <= revision.event_count
+                    && prompt_genome_scopes_are_valid(model)
+            })
+    });
     let had_stored_model = stored.is_some();
     let mut model = stored.unwrap_or_else(|| PromptEvolutionReadModel {
         schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
@@ -938,6 +859,7 @@ pub(crate) fn load_prompt_evolution_read_model(
         revision: 0,
         event_count: 0,
         genomes: Vec::new(),
+        genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
@@ -968,7 +890,7 @@ pub(crate) fn load_prompt_evolution_read_model(
             BTreeMap::<(String, String), Option<PromptAutoTeacherCase>>::new();
         for event in &delta {
             for record in prompt_genome_records_from_event(event) {
-                upsert_prompt_genome(&mut model.genomes, record);
+                upsert_prompt_genome(&mut model, record);
             }
             if let Some((key, dataset)) = prompt_dataset_record_from_event(event) {
                 model.datasets.insert(key, dataset);
@@ -1043,14 +965,11 @@ pub(crate) fn load_prompt_evolution_read_model(
             }
             apply_prompt_rollout_event(&mut model, event);
         }
+        compact_prompt_evolution_hot_state(&mut model);
         model.revision = revision.latest_sequence;
         model.event_count = revision.event_count;
     }
-
-    if changed {
-        save_prompt_evolution_read_model(store, &model)?;
-    }
-    Ok(model)
+    Ok((model, changed))
 }
 
 fn prompt_genome_scopes_are_valid(model: &PromptEvolutionReadModel) -> bool {
@@ -1058,28 +977,37 @@ fn prompt_genome_scopes_are_valid(model: &PromptEvolutionReadModel) -> bool {
         .genomes
         .iter()
         .all(|record| !record.scope.trim().is_empty())
+        && prompt_genome_identities_are_valid(model)
 }
 
-pub(crate) fn save_prompt_evolution_read_model(
+fn compare_exchange_prompt_evolution_read_model(
     store: &mut SqliteStore,
+    expected: Option<&StoredReadModel>,
     model: &PromptEvolutionReadModel,
-) -> Result<(), StorageError> {
+) -> Result<bool, StorageError> {
+    let revision = store.event_revision(&phase16_task_id())?;
+    if model.revision != revision.latest_sequence || model.event_count != revision.event_count {
+        return Ok(false);
+    }
     let payload = serde_json::to_string(model).map_err(|error| {
         StorageError::new(format!("prompt evolution serialization failed: {error}"))
     })?;
-    store.save_read_model(
+    store.compare_exchange_read_model(
         PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
         PROMPT_EVOLUTION_READ_MODEL_KEY,
+        expected,
         model.revision,
         &payload,
     )
 }
 
 pub(crate) fn prompt_evolution_profile_events(model: &PromptEvolutionReadModel) -> Vec<Event> {
+    let conflicts = prompt_model_genome_conflict_keys(model);
     model
         .genomes
         .iter()
         .enumerate()
+        .filter(|(_, record)| !conflicts.contains(&prompt_genome_key(record)))
         .filter_map(|(index, record)| {
             Some(Event {
                 id: EventId(format!("prompt-read-model-{index}")),

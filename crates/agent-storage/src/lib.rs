@@ -53,6 +53,7 @@ unsafe extern "C" {
         pz_tail: *mut *const c_char,
     ) -> c_int;
     fn sqlite3_finalize(stmt: *mut sqlite3_stmt) -> c_int;
+    fn sqlite3_changes(db: *mut sqlite3) -> c_int;
     fn sqlite3_step(stmt: *mut sqlite3_stmt) -> c_int;
     fn sqlite3_bind_text(
         stmt: *mut sqlite3_stmt,
@@ -387,6 +388,19 @@ impl SqliteStore {
         )?;
         statement.bind_text(1, &task_id.0)?;
         event_revision_from_statement(&mut statement)
+    }
+
+    /// Reads only the indexed event tail for callers that already own a
+    /// persisted event count and need to discover an append-only delta.
+    pub fn latest_sequence(&self, task_id: &TaskId) -> Result<u64, StorageError> {
+        let mut statement = self.prepare(
+            "select sequence from events\n             where task_id = ?1\n             order by sequence desc limit 1",
+        )?;
+        statement.bind_text(1, &task_id.0)?;
+        if statement.step()? != StepResult::Row {
+            return Ok(0);
+        }
+        Ok(statement.column_i64(0) as u64)
     }
 
     pub fn list_by_task_after(
@@ -793,6 +807,54 @@ impl SqliteStore {
         statement.bind_i64(3, revision as i64)?;
         statement.bind_text(4, payload)?;
         statement.expect_done()
+    }
+
+    /// Publishes a read model only when the stored row still matches the
+    /// revision and payload observed by the caller. `None` inserts only when
+    /// the row is still absent.
+    pub fn compare_exchange_read_model(
+        &mut self,
+        namespace: &str,
+        key: &str,
+        expected: Option<&StoredReadModel>,
+        revision: u64,
+        payload: &str,
+    ) -> Result<bool, StorageError> {
+        let mut statement = match expected {
+            Some(expected) => {
+                if revision < expected.revision {
+                    return Ok(false);
+                }
+                let mut statement = self.prepare(
+                    "update read_models
+                     set revision = ?3, payload = ?4
+                     where namespace = ?1 and model_key = ?2
+                       and revision = ?5 and payload = ?6",
+                )?;
+                statement.bind_text(1, namespace)?;
+                statement.bind_text(2, key)?;
+                statement.bind_i64(3, revision as i64)?;
+                statement.bind_text(4, payload)?;
+                statement.bind_i64(5, expected.revision as i64)?;
+                statement.bind_text(6, &expected.payload)?;
+                statement
+            }
+            None => {
+                let mut statement = self.prepare(
+                    "insert into read_models(namespace, model_key, revision, payload)
+                     values (?1, ?2, ?3, ?4)
+                     on conflict(namespace, model_key) do nothing",
+                )?;
+                statement.bind_text(1, namespace)?;
+                statement.bind_text(2, key)?;
+                statement.bind_i64(3, revision as i64)?;
+                statement.bind_text(4, payload)?;
+                statement
+            }
+        };
+        statement.expect_done()?;
+        drop(statement);
+        Ok(unsafe { sqlite3_changes(self.connection) } == 1)
     }
 
     pub fn delete_read_model(&mut self, namespace: &str, key: &str) -> Result<(), StorageError> {
@@ -2813,6 +2875,45 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_indexed_task_tail_without_counting_history() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-tail".to_string());
+        assert_eq!(store.latest_sequence(&task_id).unwrap(), 0);
+        for sequence in [1, 2, 7] {
+            store
+                .append(Event {
+                    id: EventId(format!("tail-event-{sequence}")),
+                    task_id: task_id.clone(),
+                    sequence,
+                    timestamp_ms: sequence,
+                    kind: EventKind::TaskStatusChanged,
+                    summary: "tail".to_string(),
+                    metadata: Metadata::new(),
+                })
+                .expect("event should append");
+        }
+
+        assert_eq!(store.latest_sequence(&task_id).unwrap(), 7);
+
+        let mut statement = store
+            .prepare(
+                "explain query plan
+                 select sequence from events
+                 where task_id = ?1
+                 order by sequence desc limit 1",
+            )
+            .unwrap();
+        statement.bind_text(1, &task_id.0).unwrap();
+        let mut plan = Vec::new();
+        while statement.step().unwrap() == StepResult::Row {
+            plan.push(statement.column_text(3).unwrap());
+        }
+        assert!(plan
+            .iter()
+            .any(|step| step.contains("idx_events_task_sequence")));
+    }
+
+    #[test]
     fn reads_only_requested_event_kinds_in_sequence_order() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let task_id = TaskId("task-kinds".to_string());
@@ -3279,6 +3380,92 @@ mod tests {
             .load_read_model("agent-session-v1", "session-a")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn compare_exchange_read_model_rejects_stale_cross_connection_publications() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "cindx-agent-storage-read-model-cas-{}-{unique}.sqlite3",
+            std::process::id()
+        ));
+        let mut first = SqliteStore::open(&path).expect("first store should open");
+        let mut second = SqliteStore::open(&path).expect("second store should open");
+
+        assert!(first
+            .compare_exchange_read_model("cas", "absent", None, 1, "initial")
+            .expect("absent row should publish"));
+        assert!(!second
+            .compare_exchange_read_model("cas", "absent", None, 1, "competing")
+            .expect("competing insert should report a conflict"));
+
+        first
+            .save_read_model("cas", "newer", 10, "old")
+            .expect("baseline should save");
+        let stale = second
+            .load_read_model("cas", "newer")
+            .expect("baseline should load")
+            .expect("baseline should exist");
+        assert!(first
+            .compare_exchange_read_model("cas", "newer", Some(&stale), 11, "new")
+            .expect("newer snapshot should publish"));
+        assert!(!second
+            .compare_exchange_read_model("cas", "newer", Some(&stale), 12, "stale")
+            .expect("stale expected value should report a conflict"));
+        assert_eq!(
+            second.load_read_model("cas", "newer").unwrap().unwrap(),
+            StoredReadModel {
+                revision: 11,
+                payload: "new".to_string(),
+            }
+        );
+
+        first
+            .save_read_model("cas", "same-revision", 20, "old-projection")
+            .expect("old projection should save");
+        let old_projection = first
+            .load_read_model("cas", "same-revision")
+            .unwrap()
+            .unwrap();
+        let competing_projection = second
+            .load_read_model("cas", "same-revision")
+            .unwrap()
+            .unwrap();
+        assert!(first
+            .compare_exchange_read_model(
+                "cas",
+                "same-revision",
+                Some(&old_projection),
+                20,
+                "repaired-projection",
+            )
+            .expect("the observed old projection should be replaceable"));
+        assert!(!second
+            .compare_exchange_read_model(
+                "cas",
+                "same-revision",
+                Some(&competing_projection),
+                20,
+                "conflicting-projection",
+            )
+            .expect("same-revision payload conflict should be rejected"));
+        assert_eq!(
+            second
+                .load_read_model("cas", "same-revision")
+                .unwrap()
+                .unwrap(),
+            StoredReadModel {
+                revision: 20,
+                payload: "repaired-projection".to_string(),
+            }
+        );
+
+        drop(second);
+        drop(first);
+        fs::remove_file(path).expect("temporary database should be removed");
     }
 
     #[test]

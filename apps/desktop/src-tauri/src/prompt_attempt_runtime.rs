@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_attempt_retention_evicts_before_admitting_the_1025th() {
+    fn terminal_attempt_projection_defers_eviction_to_reference_safe_compaction() {
         let cohort = cohort_fixture();
         let mut attempts = BTreeMap::new();
         for index in 0..=crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION {
@@ -697,14 +697,14 @@ mod tests {
 
         assert_eq!(
             attempts.len(),
-            crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION
+            crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION + 1
         );
-        assert!(!attempts.contains_key("scope::attempt-0000"));
+        assert!(attempts.contains_key("scope::attempt-0000"));
         assert!(attempts.contains_key("scope::attempt-1024"));
     }
 
     #[test]
-    fn incomplete_attempt_retention_rejects_and_drops_the_1025th_start() {
+    fn incomplete_attempt_admission_rejects_but_replay_preserves_the_1025th_start() {
         let cohort = cohort_fixture();
         let mut attempts = BTreeMap::new();
         for index in 0..crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION {
@@ -725,8 +725,8 @@ mod tests {
         );
         assert_eq!(
             attempts.len(),
-            crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION
+            crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION + 1
         );
-        assert!(!attempts.contains_key("scope::attempt-1024"));
+        assert!(attempts.contains_key("scope::attempt-1024"));
     }
 }

@@ -48,6 +48,7 @@
       "performance-comparator-contract",
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
+      "prompt-learning-outbox-scaling",
       "workspace-graph-cache-scaling",
       "prepared-image-request-scaling",
       "model-transport-prepare-scaling",
@@ -64,6 +65,7 @@
     "shipping-performance": [
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
+      "prompt-learning-outbox-scaling",
       "workspace-graph-cache-scaling",
       "prepared-image-request-scaling",
       "model-transport-prepare-scaling",
@@ -88,6 +90,7 @@
       "frontend-test",
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
+      "prompt-learning-outbox-scaling",
       "workspace-graph-cache-scaling",
       "prepared-image-request-scaling",
       "model-transport-prepare-scaling",
@@ -322,6 +325,25 @@
       "required_output": [
         "test result: ok. 1 passed; 0 failed",
         "cindx.agent-runtime-snapshot-scaling.v1"
+      ]
+    },
+    {
+      "id": "prompt-learning-outbox-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "prompt_learning_outbox_projection::tests::prompt_learning_outbox_delta_projection_scaling_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prompt-learning-outbox-scaling.v1"
       ]
     },
     {

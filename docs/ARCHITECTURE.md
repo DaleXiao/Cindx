@@ -304,6 +304,18 @@ These contracts make self-distillation controlled and replayable. Deterministic
 tests establish eligibility, isolation, reachability, and rollback behavior;
 they do not establish provider-backed intelligence improvement.
 
+Auto-transfer and Pro-distillation share a small event-projected outbox read
+model. It stores a 256-intent FIFO work window and a canonical event cursor;
+latest pending work is coalesced only by project and learning track. Normal
+worker wakes use an indexed tail lookup and project the sequence delta. Bad
+snapshots or non-contiguous deltas replay the phase-16 event stream. An overflow
+flag keeps the persisted window bounded; when dispatched markers free capacity,
+full replay refills the next window from canonical events. CAS publication binds
+the observed revision and full payload, with one reload before conflict failure,
+so concurrent workers cannot publish stale discovery state. Dispatch markers
+are project-bound and remove envelopes through the same projection; no canonical
+intent or audit event is deleted.
+
 The desktop boundary keeps live canary outcome projection in
 `prompt_canary_outcome_projection` and bounded canary observation, quarantine,
 and rollback helpers in `prompt_canary_runtime`; the evolution read model and
@@ -314,6 +326,20 @@ datasets, and rollout state by project. Records without a durable scope are
 rebuilt from canonical events before they can participate in selection. Its
 projection version is explicit, so a semantic projection change forces a
 canonical replay instead of trusting a structurally compatible stale cache.
+Rollout changes are event-first, and cache publication uses the same
+revision-and-payload CAS rule as the outbox. Scope projection selects only the
+requested project's records instead of cloning the full model, and cold teacher
+reconstruction indexes source-run events once. A compact per-identity payload
+fingerprint ledger preserves conflict tombstones after full genome payloads leave
+the hot window, so incremental projection and cold replay exclude the same
+identities from selection. Hot-state compaction is reference-safe and soft: it may
+retain more than the target limit rather than evict active cohort, attempt,
+stable/canary/frozen/quarantine, or matched-observation lineage. Canonical events
+remain the complete audit and deterministic recovery source.
+`prompt_evolution_hot_state` owns scope selection, duplicate-genome conflict
+handling, and reference-safe soft retention; `prompt_evolution_read_model`
+depends on that module and owns event projection plus CAS publication, not the
+reverse.
 
 Prompt evolution is not the conductor, task graph, or run loop. It cannot alter
 active permissions, transcripts, tool observations, or budgets.

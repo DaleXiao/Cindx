@@ -20,9 +20,10 @@ does not claim Fugu Ultra equivalence.
   before applying the versioned policy. Sub-microsecond conductor routing remains a
   capacity diagnostic because scheduler noise is larger than a useful hard limit.
 - `shipping-performance`: resource-bounded hard gates for incremental Session and
-  runtime snapshots, shared graph parsing, prepared image/request reuse, retry
-  reuse, and linear frontend streaming Markdown work. It uses operation counts and
-  identity invariants, never cross-machine wall-clock thresholds.
+  runtime snapshots, prompt-learning outbox delta projection, shared graph
+  parsing, prepared image/request reuse, retry reuse, and linear frontend
+  streaming Markdown work. It uses operation counts and identity invariants,
+  never cross-machine wall-clock thresholds.
 - `full`: all shipping deterministic gates, sidecars, frontend production build,
   and Rust tests; heavier same-machine diagnostics remain in `performance`.
 
@@ -88,7 +89,8 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   desktop Rust control-plane tests.
 - Each exact-filtered Rust shipping gate must prove that precisely one matching test
   executed. The gates preserve constant delta visits, shared graph/request storage,
-  single request preparation across retries, and linear frontend parse/join work.
+  single request preparation across retries, one-event prompt outbox work after a
+  4,096-event checkpoint, and linear frontend parse/join work.
 
 ## Evidence Boundary
 

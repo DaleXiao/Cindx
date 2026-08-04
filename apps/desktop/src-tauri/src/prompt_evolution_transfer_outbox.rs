@@ -2,12 +2,15 @@ use crate::app_state::AppState;
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
 use crate::prompt_evolution_models::notify_prompt_evaluation_worker;
-use crate::runtime_values::phase16_task_id;
-use agent_core::{EventKind, Metadata, TaskId};
+use agent_core::{Event, EventKind, Metadata, TaskId};
 use orchestrator::sha256_hex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
 use tauri::Manager;
+
+use crate::prompt_learning_outbox_projection::{
+    load_prompt_learning_outbox_projection, prompt_learning_dispatch_recovery,
+    PromptLearningDispatchRecovery, PromptLearningOutboxProjection,
+};
 
 const INTENT_SCHEMA: &str = "cindx.prompt-auto-transfer-intent.v1";
 const INTENT_EVENT: &str = "Conductor prompt Auto transfer requested";
@@ -16,7 +19,7 @@ const INTENT_KEY: &str = "prompt_auto_transfer_intent";
 const INTENT_ID_KEY: &str = "prompt_auto_transfer_intent_id";
 pub(crate) const AUTO_TRANSFER_REQUIRED_KEY: &str = "prompt_auto_transfer_required";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct PromptAutoTransferIntent {
     schema: String,
     intent_id: String,
@@ -51,9 +54,8 @@ impl PromptAutoTransferIntent {
 
     fn validate(&self) -> bool {
         self.schema == INTENT_SCHEMA
-            && !self.intent_id.trim().is_empty()
-            && !self.task_id.trim().is_empty()
-            && self.run_context.contains_key("project_id")
+            && Self::from_context(&TaskId(self.task_id.clone()), &self.run_context).as_ref()
+                == Some(self)
     }
 }
 
@@ -102,48 +104,21 @@ pub(crate) fn persist_prompt_auto_transfer_intent(
 
 pub(crate) fn dispatch_prompt_auto_transfer_intents(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let (intent_events, completion_events) = {
-        let store = state
+    let projection = {
+        let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        (
-            store
-                .list_by_task_and_metadata(&phase16_task_id(), "background_evaluation", "true")
-                .map_err(|error| error.to_string())?,
-            store
-                .list_by_task_and_metadata(&phase16_task_id(), AUTO_TRANSFER_REQUIRED_KEY, "true")
-                .map_err(|error| error.to_string())?,
-        )
+        load_prompt_learning_outbox(&mut store)?
     };
-    let mut intents = BTreeMap::<String, PromptAutoTransferIntent>::new();
-    let mut dispatched = BTreeSet::new();
-    for event in &intent_events {
-        if event.summary == DISPATCHED_EVENT {
-            if let Some(intent_id) = event.metadata.get(INTENT_ID_KEY) {
-                dispatched.insert(intent_id.clone());
-            }
-        } else if event.summary == INTENT_EVENT {
-            let intent = event
-                .metadata
-                .get(INTENT_KEY)
-                .and_then(|payload| serde_json::from_str::<PromptAutoTransferIntent>(payload).ok())
-                .filter(PromptAutoTransferIntent::validate)
-                .ok_or_else(|| "prompt Auto transfer intent is invalid".to_string())?;
-            intents.entry(intent.intent_id.clone()).or_insert(intent);
-        }
-    }
-    for event in completion_events {
-        if let Some(intent) =
-            PromptAutoTransferIntent::from_context(&event.task_id, &event.metadata)
-        {
-            intents.entry(intent.intent_id.clone()).or_insert(intent);
-        }
-    }
+    let intents = projection
+        .pending_auto_transfer()
+        .map(|(project_id, intent_id, payload)| {
+            decode_auto_transfer_intent(project_id, intent_id, payload)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut dispatched_any = false;
     for (intent_id, intent) in intents {
-        if dispatched.contains(&intent_id) {
-            continue;
-        }
         let request_id = format!("prompt-evaluation-{intent_id}");
         let task_id = TaskId(intent.task_id.clone());
         let request_exists = state
@@ -154,19 +129,136 @@ pub(crate) fn dispatch_prompt_auto_transfer_intents(app: &tauri::AppHandle) -> R
             .map_err(|error| error.to_string())?
             .iter()
             .any(|event| event.summary == "Conductor prompt evaluation requested");
-        if !request_exists
-            && !crate::prompt_pairwise_runtime::enqueue_prompt_auto_transfer_evaluation(
+        if prompt_learning_dispatch_recovery(request_exists)
+            == PromptLearningDispatchRecovery::EnqueueThenMark
+        {
+            if !crate::prompt_pairwise_runtime::enqueue_prompt_auto_transfer_evaluation(
                 app,
                 &task_id,
                 &intent.run_context,
                 Some(request_id),
-            )?
-        {
-            continue;
+            )? {
+                continue;
+            }
         }
         append_dispatched(&state, &intent, &intent_id)?;
+        dispatched_any = true;
+    }
+    if dispatched_any {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        load_prompt_learning_outbox(&mut store)?;
     }
     Ok(())
+}
+
+pub(crate) fn load_prompt_learning_outbox(
+    store: &mut agent_storage::SqliteStore,
+) -> Result<PromptLearningOutboxProjection, String> {
+    load_prompt_learning_outbox_projection(
+        store,
+        project_prompt_learning_outbox_event,
+        prompt_learning_outbox_payloads_are_valid,
+    )
+}
+
+fn project_prompt_learning_outbox_event(
+    projection: &mut PromptLearningOutboxProjection,
+    event: &Event,
+) -> Result<(), String> {
+    project_auto_transfer_outbox_event(projection, event)?;
+    crate::prompt_distillation_outbox::project_pro_distillation_outbox_event(projection, event)
+}
+
+fn project_auto_transfer_outbox_event(
+    projection: &mut PromptLearningOutboxProjection,
+    event: &Event,
+) -> Result<(), String> {
+    if event.summary == DISPATCHED_EVENT {
+        let intent_id = event
+            .metadata
+            .get(INTENT_ID_KEY)
+            .ok_or_else(|| "prompt Auto transfer dispatch intent id is missing".to_string())?;
+        let project_id = event
+            .metadata
+            .get("project_id")
+            .ok_or_else(|| "prompt Auto transfer dispatch project is missing".to_string())?;
+        return projection.remove_auto_transfer(project_id, intent_id);
+    }
+    if event.summary == INTENT_EVENT {
+        let intent = event
+            .metadata
+            .get(INTENT_KEY)
+            .and_then(|payload| serde_json::from_str::<PromptAutoTransferIntent>(payload).ok())
+            .filter(PromptAutoTransferIntent::validate)
+            .ok_or_else(|| "prompt Auto transfer intent is invalid".to_string())?;
+        let payload = serde_json::to_string(&intent).map_err(|error| {
+            format!("prompt Auto transfer intent serialization failed: {error}")
+        })?;
+        let project_id = intent
+            .run_context
+            .get("project_id")
+            .ok_or_else(|| "prompt Auto transfer project is missing".to_string())?;
+        projection.insert_auto_transfer(project_id, &intent.intent_id, event.sequence, payload)?;
+    }
+    if event
+        .metadata
+        .get(AUTO_TRANSFER_REQUIRED_KEY)
+        .map(String::as_str)
+        == Some("true")
+    {
+        if let Some(intent) =
+            PromptAutoTransferIntent::from_context(&event.task_id, &event.metadata)
+        {
+            let payload = serde_json::to_string(&intent).map_err(|error| {
+                format!("prompt Auto transfer intent serialization failed: {error}")
+            })?;
+            let project_id = intent
+                .run_context
+                .get("project_id")
+                .ok_or_else(|| "prompt Auto transfer project is missing".to_string())?;
+            projection.insert_auto_transfer(
+                project_id,
+                &intent.intent_id,
+                event.sequence,
+                payload,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn prompt_learning_outbox_payloads_are_valid(projection: &PromptLearningOutboxProjection) -> bool {
+    projection
+        .pending_auto_transfer()
+        .all(|(project_id, intent_id, payload)| {
+            decode_auto_transfer_intent(project_id, intent_id, payload).is_ok()
+        })
+        && projection
+            .pending_pro_distillation()
+            .all(|(project_id, intent_id, payload)| {
+                crate::prompt_distillation_outbox::pro_distillation_intent_payload_is_valid(
+                    project_id, intent_id, payload,
+                )
+            })
+}
+
+fn decode_auto_transfer_intent(
+    project_id: &str,
+    intent_id: &str,
+    payload: &str,
+) -> Result<(String, PromptAutoTransferIntent), String> {
+    let intent = serde_json::from_str::<PromptAutoTransferIntent>(payload)
+        .map_err(|error| format!("prompt Auto transfer intent is invalid: {error}"))?;
+    if !intent.validate()
+        || intent.intent_id != intent_id
+        || intent.run_context.get("project_id").map(String::as_str) != Some(project_id)
+    {
+        return Err("prompt Auto transfer intent identity is invalid".to_string());
+    }
+    Ok((intent_id.to_string(), intent))
 }
 
 fn append_dispatched(
@@ -217,6 +309,8 @@ fn persistent_context(context: &Metadata) -> Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::{EventId, EventKind};
+    use agent_storage::{EventStore, SqliteStore};
 
     #[test]
     fn intent_identity_is_stable_for_the_same_auto_completion() {
@@ -233,5 +327,107 @@ mod tests {
         let second = PromptAutoTransferIntent::from_context(&task_id, &context).unwrap();
 
         assert_eq!(first.intent_id, second.intent_id);
+    }
+
+    #[test]
+    fn intent_validation_rejects_malformed_or_cross_project_identity() {
+        let context = [
+            ("project_id".to_string(), "project-a".to_string()),
+            ("agent_run_id".to_string(), "run".to_string()),
+            ("steer_epoch".to_string(), "2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let task_id = TaskId("task".to_string());
+        let intent = PromptAutoTransferIntent::from_context(&task_id, &context).unwrap();
+        assert!(intent.validate());
+
+        let mut malformed_id = intent.clone();
+        malformed_id.intent_id.push_str("-tampered");
+        assert!(!malformed_id.validate());
+
+        let mut cross_project = intent.clone();
+        cross_project
+            .run_context
+            .insert("project_id".to_string(), "project-b".to_string());
+        assert!(!cross_project.validate());
+
+        let mut different_task = intent.clone();
+        different_task.task_id = "other-task".to_string();
+        assert!(!different_task.validate());
+
+        let mut unexpected_context = intent;
+        unexpected_context
+            .run_context
+            .insert("unexpected".to_string(), "value".to_string());
+        assert!(!unexpected_context.validate());
+    }
+
+    #[test]
+    fn canonical_completion_and_intent_replay_to_one_pending_entry() {
+        let task_id = crate::runtime_values::phase16_task_id();
+        let context = [
+            ("project_id".to_string(), "project".to_string()),
+            ("agent_run_id".to_string(), "run".to_string()),
+            ("steer_epoch".to_string(), "2".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let intent = PromptAutoTransferIntent::from_context(&task_id, &context).unwrap();
+        let mut completion_metadata = context.clone();
+        completion_metadata.insert(AUTO_TRANSFER_REQUIRED_KEY.to_string(), "true".to_string());
+        let mut intent_metadata = context;
+        intent_metadata.insert(INTENT_ID_KEY.to_string(), intent.intent_id.clone());
+        intent_metadata.insert(
+            INTENT_KEY.to_string(),
+            serde_json::to_string(&intent).unwrap(),
+        );
+        let mut store = SqliteStore::in_memory().unwrap();
+        store
+            .append(Event {
+                id: EventId("completion".to_string()),
+                task_id: task_id.clone(),
+                sequence: 1,
+                timestamp_ms: 1,
+                kind: EventKind::TaskStatusChanged,
+                summary: "Collaboration workflow completed".to_string(),
+                metadata: completion_metadata,
+            })
+            .unwrap();
+        store
+            .append(Event {
+                id: EventId("intent".to_string()),
+                task_id: task_id.clone(),
+                sequence: 2,
+                timestamp_ms: 2,
+                kind: EventKind::TaskStatusChanged,
+                summary: INTENT_EVENT.to_string(),
+                metadata: intent_metadata,
+            })
+            .unwrap();
+
+        let projection = load_prompt_learning_outbox(&mut store).unwrap();
+        assert_eq!(projection.pending_auto_transfer().count(), 1);
+
+        store
+            .append(Event {
+                id: EventId("dispatch".to_string()),
+                task_id,
+                sequence: 3,
+                timestamp_ms: 3,
+                kind: EventKind::TaskStatusChanged,
+                summary: DISPATCHED_EVENT.to_string(),
+                metadata: [
+                    (INTENT_ID_KEY.to_string(), intent.intent_id),
+                    ("project_id".to_string(), "project".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            })
+            .unwrap();
+        let restarted = load_prompt_learning_outbox(&mut store).unwrap();
+        assert_eq!(restarted.pending_auto_transfer().count(), 0);
+        assert_eq!(restarted.revision, 3);
+        assert_eq!(restarted.event_count, 3);
     }
 }

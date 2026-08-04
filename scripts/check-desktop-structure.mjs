@@ -437,6 +437,15 @@ const promptEvolutionWorkerSource = read(
 const promptEvolutionReadModelSource = read(
   "apps/desktop/src-tauri/src/prompt_evolution_read_model.rs"
 );
+const promptEvolutionRuntimeSource = read(
+  "apps/desktop/src-tauri/src/prompt_evolution_runtime.rs"
+);
+const promptEvolutionHotStateSource = read(
+  "apps/desktop/src-tauri/src/prompt_evolution_hot_state.rs"
+);
+const promptLearningOutboxProjectionSource = read(
+  "apps/desktop/src-tauri/src/prompt_learning_outbox_projection.rs"
+);
 const promptPairwiseRuntimeSource = read(
   "apps/desktop/src-tauri/src/prompt_pairwise_runtime.rs"
 );
@@ -537,6 +546,7 @@ const desktopDtoContractRustTest = read(
 const shippingPerformanceGateIds = [
   "session-projection-scaling",
   "agent-runtime-snapshot-scaling",
+  "prompt-learning-outbox-scaling",
   "workspace-graph-cache-scaling",
   "prepared-image-request-scaling",
   "model-transport-prepare-scaling",
@@ -555,6 +565,13 @@ const shippingPerformanceProofs = new Map([
     [
       "agent_runtime_snapshot_cursor::tests::incremental_runtime_snapshot_visits_only_appended_messages",
       "cindx.agent-runtime-snapshot-scaling.v1"
+    ]
+  ],
+  [
+    "prompt-learning-outbox-scaling",
+    [
+      "prompt_learning_outbox_projection::tests::prompt_learning_outbox_delta_projection_scaling_gate",
+      "cindx.prompt-learning-outbox-scaling.v1"
     ]
   ],
   [
@@ -1060,6 +1077,21 @@ assert(
   "Startup recovery and prompt evolution must keep history reads indexed and scope-bounded"
 );
 assert(
+  agentStorageSource.includes("pub fn compare_exchange_read_model(") &&
+    promptEvolutionReadModelSource.includes("compare_exchange_read_model(") &&
+    promptEvolutionReadModelSource.includes(
+      "prompt evolution snapshot publication conflicted twice"
+    ) &&
+    promptEvolutionRuntimeSource.includes("append_prompt_rollout_update(") &&
+    !promptEvolutionRuntimeSource.includes("save_prompt_evolution_read_model") &&
+    promptLearningOutboxProjectionSource.includes("list_by_task_after(") &&
+    promptLearningOutboxProjectionSource.includes("compare_exchange_read_model(") &&
+    promptLearningOutboxProjectionSource.includes(
+      "PROMPT_LEARNING_OUTBOX_MAX_PENDING"
+    ),
+  "Prompt learning control snapshots must remain canonical-event-first, CAS-published, delta-projected, and bounded"
+);
+assert(
   shippingOrchestratorExamples.length === 0 &&
     fs.existsSync(
       path.join(root, "crates", "orchestrator-eval", "examples", "arena_lab.rs")
@@ -1167,7 +1199,9 @@ for (const requiredModule of [
   "event_persistence.rs",
   "event_security.rs",
   "prompt_evaluation_runtime.rs",
+  "prompt_evolution_hot_state.rs",
   "prompt_evolution_runtime.rs",
+  "prompt_learning_outbox_projection.rs",
   "project_session_persistence.rs",
   "routing_learning_runtime.rs",
   "runtime_values.rs",
@@ -3661,7 +3695,7 @@ assert(
       "snapshot.stable_profile_id == previous.stable_profile_id"
     ) &&
     rustLib.includes(
-      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 7"
+      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 8"
     ) &&
     rustLib.includes("snapshot.genome.id == rollout.stable_profile_id") &&
     rustLib.includes("promoted_prompt_rollout_without_a_valid_frozen_profile_is_ignored") &&
@@ -3708,7 +3742,7 @@ assert(
     rustLib.includes(
       "frozen prompt dataset is incomplete; refusing cohort substitution"
     ) &&
-    promptEvolutionReadModelSource.includes(
+    promptEvolutionHotStateSource.includes(
       "PROMPT_EVALUATION_ATTEMPT_RETENTION: usize = 1_024"
     ) &&
     localBuildScript.includes("CINDX_SOURCE_REVISION"),
