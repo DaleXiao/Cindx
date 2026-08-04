@@ -148,15 +148,41 @@ this revision, the `0.1.98` `NO-GO` conclusion remains the product evidence.
 
 ## Current Product Gate
 
-`benchmarks/agent/realworld-v2.json` freezes the current matched product
-protocol. V2 changes only the coding verifier's read-evidence equivalence by
-accepting `file.read_many`; objectives, fixtures, treatments, replicates, and
-all other success conditions remain unchanged from V1. The `0.1.98` collection
-is the current complete V2 baseline; the earlier `0.1.82` V2 attempt remains
-invalid historical evidence and does not affect the current decision.
-It covers structured file mutation, code edit plus tests, browser evidence,
-long-horizon migration, indexed knowledge plus cross-session memory, and denied
-mutation. Direct, Fast, Auto, and Pro each receive three matched repeats.
+`benchmarks/agent/realworld-v3.json` freezes the current matched product
+protocol. It retains the six V2 product cases and three repeats for Direct,
+Fast, Auto, and Pro, but replaces the fixed treatment sequence with a frozen
+cyclic Latin-square order. The resulting 72-cell plan balances treatment
+position across case blocks while preserving a globally stable execution index
+for interruption and resume. V3 also preregisters non-regression and resource
+ceilings against Fast: both Auto and Pro must preserve quality and completion,
+stay within their separate latency and token ratios, and at least one must add
+one passing or completed run. Setup failures, safety violations, or incomplete
+strategy/provider receipts make promotion fail closed.
+
+The V3 raw and sanitized schemas bind the exact source revision, application
+version, suite and execution-plan digests, configured role models, resolved
+shipping budgets, actual strategy decision/profile hashes, and every successful
+model response. Provider response identifiers and system fingerprints are
+domain-hashed before publication; request-body and canonical semantic-response
+digests bind text, ordered tool calls, and finish reason without committing
+prompts, secrets, or full outputs.
+Missing provider identifiers and inconsistent streaming identities remain
+explicit evidence failures rather than being counted as valid receipts.
+
+Optional Auto or Pro `FrozenPromptProfileSnapshot` inputs must remain outside
+Git. Their byte digest, canonical artifact digest, candidate identity, method,
+and promotion provenance are validated and bound into the execution plan before
+use. A run without such an artifact is labeled `FRESH_SEED_ONLY` and cannot
+support a GEPA, transfer, self-distillation, or learned-profile claim. A frozen
+artifact authorizes conclusions only about that exact artifact; it does not
+establish general learning uplift or Fugu parity.
+
+The `0.1.98` V2 collection remains the latest complete provider-backed product
+baseline until a complete V3 report is retained. The earlier `0.1.82` V2
+attempt remains invalid historical evidence and does not affect the current
+decision. V2 and V3 cover structured file mutation, code edit plus tests,
+browser evidence, long-horizon migration, indexed knowledge plus cross-session
+memory, and denied mutation.
 
 The feature-gated `cindx-agent-realworld-eval` binary drives the shipping Agent,
 tool, permission, RAG, and memory paths. Direct is explicitly marked as a
@@ -168,10 +194,11 @@ The runner builds the driver once, then isolates every case, treatment, and
 replicate in its own process. Each sample writes a private pending checkpoint
 before provider execution. The frozen suite applies a 600-second process
 deadline; a timeout is retained as a failed sample, never retried into a pass.
-Completed samples are merged in matrix order and reused after interruption only
-when Git commit, suite hash, selection, and replicate count still match. Browser
-processes are retired by the sample's unique temporary root so one treatment
-cannot contaminate the resources or state of the next.
+Completed samples are merged in execution order and reused after interruption
+only when Git commit, suite hash, full execution plan, profile artifacts,
+selection, and replicate count still match. Browser processes are retired by
+the sample's unique temporary root so one treatment cannot contaminate the
+resources or state of the next.
 
 The current provider-backed matrix is recorded in
 [Agent Real-World V2 0.1.98](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md)
@@ -200,21 +227,23 @@ The real-world Agent runner follows the same explicit opt-in boundary:
 
 ```sh
 node scripts/run-agent-realworld.mjs \
-  --raw /private/tmp/cindx-agent-realworld-v2.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V2.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V2.md
+  --raw /private/tmp/cindx-agent-realworld-v3.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V3.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V3.md
 
 node scripts/run-agent-realworld.mjs --execute \
-  --raw /private/tmp/cindx-agent-realworld-v2.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V2.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V2.md
+  --raw /private/tmp/cindx-agent-realworld-v3.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V3.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V3.md
 ```
 
 Without `--execute`, it performs only Git, provider, suite, and output-boundary
 preflight. A subset may be used for private calibration, but the publication
 contract accepts only the complete frozen matrix. Re-running the same command
 after interruption resumes validated completed cells from the private raw
-checkpoint; timed-out cells remain failures.
+checkpoint; timed-out cells remain failures. Optional `--auto-profile` and
+`--pro-profile` arguments accept only private frozen snapshot artifacts and bind
+their identities into the execution plan.
 
 The offline Fugu matrix is generated by the non-shipping evaluation crate:
 

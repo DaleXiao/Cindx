@@ -5,15 +5,15 @@ mod preparation;
 #[path = "agent_strategy_requirements.rs"]
 mod requirements;
 
+#[cfg(test)]
+pub(crate) use self::preparation::should_evaluate_strategy_profile;
 pub(crate) use self::preparation::{
     cumulative_effective_prompt_objective, effective_prompt_objective_for_messages,
 };
-#[cfg(test)]
-pub(crate) use self::preparation::should_evaluate_strategy_profile;
 use self::preparation::{ensure_planning_current, selected_strategy_profile};
-pub(crate) use self::requirements::AgentPlanningSource;
 #[cfg(test)]
 pub(crate) use self::requirements::preferred_compatible_route_model;
+pub(crate) use self::requirements::AgentPlanningSource;
 use crate::agent_conductor_runtime::{
     attempt_conductor_decision, conductor_model_sequence, preferred_fallback_model,
     unique_configured_models,
@@ -108,7 +108,8 @@ pub(crate) fn plan_agent_run(
     let candidates = model_candidates_for_config(config);
     let allowed_models = unique_configured_models(&candidates);
     let preferred_fallback_model = preferred_fallback_model(config, effort, &allowed_models);
-    let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context);
+    let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context)
+        .map_err(CollaborationStageError::Failed)?;
 
     if !effort.uses_conductor() {
         conductor_health_runtime::record_conductor_fast_bypass(run_context);

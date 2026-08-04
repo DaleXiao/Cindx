@@ -9,20 +9,25 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::Manager;
 
-mod verification;
+mod receipts;
 mod setup;
 #[cfg(test)]
 mod tests;
+mod verification;
 
+use receipts::{
+    is_receipt_bearing_event, model_receipts_from_metadata, resolved_budget_from_events,
+    strategy_receipt_from_events, successful_response_count, ModelReceipt, ResolvedBudgetReceipt,
+    StrategyReceipt,
+};
 use setup::{
-    activate_evaluation_data_root, add_recall_session, build_evaluation_app,
-    configure_run_project, seed_memory_fixture_for_case, SetupFailure, SetupFailureCode,
-    SetupFailureStage,
+    activate_evaluation_data_root, add_recall_session, build_evaluation_app, configure_run_project,
+    seed_memory_fixture_for_case, SetupFailure, SetupFailureCode, SetupFailureStage,
 };
 use verification::{case_input_sha256, direct_prompt, resolved_objective, verify_case};
 
-const SUITE_SCHEMA: &str = "cindx.agent-realworld-suite.v1";
-const RAW_SCHEMA: &str = "cindx.agent-realworld-raw.v1";
+const SUITE_SCHEMA: &str = "cindx.agent-realworld-suite.v2";
+const RAW_SCHEMA: &str = "cindx.agent-realworld-raw.v2";
 const MAX_DRIVER_ROUNDS: usize = 24;
 
 #[derive(Debug, Deserialize)]
@@ -34,7 +39,14 @@ struct RealworldSuite {
     default_replicates: u32,
     per_run_timeout_seconds: u64,
     treatments: Vec<String>,
+    execution_order: ExecutionOrderContract,
     cases: Vec<RealworldCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecutionOrderContract {
+    protocol: String,
+    base_treatments: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +158,7 @@ struct RuntimeMetrics {
     latency_ms: u64,
     setup_latency_ms: u64,
     model_calls: usize,
+    model_responses: usize,
     tool_calls: usize,
     permission_requests: usize,
     denied_permissions: usize,
@@ -171,6 +184,8 @@ struct VerificationResult {
 
 #[derive(Debug, Serialize)]
 struct RawRun {
+    execution_index: usize,
+    treatment_position: usize,
     replicate: u32,
     case_id: String,
     category: String,
@@ -185,7 +200,11 @@ struct RawRun {
     output_sha256: String,
     output: String,
     error: Option<String>,
+    evidence_error: Option<String>,
     setup_failure: Option<SetupFailure>,
+    resolved_budget: ResolvedBudgetReceipt,
+    strategy_receipt: Option<StrategyReceipt>,
+    model_receipts: Vec<ModelReceipt>,
     metrics: RuntimeMetrics,
     verification: VerificationResult,
 }
@@ -197,6 +216,8 @@ struct RawReport<'a> {
     suite_version: u32,
     suite_description: &'a str,
     suite_sha256: String,
+    execution_order_protocol: &'a str,
+    execution_plan_sha256: &'a str,
     generated_at_ms: u64,
     git_commit: String,
     app_version: &'static str,
@@ -212,6 +233,7 @@ struct RawReport<'a> {
 #[derive(Debug, Default)]
 struct EventMetrics {
     model_calls: usize,
+    model_responses: usize,
     tool_calls: usize,
     permission_requests: usize,
     denied_permissions: usize,
@@ -220,6 +242,17 @@ struct EventMetrics {
     completion_tokens: u64,
     total_tokens: u64,
     tools: BTreeSet<String>,
+    resolved_budget: Option<ResolvedBudgetReceipt>,
+    strategy_receipt: Option<StrategyReceipt>,
+    model_receipts: Vec<ModelReceipt>,
+    evidence_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionCell {
+    execution_index: usize,
+    treatment_position: usize,
+    plan_sha256: String,
 }
 
 struct ProductRun {
@@ -237,7 +270,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
         .map_err(|error| format!("failed to locate repository root: {error}"))?;
     let suite_path = std::env::var_os("CINDX_AGENT_REALWORLD_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v2.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v3.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
@@ -285,6 +318,19 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
     if treatments.is_empty() {
         return Err("treatment selection is empty".to_string());
     }
+    if replicate_indices.len() != 1 || selected_cases.len() != 1 || treatments.len() != 1 {
+        return Err(
+            "real-world evidence v2 executes exactly one frozen matrix cell per process"
+                .to_string(),
+        );
+    }
+    let execution = required_execution_cell(
+        &suite,
+        replicate_indices[0],
+        selected_cases[0],
+        treatments[0],
+    )?;
+    let frozen_profile = load_evaluation_frozen_profile(&repo_root, treatments[0])?;
 
     let provider = load_provider_config();
     if !provider.is_ready() {
@@ -351,6 +397,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                     *treatment,
                     replicate,
                     provider.model.clone(),
+                    &execution,
                 ));
                 write_raw_report(
                     &output_path,
@@ -361,6 +408,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                     replicates,
                     &selected_case_names,
                     &treatments,
+                    &execution,
                     &runs,
                 )?;
                 let run = execute_case(
@@ -372,6 +420,8 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                     replicate,
                     &run_root,
                     &evaluation_database,
+                    &execution,
+                    frozen_profile.as_ref(),
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;
                 write_raw_report(
@@ -383,6 +433,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                     replicates,
                     &selected_case_names,
                     &treatments,
+                    &execution,
                     &runs,
                 )?;
             }
@@ -412,6 +463,11 @@ fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
         .collect::<Result<BTreeSet<_>, _>>()?;
     if treatment_set != BTreeSet::from(["direct", "fast", "auto", "pro"]) {
         return Err("suite must contain direct, fast, auto, and pro exactly once".to_string());
+    }
+    if suite.execution_order.protocol != "cyclic_latin_square_v1"
+        || suite.execution_order.base_treatments != ["direct", "fast", "auto", "pro"]
+    {
+        return Err("suite must use the frozen cyclic_latin_square_v1 treatment order".to_string());
     }
     let mut ids = BTreeSet::new();
     let mut categories = BTreeSet::new();
@@ -530,6 +586,111 @@ fn selected_replicates(replicates: u32) -> Result<Vec<u32>, String> {
     Ok(vec![index])
 }
 
+fn required_execution_cell(
+    suite: &RealworldSuite,
+    replicate: u32,
+    case: &RealworldCase,
+    treatment: Treatment,
+) -> Result<ExecutionCell, String> {
+    let case_index = suite
+        .cases
+        .iter()
+        .position(|candidate| candidate.id == case.id)
+        .ok_or_else(|| format!("case {} is not in the frozen suite", case.id))?;
+    let block_index = (replicate.saturating_sub(1) as usize)
+        .saturating_mul(suite.cases.len())
+        .saturating_add(case_index);
+    let rotation = block_index % suite.execution_order.base_treatments.len();
+    let treatment_position = (0..suite.execution_order.base_treatments.len())
+        .find(|position| {
+            let index = (position + rotation) % suite.execution_order.base_treatments.len();
+            suite.execution_order.base_treatments[index] == treatment.label()
+        })
+        .map(|position| position + 1)
+        .ok_or_else(|| "treatment is missing from the frozen execution order".to_string())?;
+    let execution_index = block_index
+        .saturating_mul(suite.execution_order.base_treatments.len())
+        .saturating_add(treatment_position);
+    let observed_index = required_env_usize("CINDX_AGENT_REALWORLD_EXECUTION_INDEX")?;
+    let observed_position = required_env_usize("CINDX_AGENT_REALWORLD_TREATMENT_POSITION")?;
+    if observed_index != execution_index || observed_position != treatment_position {
+        return Err(format!(
+            "execution cell receipt drifted: expected index {execution_index} position {treatment_position}, observed index {observed_index} position {observed_position}"
+        ));
+    }
+    let plan_sha256 = std::env::var("CINDX_AGENT_REALWORLD_PLAN_SHA256")
+        .map_err(|_| "CINDX_AGENT_REALWORLD_PLAN_SHA256 is required".to_string())?;
+    if !is_lower_sha256(&plan_sha256) {
+        return Err("CINDX_AGENT_REALWORLD_PLAN_SHA256 must be a lowercase SHA-256".to_string());
+    }
+    Ok(ExecutionCell {
+        execution_index,
+        treatment_position,
+        plan_sha256,
+    })
+}
+
+fn load_evaluation_frozen_profile(
+    repo_root: &Path,
+    treatment: Treatment,
+) -> Result<Option<FrozenPromptProfileSnapshot>, String> {
+    let Some(path) = std::env::var_os("CINDX_AGENT_REALWORLD_PROFILE_PATH").map(PathBuf::from)
+    else {
+        return Ok(None);
+    };
+    if !matches!(treatment, Treatment::Auto | Treatment::Pro) {
+        return Err("frozen profile artifacts are valid only for Auto or Pro cells".to_string());
+    }
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve frozen profile {}: {error}",
+            path.display()
+        )
+    })?;
+    if canonical.starts_with(repo_root) {
+        return Err("frozen profile artifacts must remain outside the Git checkout".to_string());
+    }
+    let encoded = fs::read(&canonical).map_err(|error| {
+        format!(
+            "failed to read frozen profile {}: {error}",
+            canonical.display()
+        )
+    })?;
+    let snapshot = FrozenPromptProfileSnapshot::from_json_slice(&encoded)?;
+    if snapshot.effort != treatment.label() {
+        return Err(format!(
+            "frozen profile effort {} does not match treatment {}",
+            snapshot.effort,
+            treatment.label()
+        ));
+    }
+    let artifact_sha256 = snapshot.artifact_sha256()?;
+    if let Ok(expected) = std::env::var("CINDX_AGENT_REALWORLD_PROFILE_ARTIFACT_SHA256") {
+        if expected != artifact_sha256 {
+            return Err(
+                "frozen profile artifact digest does not match runner preflight".to_string(),
+            );
+        }
+    }
+    Ok(Some(snapshot))
+}
+
+fn required_env_usize(name: &str) -> Result<usize, String> {
+    std::env::var(name)
+        .map_err(|_| format!("{name} is required"))?
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{name} must be a positive integer"))
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn install_eval_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -561,6 +722,8 @@ fn execute_case(
     replicate: u32,
     root: &Path,
     evaluation_database: &Path,
+    execution: &ExecutionCell,
+    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
 ) -> RawRun {
     let input_sha256 = case_input_sha256(case);
     let started = Instant::now();
@@ -579,7 +742,29 @@ fn execute_case(
         );
         let output = completion.content.unwrap_or_default();
         let verification = verify_case(case, treatment, root, &output, &[], 0);
+        let model_responses = usize::from(completion.error.is_none());
+        let (model_receipts, evidence_error) = if model_responses == 0 {
+            (Vec::new(), None)
+        } else {
+            match model_receipts_from_metadata(&completion.usage) {
+                Ok(receipts)
+                    if receipts.len() == model_responses
+                        && receipts
+                            .iter()
+                            .all(|receipt| receipt.receipt_status == "observed") =>
+                {
+                    (receipts, None)
+                }
+                Ok(receipts) => (
+                    receipts,
+                    Some("direct provider identity evidence is incomplete".to_string()),
+                ),
+                Err(error) => (Vec::new(), Some(error)),
+            }
+        };
         return RawRun {
+            execution_index: execution.execution_index,
+            treatment_position: execution.treatment_position,
             replicate,
             case_id: case.id.clone(),
             category: case.category.clone(),
@@ -598,10 +783,15 @@ fn execute_case(
             output_sha256: sha256_hex(output.as_bytes()),
             output,
             error: completion.error,
+            evidence_error,
             setup_failure: None,
+            resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
+            strategy_receipt: None,
+            model_receipts,
             metrics: RuntimeMetrics {
                 latency_ms: completion.latency_ms,
                 model_calls: 1,
+                model_responses,
                 prompt_tokens: metadata_u64(&completion.usage, "prompt_tokens"),
                 completion_tokens: metadata_u64(&completion.usage, "completion_tokens"),
                 total_tokens: metadata_u64(&completion.usage, "total_tokens"),
@@ -630,6 +820,7 @@ fn execute_case(
                     false,
                 ),
                 0,
+                execution,
             )
         }
     };
@@ -668,6 +859,7 @@ fn execute_case(
                 started,
                 setup_failure,
                 setup_latency_ms,
+                execution,
             );
         }
     }
@@ -693,6 +885,7 @@ fn execute_case(
                     started,
                     setup_failure,
                     setup_latency_ms,
+                    execution,
                 )
             }
         };
@@ -714,6 +907,7 @@ fn execute_case(
                         false,
                     ),
                     setup_latency_ms,
+                    execution,
                 );
             }
         };
@@ -729,13 +923,26 @@ fn execute_case(
         case.permission_policy,
     );
     let output = product.state.latest_answer.clone().unwrap_or_default();
-    let event_metrics = collect_event_metrics(state, &session_id).unwrap_or_default();
-    let tools = event_metrics.tools.into_iter().collect::<Vec<_>>();
+    let mut event_metrics =
+        match collect_event_metrics(state, &session_id, treatment, frozen_profile) {
+            Ok(metrics) => metrics,
+            Err(error) => EventMetrics {
+                evidence_errors: vec![error],
+                ..EventMetrics::default()
+            },
+        };
+    let tools = std::mem::take(&mut event_metrics.tools)
+        .into_iter()
+        .collect::<Vec<_>>();
     let denied_permissions = product
         .denied_permissions
         .max(event_metrics.denied_permissions);
     let verification = verify_case(case, treatment, root, &output, &tools, denied_permissions);
+    let evidence_error = (!event_metrics.evidence_errors.is_empty())
+        .then(|| event_metrics.evidence_errors.join(" | "));
     RawRun {
+        execution_index: execution.execution_index,
+        treatment_position: execution.treatment_position,
         replicate,
         case_id: case.id.clone(),
         category: case.category.clone(),
@@ -750,11 +957,18 @@ fn execute_case(
         output_sha256: sha256_hex(output.as_bytes()),
         output,
         error: product.error.or(product.state.last_error.clone()),
+        evidence_error,
         setup_failure: None,
+        resolved_budget: event_metrics
+            .resolved_budget
+            .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment)),
+        strategy_receipt: event_metrics.strategy_receipt,
+        model_receipts: event_metrics.model_receipts,
         metrics: RuntimeMetrics {
             latency_ms: elapsed_ms(started).saturating_sub(setup_latency_ms),
             setup_latency_ms,
             model_calls: event_metrics.model_calls,
+            model_responses: event_metrics.model_responses,
             tool_calls: event_metrics.tool_calls,
             permission_requests: product
                 .permission_requests
@@ -777,9 +991,12 @@ fn interrupted_run(
     treatment: Treatment,
     replicate: u32,
     direct_model: String,
+    execution: &ExecutionCell,
 ) -> RawRun {
     let product_mechanism_exercised = treatment != Treatment::Direct;
     RawRun {
+        execution_index: execution.execution_index,
+        treatment_position: execution.treatment_position,
         replicate,
         case_id: case.id.clone(),
         category: case.category.clone(),
@@ -798,7 +1015,11 @@ fn interrupted_run(
         output_sha256: sha256_hex(&[]),
         output: String::new(),
         error: Some("evaluation process exited before verification".to_string()),
+        evidence_error: Some("run did not reach provider evidence collection".to_string()),
         setup_failure: None,
+        resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
+        strategy_receipt: None,
+        model_receipts: Vec::new(),
         metrics: RuntimeMetrics::default(),
         verification: VerificationResult {
             external_effect_passed: product_mechanism_exercised.then_some(false),
@@ -817,8 +1038,11 @@ fn failed_run(
     started: Instant,
     setup_failure: SetupFailure,
     setup_latency_ms: u64,
+    execution: &ExecutionCell,
 ) -> RawRun {
     RawRun {
+        execution_index: execution.execution_index,
+        treatment_position: execution.treatment_position,
         replicate,
         case_id: case.id.clone(),
         category: case.category.clone(),
@@ -833,7 +1057,11 @@ fn failed_run(
         output_sha256: sha256_hex(&[]),
         output: String::new(),
         error: Some(error),
+        evidence_error: None,
         setup_failure: Some(setup_failure),
+        resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
+        strategy_receipt: None,
+        model_receipts: Vec::new(),
         metrics: RuntimeMetrics {
             latency_ms: elapsed_ms(started),
             setup_latency_ms,
@@ -986,6 +1214,8 @@ fn empty_agent_state(session_id: &str, error: &str) -> AgentState {
 fn collect_event_metrics(
     state: &tauri::State<'_, AppState>,
     session_id: &str,
+    treatment: Treatment,
+    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
 ) -> Result<EventMetrics, String> {
     let store = state
         .store
@@ -994,7 +1224,7 @@ fn collect_event_metrics(
     let events = agent_events_for_session(&store, &phase16_task_id(), Some(session_id))
         .map_err(|error| error.to_string())?;
     let mut metrics = EventMetrics::default();
-    for event in events {
+    for event in &events {
         match event.kind {
             EventKind::ModelRequestStarted => metrics.model_calls += 1,
             EventKind::ModelRequestFinished => {
@@ -1007,6 +1237,33 @@ fn collect_event_metrics(
                 metrics.total_tokens = metrics
                     .total_tokens
                     .saturating_add(metadata_u64(&event.metadata, "total_tokens"));
+                let expected_responses = successful_response_count(event);
+                metrics.model_responses =
+                    metrics.model_responses.saturating_add(expected_responses);
+                if is_receipt_bearing_event(event) {
+                    match model_receipts_from_metadata(&event.metadata) {
+                        Ok(receipts) => {
+                            for receipt in &receipts {
+                                if receipt.receipt_status != "observed" {
+                                    metrics.evidence_errors.push(format!(
+                                        "provider identity evidence is {} at event {}",
+                                        receipt.receipt_status, event.sequence
+                                    ));
+                                }
+                            }
+                            metrics.model_receipts.extend(receipts);
+                        }
+                        Err(error) => metrics.evidence_errors.push(format!(
+                            "provider receipt at event {} is invalid: {error}",
+                            event.sequence
+                        )),
+                    }
+                } else if expected_responses > 0 {
+                    metrics.evidence_errors.push(format!(
+                        "provider receipt is missing for successful event {}",
+                        event.sequence
+                    ));
+                }
             }
             EventKind::ToolCallStarted => {
                 metrics.tool_calls += 1;
@@ -1028,6 +1285,22 @@ fn collect_event_metrics(
             metrics.recovery_events += 1;
         }
     }
+    metrics.model_calls = metrics.model_calls.max(metrics.model_responses);
+    if metrics.model_receipts.len() != metrics.model_responses {
+        metrics.evidence_errors.push(format!(
+            "provider receipt coverage is {}/{} successful responses",
+            metrics.model_receipts.len(),
+            metrics.model_responses
+        ));
+    }
+    match resolved_budget_from_events(&events, treatment) {
+        Ok(receipt) => metrics.resolved_budget = Some(receipt),
+        Err(error) => metrics.evidence_errors.push(error),
+    }
+    match strategy_receipt_from_events(&events, treatment, frozen_profile) {
+        Ok(receipt) => metrics.strategy_receipt = receipt,
+        Err(error) => metrics.evidence_errors.push(error),
+    }
     if metrics.total_tokens == 0 {
         metrics.total_tokens = metrics
             .prompt_tokens
@@ -1045,6 +1318,7 @@ fn write_raw_report(
     replicates: u32,
     selected_cases: &[String],
     treatments: &[Treatment],
+    execution: &ExecutionCell,
     runs: &[RawRun],
 ) -> Result<(), String> {
     let report = RawReport {
@@ -1053,6 +1327,8 @@ fn write_raw_report(
         suite_version: suite.version,
         suite_description: &suite.description,
         suite_sha256: sha256_hex(suite_bytes),
+        execution_order_protocol: &suite.execution_order.protocol,
+        execution_plan_sha256: &execution.plan_sha256,
         generated_at_ms: current_time_millis(),
         git_commit: git_commit.to_string(),
         app_version: env!("CARGO_PKG_VERSION"),

@@ -15,6 +15,7 @@ mod error;
 mod image_provider;
 mod json_wire;
 mod prepared_request;
+mod provider_receipt;
 mod provider_validation;
 mod realtime_provider;
 mod redirect_policy;
@@ -727,6 +728,8 @@ impl OpenAiCompatibleProvider {
             self.config.supports_vision_content(),
             &mut |path| self.image_cache.resolve(path),
         )?;
+        let request_payload_sha256 =
+            provider_receipt::request_payload_sha256(request_body.as_bytes());
         let output = execute_http(
             &self.config.chat_completions_url(),
             &self.config.api_key,
@@ -749,6 +752,13 @@ impl OpenAiCompatibleProvider {
         }
 
         let mut response = parse_model_response(&stdout)?;
+        response
+            .metadata
+            .insert("model".to_string(), self.config.model.clone());
+        provider_receipt::attach_request_payload_sha256(
+            &mut response.metadata,
+            &request_payload_sha256,
+        );
         normalize_model_usage(&mut response, estimated_prompt_tokens);
         Ok(response)
     }
@@ -1032,7 +1042,7 @@ mod tests {
             vec![
                 (
                     Duration::ZERO,
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
+                    "data: {\"id\":\"resp-stream-1\",\"model\":\"served-model\",\"system_fingerprint\":\"fp-stream\",\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n",
                 ),
                 (
                     Duration::ZERO,
@@ -1050,6 +1060,17 @@ mod tests {
         assert_eq!(response.message.content, "done");
         assert_eq!(response.metadata["provider"], "openai-compatible");
         assert_eq!(response.metadata["provider_protocol"], "openai-compatible");
+        assert_eq!(response.metadata["provider_response_id"], "resp-stream-1");
+        assert_eq!(response.metadata["provider_response_model"], "served-model");
+        assert_eq!(
+            response.metadata["provider_system_fingerprint"],
+            "fp-stream"
+        );
+        assert_eq!(response.metadata["provider_receipt_status"], "observed");
+        assert_eq!(
+            response.metadata["response_semantic_sha256"],
+            crate::provider_receipt::response_semantic_sha256("done", &[], None)
+        );
         assert_eq!(
             response.metadata.get("prompt_tokens").map(String::as_str),
             Some("21")
@@ -1538,6 +1559,49 @@ mod tests {
 
         assert_eq!(output, "abc");
         assert_eq!(response.message.content, "abc");
+        assert_eq!(
+            response.metadata["provider_receipt_status"],
+            "provider_id_missing"
+        );
+        assert_eq!(
+            response.metadata["response_semantic_sha256"],
+            crate::provider_receipt::response_semantic_sha256("abc", &[], None)
+        );
+    }
+
+    #[test]
+    fn streaming_identity_conflict_preserves_output_and_first_observation() {
+        let mut visible = String::new();
+        let response = consume_test_stream(
+            vec![
+                (
+                    Duration::ZERO,
+                    "data: {\"id\":\"response-first\",\"model\":\"served-a\",\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n",
+                ),
+                (
+                    Duration::ZERO,
+                    "data: {\"id\":\"response-second\",\"model\":\"served-b\",\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n",
+                ),
+                (Duration::ZERO, "data: [DONE]\n"),
+            ],
+            Duration::from_secs(1),
+            &mut |delta| visible.push_str(delta),
+            &mut || false,
+        )
+        .expect("identity conflict must not discard a valid stream");
+
+        assert_eq!(visible, "ab");
+        assert_eq!(response.message.content, "ab");
+        assert_eq!(response.metadata["provider_response_id"], "response-first");
+        assert_eq!(response.metadata["provider_response_model"], "served-a");
+        assert_eq!(
+            response.metadata["provider_receipt_status"],
+            "identity_conflict"
+        );
+        assert_eq!(
+            response.metadata["response_semantic_sha256"],
+            crate::provider_receipt::response_semantic_sha256("ab", &[], None)
+        );
     }
 
     #[test]
@@ -1566,7 +1630,7 @@ mod tests {
     fn streaming_reader_accepts_non_streaming_tool_call_fallback() {
         let response = finish_streaming_response(
             StreamingResponseParts {
-                fallback_response: r#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#.to_string(),
+                fallback_response: r#"{"id":"fallback-response-1","model":"fallback-model","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"file_read","arguments":"{\"input\":\"path=README.md\"}"}}]}}]}"#.to_string(),
                 fallback_truncated: false,
                 answer: String::new(),
                 streamed_tool_calls: BTreeMap::new(),
@@ -1581,6 +1645,15 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "file_read");
         assert!(response.raw_tool_calls_json.is_some());
+        assert_eq!(
+            response.metadata["provider_response_id"],
+            "fallback-response-1"
+        );
+        assert_eq!(response.metadata["provider_receipt_status"], "observed");
+        assert_eq!(
+            response.metadata["response_semantic_sha256"],
+            crate::provider_receipt::response_semantic_sha256("", &response.tool_calls, None,)
+        );
     }
 
     #[test]
@@ -1707,7 +1780,7 @@ mod tests {
 
     #[test]
     fn parses_non_streaming_chat_response() {
-        let text = r#"{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":21,"completion_tokens":4,"total_tokens":25}}"#;
+        let text = r#"{"id":"resp-once-1","model":"served-model","system_fingerprint":"fp-once","choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":21,"completion_tokens":4,"total_tokens":25}}"#;
         let answer = parse_chat_response(text).expect("response should parse");
 
         assert_eq!(answer, "done");
@@ -1719,6 +1792,33 @@ mod tests {
         assert_eq!(
             response.metadata.get("total_tokens").map(String::as_str),
             Some("25")
+        );
+        assert_eq!(response.metadata["provider_response_id"], "resp-once-1");
+        assert_eq!(response.metadata["provider_response_model"], "served-model");
+        assert_eq!(response.metadata["provider_system_fingerprint"], "fp-once");
+        assert_eq!(response.metadata["provider_receipt_status"], "observed");
+        assert_eq!(
+            response.metadata["response_semantic_sha256"],
+            crate::provider_receipt::response_semantic_sha256("done", &[], None)
+        );
+    }
+
+    #[test]
+    fn non_streaming_response_marks_missing_provider_id_without_losing_content() {
+        let response = parse_model_response(
+            r#"{"model":"served-model","choices":[{"message":{"role":"assistant","content":"done"}}]}"#,
+        )
+        .expect("response without an id should remain usable");
+
+        assert_eq!(response.message.content, "done");
+        assert_eq!(response.metadata["provider_response_model"], "served-model");
+        assert_eq!(
+            response.metadata["provider_receipt_status"],
+            "provider_id_missing"
+        );
+        assert_eq!(
+            response.metadata["response_semantic_sha256"],
+            crate::provider_receipt::response_semantic_sha256("done", &[], None)
         );
     }
 
@@ -1965,6 +2065,102 @@ mod tests {
 
         assert!(model_supports_vision_content("qwen3.7-plus"));
         assert!(!model_supports_vision_content("qwen3.7-max"));
+    }
+
+    #[test]
+    fn completed_requests_expose_only_the_canonical_request_digest() {
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "receipt prompt".to_string(),
+            metadata: Metadata::new(),
+        }];
+        let expected_body = build_chat_request_json_with_tools_and_output_limit(
+            "receipt-model",
+            &messages,
+            false,
+            &[],
+            None,
+        )
+        .expect("canonical request should encode");
+        let expected_digest =
+            crate::provider_receipt::request_payload_sha256(expected_body.as_bytes());
+        let (base_url, request) = serve_credential_probe(
+            "200 OK",
+            r#"{"id":"receipt-response","choices":[{"message":{"role":"assistant","content":"done"}}]}"#,
+        );
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "private-api-key".to_string(),
+            model: "receipt-model".to_string(),
+            embedding_model: String::new(),
+            timeout_seconds: 5,
+        });
+
+        let response = provider
+            .complete_once(ModelRequest {
+                role: ModelRole::Executor,
+                messages,
+                tools: Vec::new(),
+                mode: ModelCallMode::NonStreaming,
+                metadata: Metadata::new(),
+            })
+            .expect("request should complete");
+        request.join().expect("probe server should finish");
+
+        assert_eq!(response.metadata["request_payload_sha256"], expected_digest);
+        assert!(!response.metadata["request_payload_sha256"].contains("receipt prompt"));
+        assert!(!response.metadata["request_payload_sha256"].contains("private-api-key"));
+    }
+
+    #[test]
+    fn prepared_streaming_request_attaches_its_cached_request_digest() {
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "stream receipt prompt".to_string(),
+            metadata: Metadata::new(),
+        }];
+        let expected_body = build_chat_request_json_with_tools_and_output_limit(
+            "receipt-model",
+            &messages,
+            true,
+            &[],
+            None,
+        )
+        .expect("canonical streaming request should encode");
+        let expected_digest =
+            crate::provider_receipt::request_payload_sha256(expected_body.as_bytes());
+        let (base_url, request) = serve_credential_probe(
+            "200 OK",
+            r#"{"id":"stream-fallback-response","choices":[{"message":{"role":"assistant","content":"done"}}]}"#,
+        );
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "private-api-key".to_string(),
+            model: "receipt-model".to_string(),
+            embedding_model: String::new(),
+            timeout_seconds: 5,
+        });
+        let prepared = provider
+            .prepare_streaming_request(&ModelRequest {
+                role: ModelRole::Executor,
+                messages,
+                tools: Vec::new(),
+                mode: ModelCallMode::Streaming,
+                metadata: Metadata::new(),
+            })
+            .expect("streaming request should prepare");
+
+        let response = provider
+            .complete_prepared_streaming_cancellable(&prepared, &mut |_| {}, &mut || false)
+            .expect("prepared streaming request should complete");
+        request.join().expect("probe server should finish");
+
+        assert_eq!(response.metadata["request_payload_sha256"], expected_digest);
+        assert_eq!(response.metadata["provider_receipt_status"], "observed");
+        assert_eq!(
+            response.metadata["response_semantic_sha256"],
+            crate::provider_receipt::response_semantic_sha256("done", &[], None)
+        );
     }
 
     #[test]
