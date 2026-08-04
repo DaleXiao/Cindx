@@ -13,12 +13,14 @@ use agent_runtime::{
 };
 use std::{path::Path, sync::Arc};
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentFailureTerminalOutcome {
     Committed(AgentState),
     RestartAfterSteer,
     Stopped,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentFailureLoopOutcome {
     Finished(AgentState),
     RestartAfterSteer,

@@ -389,20 +389,22 @@ fn obligation_evidence_kinds_are_valid(ledger: &OutcomeLedgerShadow) -> bool {
         let Some(sequence) = item.evidence_sequence else {
             return false;
         };
-        match (item.kind, evidence.get(&sequence)) {
-            (OutcomeObligationKind::RequiredTool, Some(ContractEvidenceKind::RequiredTool))
-            | (OutcomeObligationKind::Grounding, Some(ContractEvidenceKind::Grounding))
-            | (
+        matches!(
+            (item.kind, evidence.get(&sequence)),
+            (
+                OutcomeObligationKind::RequiredTool,
+                Some(ContractEvidenceKind::RequiredTool)
+            ) | (
+                OutcomeObligationKind::Grounding,
+                Some(ContractEvidenceKind::Grounding)
+            ) | (
                 OutcomeObligationKind::WorkspaceVerification,
                 Some(ContractEvidenceKind::Verification),
-            )
-            | (
+            ) | (
                 OutcomeObligationKind::InteractionObservation,
                 Some(ContractEvidenceKind::InteractionObservation),
-            ) => true,
-            (OutcomeObligationKind::AnyTool, Some(_)) => true,
-            _ => false,
-        }
+            ) | (OutcomeObligationKind::AnyTool, Some(_))
+        )
     })
 }
 

@@ -83,6 +83,7 @@ pub(crate) use contract_runtime::{
 use contract_runtime::{
     record_retained_agent_decision_after_noop_steer, synchronize_noop_control_epoch_context,
 };
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentLoopExecutionOutcome {
     Finished(AgentState),
     Reprepare {
