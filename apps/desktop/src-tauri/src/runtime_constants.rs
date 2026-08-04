@@ -54,7 +54,7 @@ pub(crate) const WORKFLOW_TELEMETRY_READ_MODEL_KEY: &str = "global";
 pub(crate) const WORKFLOW_TELEMETRY_MAX_RUNS: usize = 1_024;
 pub(crate) const PROMPT_EVOLUTION_READ_MODEL_NAMESPACE: &str = "prompt-evolution-v2";
 pub(crate) const PROMPT_EVOLUTION_READ_MODEL_KEY: &str = "global";
-pub(crate) const PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 7;
+pub(crate) const PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 8;
 pub(crate) const PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1: &str =
     "cindx.prompt-distillation-canary-lease.v1";
 pub(crate) const PROMPT_ROLLOUT_MAX_QUARANTINED_PROFILES: usize = 32;

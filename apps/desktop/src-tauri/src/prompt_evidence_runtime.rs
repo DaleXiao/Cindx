@@ -268,12 +268,35 @@ pub(crate) fn reconstruct_prompt_auto_teacher_from_canonical_events(
     project_id: &str,
     source_run_id: &str,
 ) -> Option<PromptAutoTeacherCase> {
-    let mut run_events = events
+    let run_events = events
         .iter()
         .filter(|event| {
             event.metadata.get("agent_run_id").map(String::as_str) == Some(source_run_id)
         })
         .collect::<Vec<_>>();
+    reconstruct_prompt_auto_teacher_from_run_events(run_events, project_id, source_run_id)
+}
+
+pub(crate) fn reconstruct_prompt_auto_teacher_from_indexed_events(
+    events: &[&Event],
+    project_id: &str,
+    source_run_id: &str,
+) -> Option<PromptAutoTeacherCase> {
+    let run_events = events
+        .iter()
+        .copied()
+        .filter(|event| {
+            event.metadata.get("agent_run_id").map(String::as_str) == Some(source_run_id)
+        })
+        .collect::<Vec<_>>();
+    reconstruct_prompt_auto_teacher_from_run_events(run_events, project_id, source_run_id)
+}
+
+fn reconstruct_prompt_auto_teacher_from_run_events(
+    mut run_events: Vec<&Event>,
+    project_id: &str,
+    source_run_id: &str,
+) -> Option<PromptAutoTeacherCase> {
     run_events.sort_by_key(|event| event.sequence);
     let terminal = run_events
         .iter()

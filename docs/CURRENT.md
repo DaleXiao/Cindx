@@ -163,9 +163,9 @@ presented as learned strategy without a matched causal evaluation.
 Transfer observations are appended as one mirrored pair and enter the canonical
 evolution read model only when both sides are scientific, project-scoped, and
 bound to the same source-attested Auto run and profile. Legacy transfer records
-without this lineage fail closed. Projection version 3 rebuilds older caches
-from canonical events instead of silently preserving the previous projection
-that omitted transfer events. A completed Auto run schedules its project-scoped
+without this lineage fail closed. A projection-version change rebuilds older
+caches from canonical events instead of silently preserving stale semantics. A
+completed Auto run schedules its project-scoped
 Pro learning intent durably; the background worker dispatches and idempotently
 replays that intent after interruption. Background requests are
 coalesced by project and effort; activity in one project cannot replace another
@@ -175,6 +175,18 @@ never replenished by malformed or interrupted recovery state. When repeated
 objectives have multiple qualified Auto teachers, the
 current stable Auto profile is selected before stale profiles, then
 independently measured quality and resource use break ties.
+
+Auto-transfer and Pro-distillation discovery use one durable outbox projection.
+Its versioned cursor uses an indexed tail lookup and reads only new canonical
+events during an ordinary wake; a non-contiguous sequence, corrupt payload hash,
+or invalid snapshot triggers deterministic full replay. The persisted FIFO work
+window contains at most 256 undispatched intents and coalesces only within the
+same project and learning track. Overflow remains in canonical events: after a
+window drains, replay refills the next window instead of discarding or blocking
+the backlog. Exact replay is idempotent, while an identity that changes payload,
+project, or learning track fails closed. Pro intent identity includes the project
+scope. Snapshot publication uses compare-and-swap, retries one observed conflict,
+and stops on a second conflict so a stale worker cannot overwrite newer state.
 
 The current tree also contains a separate controlled Pro-to-Auto distillation
 track. Only the active frozen Pro champion can be a teacher, and its attestation
@@ -223,6 +235,19 @@ Rejected and repaired mutations pass through the same validator.
 Learned genomes, datasets, observations, and rollout state are isolated by
 project. A reflective mutation produced from one project's evidence cannot
 enter another project's candidate population, evaluation, or rollout.
+
+Rollout transitions append their canonical event before any read-model cache can
+observe the change. Evolution snapshots are published only when both the
+previous revision and payload still match; a competing writer causes one
+bounded reload and then fails closed. Conflicting genome payloads under the same
+project, effort, and identity leave a compact fingerprint tombstone and remain
+excluded from selection and rollout after their full payload leaves the hot
+window. The hot projection applies deterministic, reference-safe
+soft limits: active attempts, cohorts, stable/canary/frozen/quarantined profiles,
+and their matched evidence are never evicted, so unusually large active evidence
+may exceed a soft limit. Canonical events remain append-only and are the recovery
+and audit authority; deterministic tests do not turn this cache contract into a
+claim of provider-backed intelligence or strict constant memory.
 
 The latest provider-backed raw schema did not capture learned profile or GEPA
 identities. Deterministic tests prove the transfer boundary, evidence isolation,

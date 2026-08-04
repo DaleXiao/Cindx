@@ -956,6 +956,7 @@ fn legacy_unscoped_prompt_genomes_force_a_read_model_rebuild() {
             genome: ConductorPromptGenome::seed_for_effort("auto"),
             evolution_method: None,
         }],
+        genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
@@ -965,6 +966,59 @@ fn legacy_unscoped_prompt_genomes_force_a_read_model_rebuild() {
     };
 
     assert!(!prompt_genome_scopes_are_valid(&model));
+}
+
+#[test]
+fn prior_projection_version_replays_canonical_events_without_a_delta() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let genome = ConductorPromptGenome::seed_for_effort("auto");
+    store
+        .append(event(
+            1,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt profile indexed",
+            [
+                ("project_id".to_string(), "project-a".to_string()),
+                ("prompt_effort".to_string(), "auto".to_string()),
+                (
+                    "prompt_genome".to_string(),
+                    serde_json::to_string(&genome).expect("serialize genome"),
+                ),
+            ],
+        ))
+        .expect("canonical event should append");
+    let stale = PromptEvolutionReadModel {
+        schema: PROMPT_EVOLUTION_READ_MODEL_NAMESPACE.to_string(),
+        projection_version: PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION - 1,
+        revision: 1,
+        event_count: 1,
+        genomes: Vec::new(),
+        genome_identity_fingerprints: BTreeMap::new(),
+        observations: Vec::new(),
+        attempts: BTreeMap::new(),
+        cohorts: BTreeMap::new(),
+        cohort_sequences: BTreeMap::new(),
+        rollouts: BTreeMap::new(),
+        datasets: BTreeMap::new(),
+    };
+    store
+        .save_read_model(
+            PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
+            PROMPT_EVOLUTION_READ_MODEL_KEY,
+            stale.revision,
+            &serde_json::to_string(&stale).expect("serialize stale projection"),
+        )
+        .expect("stale projection should persist");
+
+    let rebuilt = load_prompt_evolution_read_model(&mut store)
+        .expect("old projection version should replay canonical events");
+
+    assert_eq!(
+        rebuilt.projection_version,
+        PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION
+    );
+    assert_eq!(rebuilt.genomes.len(), 1);
+    assert_eq!(rebuilt.genomes[0].genome.id, genome.id);
 }
 
 #[test]
@@ -1308,5 +1362,545 @@ fn matched_attempt_lifecycle_persists_one_terminal_and_keeps_failures_in_the_rea
         prompt_evolution_read_model_for_scope(&missing_terminal, "project-a")
             .observations
             .is_empty()
+    );
+}
+
+#[test]
+fn scoped_read_model_never_falls_back_to_a_global_rollout() {
+    let rollout = |stable_profile_id: &str| PromptRolloutState {
+        stable_profile_id: stable_profile_id.to_string(),
+        canary_profile_id: None,
+        canary_percent: 0,
+        evidence_checkpoint: 0,
+        live_checkpoint: 0,
+        stable_live_checkpoint: 0,
+        quarantined_profile_ids: Vec::new(),
+        distillation_lease: None,
+        rollback_count: 0,
+        status: "stable".to_string(),
+        last_reason: None,
+        promotion_confidence: None,
+        frozen_profile: None,
+    };
+    let mut model = build_prompt_evolution_read_model(&[], 0, 0);
+    model
+        .rollouts
+        .insert("auto".to_string(), rollout("global-stable"));
+    model.rollouts.insert(
+        prompt_rollout_key("project-a", "auto"),
+        rollout("project-a-stable"),
+    );
+
+    let project_a = prompt_evolution_read_model_for_scope(&model, "project-a");
+    let project_b = prompt_evolution_read_model_for_scope(&model, "project-b");
+    let global = prompt_evolution_read_model_for_scope(&model, "global");
+
+    assert_eq!(
+        project_a
+            .rollouts
+            .get("auto")
+            .map(|rollout| rollout.stable_profile_id.as_str()),
+        Some("project-a-stable")
+    );
+    assert!(project_b.rollouts.is_empty());
+    assert_eq!(
+        global
+            .rollouts
+            .get("auto")
+            .map(|rollout| rollout.stable_profile_id.as_str()),
+        Some("global-stable")
+    );
+}
+
+#[test]
+fn cold_rebuild_indexes_each_run_event_once_and_limits_teacher_visits_to_its_run() {
+    let events = (0..2_048)
+        .map(|offset| {
+            event(
+                offset + 1,
+                EventKind::TaskStatusChanged,
+                "indexed event",
+                [("agent_run_id".to_string(), format!("run-{}", offset % 128))],
+            )
+        })
+        .collect::<Vec<_>>();
+    let index = prompt_agent_run_event_index(&events);
+
+    assert_eq!(index.len(), 128);
+    assert_eq!(index.values().map(Vec::len).sum::<usize>(), events.len());
+    assert!(index.values().all(|run_events| run_events.len() == 16));
+    for source_run_id in ["run-0", "run-63", "run-127"] {
+        let indexed =
+            crate::prompt_evidence_runtime::reconstruct_prompt_auto_teacher_from_indexed_events(
+                index
+                    .get(source_run_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                "project-a",
+                source_run_id,
+            );
+        let scanned =
+            crate::prompt_evidence_runtime::reconstruct_prompt_auto_teacher_from_canonical_events(
+                &events,
+                "project-a",
+                source_run_id,
+            );
+        assert_eq!(indexed, scanned);
+    }
+}
+
+#[test]
+fn hot_state_compaction_preserves_valid_and_unfinished_references() {
+    let cohort = |case_id: &str, marker: char| {
+        let dataset = PromptDatasetIdentityV1::new(
+            "project-a",
+            1,
+            vec![PromptDatasetCaseIdentityV1 {
+                case_id: case_id.to_string(),
+                objective_sha256: marker.to_string().repeat(64),
+                task_family_sha256: "f".repeat(64),
+                split: PromptEvaluationSplit::Train,
+            }],
+        )
+        .unwrap();
+        PromptLearningCohortV1::new(
+            dataset,
+            PromptExecutionContextV1 {
+                schema: PROMPT_EXECUTION_CONTEXT_SCHEMA_V1.to_string(),
+                provider_sha256: marker.to_string().repeat(64),
+                model_pool_sha256: "2".repeat(64),
+                harness_sha256: "3".repeat(64),
+                system_prompt_sha256: "4".repeat(64),
+                policy: AgentPolicy::Auto,
+                policy_sha256: "5".repeat(64),
+                budget_sha256: "6".repeat(64),
+                tool_contract_sha256: "7".repeat(64),
+                source_revision_sha256: "8".repeat(64),
+                workspace_revision_sha256: "9".repeat(64),
+            },
+        )
+        .unwrap()
+    };
+    let referenced_cohort = cohort("case-referenced", 'a');
+    let second_referenced_cohort = cohort("case-second-referenced", 'f');
+    let orphan_attempt_cohort = cohort("case-orphan-attempt", 'b');
+    let unfinished_cohort = cohort("case-unfinished", 'c');
+    let leased_cohort = cohort("case-leased", 'd');
+    let unused_cohort = cohort("case-unused", 'e');
+    let attempt = |cohort: &PromptLearningCohortV1,
+                   suffix: &str,
+                   terminal: Option<PromptEvaluationAttemptStatus>| {
+        let identity = PromptMatchedEvaluationIdentityV1::new(
+            scoped_prompt_evaluation_id("project-a", suffix),
+            cohort,
+            cohort.dataset.cases[0].case_id.clone(),
+            PromptEvaluationSplit::Train,
+            PromptEvaluationMode::PairedExecution,
+        )
+        .unwrap();
+        let started = PromptEvaluationAttemptEventV1::started(
+            identity,
+            cohort,
+            [
+                PromptTreatmentIdentityV1 {
+                    profile_id: format!("{suffix}-candidate"),
+                    prompt_sha256: "a".repeat(64),
+                },
+                PromptTreatmentIdentityV1 {
+                    profile_id: format!("{suffix}-stable"),
+                    prompt_sha256: "b".repeat(64),
+                },
+            ],
+        )
+        .unwrap();
+        let terminal = terminal.map(|status| {
+            let (failures, reason) = match status {
+                PromptEvaluationAttemptStatus::CompletedPair => ([false; 2], ""),
+                PromptEvaluationAttemptStatus::TreatmentFailure => {
+                    ([true, false], "treatment_failed")
+                }
+                _ => ([false; 2], "invalid"),
+            };
+            PromptEvaluationAttemptEventV1::terminal(&started, status, failures, reason).unwrap()
+        });
+        PromptEvaluationAttemptState { started, terminal }
+    };
+    let valid = attempt(
+        &referenced_cohort,
+        "valid",
+        Some(PromptEvaluationAttemptStatus::CompletedPair),
+    );
+    let second_valid = attempt(
+        &second_referenced_cohort,
+        "second-valid",
+        Some(PromptEvaluationAttemptStatus::CompletedPair),
+    );
+    let orphan = attempt(
+        &orphan_attempt_cohort,
+        "orphan",
+        Some(PromptEvaluationAttemptStatus::TreatmentFailure),
+    );
+    let unfinished = attempt(&unfinished_cohort, "unfinished", None);
+    let valid_id = valid.started.identity.evaluation_id.clone();
+    let second_valid_id = second_valid.started.identity.evaluation_id.clone();
+    let orphan_id = orphan.started.identity.evaluation_id.clone();
+    let unfinished_id = unfinished.started.identity.evaluation_id.clone();
+    let mut model = build_prompt_evolution_read_model(&[], 0, 0);
+    model.attempts.insert(valid_id.clone(), valid);
+    model.attempts.insert(second_valid_id.clone(), second_valid);
+    model.attempts.insert(orphan_id.clone(), orphan);
+    model.attempts.insert(unfinished_id.clone(), unfinished);
+    for (sequence, cohort) in [
+        (4, referenced_cohort.clone()),
+        (3, second_referenced_cohort.clone()),
+        (2, leased_cohort.clone()),
+        (1, unused_cohort.clone()),
+    ] {
+        model
+            .cohort_sequences
+            .insert(cohort.cohort_sha256.clone(), sequence);
+        model.cohorts.insert(cohort.cohort_sha256.clone(), cohort);
+    }
+    model.rollouts.insert(
+        prompt_rollout_key("project-a", "auto"),
+        PromptRolloutState {
+            stable_profile_id: "stable".to_string(),
+            canary_profile_id: Some("candidate".to_string()),
+            canary_percent: 10,
+            evidence_checkpoint: 0,
+            live_checkpoint: 0,
+            stable_live_checkpoint: 0,
+            quarantined_profile_ids: Vec::new(),
+            distillation_lease: Some(PromptDistillationCanaryLeaseV1 {
+                schema: PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1.to_string(),
+                candidate_profile_id: "candidate".to_string(),
+                candidate_profile_sha256: "1".repeat(64),
+                stable_profile_id: "stable".to_string(),
+                stable_profile_sha256: "2".repeat(64),
+                cohort_sha256: leased_cohort.cohort_sha256.clone(),
+                paired_evidence_sha256: "3".repeat(64),
+            }),
+            rollback_count: 0,
+            status: "canary".to_string(),
+            last_reason: None,
+            promotion_confidence: None,
+            frozen_profile: None,
+        },
+    );
+
+    compact_prompt_learning_hot_state_to_limits(&mut model, 2, 2);
+
+    assert!(model.attempts.contains_key(&valid_id));
+    assert!(model.attempts.contains_key(&second_valid_id));
+    assert!(model.attempts.contains_key(&unfinished_id));
+    assert!(!model.attempts.contains_key(&orphan_id));
+    assert!(model.cohorts.contains_key(&referenced_cohort.cohort_sha256));
+    assert!(model
+        .cohorts
+        .contains_key(&second_referenced_cohort.cohort_sha256));
+    assert!(model.cohorts.contains_key(&leased_cohort.cohort_sha256));
+    assert!(!model.cohorts.contains_key(&unused_cohort.cohort_sha256));
+}
+
+#[test]
+fn conflicting_genome_identity_tombstone_persists_and_fails_closed() {
+    let generation_one = ConductorPromptGenome::seed_for_effort("auto")
+        .mutations()
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut first = generation_one.mutations().into_iter().next().unwrap();
+    first.custom_directive = "first payload".to_string();
+    let mut conflicting = first.clone();
+    conflicting.custom_directive = "conflicting payload".to_string();
+    let mutation = |sequence: u64, genome: &ConductorPromptGenome| {
+        event(
+            sequence,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt mutation generated",
+            [
+                ("project_id".to_string(), "project-a".to_string()),
+                ("prompt_effort".to_string(), "auto".to_string()),
+                (
+                    "prompt_genome".to_string(),
+                    serde_json::to_string(genome).unwrap(),
+                ),
+                (
+                    "mutation_strategy".to_string(),
+                    "gepa_reflection".to_string(),
+                ),
+            ],
+        )
+    };
+    let mut model = build_prompt_evolution_read_model(
+        &[
+            mutation(1, &first),
+            mutation(2, &first),
+            mutation(3, &conflicting),
+        ],
+        3,
+        3,
+    );
+    model.rollouts.insert(
+        prompt_rollout_key("project-a", "auto"),
+        PromptRolloutState {
+            stable_profile_id: first.id.clone(),
+            canary_profile_id: None,
+            canary_percent: 0,
+            evidence_checkpoint: 0,
+            live_checkpoint: 0,
+            stable_live_checkpoint: 0,
+            quarantined_profile_ids: Vec::new(),
+            distillation_lease: None,
+            rollback_count: 0,
+            status: "stable".to_string(),
+            last_reason: None,
+            promotion_confidence: None,
+            frozen_profile: None,
+        },
+    );
+
+    assert!(model.genomes.is_empty());
+    assert_eq!(
+        model
+            .genome_identity_fingerprints
+            .values()
+            .filter(|fingerprint| fingerprint.as_str() == "conflict")
+            .count(),
+        1
+    );
+    let encoded = serde_json::to_string(&model).unwrap();
+    let restored = serde_json::from_str::<PromptEvolutionReadModel>(&encoded).unwrap();
+    let scoped = prompt_evolution_read_model_for_scope(&restored, "project-a");
+    let candidates = prompt_genomes_from_events(&prompt_evolution_profile_events(&scoped), "auto");
+
+    assert!(scoped.genomes.is_empty());
+    assert!(scoped.rollouts.is_empty());
+    assert!(candidates.iter().all(|genome| genome.id != first.id));
+    assert!(visible_prompt_rollout(&restored, "auto").is_none());
+}
+
+#[test]
+fn evicted_genome_identity_detects_later_conflict_like_cold_replay() {
+    let generation_one = ConductorPromptGenome::seed_for_effort("auto")
+        .mutations()
+        .into_iter()
+        .next()
+        .unwrap();
+    let mut genomes = generation_one.mutations().into_iter();
+    let mut first = genomes.next().unwrap();
+    first.custom_directive = "first payload".to_string();
+    let filler_one = genomes.next().unwrap();
+    let filler_two = genomes.next().unwrap();
+    let mut conflicting = first.clone();
+    conflicting.custom_directive = "conflicting payload".to_string();
+    let mutation = |sequence: u64, genome: &ConductorPromptGenome| {
+        event(
+            sequence,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt mutation generated",
+            [
+                ("project_id".to_string(), "project-a".to_string()),
+                ("prompt_effort".to_string(), "auto".to_string()),
+                (
+                    "prompt_genome".to_string(),
+                    serde_json::to_string(genome).unwrap(),
+                ),
+                (
+                    "mutation_strategy".to_string(),
+                    "gepa_reflection".to_string(),
+                ),
+            ],
+        )
+    };
+    let events = vec![
+        mutation(1, &first),
+        mutation(2, &filler_one),
+        mutation(3, &filler_two),
+        mutation(4, &first),
+        mutation(5, &conflicting),
+    ];
+
+    let mut incremental = build_prompt_evolution_read_model(&events[..3], 3, 3);
+    compact_prompt_evolution_hot_state_to_limits(
+        &mut incremental,
+        usize::MAX,
+        usize::MAX,
+        1,
+        usize::MAX,
+    );
+    assert!(incremental
+        .genomes
+        .iter()
+        .all(|record| record.genome.id != first.id));
+    for event in &events[3..] {
+        for record in prompt_genome_records_from_event(event) {
+            upsert_prompt_genome(&mut incremental, record);
+        }
+        compact_prompt_evolution_hot_state_to_limits(
+            &mut incremental,
+            usize::MAX,
+            usize::MAX,
+            1,
+            usize::MAX,
+        );
+    }
+    incremental.revision = 5;
+    incremental.event_count = 5;
+
+    let mut cold = build_prompt_evolution_read_model(&events, 5, 5);
+    compact_prompt_evolution_hot_state_to_limits(
+        &mut cold,
+        usize::MAX,
+        usize::MAX,
+        1,
+        usize::MAX,
+    );
+
+    assert_eq!(
+        serde_json::to_string(&incremental.genomes).unwrap(),
+        serde_json::to_string(&cold.genomes).unwrap()
+    );
+    assert_eq!(
+        incremental.genome_identity_fingerprints,
+        cold.genome_identity_fingerprints
+    );
+    let scoped = prompt_evolution_read_model_for_scope(&incremental, "project-a");
+    let candidates = prompt_genomes_from_events(&prompt_evolution_profile_events(&scoped), "auto");
+    assert!(candidates.iter().all(|genome| genome.id != first.id));
+}
+
+#[test]
+fn hot_state_soft_caps_are_reference_safe_and_incrementally_deterministic() {
+    let genomes = ConductorPromptGenome::seed_for_effort("auto")
+        .mutations()
+        .into_iter()
+        .take(6)
+        .map(|genome| PromptGenomeRecord {
+            scope: "project-a".to_string(),
+            effort: "auto".to_string(),
+            genome,
+            evolution_method: Some(PromptEvolutionMethod::GepaReflectivePaired),
+        })
+        .collect::<Vec<_>>();
+    let active_profile = genomes[0].genome.id.clone();
+    let observation = |index: usize, profile_id: &str| PromptEvolutionObservation {
+        profile_id: profile_id.to_string(),
+        evaluation_id: scoped_prompt_evaluation_id("project-a", &format!("live-{index}")),
+        case_id: format!("case-{index}"),
+        opponent_profile_id: None,
+        task_class: "coding".to_string(),
+        split: PromptEvaluationSplit::Train,
+        mode: PromptEvaluationMode::Live,
+        format_valid: true,
+        succeeded: true,
+        quality_score: 0.8,
+        latency_ms: 1,
+        total_tokens: 1,
+        estimated_cost_microusd: 0,
+        safety_violations: 0,
+        relative_reward: None,
+        step_credits: Vec::new(),
+        reflection_packet: None,
+        provenance: PromptEvaluationProvenance::default(),
+    };
+    let observations = (0..8)
+        .map(|index| {
+            let profile = if index % 2 == 0 {
+                active_profile.as_str()
+            } else {
+                "inactive-profile"
+            };
+            ("auto".to_string(), observation(index, profile))
+        })
+        .collect::<Vec<_>>();
+    let rollout = PromptRolloutState {
+        stable_profile_id: active_profile.clone(),
+        canary_profile_id: None,
+        canary_percent: 0,
+        evidence_checkpoint: 0,
+        live_checkpoint: 0,
+        stable_live_checkpoint: 0,
+        quarantined_profile_ids: Vec::new(),
+        distillation_lease: None,
+        rollback_count: 0,
+        status: "stable".to_string(),
+        last_reason: None,
+        promotion_confidence: None,
+        frozen_profile: None,
+    };
+    let mut rebuilt = build_prompt_evolution_read_model(&[], 0, 0);
+    rebuilt.genomes = genomes.clone();
+    rebuilt.observations = observations.clone();
+    rebuilt
+        .rollouts
+        .insert(prompt_rollout_key("project-a", "auto"), rollout.clone());
+    compact_prompt_evolution_hot_state_to_limits(&mut rebuilt, usize::MAX, usize::MAX, 2, 2);
+
+    let mut incremental = build_prompt_evolution_read_model(&[], 0, 0);
+    incremental
+        .rollouts
+        .insert(prompt_rollout_key("project-a", "auto"), rollout);
+    for index in 0..observations.len() {
+        if let Some(genome) = genomes.get(index) {
+            incremental.genomes.push(genome.clone());
+        }
+        incremental.observations.push(observations[index].clone());
+        compact_prompt_evolution_hot_state_to_limits(
+            &mut incremental,
+            usize::MAX,
+            usize::MAX,
+            2,
+            2,
+        );
+    }
+
+    assert_eq!(
+        rebuilt
+            .observations
+            .iter()
+            .filter(|(_, observation)| observation.profile_id == active_profile)
+            .count(),
+        4,
+        "active rollout references are allowed to exceed the soft cap"
+    );
+    assert_eq!(rebuilt.observations.len(), 6);
+    assert_eq!(rebuilt.genomes.len(), 3);
+    assert!(rebuilt
+        .genomes
+        .iter()
+        .any(|record| record.genome.id == active_profile));
+    assert_eq!(rebuilt.observations, incremental.observations);
+    assert_eq!(
+        serde_json::to_string(&rebuilt.genomes).unwrap(),
+        serde_json::to_string(&incremental.genomes).unwrap()
+    );
+}
+
+#[test]
+fn prompt_snapshot_publication_rejects_a_stale_observed_row() {
+    let mut store = SqliteStore::in_memory().unwrap();
+    let model = build_prompt_evolution_read_model(&[], 0, 0);
+    assert!(compare_exchange_prompt_evolution_read_model(&mut store, None, &model).unwrap());
+    let observed = store
+        .load_read_model(
+            PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
+            PROMPT_EVOLUTION_READ_MODEL_KEY,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(store
+        .compare_exchange_read_model(
+            PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
+            PROMPT_EVOLUTION_READ_MODEL_KEY,
+            Some(&observed),
+            0,
+            "competing-payload",
+        )
+        .unwrap());
+
+    assert!(
+        !compare_exchange_prompt_evolution_read_model(&mut store, Some(&observed), &model,)
+            .unwrap()
     );
 }

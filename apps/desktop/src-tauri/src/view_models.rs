@@ -924,6 +924,8 @@ pub(crate) struct PromptEvolutionReadModel {
     pub(crate) revision: u64,
     pub(crate) event_count: u64,
     pub(crate) genomes: Vec<PromptGenomeRecord>,
+    #[serde(default)]
+    pub(crate) genome_identity_fingerprints: BTreeMap<String, String>,
     pub(crate) observations: Vec<(String, PromptEvolutionObservation)>,
     #[serde(default)]
     pub(crate) attempts: BTreeMap<String, PromptEvaluationAttemptState>,
