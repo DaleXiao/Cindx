@@ -23,6 +23,7 @@ mod private_file;
 mod process_control;
 mod shell;
 mod stream_capture;
+mod tool_contract_v2;
 mod tool_support;
 mod web_search;
 
@@ -44,8 +45,8 @@ pub use web_search::WebSearchTool;
 
 use meta_tools::{ToolInspectMeta, ToolInvokeMeta, ToolSearchMeta};
 pub(crate) use tool_support::{
-    builtin_tool_spec, current_time_millis, input_value_is_true, json_field,
-    parse_bounded_usize_input, permission_request, required_input, required_url,
+    bounded_model_text, builtin_tool_spec, current_time_millis, input_value_is_true, json_field,
+    model_observation, parse_bounded_usize_input, permission_request, required_input, required_url,
     resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result,
 };
 
@@ -702,6 +703,29 @@ mod tests {
             .iter()
             .all(|spec| spec.validate_input_schema().is_ok()));
 
+        for (name, integer_field) in [
+            ("file.read", "offset_bytes"),
+            ("file.search", "max_results"),
+            ("shell.run", "timeout_seconds"),
+            ("browser.extract_text", "timeout_ms"),
+        ] {
+            let spec = specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("migrated tool spec should exist");
+            let input_schema: serde_json::Value =
+                serde_json::from_str(&spec.input_schema_json).expect("input schema should parse");
+            assert_eq!(
+                input_schema["properties"][integer_field]["type"],
+                serde_json::Value::String("integer".to_string())
+            );
+            assert_eq!(
+                input_schema["additionalProperties"],
+                serde_json::Value::Bool(false)
+            );
+            assert!(spec.output_schema_json.is_some());
+        }
+
         for name in ["file.read", "file.read_many", "file.search"] {
             assert_eq!(
                 specs
@@ -1067,6 +1091,27 @@ mod tests {
     }
 
     #[test]
+    fn migrated_output_schema_is_discoverable_through_tool_inspect() {
+        let catalog = ToolRegistry::with_workspace_tools(temp_workspace());
+        let inspect = ToolInspectMeta {
+            catalog: catalog.clone(),
+        };
+        let result = inspect
+            .execute(invocation(
+                "tool.inspect",
+                serde_json::json!({ "name": "file.read" }).to_string(),
+            ))
+            .expect("tool inspection should succeed");
+        let output: serde_json::Value =
+            serde_json::from_str(&result.output).expect("inspection should return JSON");
+
+        assert_eq!(
+            output["outputSchema"]["properties"]["schema"]["const"],
+            "cindx.file-read-result.v1"
+        );
+    }
+
+    #[test]
     fn file_search_cooperatively_stops_during_a_scan() {
         let root = temp_workspace();
         fs::create_dir_all(root.join("notes")).expect("fixture directory should be created");
@@ -1161,6 +1206,69 @@ mod tests {
             second.metadata.get("next_offset_bytes").map(String::as_str),
             Some("6")
         );
+    }
+
+    #[test]
+    fn file_read_continuation_tracks_model_visible_bytes_without_skipping() {
+        let root = temp_workspace();
+        fs::write(root.join("long.txt"), "a".repeat(20_000))
+            .expect("long fixture should be written");
+        let result = ReadFileTool::new(root)
+            .execute(invocation(
+                "file.read",
+                encode_input(&[("path", "long.txt")]),
+            ))
+            .expect("long read should succeed");
+        let observation = result
+            .model_observation
+            .expect("file.read should expose a typed model observation");
+
+        assert_eq!(result.output.len(), 20_000);
+        assert_eq!(
+            result.metadata.get("next_offset_bytes").map(String::as_str),
+            Some("20000")
+        );
+        assert_eq!(
+            observation
+                .facts
+                .get("next_offset_bytes")
+                .map(String::as_str),
+            Some("5120")
+        );
+        assert!(!observation.evidence_complete);
+        assert!(observation
+            .next_action
+            .as_deref()
+            .is_some_and(|action| action.contains("offset_bytes=5120")));
+    }
+
+    #[test]
+    fn file_search_marks_limited_results_incomplete() {
+        let root = temp_workspace();
+        fs::write(root.join("matches.txt"), "needle one\nneedle two\n")
+            .expect("search fixture should be written");
+        let result = SearchFilesTool::new(root)
+            .execute(invocation(
+                "file.search",
+                encode_input(&[("path", "."), ("query", "needle"), ("max_results", "1")]),
+            ))
+            .expect("limited search should succeed");
+        let observation = result
+            .model_observation
+            .expect("file.search should expose a typed model observation");
+
+        assert_eq!(
+            result
+                .metadata
+                .get("result_limit_reached")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(!observation.evidence_complete);
+        assert!(observation
+            .next_action
+            .as_deref()
+            .is_some_and(|action| action.contains("Narrow")));
     }
 
     #[test]
@@ -1299,6 +1407,26 @@ mod tests {
                 .len(),
             100_000
         );
+        let observation = result
+            .model_observation
+            .as_ref()
+            .expect("shell should expose a typed model observation");
+        assert_eq!(
+            observation
+                .facts
+                .get("output_truncated")
+                .map(String::as_str),
+            Some("true")
+        );
+        let model_artifact = observation
+            .facts
+            .get("stdout_artifact")
+            .expect("model observation should reference complete stdout");
+        assert!(!model_artifact.starts_with(root.to_string_lossy().as_ref()));
+        assert!(observation
+            .next_action
+            .as_deref()
+            .is_some_and(|action| action.contains("file.read")));
     }
 
     #[cfg(unix)]
@@ -1319,7 +1447,69 @@ mod tests {
             result.metadata.get("timed_out").map(String::as_str),
             Some("true")
         );
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("shell_timeout")
+        );
+        assert!(
+            !result
+                .model_observation
+                .as_ref()
+                .expect("timeout should expose a typed observation")
+                .evidence_complete
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_nonzero_exit_exposes_a_stable_failure_code() {
+        let result = ShellRunTool::new(temp_workspace())
+            .execute(invocation(
+                "shell.run",
+                encode_input(&[("command", "printf failure >&2; exit 7")]),
+            ))
+            .expect("nonzero exit should return a tool result");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Failed);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("shell_exit_nonzero")
+        );
+        assert_eq!(
+            result
+                .model_observation
+                .as_ref()
+                .and_then(|observation| observation.facts.get("exit_code"))
+                .map(String::as_str),
+            Some("7")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_signal_exposes_a_distinct_incomplete_failure() {
+        let result = ShellRunTool::new(temp_workspace())
+            .execute(invocation(
+                "shell.run",
+                encode_input(&[("command", "kill -TERM $$")]),
+            ))
+            .expect("signal termination should return a tool result");
+
+        assert_eq!(result.status, ToolOutcomeStatus::Failed);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("shell_signal")
+        );
+        let observation = result
+            .model_observation
+            .as_ref()
+            .expect("signal termination should expose a typed observation");
+        assert!(!observation.evidence_complete);
+        assert_eq!(
+            observation.facts.get("termination").map(String::as_str),
+            Some("signal")
+        );
     }
 
     #[cfg(unix)]
@@ -1350,6 +1540,15 @@ mod tests {
             result.metadata.get("cancelled").map(String::as_str),
             Some("true")
         );
+        let observation = result
+            .model_observation
+            .as_ref()
+            .expect("cancelled shell should expose a typed observation");
+        assert!(!observation.evidence_complete);
+        assert!(observation
+            .next_action
+            .as_deref()
+            .is_some_and(|action| action.contains("partial")));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -1426,6 +1625,92 @@ mod tests {
         assert!(error
             .message
             .contains("CINDX_BROWSER_SIDECAR is not configured"));
+    }
+
+    #[test]
+    fn browser_extract_rejects_ambiguous_targets_before_sidecar_execution() {
+        let tool = BrowserTool::extract_text(temp_workspace());
+        let error = tool
+            .execute(invocation(
+                "browser.extract_text",
+                encode_input(&[("selector", "main"), ("text_target", "Settings")]),
+            ))
+            .expect_err("ambiguous targets should be rejected locally");
+
+        assert!(error.message.contains("at most one target strategy"));
+    }
+
+    #[test]
+    fn browser_extract_preserves_page_identity_and_continuation_guidance() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let root = temp_workspace();
+        let sidecar = root.join("browser-extract-test.sh");
+        let trace = root.join("browser-trace.json");
+        let text = root.join("browser-text.txt");
+        fs::write(&trace, "{}\n").expect("trace should write");
+        fs::write(&text, "complete retained browser text\n").expect("text artifact should write");
+        let output = format!(
+            "BODY_HEAD{}BODY_TAIL\n\nAccessibility snapshot:\nARIA_TAIL",
+            "x".repeat(8_000)
+        );
+        fs::write(
+            &sidecar,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({
+                    "schema": BROWSER_CONTROL_RESPONSE_SCHEMA,
+                    "ok": true,
+                    "id": "browser-extract-test",
+                    "action": "extract_text",
+                    "session_id": "task-1",
+                    "controller": "cdp_playwright",
+                    "page": {
+                        "id": "tab-1",
+                        "url": "https://example.com/docs",
+                        "title": "Example docs"
+                    },
+                    "output": output,
+                    "artifacts": [{
+                        "path": text.display().to_string(),
+                        "mime_type": "text/plain",
+                        "title": "Browser text"
+                    }],
+                    "trace_path": trace.display().to_string(),
+                    "duration_ms": 12
+                })
+            ),
+        )
+        .expect("sidecar should write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o700))
+                .expect("sidecar should be executable");
+        }
+        env::set_var("CINDX_BROWSER_SIDECAR", &sidecar);
+        let result = BrowserTool::extract_text(root)
+            .execute(invocation("browser.extract_text", "{}".to_string()))
+            .expect("browser extract sidecar should execute");
+        env::remove_var("CINDX_BROWSER_SIDECAR");
+        let observation = result
+            .model_observation
+            .expect("browser extract should expose a typed observation");
+
+        assert_eq!(
+            observation.facts.get("url").map(String::as_str),
+            Some("https://example.com/docs")
+        );
+        assert_eq!(
+            observation.facts.get("tab_id").map(String::as_str),
+            Some("tab-1")
+        );
+        assert!(observation.evidence.contains("BODY_HEAD"));
+        assert!(observation.evidence.contains("ARIA_TAIL"));
+        assert!(!observation.evidence_complete);
+        assert!(observation
+            .next_action
+            .as_deref()
+            .is_some_and(|action| action.contains("file.read")));
     }
 
     #[test]

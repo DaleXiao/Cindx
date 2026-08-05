@@ -1,12 +1,12 @@
+use super::tool_contract_v2::{file_search_result, file_search_spec, SearchCoverage};
 use super::{
-    builtin_tool_spec,
     file_tools::{is_sensitive_workspace_path, reject_sensitive_read_path},
-    parse_input, required_input, resolve_workspace_path, resolve_workspace_read_path, tool_result,
-    Tool, ToolError, ToolExecutionControl,
+    parse_bounded_usize_input, parse_input, required_input, resolve_workspace_path,
+    resolve_workspace_read_path, Tool, ToolError, ToolExecutionControl,
 };
 use agent_core::{
     Metadata, PermissionRequest, ToolExecutionConcurrency, ToolInvocation, ToolOutcomeStatus,
-    ToolResult, ToolRisk, ToolSpec,
+    ToolResult, ToolSpec,
 };
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -17,7 +17,6 @@ const SEARCH_MATCH_PREVIEW_CHARS: usize = 512;
 const SEARCH_CANCEL_POLL_LINES: usize = 128;
 const SEARCH_CANCEL_POLL_DIRECTORY_ENTRIES: usize = 32;
 const SEARCH_CANCEL_POLL_BYTES: usize = 64 * 1024;
-
 pub struct SearchFilesTool {
     workspace_root: PathBuf,
 }
@@ -48,55 +47,37 @@ impl SearchFilesTool {
             .get("path")
             .cloned()
             .unwrap_or_else(|| ".".to_string());
-        let max_results = input
-            .get("max_results")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(50)
-            .min(200);
+        let max_results = parse_bounded_usize_input(&input, "max_results", 50, 1, 200)?;
         let root = resolve_workspace_path(&self.workspace_root, &path)?;
         let root = resolve_workspace_read_path(&self.workspace_root, &root)?;
         reject_sensitive_read_path(&self.workspace_root, &root)?;
         let mut results = Vec::new();
+        let mut coverage = SearchCoverage::default();
         search_directory(
             &self.workspace_root,
             &root,
             &query,
             max_results,
             &mut results,
+            &mut coverage,
             should_cancel,
         )?;
 
-        let mut metadata = Metadata::new();
-        metadata.insert("query".to_string(), query);
-        metadata.insert("path".to_string(), path);
-        metadata.insert("matches".to_string(), results.len().to_string());
-        let cancelled = should_cancel();
-        Ok(tool_result(
+        Ok(file_search_result(
             invocation.id,
-            if cancelled {
-                ToolOutcomeStatus::Cancelled
-            } else {
-                ToolOutcomeStatus::Succeeded
-            },
-            if cancelled {
-                "File search cancelled.".to_string()
-            } else {
-                results.join("\n")
-            },
-            metadata,
+            query,
+            path,
+            results,
+            max_results,
+            coverage,
+            should_cancel(),
         ))
     }
 }
 
 impl Tool for SearchFilesTool {
     fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "file.search",
-            "Search UTF-8 files inside the workspace for a literal query.",
-            ToolRisk::ReadOnly,
-            "query=<literal text>\npath=<optional workspace-relative path>\nmax_results=<optional number>",
-        )
-        .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
+        file_search_spec().with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -122,6 +103,7 @@ fn search_directory(
     query: &str,
     max_results: usize,
     results: &mut Vec<String>,
+    coverage: &mut SearchCoverage,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<(), ToolError> {
     if results.len() >= max_results || should_cancel() {
@@ -137,6 +119,8 @@ fn search_directory(
             query,
             max_results,
             results,
+            coverage,
+            metadata.len(),
             should_cancel,
         )?;
         return Ok(());
@@ -155,12 +139,14 @@ fn search_directory(
         let path = entry.path();
         let file_name = entry.file_name();
         if file_name.to_string_lossy().starts_with('.') {
+            coverage.skipped_hidden_entries = coverage.skipped_hidden_entries.saturating_add(1);
             continue;
         }
         let file_type = entry
             .file_type()
             .map_err(|error| ToolError::new(format!("failed to read file type: {error}")))?;
         if file_type.is_symlink() {
+            coverage.skipped_symlinks = coverage.skipped_symlinks.saturating_add(1);
             continue;
         }
         let metadata = entry
@@ -173,6 +159,7 @@ fn search_directory(
                 query,
                 max_results,
                 results,
+                coverage,
                 should_cancel,
             )?;
         } else if metadata.is_file() {
@@ -182,6 +169,8 @@ fn search_directory(
                 query,
                 max_results,
                 results,
+                coverage,
+                metadata.len(),
                 should_cancel,
             )?;
         }
@@ -196,6 +185,8 @@ fn search_file(
     query: &str,
     max_results: usize,
     results: &mut Vec<String>,
+    coverage: &mut SearchCoverage,
+    file_size: u64,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<(), ToolError> {
     if results.len() >= max_results || should_cancel() {
@@ -205,8 +196,12 @@ fn search_file(
         return Ok(());
     }
     let Ok(file) = fs::File::open(path) else {
+        coverage.unreadable_files = coverage.unreadable_files.saturating_add(1);
         return Ok(());
     };
+    if file_size > SEARCH_FILE_SCAN_MAX_BYTES {
+        coverage.truncated_files = coverage.truncated_files.saturating_add(1);
+    }
     let relative = path.strip_prefix(workspace_root).unwrap_or(path);
     let mut reader = BufReader::new(file.take(SEARCH_FILE_SCAN_MAX_BYTES));
     let mut line = String::new();
@@ -222,8 +217,12 @@ fn search_file(
             bytes_since_cancel_poll = 0;
         }
         line.clear();
-        let Ok(read) = reader.read_line(&mut line) else {
-            break;
+        let read = match reader.read_line(&mut line) {
+            Ok(read) => read,
+            Err(_) => {
+                coverage.unreadable_files = coverage.unreadable_files.saturating_add(1);
+                break;
+            }
         };
         if read == 0 {
             break;

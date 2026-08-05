@@ -945,6 +945,7 @@ const toolsModuleBudgets = new Map([
   ["process_control.rs", 30],
   ["shell.rs", 950],
   ["stream_capture.rs", 60],
+  ["tool_contract_v2.rs", 650],
   ["tool_support.rs", 360],
   ["web_search.rs", 420],
 ]);
@@ -1059,6 +1060,7 @@ assert(
     read("crates/tools/src/lib.rs").includes("mod file_tools;") &&
     read("crates/tools/src/lib.rs").includes("mod meta_tools;") &&
     read("crates/tools/src/lib.rs").includes("mod image_generation;") &&
+    read("crates/tools/src/lib.rs").includes("mod tool_contract_v2;") &&
     read("crates/tools/src/lib.rs").includes("mod web_search;") &&
     toolsSource.includes("web_search_is_network_permissioned_but_effect_read_only") &&
     toolsSource.includes(".with_effect_semantics(ToolEffectSemantics::ReadOnly)"),

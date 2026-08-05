@@ -3,9 +3,9 @@ use agent_core::{
     ToolOutcomeStatus, ToolResult,
 };
 use agent_runtime::{
-    decode_persisted_tool_artifacts, recovery_source_scope_matches,
-    supports_recovery_effect_replay, tool_effect_recovery_policy, tool_execution_scope_matches,
-    ToolEffectRecoveryPolicy, TOOL_EFFECT_VERIFIER_METADATA_KEY,
+    decode_persisted_tool_artifacts, decode_persisted_tool_model_observation,
+    recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,
+    tool_execution_scope_matches, ToolEffectRecoveryPolicy, TOOL_EFFECT_VERIFIER_METADATA_KEY,
 };
 pub(super) use agent_runtime::{
     finalize_tool_result, tool_input_fingerprint, tool_invocation_context,
@@ -319,6 +319,7 @@ fn result_from_finished_event(
         retryable: false,
     });
     let structured_output_json = metadata.get("structured_output").cloned();
+    let model_observation = decode_persisted_tool_model_observation(&metadata);
 
     Some(ToolResult {
         invocation_id: ToolCallId(invocation.id.0.clone()),
@@ -328,6 +329,7 @@ fn result_from_finished_event(
         structured_output_json,
         artifacts,
         failure,
+        model_observation,
         metadata,
     })
 }
@@ -335,7 +337,7 @@ fn result_from_finished_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{EventId, TaskId, ToolArtifact};
+    use agent_core::{EventId, TaskId, ToolArtifact, ToolObservationV2};
     use agent_storage::EventStore;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -550,6 +552,18 @@ mod tests {
             mime_type: Some("text/plain".to_string()),
             title: Some("Output".to_string()),
         });
+        result.model_observation = Some(
+            ToolObservationV2::new(
+                "filesystem.write",
+                "Wrote the requested file.",
+                "written",
+                true,
+                [("path".to_string(), "a.txt".to_string())]
+                    .into_iter()
+                    .collect(),
+            )
+            .with_next_action("Verify the file only if the task requires it."),
+        );
         let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
         finalize_tool_result(
             &mut result,
@@ -563,6 +577,7 @@ mod tests {
 
         assert_eq!(replayed.output, "written");
         assert_eq!(replayed.artifacts, result.artifacts);
+        assert_eq!(replayed.model_observation, result.model_observation);
         assert_eq!(
             replayed
                 .metadata

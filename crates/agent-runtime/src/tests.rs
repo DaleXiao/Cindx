@@ -1219,6 +1219,80 @@ fn resumed_loop_rebuilds_pending_interaction_verification() {
     assert!(state.pending_interaction_verifications().is_empty());
 }
 
+#[test]
+fn typed_tool_observation_keeps_model_evidence_separate_from_full_details() {
+    let mut result = ToolResult::text(
+        ToolCallId("call-observation-v2".to_string()),
+        ToolOutcomeStatus::Failed,
+        "FULL_OUTPUT_SENTINEL",
+        [(
+            "private_detail".to_string(),
+            "METADATA_SENTINEL".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    result.structured_output_json = Some("STRUCTURED_SENTINEL".to_string());
+    result.content.push(agent_core::ToolContent::Image {
+        mime_type: "image/png".to_string(),
+        data: "BASE64_SENTINEL".to_string(),
+    });
+    result.artifacts.push(agent_core::ToolArtifact {
+        path: ".cindx/tool-output/stdout.log".to_string(),
+        mime_type: Some("text/plain".to_string()),
+        title: Some("Shell stdout".to_string()),
+    });
+    result.artifacts.push(agent_core::ToolArtifact {
+        path: format!("LONG_ARTIFACT_HEAD{}LONG_ARTIFACT_TAIL", "p".repeat(4_000)),
+        mime_type: Some("text/plain".to_string()),
+        title: Some("Oversized artifact fixture".to_string()),
+    });
+    result.failure = Some(agent_core::ToolFailure {
+        code: "shell_exit_nonzero".to_string(),
+        message: "FULL_FAILURE_SENTINEL".to_string(),
+        retryable: false,
+    });
+    let evidence = format!("HEAD_SENTINEL{}TAIL_SENTINEL", "x".repeat(8_000));
+    result.model_observation = Some(
+        agent_core::ToolObservationV2::new(
+            "shell.run",
+            "Command failed with exit code 2.",
+            evidence,
+            false,
+            [
+                ("exit_code".to_string(), "2".to_string()),
+                (
+                    "long_fact".to_string(),
+                    format!("LONG_FACT_HEAD{}LONG_FACT_TAIL", "f".repeat(4_000)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .with_next_action("Change the command before retrying."),
+    );
+
+    let observation = observation_from_agent_tool_result("tool.invoke", &result);
+
+    assert!(observation
+        .starts_with("tool=shell.run\nstatus=failed\nschema=cindx.tool-observation.v2\n"));
+    assert!(observation.contains("failure_code=shell_exit_nonzero"));
+    assert!(observation.contains("retryable=false"));
+    assert!(observation.contains(".cindx/tool-output/stdout.log"));
+    assert!(observation.contains("HEAD_SENTINEL"));
+    assert!(observation.contains("TAIL_SENTINEL"));
+    assert!(observation.contains("...[model evidence truncated]..."));
+    assert!(observation.contains("facts_excerpt="));
+    assert!(observation.contains("artifacts_excerpt="));
+    assert!(!observation.contains("FULL_OUTPUT_SENTINEL"));
+    assert!(!observation.contains("FULL_FAILURE_SENTINEL"));
+    assert!(!observation.contains("STRUCTURED_SENTINEL"));
+    assert!(!observation.contains("METADATA_SENTINEL"));
+    assert!(!observation.contains("BASE64_SENTINEL"));
+    assert_eq!(observation.matches("output=").count(), 1);
+    assert!(observation.chars().count() <= 6_000);
+}
+
 fn tool(name: &str, schema: &str) -> ToolSpec {
     let schema = if schema.trim_start().starts_with('{') {
         schema.to_string()

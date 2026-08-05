@@ -1291,6 +1291,7 @@ fn mcp_tool_result(
             message: output,
             retryable: false,
         }),
+        model_observation: None,
         metadata,
     }
 }

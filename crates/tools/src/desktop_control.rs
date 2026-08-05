@@ -1,6 +1,9 @@
 use super::*;
 use crate::process_control::terminate_process_group;
 use crate::stream_capture::capture_stream_limited;
+use crate::tool_contract_v2::{
+    attach_browser_extract_observation, browser_extract_spec, validate_browser_extract_target,
+};
 use agent_core::{PermissionRisk, ToolArtifact, ToolCallId, ToolEffectSemantics};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -365,19 +368,31 @@ impl BrowserTool {
         );
         result.structured_output_json = Some(sidecar.stdout);
         result.artifacts = artifacts;
+        if self.kind == BrowserToolKind::ExtractText {
+            attach_browser_extract_observation(&mut result);
+        }
         Ok(result)
     }
 }
 
 impl Tool for BrowserTool {
     fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            self.kind.tool_name(),
-            self.kind.description(),
-            self.kind.risk(),
-            self.kind.schema(),
-        )
-        .with_effect_semantics(self.kind.effect_semantics())
+        if self.kind == BrowserToolKind::ExtractText {
+            browser_extract_spec(
+                self.kind.description(),
+                self.kind.risk(),
+                self.kind.effect_semantics(),
+                BROWSER_CONTROL_RESPONSE_SCHEMA,
+            )
+        } else {
+            builtin_tool_spec(
+                self.kind.tool_name(),
+                self.kind.description(),
+                self.kind.risk(),
+                self.kind.schema(),
+            )
+            .with_effect_semantics(self.kind.effect_semantics())
+        }
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -820,8 +835,8 @@ fn validate_browser_input(
             ))
         }
         BrowserToolKind::SelectTab => required_input(input, "tab_id").map(|_| ()),
-        BrowserToolKind::ExtractText
-        | BrowserToolKind::Capture
+        BrowserToolKind::ExtractText => validate_browser_extract_target(input),
+        BrowserToolKind::Capture
         | BrowserToolKind::Scroll
         | BrowserToolKind::Tabs
         | BrowserToolKind::Close => Ok(()),

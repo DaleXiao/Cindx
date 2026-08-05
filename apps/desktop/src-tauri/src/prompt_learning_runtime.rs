@@ -473,7 +473,7 @@ pub(crate) fn prompt_learning_cohort(
 pub(crate) fn prompt_evaluation_tool_contract_sha256(workspace_root: &Path) -> String {
     let mut specs = ToolRegistry::with_workspace_tools(workspace_root.to_path_buf()).specs();
     specs.sort_by(|left, right| left.name.cmp(&right.name));
-    let canonical = specs
+    let tool_specs = specs
         .into_iter()
         .map(|spec| {
             format!(
@@ -491,6 +491,7 @@ pub(crate) fn prompt_evaluation_tool_contract_sha256(workspace_root: &Path) -> S
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let canonical = format!("{}\n{tool_specs}", agent_core::TOOL_OBSERVATION_V2_SCHEMA);
     sha256_hex(canonical.as_bytes())
 }
 

@@ -1,7 +1,7 @@
 use crate::ToolError;
 use agent_core::{
     Metadata, PermissionRequest, PermissionRequestId, PermissionRisk, TaskId, ToolCallId,
-    ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    ToolObservationV2, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -169,6 +169,40 @@ pub(crate) fn tool_result(
     metadata: Metadata,
 ) -> ToolResult {
     ToolResult::text(invocation_id, status, output, metadata)
+}
+
+pub(crate) fn model_observation(
+    tool_name: &str,
+    summary: impl Into<String>,
+    evidence: impl Into<String>,
+    evidence_complete: bool,
+    facts: Metadata,
+    next_action: Option<String>,
+) -> ToolObservationV2 {
+    let observation =
+        ToolObservationV2::new(tool_name, summary, evidence, evidence_complete, facts);
+    match next_action {
+        Some(next_action) => observation.with_next_action(next_action),
+        None => observation,
+    }
+}
+
+pub(crate) fn bounded_model_text(value: &str, max_chars: usize) -> (String, bool) {
+    const MARKER: &str = "\n...[middle evidence omitted]...\n";
+    let character_count = value.chars().count();
+    if character_count <= max_chars {
+        return (value.to_string(), false);
+    }
+    let marker_count = MARKER.chars().count();
+    let retained = max_chars.saturating_sub(marker_count);
+    let tail_count = retained / 4;
+    let head_count = retained.saturating_sub(tail_count);
+    let head = value.chars().take(head_count).collect::<String>();
+    let tail = value
+        .chars()
+        .skip(character_count.saturating_sub(tail_count))
+        .collect::<String>();
+    (format!("{head}{MARKER}{tail}"), true)
 }
 
 pub(crate) fn resolve_workspace_path(
