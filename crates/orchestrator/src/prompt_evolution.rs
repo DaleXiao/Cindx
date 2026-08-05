@@ -1,6 +1,7 @@
 mod auto_teacher_source;
 mod distillation;
 mod distillation_snapshot;
+mod failure_curriculum;
 mod fitness;
 mod genome;
 mod learning_dataset;
@@ -17,6 +18,7 @@ mod snapshot;
 pub use auto_teacher_source::*;
 pub use distillation::*;
 pub use distillation_snapshot::*;
+pub use failure_curriculum::*;
 pub use genome::*;
 pub use learning_dataset::*;
 pub use learning_intent::*;
@@ -26,7 +28,8 @@ pub use observation::*;
 pub use pareto::*;
 pub use pro_teacher_source::*;
 pub use reflection_selection::{
-    prompt_transfer_reflection_pairs, PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
+    prompt_reflection_success_anchor, prompt_transfer_reflection_pairs,
+    PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
 };
 pub use snapshot::*;
 

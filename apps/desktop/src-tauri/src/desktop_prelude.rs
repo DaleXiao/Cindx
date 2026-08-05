@@ -70,7 +70,9 @@ pub(crate) use model_provider::{
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 #[cfg(test)]
-pub(crate) use orchestrator::AgentEvaluationVerifier;
+pub(crate) use orchestrator::{
+    AgentEvaluationVerifier, PromptFailureCurriculumInput, PromptFailureCurriculumKind,
+};
 pub(crate) use orchestrator::{
     adaptive_worker_prompt_for_plan, adaptive_workflow_layers, adaptive_workflow_step_budget,
     candidate_pair_review_prompt, compare_team_and_anchor_order_invariant, decide_uplift_gate,
@@ -78,8 +80,10 @@ pub(crate) use orchestrator::{
     direct_anchor_response_verdict, evaluate_prompt_auto_transfer_gate_in_cohort_with_failures,
     evaluate_prompt_convergence, evaluate_prompt_promotion_gate_with_failures_in_cohort,
     parse_candidate_pair_review,
-    parse_policy, prompt_genome_sha256, prompt_proposal_minibatch_decision,
-    prompt_reflection_packets, prompt_transfer_reflection_pairs, role_label, sha256_hex,
+    parse_policy, prompt_failure_reflection_packets, prompt_genome_sha256,
+    prompt_proposal_minibatch_decision, prompt_reflection_packets,
+    prompt_reflection_success_anchor,
+    prompt_transfer_reflection_pairs, role_label, sha256_hex,
     step_prompt, ActionableSideInformation, AgentEngineSession, AgentEvaluationCaseScore,
     AgentEvaluationCheck, AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket,
     AgentEvaluationSplit, AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
@@ -96,6 +100,7 @@ pub(crate) use orchestrator::{
     PromptLearningCohortV1, PromptLearningEligibilityReceiptV1,
     PromptEvolutionCampaignInput, PromptEvolutionCampaignSnapshot, PromptEvolutionMethod,
     PromptEvolutionObservation, PromptInstanceParetoArchive, PromptParetoArchive,
+    PromptFailureCurriculumReceiptV1,
     PromptPromotionConfidence, PromptPromotionFailurePenalty, PromptPromotionGateConfig,
     PromptPromotionGateResult, PromptProposalMinibatchDecision,
     PromptRetryPolicy, PromptSearchArchive, PromptStepCredit, PromptVerification, RoutingContext,

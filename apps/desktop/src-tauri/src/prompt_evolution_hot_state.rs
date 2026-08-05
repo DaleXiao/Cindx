@@ -11,6 +11,7 @@ pub(crate) const PROMPT_EVALUATION_ATTEMPT_RETENTION: usize = 1_024;
 pub(crate) const PROMPT_EVIDENCE_SCOPE_SEPARATOR: &str = "::";
 const PROMPT_GENOME_HOT_RETENTION_PER_SCOPE: usize = 64;
 const PROMPT_OBSERVATION_HOT_RETENTION_PER_SCOPE: usize = 2_048;
+const PROMPT_FAILURE_CURRICULUM_HOT_RETENTION_PER_SCOPE: usize = 128;
 
 type PromptGenomeKey = (String, String, String);
 type PromptScopeEffort = (String, String);
@@ -310,6 +311,12 @@ pub(crate) fn prompt_evolution_read_model_for_scope(
         })
         .cloned()
         .collect();
+    let failure_curricula = model
+        .failure_curricula
+        .iter()
+        .filter(|record| record.scope == scope)
+        .cloned()
+        .collect();
     let rollouts = ["fast", "auto", "pro"]
         .into_iter()
         .filter_map(|effort| {
@@ -342,6 +349,7 @@ pub(crate) fn prompt_evolution_read_model_for_scope(
         genomes,
         genome_identity_fingerprints,
         observations,
+        failure_curricula,
         attempts,
         cohorts,
         cohort_sequences,
@@ -507,6 +515,29 @@ fn compact_prompt_observations(
     });
 }
 
+fn compact_prompt_failure_curricula(
+    model: &mut PromptEvolutionReadModel,
+    limit_per_scope: usize,
+) {
+    let mut retained = BTreeMap::<PromptScopeEffort, usize>::new();
+    let mut keep = vec![false; model.failure_curricula.len()];
+    for (index, record) in model.failure_curricula.iter().enumerate().rev() {
+        let count = retained
+            .entry((record.scope.clone(), record.effort.clone()))
+            .or_default();
+        if *count < limit_per_scope {
+            keep[index] = true;
+            *count += 1;
+        }
+    }
+    let mut index = 0usize;
+    model.failure_curricula.retain(|_| {
+        let retain = keep[index];
+        index += 1;
+        retain
+    });
+}
+
 fn compact_prompt_attempts_and_cohorts(
     model: &mut PromptEvolutionReadModel,
     active_cohorts: &BTreeSet<String>,
@@ -663,6 +694,10 @@ pub(crate) fn compact_prompt_evolution_hot_state_to_limits(
 ) {
     let active_cohorts = prompt_active_cohort_references(model);
     compact_prompt_observations(model, &active_cohorts, observation_limit_per_scope);
+    compact_prompt_failure_curricula(
+        model,
+        PROMPT_FAILURE_CURRICULUM_HOT_RETENTION_PER_SCOPE,
+    );
     compact_prompt_attempts_and_cohorts(model, &active_cohorts, attempt_limit, cohort_limit);
     compact_prompt_genomes(model, genome_limit_per_scope);
 }

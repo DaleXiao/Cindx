@@ -179,6 +179,18 @@ six-trajectory input ceiling, so richer learning evidence does not expand the
 mutation context budget. Mutation events pin the selector schema and the digest
 of the exact redacted trajectory set.
 
+Pro mutation may also receive a bounded failure curriculum derived only from
+canonical current-epoch timeout, denial, or no-progress outcomes. These records
+contain typed failure codes and fingerprints, never prompts, tool arguments,
+outputs, provider errors, or secret-bearing text. They are negative-only
+`FailureSeed` reflections and enter mutation only beside a successful scientific
+train observation for the same profile. The success anchor, at most two diverse
+failure seeds, ordinary reflection, and Auto-transfer reflection still share the
+same six-packet ceiling. Failure seeds cannot become positive learning evidence,
+Auto teachers, Goal Delta, canary success, promotion evidence, or Pro-to-Auto
+teachers. Permission failures can teach stopping or recovery within existing
+authority, never permission bypass, budget expansion, or repeated side effects.
+
 The learned genome continues to govern the evaluated workflow surface:
 topology, branch shape, roles, verification, tool exposure, retry/recovery,
 stopping, context policy, and bounded step budgets. Per-request route,

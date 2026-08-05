@@ -3712,7 +3712,7 @@ assert(
       "snapshot.stable_profile_id == previous.stable_profile_id"
     ) &&
     rustLib.includes(
-      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 8"
+      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 9"
     ) &&
     rustLib.includes("snapshot.genome.id == rollout.stable_profile_id") &&
     rustLib.includes("promoted_prompt_rollout_without_a_valid_frozen_profile_is_ignored") &&

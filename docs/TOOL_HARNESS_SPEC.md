@@ -96,6 +96,15 @@ mutate an in-flight transcript, permission decision, tool result, run budget, or
 workflow checkpoint. Route, retrieval, and memory remain per-run decisions until
 their own execution path is included in the matched evaluation protocol.
 
+Pro may use canonical timeout, denial, and no-progress facts as an isolated
+negative failure curriculum. Each receipt is hash-only, bound to the current
+project/run/profile/policy/steer epoch, and contains no prompt, tool arguments,
+outputs, provider error text, or secrets. Failure seeds require a successful
+scientific train anchor, are limited to two within the existing six-reflection
+budget, and cannot become a teacher, positive evidence, Goal Delta, canary
+success, promotion evidence, or Pro-to-Auto input. A denial can only reinforce
+respect for the current permission boundary or authorized recovery.
+
 ## Performance invariants
 
 - Session interaction paths never scan every event for the shared agent task.

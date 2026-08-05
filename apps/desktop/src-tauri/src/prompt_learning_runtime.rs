@@ -155,12 +155,13 @@ pub(crate) fn prompt_learning_receipt(
     steer_epoch: u64,
 ) -> PromptLearningEligibilityReceiptV1 {
     let evidence = LearningEvidenceV1::from_metadata(&terminal.metadata);
-    let permission_denied = run_events.iter().any(|event| {
+    let permission_denied = crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(terminal)
+        || run_events.iter().any(|event| {
         event.kind == EventKind::PermissionResolved
             && event.metadata.get("decision").is_some_and(|decision| {
                 !matches!(decision.as_str(), "allow_once" | "allow_for_session")
             })
-    });
+        });
     let safety_violations = run_events
         .iter()
         .filter_map(|event| event.metadata.get("safety_violations"))
