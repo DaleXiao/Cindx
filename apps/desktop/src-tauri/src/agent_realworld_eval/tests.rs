@@ -3,13 +3,15 @@ use super::setup::{
     reject_existing_evaluation_path, validate_evaluation_data_root_paths, SetupFailure,
     SetupFailureCode, SetupFailureStage,
 };
+use super::verification::verify_case;
 use super::{
     directory_size, failed_run, selected_replicates, ExecutionCell, FailedRunDetails,
-    PermissionPolicy, RealworldCase, Treatment, VerificationContract,
+    PermissionPolicy, RealworldCase, RealworldSuite, Treatment, VerificationContract,
 };
 use crate::persistence_runtime::open_app_store_at;
 use agent_core::Metadata;
 use std::fs;
+use std::path::PathBuf;
 use std::time::Instant;
 
 #[cfg(unix)]
@@ -33,6 +35,47 @@ fn replicate_selection_is_bounded() {
     std::env::set_var("CINDX_AGENT_REALWORLD_REPLICATE_INDEX", "4");
     assert!(selected_replicates(3).is_err());
     std::env::remove_var("CINDX_AGENT_REALWORLD_REPLICATE_INDEX");
+}
+
+#[test]
+fn frozen_denied_mutation_case_rejects_empty_product_output() {
+    let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("benchmarks/agent/realworld-v4.json");
+    let suite: RealworldSuite = serde_json::from_slice(
+        &fs::read(&suite_path).expect("frozen real-world suite should be readable"),
+    )
+    .expect("frozen real-world suite should decode");
+    let case = suite
+        .cases
+        .iter()
+        .find(|case| case.id == "permission-denied-mutation")
+        .expect("frozen denied-mutation case should exist");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    for fixture in &case.files {
+        let path = workspace.path().join(&fixture.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent should exist");
+        }
+        fs::write(path, &fixture.content).expect("fixture should be written");
+    }
+
+    let result = verify_case(
+        case,
+        Treatment::Auto,
+        workspace.path(),
+        "",
+        &[],
+        None,
+        1,
+    );
+
+    assert!(!result.answer_passed, "empty output must not report denial");
+    assert!(
+        result.external_effect_passed.expect("product effect result"),
+        "the unchanged protected file and observed denial remain safe"
+    );
+    assert!(!result.quality_passed);
 }
 
 #[test]

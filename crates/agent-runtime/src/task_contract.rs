@@ -7,9 +7,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod denial;
 mod goal_delta;
 mod grounded_completion;
 mod outcome_ledger;
+
+pub use denial::{
+    AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,
+    AgentActionRecovery, ACTION_DENIAL_SCHEMA,
+};
 
 pub use grounded_completion::{
     GroundedCompletionBasis, GroundedCompletionIssue, GroundedCompletionReceipt,
@@ -20,12 +26,12 @@ pub use grounded_completion::{
 pub use goal_delta::{AgentGoalDelta, AgentGoalDeltaKind, GOAL_DELTA_SCHEMA};
 
 pub use outcome_ledger::{
-    OutcomeClaim, OutcomeClaimDecision, OutcomeClaimEvidenceStatus, OutcomeClaimKind,
-    OutcomeClaimQuality, OutcomeEvidence, OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase,
-    OutcomeLedgerShadow, OutcomeObligation, OutcomeObligationKind, OutcomePostcondition,
-    OutcomePostconditionKind, OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope,
-    OutcomeTerminal, OutcomeTerminalObservation, OutcomeTruncation,
-    OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
+    OutcomeBlocker, OutcomeClaim, OutcomeClaimDecision, OutcomeClaimEvidenceStatus,
+    OutcomeClaimKind, OutcomeClaimQuality, OutcomeEvidence, OutcomeFailure, OutcomeFailureClass,
+    OutcomeLedgerPhase, OutcomeLedgerShadow, OutcomeObligation, OutcomeObligationKind,
+    OutcomePostcondition, OutcomePostconditionKind, OutcomePostconditionStatus,
+    OutcomeSatisfaction, OutcomeScope, OutcomeTerminal, OutcomeTerminalObservation,
+    OutcomeTruncation, OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
     OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
 };
 
@@ -45,6 +51,7 @@ pub enum ContractEvidenceKind {
     Verification,
     InteractionAction,
     InteractionObservation,
+    Denial,
     OtherTool,
 }
 
@@ -118,6 +125,7 @@ struct TaskContractContext {
     pending_postconditions: Vec<TaskContractPostcondition>,
     unverified_workspace_mutation: Option<TaskContractMutation>,
     recent_evidence: Vec<TaskContractEvidenceSummary>,
+    active_denials: Vec<denial::TaskContractDenialSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -193,6 +201,12 @@ pub struct AgentTaskContract {
     outcome_dropped_claims: u64,
     #[serde(default)]
     next_outcome_claim_sequence: u64,
+    #[serde(default)]
+    action_denial_epoch: u64,
+    #[serde(default)]
+    action_denials: Vec<AgentActionDenial>,
+    #[serde(default)]
+    action_denial_replan_used: bool,
 }
 
 impl AgentTaskContract {
@@ -644,12 +658,18 @@ impl AgentTaskContract {
         let unresolved_required_tools = self
             .required_tool_successes
             .iter()
-            .filter(|tool_name| !self.successful_tools.contains(*tool_name))
+            .filter(|tool_name| {
+                !self.successful_tools.contains(*tool_name)
+                    && self.action_denial_for_tools([tool_name.as_str()]).is_none()
+            })
             .cloned()
             .chain(
                 self.prompt_required_tool_successes
                     .iter()
-                    .filter(|tool_name| !self.prompt_successful_tools.contains(*tool_name))
+                    .filter(|tool_name| {
+                        !self.prompt_successful_tools.contains(*tool_name)
+                            && self.action_denial_for_tools([tool_name.as_str()]).is_none()
+                    })
                     .cloned(),
             )
             .collect::<BTreeSet<_>>()
@@ -658,7 +678,12 @@ impl AgentTaskContract {
         let mut unresolved_any_tool_requirements = self
             .required_any_tool_successes
             .iter()
-            .filter(|(_, alternatives)| alternatives.is_disjoint(&self.successful_tools))
+            .filter(|(_, alternatives)| {
+                alternatives.is_disjoint(&self.successful_tools)
+                    && self
+                        .action_denial_for_tools(alternatives.iter().map(String::as_str))
+                        .is_none()
+            })
             .map(|(id, alternatives)| TaskContractAnyToolRequirement {
                 id: id.clone(),
                 alternatives: alternatives
@@ -671,7 +696,12 @@ impl AgentTaskContract {
         unresolved_any_tool_requirements.extend(
             self.prompt_required_any_tool_successes
                 .iter()
-                .filter(|(_, alternatives)| alternatives.is_disjoint(&self.prompt_successful_tools))
+                .filter(|(_, alternatives)| {
+                    alternatives.is_disjoint(&self.prompt_successful_tools)
+                        && self
+                            .action_denial_for_tools(alternatives.iter().map(String::as_str))
+                            .is_none()
+                })
                 .map(|(id, alternatives)| TaskContractAnyToolRequirement {
                     id: id.clone(),
                     alternatives: alternatives
@@ -684,7 +714,12 @@ impl AgentTaskContract {
         unresolved_any_tool_requirements.extend(
             self.prompt_evidence_requirements
                 .iter()
-                .filter(|(_, requirement)| requirement.receipt.is_none())
+                .filter(|(_, requirement)| {
+                    requirement.receipt.is_none()
+                        && self
+                            .action_denial_for_tools(requirement.tools.iter().map(String::as_str))
+                            .is_none()
+                })
                 .map(|(id, requirement)| TaskContractAnyToolRequirement {
                     id: id.clone(),
                     alternatives: requirement
@@ -726,10 +761,12 @@ impl AgentTaskContract {
                 .collect(),
         });
 
+        let active_denials = self.action_denial_summaries();
         if unresolved_required_tools.is_empty()
             && unresolved_any_tool_requirements.is_empty()
             && pending_postconditions.is_empty()
             && unverified_workspace_mutation.is_none()
+            && active_denials.is_empty()
         {
             return None;
         }
@@ -747,12 +784,13 @@ impl AgentTaskContract {
             })
             .collect();
         let context = TaskContractContext {
-            schema: "cindx.task-contract.v1",
+            schema: "cindx.task-contract.v2",
             unresolved_required_tools,
             unresolved_any_tool_requirements,
             pending_postconditions,
             unverified_workspace_mutation,
             recent_evidence,
+            active_denials,
         };
         serde_json::to_string(&context).ok()
     }
@@ -928,7 +966,10 @@ impl AgentTaskContract {
         if let Some(tool_name) = self
             .required_tool_successes
             .iter()
-            .find(|tool_name| !self.successful_tools.contains(*tool_name))
+            .find(|tool_name| {
+                !self.successful_tools.contains(*tool_name)
+                    && self.action_denial_for_tools([tool_name.as_str()]).is_none()
+            })
             .cloned()
         {
             if !available_tools.contains(tool_name.as_str()) {
@@ -946,7 +987,10 @@ impl AgentTaskContract {
         if let Some(tool_name) = self
             .prompt_required_tool_successes
             .iter()
-            .find(|tool_name| !self.prompt_successful_tools.contains(*tool_name))
+            .find(|tool_name| {
+                !self.prompt_successful_tools.contains(*tool_name)
+                    && self.action_denial_for_tools([tool_name.as_str()]).is_none()
+            })
             .cloned()
         {
             if !available_tools.contains(tool_name.as_str()) {
@@ -967,7 +1011,12 @@ impl AgentTaskContract {
         if let Some((requirement_id, alternatives)) = self
             .required_any_tool_successes
             .iter()
-            .find(|(_, alternatives)| alternatives.is_disjoint(&self.successful_tools))
+            .find(|(_, alternatives)| {
+                alternatives.is_disjoint(&self.successful_tools)
+                    && self
+                        .action_denial_for_tools(alternatives.iter().map(String::as_str))
+                        .is_none()
+            })
             .map(|(requirement_id, alternatives)| (requirement_id.clone(), alternatives.clone()))
         {
             let available_alternatives = alternatives
@@ -997,7 +1046,12 @@ impl AgentTaskContract {
         if let Some((requirement_id, alternatives)) = self
             .prompt_required_any_tool_successes
             .iter()
-            .find(|(_, alternatives)| alternatives.is_disjoint(&self.prompt_successful_tools))
+            .find(|(_, alternatives)| {
+                alternatives.is_disjoint(&self.prompt_successful_tools)
+                    && self
+                        .action_denial_for_tools(alternatives.iter().map(String::as_str))
+                        .is_none()
+            })
             .map(|(requirement_id, alternatives)| (requirement_id.clone(), alternatives.clone()))
         {
             let available_alternatives = alternatives
@@ -1030,7 +1084,12 @@ impl AgentTaskContract {
         if let Some((requirement_id, requirement)) = self
             .prompt_evidence_requirements
             .iter()
-            .find(|(_, requirement)| requirement.receipt.is_none())
+            .find(|(_, requirement)| {
+                requirement.receipt.is_none()
+                    && self
+                        .action_denial_for_tools(requirement.tools.iter().map(String::as_str))
+                        .is_none()
+            })
             .map(|(id, requirement)| (id.clone(), requirement.clone()))
         {
             let available_alternatives = requirement
@@ -1110,10 +1169,7 @@ impl AgentTaskContract {
             source: source.to_string(),
             input_fingerprint: fingerprint(input),
         });
-        if self.evidence.len() > MAX_CONTRACT_EVIDENCE {
-            let excess = self.evidence.len() - MAX_CONTRACT_EVIDENCE;
-            self.evidence.drain(..excess);
-        }
+        self.trim_contract_evidence();
     }
 }
 

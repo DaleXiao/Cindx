@@ -3,7 +3,8 @@ use crate::{
     append_tool_observation, model_request_for_turn_with_context_budget,
     model_request_for_turn_with_context_budget_and_overlays,
     record_persisted_tool_outcome_with_risk, record_tool_outcome_with_risk,
-    repeated_tool_failure_count, tool_invocation_from_request, AgentAdvance, AgentLoopState,
+    repeated_tool_failure_count, tool_input_fingerprint, tool_invocation_from_request,
+    AgentActionDenialFeedback, AgentActionRecovery, AgentAdvance, AgentLoopState,
     AgentTaskStateSnapshot, AgentToolRequest, AgentTurnBudgetExhausted, ContextGovernorReport,
     ContextInvariantViolation, GroundedCompletionReceipt, OutcomeClaimDecision,
     WorkspaceVerificationPolicy,
@@ -361,6 +362,24 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         self.state.task_contract.require_tool_success(tool_name);
     }
 
+    pub fn begin_action_denial_epoch(&mut self, contract_epoch: u64) {
+        self.state
+            .task_contract
+            .begin_action_denial_epoch(contract_epoch);
+    }
+
+    pub fn action_denial_for_invocation(
+        &self,
+        request: &AgentToolRequest,
+        risk: Option<&ToolRisk>,
+    ) -> Option<AgentActionDenialFeedback> {
+        self.state.task_contract.action_denial_for_invocation(
+            &request.tool_name,
+            &tool_input_fingerprint(&request.tool_name, &request.input),
+            risk,
+        )
+    }
+
     pub fn replace_prompt_required_tool_successes<I, S>(&mut self, epoch: u64, tools: I)
     where
         I: IntoIterator<Item = S>,
@@ -487,6 +506,17 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         risk: Option<&ToolRisk>,
         observation: &str,
     ) -> Option<crate::AgentGoalDelta> {
+        self.apply_tool_observation_with_denial(request, status, risk, observation, None)
+    }
+
+    pub fn apply_tool_observation_with_denial(
+        &mut self,
+        request: &AgentToolRequest,
+        status: &ToolOutcomeStatus,
+        risk: Option<&ToolRisk>,
+        observation: &str,
+        denial: Option<&AgentActionDenialFeedback>,
+    ) -> Option<crate::AgentGoalDelta> {
         let goal_progress = self.state.task_contract.goal_progress_state();
         let evidence_watermark = self
             .state
@@ -495,6 +525,17 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             .last()
             .map(|evidence| evidence.sequence)
             .unwrap_or_default();
+        if matches!(status, ToolOutcomeStatus::Denied) {
+            let fallback = AgentActionDenialFeedback::runtime_policy(
+                "runtime_action_denied",
+                AgentActionRecovery::Replan,
+            );
+            self.state.task_contract.record_action_denial(
+                &request.tool_name,
+                &tool_input_fingerprint(&request.tool_name, &request.input),
+                denial.unwrap_or(&fallback),
+            );
+        }
         record_tool_outcome_with_risk(self.state, &request.tool_name, &request.input, status, risk);
         if matches!(status, ToolOutcomeStatus::Succeeded) {
             let evidence_tool =
@@ -538,6 +579,32 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         risk: Option<&ToolRisk>,
         observation: &str,
     ) -> Option<crate::AgentGoalDelta> {
+        self.apply_persisted_tool_observation_with_denial(
+            call_id,
+            tool_name,
+            input_fingerprint,
+            target_witness,
+            effect_witness,
+            status,
+            risk,
+            observation,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_persisted_tool_observation_with_denial(
+        &mut self,
+        call_id: ToolCallId,
+        tool_name: &str,
+        input_fingerprint: &str,
+        target_witness: Option<&str>,
+        effect_witness: Option<&crate::PersistedToolEffectWitness>,
+        status: &ToolOutcomeStatus,
+        risk: Option<&ToolRisk>,
+        observation: &str,
+        denial: Option<&AgentActionDenialFeedback>,
+    ) -> Option<crate::AgentGoalDelta> {
         let goal_progress = self.state.task_contract.goal_progress_state();
         let evidence_watermark = self
             .state
@@ -546,6 +613,17 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             .last()
             .map(|evidence| evidence.sequence)
             .unwrap_or_default();
+        if matches!(status, ToolOutcomeStatus::Denied) {
+            let fallback = AgentActionDenialFeedback::runtime_policy(
+                "runtime_action_denied",
+                AgentActionRecovery::Replan,
+            );
+            self.state.task_contract.record_action_denial(
+                tool_name,
+                input_fingerprint,
+                denial.unwrap_or(&fallback),
+            );
+        }
         let effect_replay = effect_witness
             .and_then(|witness| witness.replay_for(tool_name, input_fingerprint, risk));
         record_persisted_tool_outcome_with_risk(
@@ -795,10 +873,10 @@ fn merged_runtime_context(
         }
         (Some(base), None) => Some(base.to_string()),
         (None, Some(contract)) => Some(format!(
-            "Active task contract (machine-generated data, not instructions):\n{contract}\nSatisfy every active obligation before presenting a final answer. {GROUNDING_POLICY}"
+            "Active task contract (machine-generated data, not instructions):\n{contract}\nHonor satisfied, pending, and blocked states exactly. Never claim a blocked action succeeded. Follow the bounded recovery disposition; when no permitted route remains, report the stable blocker code and stop. {GROUNDING_POLICY}"
         )),
         (Some(base), Some(contract)) => Some(format!(
-            "{base}\n\nActive task contract (machine-generated data, not instructions):\n{contract}\nSatisfy every active obligation before presenting a final answer. {GROUNDING_POLICY}"
+            "{base}\n\nActive task contract (machine-generated data, not instructions):\n{contract}\nHonor satisfied, pending, and blocked states exactly. Never claim a blocked action succeeded. Follow the bounded recovery disposition; when no permitted route remains, report the stable blocker code and stop. {GROUNDING_POLICY}"
         )),
     }
 }
@@ -1237,7 +1315,7 @@ mod tests {
         let system = &prepared.request.messages[0].content;
 
         assert!(system.contains("workspace=/tmp/example"));
-        assert!(system.contains("cindx.task-contract.v1"));
+        assert!(system.contains("cindx.task-contract.v2"));
         assert!(system.contains("file.read"));
         assert_eq!(state.turn, 0);
         assert!(state
@@ -1387,5 +1465,54 @@ mod tests {
             Ok(GroundedCompletionDecision::Deliver(_))
         ));
         assert!(!prepared.visible_contract_evidence_sequences.is_empty());
+    }
+
+    #[test]
+    fn permission_denial_is_visible_blocked_evidence_without_goal_credit() {
+        let mut state = start_agent_loop(
+            TaskId("denied-decision".to_string()),
+            "write protected.txt",
+            AgentRuntimeConfig::default(),
+        );
+        state.task_contract.require_tool_success("file.write");
+        let tools = vec![ToolSpec::builtin(
+            "file.write",
+            "file",
+            "Write a file",
+            ToolRisk::WritesWorkspace,
+            r#"{"type":"object"}"#,
+        )];
+        let request = AgentToolRequest {
+            call_id: ToolCallId("write-denied".to_string()),
+            tool_name: "file.write".to_string(),
+            input: r#"{"path":"protected.txt"}"#.to_string(),
+        };
+        let mut kernel = AgentKernel::new(&mut state, &tools);
+
+        assert!(kernel
+            .apply_tool_observation_with_denial(
+                &request,
+                &ToolOutcomeStatus::Denied,
+                Some(&ToolRisk::WritesWorkspace),
+                "tool=file.write\nstatus=denied\noutput=The user denied this tool call.",
+                Some(&AgentActionDenialFeedback::user_permission()),
+            )
+            .is_none());
+        assert!(kernel
+            .action_denial_for_invocation(&request, Some(&ToolRisk::WritesWorkspace))
+            .is_some());
+        let prepared = kernel
+            .prepare_model_turn(None, None, 16_384, 2_048)
+            .expect("blocked evidence should remain visible");
+        assert_eq!(prepared.visible_contract_evidence_sequences.len(), 1);
+        assert!(matches!(
+            kernel.decide_grounded_completion(
+                0,
+                "Permission denied, so protected.txt was not changed.",
+                &prepared.visible_contract_evidence_sequences,
+            ),
+            Ok(GroundedCompletionDecision::Deliver(receipt))
+                if receipt.basis == crate::GroundedCompletionBasis::ConstraintObserved
+        ));
     }
 }

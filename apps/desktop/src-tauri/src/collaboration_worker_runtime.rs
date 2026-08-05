@@ -450,13 +450,13 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                     }
 
                     let admission = worker.admit_tool_call(&call);
-                    let (status, observation) = if let WorkerToolAdmission::Denied {
+                    let (status, observation, denial) = if let WorkerToolAdmission::Denied {
                         kind,
                         reason,
                     } = admission
                     {
                         let observation =
-                            observation_from_tool_result(&call.tool_name, "failed", reason);
+                            observation_from_tool_result(&call.tool_name, "denied", reason);
                         evidence.push(CollaborationEvidence {
                             evidence_schema: COLLABORATION_TOOL_EVIDENCE_SCHEMA.to_string(),
                             steer_epoch: Some(objective_epoch),
@@ -465,7 +465,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                             tool_call_id: tool_call_id.clone(),
                             tool_name: call.tool_name.clone(),
                             request: call.input.clone(),
-                            status: "failed".to_string(),
+                            status: "denied".to_string(),
                             output: truncate_for_collaboration(reason, 2_000),
                         });
                         let mut store = match state.store.lock() {
@@ -481,7 +481,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                             worker.task_id(),
                             &call.call_id.0,
                             &call.tool_name,
-                            "failed",
+                            "denied",
                             &observation,
                             [("failure_code".to_string(), kind.code().to_string())]
                                 .into_iter()
@@ -490,13 +490,15 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                         ) {
                             return CollaborationCompletion::failed(error.to_string());
                         }
-                        (ToolOutcomeStatus::Failed, observation)
+                        (
+                            ToolOutcomeStatus::Denied,
+                            observation,
+                            Some(kind.action_feedback()),
+                        )
                     } else {
                         let result = match registry.as_ref() {
                             Some(registry) => {
-                                if let Err(error) =
-                                    registry.permissionless_read_tool(&invocation)
-                                {
+                                if let Err(error) = registry.permissionless_read_tool(&invocation) {
                                     Ok(ToolResult::text(
                                         invocation.id.clone(),
                                         ToolOutcomeStatus::Denied,
@@ -524,8 +526,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                                             return CollaborationCompletion::failed_worker(
                                                 failure,
                                                 None,
-                                                current_time_millis()
-                                                    .saturating_sub(started_at_ms),
+                                                current_time_millis().saturating_sub(started_at_ms),
                                                 worker.completion_usage("isolated_evidence_v2"),
                                                 evidence,
                                             );
@@ -542,9 +543,9 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                                     )
                                 }
                             }
-                            None => Err(
-                                "collaboration worker tool registry is unavailable".to_string(),
-                            ),
+                            None => {
+                                Err("collaboration worker tool registry is unavailable".to_string())
+                            }
                         };
                         match result {
                             Ok(result) => {
@@ -563,6 +564,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                                 (
                                     status,
                                     observation_from_agent_tool_result(&call.tool_name, &result),
+                                    None,
                                 )
                             }
                             Err(error) => {
@@ -580,11 +582,17 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                                 (
                                     ToolOutcomeStatus::Failed,
                                     observation_from_tool_result(&call.tool_name, "failed", &error),
+                                    None,
                                 )
                             }
                         }
                     };
-                    let goal_delta = worker.apply_tool_observation(&call, &status, &observation);
+                    let goal_delta = worker.apply_tool_observation_with_denial(
+                        &call,
+                        &status,
+                        &observation,
+                        denial.as_ref(),
+                    );
                     record_worker_goal_delta(
                         cancellation.as_deref(),
                         objective_epoch,

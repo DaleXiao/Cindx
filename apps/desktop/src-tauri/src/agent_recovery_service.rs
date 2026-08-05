@@ -15,46 +15,10 @@ use crate::{
     runtime_constants::AGENT_RECOVERY_SCHEMA,
     runtime_values::{current_time_millis, phase16_task_id},
 };
-use agent_core::EVENT_TYPE_METADATA_KEY;
-
-fn recovery_run_context(event: &Event) -> Metadata {
-    let mut context = event.metadata.clone();
-    context.remove(EVENT_TYPE_METADATA_KEY);
-    context
-}
-
-fn latest_agent_run_event(
-    events: &[Event],
-) -> Result<Option<AgentRunEvent>, AgentRunEventDecodeError> {
-    for event in events.iter().rev() {
-        if is_agent_queue_event(event) {
-            continue;
-        }
-        match AgentRunEvent::try_from_event(event)? {
-            Some(run_event) => return Ok(Some(run_event)),
-            None => continue,
-        }
-    }
-    Ok(None)
-}
-
-pub(super) fn agent_task_is_cancelled(
-    store: &mut SqliteStore,
-    session_id: Option<&str>,
-) -> Result<bool, StorageError> {
-    if let Some(session_id) = session_id {
-        let status = load_agent_session_read_model(store, session_id)?
-            .state
-            .status;
-        return Ok(AgentRunStatus::parse(&status) == AgentRunStatus::Cancelled);
-    }
-    let events = agent_events_for_session(store, &phase16_task_id(), session_id)?;
-    let active_events = active_agent_events_for_session(&events, session_id);
-    Ok(matches!(
-        latest_agent_run_event(&active_events),
-        Ok(Some(AgentRunEvent::Cancelled))
-    ))
-}
+#[path = "agent_recovery_status.rs"]
+mod recovery_status;
+pub(super) use recovery_status::agent_task_is_cancelled;
+use recovery_status::{latest_agent_run_event, recovery_run_context};
 
 pub(super) fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRecoveryEnvelope> {
     events
@@ -329,6 +293,25 @@ pub(super) fn claim_agent_recovery_envelope(
     allowed_states: &[AgentRecoveryState],
     reason: AgentRecoveryReason,
 ) -> Result<Option<AgentRecoveryEnvelope>, String> {
+    store
+        .with_immediate_transaction(|store| {
+            claim_agent_recovery_envelope_in_transaction(
+                store,
+                run_context,
+                allowed_states,
+                reason,
+            )
+            .map_err(StorageError::new)
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn claim_agent_recovery_envelope_in_transaction(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    allowed_states: &[AgentRecoveryState],
+    reason: AgentRecoveryReason,
+) -> Result<Option<AgentRecoveryEnvelope>, String> {
     let Some(mut envelope) = peek_agent_recovery_envelope(store, run_context, allowed_states)?
     else {
         return Ok(None);
@@ -383,6 +366,10 @@ pub(super) fn claim_agent_recovery_envelope(
     .map_err(|error| error.to_string())?;
     Ok(Some(envelope))
 }
+
+#[path = "agent_permission_recovery.rs"]
+mod permission_recovery;
+pub(super) use permission_recovery::pause_permission_recovery_after_handoff_error;
 
 #[path = "agent_recovery_transcript.rs"]
 mod recovery_transcript;
@@ -473,14 +460,25 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
                         .last()
                         .map(|event| event.sequence)
                         .unwrap_or_default();
+                    let persisted_task_state = load_matching_agent_runtime_snapshot(
+                        store,
+                        &run_context,
+                        &resolved.identity.source_run_id,
+                        &resolved.identity.prompt_fingerprint,
+                        latest_revision,
+                    )?;
+                    let task_state = latest_agent_recovery_envelope(&active_events)
+                        .and_then(|recovery| {
+                            crate::agent_commands::recovery_task_state_with_persisted_permission_denials(
+                                &active_events,
+                                &run_context,
+                                &recovery,
+                                persisted_task_state.as_ref(),
+                            )
+                        })
+                        .or(persisted_task_state);
                     (
-                        load_matching_agent_runtime_snapshot(
-                            store,
-                            &run_context,
-                            &resolved.identity.source_run_id,
-                            &resolved.identity.prompt_fingerprint,
-                            latest_revision,
-                        )?,
+                        task_state,
                         load_matching_agent_resource_snapshot(
                             store,
                             &run_context,

@@ -167,6 +167,7 @@ pub(crate) fn apply_run_task_contract_with_completion_intent(
     );
     let prompt_contract_epoch = prepared_task_state.contract_epoch();
     runtime.replace_prepared_task_state(prepared_task_state);
+    AgentKernel::new(runtime, tools).begin_action_denial_epoch(prompt_contract_epoch);
     let prompt_required_tools = if run_context
         .get("image_generation_required")
         .map(String::as_str)

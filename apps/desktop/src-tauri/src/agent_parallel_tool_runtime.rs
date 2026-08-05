@@ -403,6 +403,7 @@ fn execute_prepared_parallel_tool_batch(
             &result.status,
             Some(&item.risk),
             &observation,
+            None,
             &image_paths,
             snapshot_cursor,
         )?;

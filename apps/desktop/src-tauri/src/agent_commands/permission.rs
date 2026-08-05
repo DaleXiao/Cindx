@@ -2,7 +2,7 @@ use crate::agent_run_engine::PreparedAgentExecution;
 use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
 use crate::suspended_run_runtime::{
     append_observations_to_suspended_run, suspended_agent_run_control_snapshot,
-    suspended_agent_run_policy, take_suspended_agent_run,
+    suspended_agent_run_policy, remember_suspended_agent_run, take_suspended_agent_run,
 };
 use crate::*;
 
@@ -85,6 +85,26 @@ fn permission_tool_observation_metadata(
     ]
     .into_iter()
     .collect();
+    if matches!(status, ToolOutcomeStatus::Denied) {
+        metadata.extend([
+            (
+                "action_denial_schema".to_string(),
+                agent_runtime::ACTION_DENIAL_SCHEMA.to_string(),
+            ),
+            (
+                "action_denial_kind".to_string(),
+                "user_permission".to_string(),
+            ),
+            (
+                "action_denial_code".to_string(),
+                "user_permission_denied".to_string(),
+            ),
+            (
+                "action_denial_recovery".to_string(),
+                "finalize_blocked".to_string(),
+            ),
+        ]);
+    }
     let completion_intent = agent_runtime::prompt_completion_intent(run_context);
     if let Some(witness) = agent_runtime::evidence_target_witness(
         tool_input,
@@ -364,6 +384,76 @@ fn restore_permission_snapshot_from_boundary(
         .map(|runtime| (runtime, boundary))
 }
 
+pub(crate) fn recovery_task_state_with_persisted_permission_denials(
+    active_events: &[Event],
+    run_context: &Metadata,
+    recovery: &AgentRecoveryEnvelope,
+    persisted_task_state: Option<&AgentTaskStateSnapshot>,
+) -> Option<AgentTaskStateSnapshot> {
+    let snapshot = recovery.task_state.as_ref()?;
+    let mut transcript = agent_runtime_transcript_from_active_events(active_events);
+    let observations = persisted_permission_observations(&transcript, run_context);
+    let replay_boundary = permission_checkpoint_message_boundary(active_events, recovery, snapshot)?;
+    let denied_observations = observations
+        .iter()
+        .filter(|observation| {
+            observation.message_index >= replay_boundary
+                && matches!(observation.status, ToolOutcomeStatus::Denied)
+        })
+        .collect::<Vec<_>>();
+    if denied_observations.is_empty() {
+        return None;
+    }
+    if let Some(persisted_task_state) = persisted_task_state.filter(|task_state| {
+        denied_observations.iter().all(|observation| {
+            task_state
+                .task_contract
+                .has_user_permission_finalization(
+                    &observation.tool_name,
+                    &observation.input_fingerprint,
+                )
+        })
+    }) {
+        return Some(persisted_task_state.clone());
+    }
+    let recovery_prompt = agent_recovery_prompt_from_active_events(active_events)
+        .unwrap_or_else(|| "Continue the agent task.".to_string());
+    let effective_objective = initial_agent_objective_from_events(active_events)
+        .map(|initial| effective_prompt_objective_for_messages(&initial, &transcript))
+        .unwrap_or_else(|| {
+            crate::runtime_values::effective_agent_objective(run_context, &recovery_prompt)
+                .to_string()
+        });
+    let (mut runtime, _) = restore_permission_snapshot_from_boundary(
+        snapshot,
+        &recovery_prompt,
+        &effective_objective,
+        &transcript,
+        replay_boundary,
+    )?;
+    let tools = Vec::<ToolSpec>::new();
+    for observation in denied_observations {
+        AgentKernel::new(&mut runtime, &tools).apply_persisted_tool_observation_with_denial(
+            observation.call_id.clone(),
+            &observation.tool_name,
+            &observation.input_fingerprint,
+            observation.target_witness.as_deref(),
+            None,
+            &observation.status,
+            None,
+            &observation.observation,
+            Some(&agent_runtime::AgentActionDenialFeedback::user_permission()),
+        );
+        copy_replayed_contract_evidence_metadata(
+            &runtime,
+            &mut transcript,
+            observation.message_index,
+        );
+    }
+    runtime.messages = transcript;
+    Some(crate::agent_runtime_snapshot::capture_persistable_agent_task_state(&runtime))
+}
+
 #[tauri::command]
 pub(crate) async fn resolve_agent_permission(
     app: tauri::AppHandle,
@@ -440,7 +530,7 @@ pub(crate) fn resolve_agent_permission_blocking(
         begin_agent_run_control_for_effort(&state, &session_id, effort.label(), None)?
     };
     let cancellation = run_control_lease.control();
-    resolve_agent_permission_blocking_inner(
+    let outcome = resolve_agent_permission_blocking_inner(
         app,
         state.clone(),
         request_id,
@@ -448,7 +538,23 @@ pub(crate) fn resolve_agent_permission_blocking(
         session_id.clone(),
         effort,
         &cancellation,
-    )
+    );
+    let Err(original) = outcome else {
+        return outcome;
+    };
+    let recovery_result = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))
+        .and_then(|mut store| {
+            pause_permission_recovery_after_handoff_error(&mut store, &recovery_context)
+        });
+    if let Err(recovery_error) = recovery_result {
+        return Err(format!(
+            "{original}; failed to preserve permission recovery after handoff error: {recovery_error}"
+        ));
+    }
+    Err(original)
 }
 
 pub(crate) fn resolve_agent_permission_blocking_inner(
@@ -563,13 +669,21 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         }
     }
 
-    append_observations_to_suspended_run(
+    let hot_resume_ready = match append_observations_to_suspended_run(
         &state,
         session_id.unwrap_or_default(),
         &resolved_observations,
-    )?;
+    ) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "hot permission recovery unavailable; rebuilding from the durable checkpoint: {error}"
+            );
+            false
+        }
+    };
 
-    let mut store = state
+    let store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
@@ -585,50 +699,18 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             .map_err(|error| error.to_string());
     }
 
-    let recovery = claim_agent_recovery_envelope(
-        &mut store,
+    let recovery = peek_agent_recovery_envelope(
+        &store,
         &run_context,
         &[AgentRecoveryState::Blocked],
-        AgentRecoveryReason::PermissionResolved,
     )?;
     if let Some(recovery) = recovery.as_ref() {
-        run_context.insert(
-            "recovery_resume_key".to_string(),
-            recovery.identity.resume_key.clone(),
-        );
-        run_context.insert(
-            "source_agent_run_id".to_string(),
-            recovery.identity.source_run_id.clone(),
-        );
-        run_context.insert(
-            "recovery_attempts".to_string(),
-            recovery.attempts.to_string(),
-        );
-        run_context.insert("continuation".to_string(), "true".to_string());
-        if let Some(queue_id) = recovery.queue_id.as_ref() {
-            run_context.insert("queue_id".to_string(), queue_id.clone());
-        }
-    }
-
-    append_event(
-        &mut store,
-        &request.task_id,
-        EventKind::TaskStatusChanged,
-        "Agent task resumed after permission",
-        metadata_with_context(
-            [
-                ("permission_id".to_string(), request_id.0.clone()),
-                (
-                    "decision".to_string(),
-                    permission_decision_label(&decision).to_string(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
+        run_context = permission_recovery_run_context(
             &run_context,
-        ),
-    )
-    .map_err(|error| error.to_string())?;
+            recovery,
+            recovery.attempts.saturating_add(1),
+        );
+    }
     let events = match session_id {
         Some(session_id) => store.list_by_task_and_metadata_or_unscoped(
             &phase16_task_id(),
@@ -653,28 +735,60 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     );
     drop(store);
 
-    if let Some(session_id) = session_id {
-        if let Some(mut suspended) = take_suspended_agent_run(&state, session_id)? {
-            for (key, value) in &run_context {
-                suspended.run_context.insert(key.clone(), value.clone());
-            }
-            let prepared = PreparedAgentExecution {
-                base_run_context: suspended.run_context.clone(),
-                run_context: suspended.run_context,
-                runtime: suspended.runtime,
-                prompt: suspended.prompt,
-                collaboration: suspended.collaboration,
-            };
-            return continue_agent_loop(
-                app,
-                &state,
-                &config,
-                &suspended.workspace_root,
-                prepared,
-                effort,
-                cancellation,
-            );
+    let hot_suspended = if hot_resume_ready {
+        match session_id {
+            Some(session_id) => match take_suspended_agent_run(&state, session_id) {
+                Ok(suspended) => suspended,
+                Err(error) => {
+                    eprintln!(
+                        "hot permission handoff unavailable; rebuilding from the durable checkpoint: {error}"
+                    );
+                    None
+                }
+            },
+            None => None,
         }
+    } else {
+        None
+    };
+    if let Some(mut suspended) = hot_suspended {
+        let claimed_context = match commit_permission_recovery_claim(
+            &state,
+            &request,
+            &request_id,
+            &decision,
+            &run_context,
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                remember_suspended_agent_run(&state, suspended).map_err(|restore_error| {
+                    format!(
+                        "{error}; failed to restore the unclaimed suspended run: {restore_error}"
+                    )
+                })?;
+                return Err(error);
+            }
+        };
+        for (key, value) in &claimed_context {
+            suspended.run_context.insert(key.clone(), value.clone());
+        }
+        let workspace_root = suspended.workspace_root.clone();
+        let prepared = PreparedAgentExecution {
+            base_run_context: suspended.run_context.clone(),
+            run_context: suspended.run_context,
+            runtime: suspended.runtime,
+            prompt: suspended.prompt,
+            collaboration: suspended.collaboration,
+        };
+        return continue_agent_loop(
+            app,
+            &state,
+            &config,
+            &workspace_root,
+            prepared,
+            effort,
+            cancellation,
+        );
     }
 
     let recovered_effective_objective = initial_agent_objective_from_events(&active_events)
@@ -735,15 +849,19 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         None,
         &completion_intent,
     )?;
-    let mut recovered_goal_deltas = Vec::new();
-    for resolved in persisted_permission_observations
+    let replayed_permission_observations = persisted_permission_observations
         .iter()
         .filter(|observation| observation.message_index >= replay_boundary)
-    {
+        .collect::<Vec<_>>();
+    let mut recovered_goal_deltas = Vec::new();
+    for resolved in &replayed_permission_observations {
         let risk = registry
             .get(&resolved.tool_name)
             .map(|tool| tool.spec().risk);
-        let goal_delta = AgentKernel::new(&mut runtime, &tools).apply_persisted_tool_observation(
+        let denial = matches!(resolved.status, ToolOutcomeStatus::Denied)
+            .then(agent_runtime::AgentActionDenialFeedback::user_permission);
+        let goal_delta = AgentKernel::new(&mut runtime, &tools)
+            .apply_persisted_tool_observation_with_denial(
             resolved.call_id.clone(),
             &resolved.tool_name,
             &resolved.input_fingerprint,
@@ -752,16 +870,16 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             &resolved.status,
             risk.as_ref(),
             &resolved.observation,
+            denial.as_ref(),
         );
         recovered_goal_deltas.extend(goal_delta);
         copy_replayed_contract_evidence_metadata(&runtime, &mut transcript, resolved.message_index);
     }
     runtime.messages = transcript;
     let objective_epoch = run_context_steer_epoch(&run_context);
-    commit_cold_permission_recovery_before_goal_credit(
-        cancellation,
-        objective_epoch,
+    persist_cold_permission_recovery(
         &recovered_goal_deltas,
+        !replayed_permission_observations.is_empty(),
         || {
             let mut store = state
                 .store
@@ -774,6 +892,16 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             )
         },
     )?;
+    run_context = commit_permission_recovery_claim(
+        &state,
+        &request,
+        &request_id,
+        &decision,
+        &run_context,
+    )?;
+    for delta in &recovered_goal_deltas {
+        cancellation.record_goal_delta_at(objective_epoch, delta);
+    }
     let prepared = PreparedAgentExecution {
         base_run_context: run_context.clone(),
         run_context,
@@ -784,23 +912,169 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
 }
 
-fn commit_cold_permission_recovery_before_goal_credit(
-    cancellation: &AgentRunControl,
-    objective_epoch: u64,
+fn permission_recovery_run_context(
+    run_context: &Metadata,
+    recovery: &AgentRecoveryEnvelope,
+    attempts: u32,
+) -> Metadata {
+    let mut recovered = run_context.clone();
+    recovered.insert(
+        "recovery_resume_key".to_string(),
+        recovery.identity.resume_key.clone(),
+    );
+    recovered.insert(
+        "source_agent_run_id".to_string(),
+        recovery.identity.source_run_id.clone(),
+    );
+    recovered.insert("recovery_attempts".to_string(), attempts.to_string());
+    recovered.insert("continuation".to_string(), "true".to_string());
+    if let Some(queue_id) = recovery.queue_id.as_ref() {
+        recovered.insert("queue_id".to_string(), queue_id.clone());
+    }
+    recovered
+}
+
+fn commit_permission_recovery_claim(
+    state: &tauri::State<'_, AppState>,
+    request: &PermissionRequest,
+    request_id: &PermissionRequestId,
+    decision: &PermissionDecision,
+    run_context: &Metadata,
+) -> Result<Metadata, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .with_immediate_transaction(|store| {
+            let claimed = claim_agent_recovery_envelope_in_transaction(
+                store,
+                run_context,
+                &[AgentRecoveryState::Blocked],
+                AgentRecoveryReason::PermissionResolved,
+            )
+            .map_err(StorageError::new)?;
+            if run_context.contains_key("recovery_resume_key") && claimed.is_none() {
+                return Err(StorageError::new(
+                    "agent recovery checkpoint disappeared before permission resume",
+                ));
+            }
+            let claimed_context = claimed
+                .as_ref()
+                .map(|recovery| {
+                    permission_recovery_run_context(run_context, recovery, recovery.attempts)
+                })
+                .unwrap_or_else(|| run_context.clone());
+            append_event(
+                store,
+                &request.task_id,
+                EventKind::TaskStatusChanged,
+                "Agent task resumed after permission",
+                metadata_with_context(
+                    [
+                        ("permission_id".to_string(), request_id.0.clone()),
+                        (
+                            "decision".to_string(),
+                            permission_decision_label(decision).to_string(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    &claimed_context,
+                ),
+            )?;
+            Ok(claimed_context)
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn persist_cold_permission_recovery(
     recovered_goal_deltas: &[agent_runtime::AgentGoalDelta],
+    recovered_state_changed: bool,
     commit_recovered_runtime: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    if recovered_goal_deltas.is_empty() {
+    if recovered_goal_deltas.is_empty() && !recovered_state_changed {
         return Ok(());
     }
     // Cold recovery has no in-memory suspended snapshot to fall back to. Make
-    // the rebuilt contract state durable before its deltas can extend the live
-    // control; a failed snapshot write therefore leaves the control unchanged.
+    // the rebuilt contract state durable before the caller claims the recovery
+    // and credits any Goal Delta to the live control.
     commit_recovered_runtime()?;
-    for delta in recovered_goal_deltas {
-        cancellation.record_goal_delta_at(objective_epoch, delta);
-    }
     Ok(())
+}
+
+fn persist_permission_resolution_rows(
+    store: &mut SqliteStore,
+    request: &PermissionRequest,
+    resolution: &PermissionResolution,
+    run_context: &Metadata,
+) -> Result<(), StorageError> {
+    store.resolve_permission_in_transaction(resolution)?;
+    append_event(
+        store,
+        &request.task_id,
+        EventKind::PermissionResolved,
+        format!(
+            "Permission {}",
+            permission_decision_past_tense(&resolution.decision)
+        ),
+        metadata_with_context(
+            [
+                ("permission_id".to_string(), resolution.request_id.0.clone()),
+                (
+                    "decision".to_string(),
+                    permission_decision_label(&resolution.decision).to_string(),
+                ),
+                ("tool".to_string(), request.action.clone()),
+                ("resolved_by".to_string(), resolution.resolved_by.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_denied_permission_resolution_rows(
+    store: &mut SqliteStore,
+    request: &PermissionRequest,
+    resolution: &PermissionResolution,
+    tool_call_id: &str,
+    tool_name: &str,
+    observation: &str,
+    message_metadata: &Metadata,
+    run_context: &Metadata,
+) -> Result<(), StorageError> {
+    persist_permission_resolution_rows(store, request, resolution, run_context)?;
+    append_event(
+        store,
+        &request.task_id,
+        EventKind::ToolCallFinished,
+        "Agent tool denied",
+        metadata_with_context(
+            [
+                ("tool_call_id".to_string(), tool_call_id.to_string()),
+                ("tool".to_string(), tool_name.to_string()),
+                ("status".to_string(), "denied".to_string()),
+                (
+                    "failure_code".to_string(),
+                    "user_permission_denied".to_string(),
+                ),
+                ("output".to_string(), observation.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            run_context,
+        ),
+    )?;
+    append_message_event_with_metadata(
+        store,
+        &request.task_id,
+        MessageRole::Tool,
+        observation,
+        message_metadata.clone(),
+    )
 }
 
 pub(crate) fn resolve_agent_permission_request(
@@ -828,39 +1102,61 @@ pub(crate) fn resolve_agent_permission_request(
         .get("tool_input")
         .cloned()
         .unwrap_or_default();
+    let resolution = PermissionResolution {
+        request_id: request_id.clone(),
+        decision: decision.clone(),
+        resolved_at_ms: current_time_millis(),
+        resolved_by: resolved_by.to_string(),
+    };
     let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
+
+    if matches!(decision, PermissionDecision::Deny) {
+        let status = ToolOutcomeStatus::Denied;
+        let observation =
+            observation_from_tool_result(&tool_name, "denied", "The user denied this tool call.");
+        let message_metadata = permission_tool_observation_metadata(
+            &request_id,
+            &tool_call_id,
+            &tool_name,
+            &status,
+            &tool_input,
+            None,
+            run_context,
+        );
+        store
+            .with_immediate_transaction(|store| {
+                persist_denied_permission_resolution_rows(
+                    store,
+                    request,
+                    &resolution,
+                    &tool_call_id,
+                    &tool_name,
+                    &observation,
+                    &message_metadata,
+                    run_context,
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        return Ok(ResolvedToolObservation {
+            call_id: agent_core::ToolCallId(tool_call_id),
+            tool_name,
+            input_json: tool_input,
+            risk: None,
+            status,
+            observation,
+            image_paths: Vec::new(),
+            message_metadata,
+        });
+    }
+
     store
-        .resolve_permission(PermissionResolution {
-            request_id: request_id.clone(),
-            decision: decision.clone(),
-            resolved_at_ms: current_time_millis(),
-            resolved_by: resolved_by.to_string(),
+        .with_immediate_transaction(|store| {
+            persist_permission_resolution_rows(store, request, &resolution, run_context)
         })
         .map_err(|error| error.to_string())?;
-    append_event(
-        &mut store,
-        &request.task_id,
-        EventKind::PermissionResolved,
-        format!("Permission {}", permission_decision_past_tense(decision)),
-        metadata_with_context(
-            [
-                ("permission_id".to_string(), request_id.0.clone()),
-                (
-                    "decision".to_string(),
-                    permission_decision_label(decision).to_string(),
-                ),
-                ("tool".to_string(), request.action.clone()),
-                ("resolved_by".to_string(), resolved_by.to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            run_context,
-        ),
-    )
-    .map_err(|error| error.to_string())?;
 
     let (observation, status, image_paths, message_metadata, risk) = if matches!(
         decision,
@@ -934,45 +1230,7 @@ pub(crate) fn resolve_agent_permission_request(
         }
         (observation, status, image_paths, message_metadata, risk)
     } else {
-        let status = ToolOutcomeStatus::Denied;
-        let observation =
-            observation_from_tool_result(&tool_name, "denied", "The user denied this tool call.");
-        append_event(
-            &mut store,
-            &request.task_id,
-            EventKind::ToolCallFinished,
-            "Agent tool denied",
-            metadata_with_context(
-                [
-                    ("tool_call_id".to_string(), tool_call_id.clone()),
-                    ("tool".to_string(), tool_name.clone()),
-                    ("status".to_string(), "denied".to_string()),
-                    ("output".to_string(), observation.clone()),
-                ]
-                .into_iter()
-                .collect(),
-                run_context,
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-        let message_metadata = permission_tool_observation_metadata(
-            &request_id,
-            &tool_call_id,
-            &tool_name,
-            &status,
-            &tool_input,
-            None,
-            run_context,
-        );
-        append_message_event_with_metadata(
-            &mut store,
-            &request.task_id,
-            MessageRole::Tool,
-            &observation,
-            message_metadata.clone(),
-        )
-        .map_err(|error| error.to_string())?;
-        (observation, status, Vec::new(), message_metadata, None)
+        unreachable!("deny decisions return after their atomic persistence transaction")
     };
     Ok(ResolvedToolObservation {
         call_id: agent_core::ToolCallId(tool_call_id),
@@ -1240,6 +1498,190 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_replays_a_committed_permission_denial_into_task_state() {
+        let run_context = permission_run_context(4, 0);
+        let prompt = "核实当前屏幕上的保存按钮";
+        let mut runtime = start_agent_loop(
+            TaskId("permission-startup-replay".to_string()),
+            prompt,
+            AgentRuntimeConfig::default(),
+        );
+        runtime.task_contract.require_tool_success("shell.run");
+        let snapshot = AgentTaskStateSnapshot::capture(&runtime);
+        let recovery = permission_recovery_envelope("startup-replay", snapshot);
+        let mut user_metadata = metadata_with_context(
+            [
+                ("role".to_string(), "user".to_string()),
+                ("content".to_string(), prompt.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &run_context,
+        );
+        user_metadata.insert("project_id".to_string(), "project-a".to_string());
+        let mut blocked_metadata = metadata_with_context(
+            [
+                (
+                    "recovery_resume_key".to_string(),
+                    recovery.identity.resume_key.clone(),
+                ),
+                ("recovery_state".to_string(), "blocked".to_string()),
+                (
+                    "recovery_envelope".to_string(),
+                    serde_json::to_string(&recovery).expect("envelope serializes"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            &run_context,
+        );
+        blocked_metadata.insert("project_id".to_string(), "project-a".to_string());
+        let denied = permission_message(
+            "call-denied",
+            "shell.run",
+            ToolOutcomeStatus::Denied,
+            "The user denied this tool call.",
+            &run_context,
+        );
+        let mut denied_metadata = denied.metadata;
+        denied_metadata.insert("role".to_string(), "tool".to_string());
+        denied_metadata.insert("content".to_string(), denied.content);
+        let events = vec![
+            permission_recovery_event(1, EventKind::MessageAdded, user_metadata),
+            permission_recovery_event(2, EventKind::TaskStatusChanged, blocked_metadata),
+            permission_recovery_event(3, EventKind::MessageAdded, denied_metadata),
+        ];
+
+        let recovered = recovery_task_state_with_persisted_permission_denials(
+            &events,
+            &run_context,
+            &recovery,
+            None,
+        )
+        .expect("startup recovery should rebuild the typed denial");
+        let ledger = recovered.task_contract.outcome_ledger_shadow(4);
+        let blocked = ledger
+            .obligations
+            .iter()
+            .find(|obligation| {
+                obligation
+                    .blocker
+                    .as_ref()
+                    .is_some_and(|blocker| blocker.code == "user_permission_denied")
+            })
+            .expect("the denied required tool must remain blocked");
+        assert_eq!(
+            blocked.satisfaction,
+            agent_runtime::OutcomeSatisfaction::Blocked
+        );
+        let encoded = serde_json::to_string(&recovered).expect("snapshot serializes");
+        assert!(!encoded.contains("super-secret"));
+        assert!(!encoded.contains("The user denied"));
+
+        let transcript = agent_runtime_transcript_from_active_events(&events);
+        let mut more_complete = recovered
+            .restore_with_effective_objective(prompt, transcript.clone(), prompt)
+            .expect("recovered denial state should restore");
+        more_complete.task_contract.require_tool_success("file.read");
+        let read_fingerprint = agent_runtime::tool_input_fingerprint(
+            "file.read",
+            r#"{"path":"status.md"}"#,
+        );
+        AgentKernel::new(
+            &mut more_complete,
+            &[ToolSpec::builtin(
+                "file.read",
+                "test",
+                "Read status",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object"}"#,
+            )],
+        )
+        .apply_persisted_tool_observation(
+            agent_core::ToolCallId("read-after-denial".to_string()),
+            "file.read",
+            &read_fingerprint,
+            None,
+            None,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            "status evidence",
+        );
+        let preferred = AgentTaskStateSnapshot::capture(&more_complete);
+        let selected = recovery_task_state_with_persisted_permission_denials(
+            &events,
+            &run_context,
+            &recovery,
+            Some(&preferred),
+        )
+        .expect("a newer snapshot containing the denial should be retained");
+        assert_eq!(selected, preferred);
+        assert!(selected
+            .task_contract
+            .outcome_ledger_shadow(4)
+            .obligations
+            .iter()
+            .any(|obligation| {
+                obligation.kind == agent_runtime::OutcomeObligationKind::RequiredTool
+                    && obligation.satisfaction == agent_runtime::OutcomeSatisfaction::Satisfied
+            }));
+
+        let denied_fingerprint = transcript
+            .last()
+            .and_then(|message| message.metadata.get("tool_input_fingerprint"))
+            .cloned()
+            .expect("the canonical denial should carry an input fingerprint");
+        let (mut wrong_semantics, _) = restore_permission_snapshot_from_boundary(
+            recovery
+                .task_state
+                .as_ref()
+                .expect("blocked recovery should carry task state"),
+            prompt,
+            prompt,
+            &transcript,
+            1,
+        )
+        .expect("the blocked baseline should restore");
+        AgentKernel::new(&mut wrong_semantics, &[])
+            .apply_persisted_tool_observation_with_denial(
+                agent_core::ToolCallId("wrong-capability-denial".to_string()),
+                "shell.run",
+                &denied_fingerprint,
+                None,
+                None,
+                &ToolOutcomeStatus::Denied,
+                None,
+                "capability unavailable",
+                Some(&agent_runtime::AgentActionDenialFeedback::capability_unavailable(
+                    "tool_capability_unavailable",
+                )),
+            );
+        let wrong_semantics = AgentTaskStateSnapshot::capture(&wrong_semantics);
+        assert!(!wrong_semantics
+            .task_contract
+            .has_user_permission_finalization("shell.run", &denied_fingerprint));
+        let corrected = recovery_task_state_with_persisted_permission_denials(
+            &events,
+            &run_context,
+            &recovery,
+            Some(&wrong_semantics),
+        )
+        .expect("a semantically different denial must not suppress canonical replay");
+        assert_ne!(corrected, wrong_semantics);
+        assert!(corrected
+            .task_contract
+            .outcome_ledger_shadow(4)
+            .obligations
+            .iter()
+            .any(|obligation| {
+                obligation.blocker.as_ref().is_some_and(|blocker| {
+                    blocker.kind == agent_runtime::AgentActionDenialKind::UserPermission
+                        && blocker.code == "user_permission_denied"
+                })
+            }));
+    }
+
+    #[test]
     fn permission_observation_marker_is_runtime_only_and_lineage_bound() {
         let run_context = permission_run_context(4, 0);
         let valid = permission_message(
@@ -1384,6 +1826,7 @@ mod tests {
         ));
         apply_run_task_contract(&mut original, &run_context, &tools, None)
             .expect("contract applies before permission pause");
+        AgentKernel::new(&mut original, &tools).require_tool_success("shell.run");
         let ledger_before_pause = original.task_contract.outcome_ledger_shadow(4);
         let snapshot = AgentTaskStateSnapshot::capture(&original);
         let original_message_count = original.messages.len();
@@ -1462,16 +1905,20 @@ mod tests {
         {
             let risk = (observation.tool_name == "computer.screenshot")
                 .then_some(ToolRisk::SensitiveContext);
-            AgentKernel::new(&mut restored, &tools).apply_persisted_tool_observation(
-                observation.call_id.clone(),
-                &observation.tool_name,
-                &observation.input_fingerprint,
-                observation.target_witness.as_deref(),
-                observation.effect_witness.as_ref(),
-                &observation.status,
-                risk.as_ref(),
-                &observation.observation,
-            );
+            let denial = matches!(observation.status, ToolOutcomeStatus::Denied)
+                .then(agent_runtime::AgentActionDenialFeedback::user_permission);
+            AgentKernel::new(&mut restored, &tools)
+                .apply_persisted_tool_observation_with_denial(
+                    observation.call_id.clone(),
+                    &observation.tool_name,
+                    &observation.input_fingerprint,
+                    observation.target_witness.as_deref(),
+                    observation.effect_witness.as_ref(),
+                    &observation.status,
+                    risk.as_ref(),
+                    &observation.observation,
+                    denial.as_ref(),
+                );
             copy_replayed_contract_evidence_metadata(
                 &restored,
                 &mut transcript,
@@ -1534,10 +1981,38 @@ mod tests {
                 .contains(&agent_runtime::ContractEvidenceKind::InteractionObservation),
             "unexpected screenshot evidence: {screenshot_evidence:?}"
         );
-        assert!(recovered_ledger
+        let shell_denial_evidence = recovered_ledger
             .evidence
             .iter()
-            .all(|evidence| evidence.source != "shell.run"));
+            .filter(|evidence| {
+                evidence.source == "shell.run"
+                    && evidence.kind == agent_runtime::ContractEvidenceKind::Denial
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shell_denial_evidence.len(), 1);
+        let shell_obligation = recovered_ledger
+            .obligations
+            .iter()
+            .find(|obligation| {
+                obligation
+                    .blocker
+                    .as_ref()
+                    .is_some_and(|blocker| blocker.code == "user_permission_denied")
+            })
+            .expect("cold recovery must preserve the typed permission blocker");
+        assert_eq!(
+            shell_obligation.satisfaction,
+            agent_runtime::OutcomeSatisfaction::Blocked
+        );
+        assert_eq!(
+            shell_obligation.evidence_sequence,
+            Some(shell_denial_evidence[0].sequence)
+        );
+        let encoded_contract =
+            serde_json::to_string(&restored.task_contract).expect("contract serializes");
+        assert!(encoded_contract.contains("user_permission_denied"));
+        assert!(!encoded_contract.contains("super-secret"));
+        assert!(!encoded_contract.contains("denied again"));
     }
 
     #[test]
@@ -1834,12 +2309,118 @@ mod tests {
     }
 
     #[test]
-    fn cold_permission_recovery_credits_only_after_runtime_commit() {
+    fn denied_permission_bundle_commits_and_rolls_back_as_one_unit() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("permission-bundle".to_string());
+        let request_id = PermissionRequestId("permission-bundle-deny".to_string());
+        let request = PermissionRequest {
+            id: request_id.clone(),
+            task_id: task_id.clone(),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "Run a protected command".to_string(),
+            scope: "/tmp/project".to_string(),
+            metadata: Metadata::new(),
+        };
+        store
+            .save_permission_request(request.clone(), 100)
+            .expect("permission should persist");
+        let resolution = PermissionResolution {
+            request_id: request_id.clone(),
+            decision: PermissionDecision::Deny,
+            resolved_at_ms: 200,
+            resolved_by: "local-user".to_string(),
+        };
+        let run_context = [
+            ("session_id".to_string(), "session-bundle".to_string()),
+            ("agent_run_id".to_string(), "run-bundle".to_string()),
+            ("prompt_contract_epoch".to_string(), "0".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        let observation = "Tool shell.run denied: The user denied this tool call.";
+        let message_metadata = permission_tool_observation_metadata(
+            &request_id,
+            "call-bundle",
+            "shell.run",
+            &ToolOutcomeStatus::Denied,
+            r#"{"command":"touch protected"}"#,
+            None,
+            &run_context,
+        );
+
+        let injected = store.with_immediate_transaction(|store| {
+            persist_denied_permission_resolution_rows(
+                store,
+                &request,
+                &resolution,
+                "call-bundle",
+                "shell.run",
+                observation,
+                &message_metadata,
+                &run_context,
+            )?;
+            Err::<(), _>(StorageError::new("injected post-bundle failure"))
+        });
+        assert!(injected.is_err());
+        assert!(store
+            .list_permission_audits()
+            .expect("audits should load")[0]
+            .resolution
+            .is_none());
+        assert!(store
+            .list_by_task(&task_id)
+            .expect("rolled-back events should load")
+            .is_empty());
+
+        store
+            .with_immediate_transaction(|store| {
+                persist_denied_permission_resolution_rows(
+                    store,
+                    &request,
+                    &resolution,
+                    "call-bundle",
+                    "shell.run",
+                    observation,
+                    &message_metadata,
+                    &run_context,
+                )
+            })
+            .expect("denial bundle should commit");
+        let audit = store
+            .list_permission_audits()
+            .expect("audits should load")
+            .remove(0);
+        assert_eq!(
+            audit.resolution.map(|resolution| resolution.decision),
+            Some(PermissionDecision::Deny)
+        );
+        let events = store
+            .list_by_task(&task_id)
+            .expect("bundle events should load");
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::PermissionResolved
+                && event.metadata.get("permission_id") == Some(&request_id.0)
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::ToolCallFinished
+                && event.metadata.get("failure_code").map(String::as_str)
+                    == Some("user_permission_denied")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == EventKind::MessageAdded
+                && event.metadata.get("action_denial_schema").map(String::as_str)
+                    == Some(agent_runtime::ACTION_DENIAL_SCHEMA)
+        }));
+    }
+
+    #[test]
+    fn cold_permission_recovery_persists_before_the_caller_credits_goal_delta() {
         let empty_commit_called = std::cell::Cell::new(false);
-        commit_cold_permission_recovery_before_goal_credit(
-            &AgentRunControl::new("auto"),
-            0,
+        persist_cold_permission_recovery(
             &[],
+            false,
             || {
                 empty_commit_called.set(true);
                 Ok(())
@@ -1853,10 +2434,9 @@ mod tests {
 
         let delta = permission_goal_delta();
         let failed_control = AgentRunControl::new("auto");
-        let failure = commit_cold_permission_recovery_before_goal_credit(
-            &failed_control,
-            0,
+        let failure = persist_cold_permission_recovery(
             std::slice::from_ref(&delta),
+            true,
             || Err("injected runtime snapshot failure".to_string()),
         );
         assert!(failure.is_err());
@@ -1866,16 +2446,27 @@ mod tests {
         );
 
         let committed_control = AgentRunControl::new("auto");
-        commit_cold_permission_recovery_before_goal_credit(
-            &committed_control,
-            0,
+        persist_cold_permission_recovery(
             std::slice::from_ref(&delta),
+            true,
             || Ok(()),
         )
-        .expect("the committed recovery should be credited");
+        .expect("the recovered runtime should persist");
         assert!(
-            !committed_control.record_goal_delta_at(0, &delta),
-            "the post-commit Goal Delta should be retained by the live control"
+            committed_control.record_goal_delta_at(0, &delta),
+            "runtime persistence must not credit the live control before the recovery claim"
         );
+
+        let denial_only_commit_called = std::cell::Cell::new(false);
+        persist_cold_permission_recovery(
+            &[],
+            true,
+            || {
+                denial_only_commit_called.set(true);
+                Ok(())
+            },
+        )
+        .expect("a denial-only recovery should persist its rebuilt contract");
+        assert!(denial_only_commit_called.get());
     }
 }

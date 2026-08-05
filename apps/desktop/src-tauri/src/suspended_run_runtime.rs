@@ -243,11 +243,14 @@ fn apply_resolved_tool_observation(
         tool_name: resolved.tool_name.clone(),
         input: resolved.input_json.clone(),
     };
-    AgentKernel::new(runtime, &[]).apply_tool_observation(
+    let denial = matches!(resolved.status, agent_core::ToolOutcomeStatus::Denied)
+        .then(agent_runtime::AgentActionDenialFeedback::user_permission);
+    AgentKernel::new(runtime, &[]).apply_tool_observation_with_denial(
         &request,
         &resolved.status,
         resolved.risk.as_ref(),
         &resolved.observation,
+        denial.as_ref(),
     )
 }
 
@@ -256,7 +259,8 @@ mod tests {
     use super::*;
     use agent_core::{TaskId, ToolCallId, ToolOutcomeStatus, ToolRisk};
     use agent_runtime::{
-        start_agent_loop, AgentGoalDeltaKind, AgentRuntimeConfig, WorkspaceVerificationPolicy,
+        start_agent_loop, AgentGoalDeltaKind, AgentRuntimeConfig, OutcomeSatisfaction,
+        WorkspaceVerificationPolicy,
     };
 
     fn resolved(
@@ -324,6 +328,40 @@ mod tests {
         assert!(
             !restored.record_goal_delta_at(0, &delta),
             "the suspended snapshot should retain the admitted Goal Delta fingerprint"
+        );
+    }
+
+    #[test]
+    fn same_process_permission_denial_is_a_terminal_constraint_without_goal_credit() {
+        let mut runtime = start_agent_loop(
+            TaskId("permission-denial".to_string()),
+            "write protected.txt",
+            AgentRuntimeConfig::default(),
+        );
+        runtime.task_contract.begin_action_denial_epoch(3);
+        runtime.task_contract.require_tool_success("file.write");
+        let mut observation = resolved(
+            "write",
+            "file.write",
+            r#"{"path":"protected.txt"}"#,
+            ToolRisk::WritesWorkspace,
+        );
+        observation.status = ToolOutcomeStatus::Denied;
+        observation.observation = "The user denied this tool call.".to_string();
+
+        assert!(apply_resolved_tool_observation(&mut runtime, &observation).is_none());
+        let ledger = runtime.task_contract.outcome_ledger_shadow(3);
+        assert_eq!(ledger.obligations.len(), 1);
+        assert_eq!(
+            ledger.obligations[0].satisfaction,
+            OutcomeSatisfaction::Blocked
+        );
+        assert_eq!(
+            ledger.obligations[0]
+                .blocker
+                .as_ref()
+                .map(|blocker| blocker.code.as_str()),
+            Some("user_permission_denied")
         );
     }
 }

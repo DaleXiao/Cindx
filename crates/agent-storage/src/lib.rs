@@ -286,6 +286,37 @@ impl SqliteStore {
         }
     }
 
+    /// Resolves one permission inside the caller's active transaction so the
+    /// resolution can commit atomically with its canonical lifecycle events.
+    pub fn resolve_permission_in_transaction(
+        &mut self,
+        resolution: &PermissionResolution,
+    ) -> Result<(), StorageError> {
+        if unsafe { sqlite3_get_autocommit(self.connection) } != 0 {
+            return Err(StorageError::new(
+                "permission resolution requires an active transaction",
+            ));
+        }
+        let mut insert = self.prepare(
+            "
+            insert or replace into permission_resolutions(
+              request_id, decision, resolved_at_ms, resolved_by
+            )
+            values (?1, ?2, ?3, ?4)
+            ",
+        )?;
+        insert.bind_text(1, &resolution.request_id.0)?;
+        insert.bind_text(2, permission_decision_to_str(&resolution.decision))?;
+        insert.bind_i64(3, resolution.resolved_at_ms as i64)?;
+        insert.bind_text(4, &resolution.resolved_by)?;
+        insert.expect_done()?;
+
+        let mut update =
+            self.prepare("update permission_requests set status = 'resolved' where id = ?1")?;
+        update.bind_text(1, &resolution.request_id.0)?;
+        update.expect_done()
+    }
+
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn execute_batch_for_testing(&self, sql: &str) -> Result<(), StorageError> {
@@ -1655,38 +1686,9 @@ impl PermissionStore for SqliteStore {
     }
 
     fn resolve_permission(&mut self, resolution: PermissionResolution) -> Result<(), StorageError> {
-        self.exec_batch("begin immediate transaction")?;
-
-        let result = (|| {
-            let mut insert = self.prepare(
-                "
-                insert or replace into permission_resolutions(
-                  request_id, decision, resolved_at_ms, resolved_by
-                )
-                values (?1, ?2, ?3, ?4)
-                ",
-            )?;
-            insert.bind_text(1, &resolution.request_id.0)?;
-            insert.bind_text(2, permission_decision_to_str(&resolution.decision))?;
-            insert.bind_i64(3, resolution.resolved_at_ms as i64)?;
-            insert.bind_text(4, &resolution.resolved_by)?;
-            insert.expect_done()?;
-
-            let mut update =
-                self.prepare("update permission_requests set status = 'resolved' where id = ?1")?;
-            update.bind_text(1, &resolution.request_id.0)?;
-            update.expect_done()?;
-
-            Ok(())
-        })();
-
-        match result {
-            Ok(()) => self.exec_batch("commit"),
-            Err(error) => {
-                let _ = self.exec_batch("rollback");
-                Err(error)
-            }
-        }
+        self.with_immediate_transaction(|store| {
+            store.resolve_permission_in_transaction(&resolution)
+        })
     }
 
     fn get_permission_request(
@@ -2418,6 +2420,56 @@ mod tests {
                 .as_ref()
                 .map(|resolution| &resolution.decision),
             Some(&PermissionDecision::AllowOnce)
+        );
+    }
+
+    #[test]
+    fn permission_resolution_can_share_and_rollback_a_caller_transaction() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let request_id = PermissionRequestId("perm-atomic".to_string());
+        store
+            .save_permission_request(
+                PermissionRequest {
+                    id: request_id.clone(),
+                    task_id: TaskId("task-atomic".to_string()),
+                    risk: PermissionRisk::Execute,
+                    action: "shell.run".to_string(),
+                    reason: "Verify atomic resolution".to_string(),
+                    scope: "/tmp/project".to_string(),
+                    metadata: Metadata::new(),
+                },
+                200,
+            )
+            .expect("request should save");
+        let resolution = PermissionResolution {
+            request_id: request_id.clone(),
+            decision: PermissionDecision::Deny,
+            resolved_at_ms: 300,
+            resolved_by: "user".to_string(),
+        };
+
+        let failure = store.with_immediate_transaction(|transaction| {
+            transaction.resolve_permission_in_transaction(&resolution)?;
+            Err::<(), _>(StorageError::new("injected event failure"))
+        });
+        assert!(failure.is_err());
+        assert!(
+            store.list_permission_audits().expect("audits should load")[0]
+                .resolution
+                .is_none()
+        );
+
+        store
+            .with_immediate_transaction(|transaction| {
+                transaction.resolve_permission_in_transaction(&resolution)
+            })
+            .expect("resolution should commit with its caller");
+        assert_eq!(
+            store.list_permission_audits().expect("audits should load")[0]
+                .resolution
+                .as_ref()
+                .map(|resolved| &resolved.decision),
+            Some(&PermissionDecision::Deny)
         );
     }
 

@@ -17,6 +17,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Agent Real-World V4 execution contract | current source | Prospective 72-cell matrix with isolated HTTP fixtures and typed tool/effect receipts | Deterministic measurement contract only; no V4 provider-backed observations or intelligence-uplift claim |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
+| Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
 The `0.2.3` V3 matrix is the latest complete provider-backed product baseline.
@@ -157,7 +158,9 @@ tool. Projected failed, denied, cancelled, and unfinished attempts remain in the
 tool-call denominator; a process-level timeout remains a failed matrix cell even
 when it cannot emit a final tool receipt. Browser verification additionally
 requires the exact resolved URL and artifact or postcondition digests that bind
-evidence to the frozen case.
+evidence to the frozen case. The denied-mutation product treatment must also
+return text containing `permission` and `denied`; preserving the protected file
+while returning an empty answer is safe but does not pass answer quality.
 Setup failures, safety violations, incomplete strategy/provider receipts, or
 missing effect evidence make promotion fail closed.
 
@@ -174,6 +177,15 @@ observation is large. Target binding and desktop persistence/recovery remain
 separate deterministic contracts; this exact filter does not prove them. This
 is a run-control improvement, not answer-quality or intelligence uplift without
 a later provider-backed matched run.
+
+The typed denial gate proves that a permission denial is `Blocked`, never
+`Satisfied`, carries no Goal Delta, survives bounded checkpoint and hot/cold
+permission recovery without raw arguments, and requires visible denial evidence
+plus an explicit terminal disclosure. Policy and unavailable-capability denials
+share one same-epoch replan token; a subsequent denial finalizes blocked, while a
+new contract epoch clears the state. These are deterministic control-plane
+properties. The V3 post-denial failures remain the latest provider observation,
+so current-source convergence is still unmeasured.
 
 `benchmarks/agent/realworld-v3.json` freezes the protocol used by the latest
 measured product baseline. Its 72-cell plan balances treatment position across

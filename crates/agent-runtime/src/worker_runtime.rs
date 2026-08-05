@@ -1,8 +1,9 @@
 use crate::{
-    sanitize_assistant_content, start_agent_loop, tool_invocation_from_request, AgentAdvance,
-    AgentFailure, AgentGoalDelta, AgentKernel, AgentLoopState, AgentRuntimeConfig,
-    AgentToolRequest, AgentTurnBudgetExhausted, AgentTurnPreparationError, ContextGovernorReport,
-    PreparedAgentTurn, WorkerTurnPhase, WorkerTurnPolicy, MAX_IDENTICAL_TOOL_FAILURES,
+    sanitize_assistant_content, start_agent_loop, tool_invocation_from_request,
+    AgentActionDenialFeedback, AgentActionRecovery, AgentAdvance, AgentFailure, AgentGoalDelta,
+    AgentKernel, AgentLoopState, AgentRuntimeConfig, AgentToolRequest, AgentTurnBudgetExhausted,
+    AgentTurnPreparationError, ContextGovernorReport, PreparedAgentTurn, WorkerTurnPhase,
+    WorkerTurnPolicy, MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_core::{Metadata, TaskId, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec};
 use model_provider::ModelResponse;
@@ -66,21 +67,39 @@ pub enum WorkerAdvance {
     Failed(WorkerFailure),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerToolDenialKind {
     BudgetExhausted,
     RepeatedFailure,
     NotExposed,
     NotReadOnly,
+    ActiveDenial(AgentActionDenialFeedback),
 }
 
 impl WorkerToolDenialKind {
-    pub fn code(self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::BudgetExhausted => "worker_tool_budget_exhausted",
             Self::RepeatedFailure => "worker_repeated_tool_failure",
             Self::NotExposed => "worker_tool_not_exposed",
             Self::NotReadOnly => "worker_tool_not_read_only",
+            Self::ActiveDenial(feedback) => feedback.code,
+        }
+    }
+
+    pub fn action_feedback(&self) -> AgentActionDenialFeedback {
+        match self {
+            Self::BudgetExhausted => AgentActionDenialFeedback::runtime_policy(
+                self.code(),
+                AgentActionRecovery::FinalizeBlocked,
+            ),
+            Self::RepeatedFailure => {
+                AgentActionDenialFeedback::runtime_policy(self.code(), AgentActionRecovery::Replan)
+            }
+            Self::NotExposed | Self::NotReadOnly => {
+                AgentActionDenialFeedback::capability_unavailable(self.code())
+            }
+            Self::ActiveDenial(feedback) => feedback.clone(),
         }
     }
 }
@@ -293,6 +312,21 @@ impl IsolatedWorkerRuntime {
     }
 
     pub fn admit_tool_call(&mut self, request: &AgentToolRequest) -> WorkerToolAdmission {
+        let active_denial = {
+            let risk = self
+                .tools
+                .iter()
+                .find(|tool| tool.name == request.tool_name)
+                .map(|tool| &tool.risk);
+            AgentKernel::new(&mut self.state, &self.tools)
+                .action_denial_for_invocation(request, risk)
+        };
+        if let Some(feedback) = active_denial {
+            return WorkerToolAdmission::Denied {
+                kind: WorkerToolDenialKind::ActiveDenial(feedback),
+                reason: "Cindx blocked this action because the active worker objective already contains a trusted denial. Use remaining read-only capabilities or finalize with that blocker.",
+            };
+        }
         if self.tool_call_count >= self.max_tool_calls {
             return WorkerToolAdmission::Denied {
                 kind: WorkerToolDenialKind::BudgetExhausted,
@@ -337,16 +371,27 @@ impl IsolatedWorkerRuntime {
         status: &ToolOutcomeStatus,
         observation: &str,
     ) -> Option<AgentGoalDelta> {
+        self.apply_tool_observation_with_denial(request, status, observation, None)
+    }
+
+    pub fn apply_tool_observation_with_denial(
+        &mut self,
+        request: &AgentToolRequest,
+        status: &ToolOutcomeStatus,
+        observation: &str,
+        denial: Option<&AgentActionDenialFeedback>,
+    ) -> Option<AgentGoalDelta> {
         let risk = self
             .tools
             .iter()
             .find(|tool| tool.name == request.tool_name)
             .map(|tool| &tool.risk);
-        AgentKernel::new(&mut self.state, &self.tools).apply_tool_observation(
+        AgentKernel::new(&mut self.state, &self.tools).apply_tool_observation_with_denial(
             request,
             status,
             risk,
             observation,
+            denial,
         )
     }
 
@@ -659,6 +704,131 @@ mod tests {
             }
         ));
         assert_eq!(worker.tool_call_count(), 1);
+    }
+
+    #[test]
+    fn worker_denial_kinds_preserve_stable_typed_feedback() {
+        let cases = [
+            (
+                WorkerToolDenialKind::BudgetExhausted,
+                "worker_tool_budget_exhausted",
+                crate::AgentActionDenialKind::RuntimePolicy,
+                AgentActionRecovery::FinalizeBlocked,
+            ),
+            (
+                WorkerToolDenialKind::RepeatedFailure,
+                "worker_repeated_tool_failure",
+                crate::AgentActionDenialKind::RuntimePolicy,
+                AgentActionRecovery::Replan,
+            ),
+            (
+                WorkerToolDenialKind::NotExposed,
+                "worker_tool_not_exposed",
+                crate::AgentActionDenialKind::CapabilityUnavailable,
+                AgentActionRecovery::Replan,
+            ),
+            (
+                WorkerToolDenialKind::NotReadOnly,
+                "worker_tool_not_read_only",
+                crate::AgentActionDenialKind::CapabilityUnavailable,
+                AgentActionRecovery::Replan,
+            ),
+            (
+                WorkerToolDenialKind::ActiveDenial(AgentActionDenialFeedback::repeated_action(
+                    "previously_denied_action",
+                )),
+                "previously_denied_action",
+                crate::AgentActionDenialKind::RepeatedAction,
+                AgentActionRecovery::FinalizeBlocked,
+            ),
+        ];
+
+        for (kind, code, feedback_kind, recovery) in cases {
+            let feedback = kind.action_feedback();
+            assert_eq!(feedback.code, code);
+            assert_eq!(feedback.kind, feedback_kind);
+            assert_eq!(feedback.recovery, recovery);
+        }
+    }
+
+    #[test]
+    fn worker_typed_denial_is_recorded_without_goal_credit() {
+        let mut worker = IsolatedWorkerRuntime::new(
+            TaskId("worker-denial".to_string()),
+            "inspect",
+            vec![read_tool()],
+            2,
+            1,
+        );
+        let request = AgentToolRequest {
+            call_id: ToolCallId("call-denied".to_string()),
+            tool_name: "shell.run".to_string(),
+            input: r#"{"command":"true"}"#.to_string(),
+        };
+        AgentKernel::new(&mut worker.state, &worker.tools).require_tool_success("shell.run");
+        let feedback = match worker.admit_tool_call(&request) {
+            WorkerToolAdmission::Denied {
+                kind: WorkerToolDenialKind::NotExposed,
+                ..
+            } => WorkerToolDenialKind::NotExposed.action_feedback(),
+            other => panic!("expected an unavailable capability denial, got {other:?}"),
+        };
+
+        assert!(worker
+            .apply_tool_observation_with_denial(
+                &request,
+                &ToolOutcomeStatus::Denied,
+                "tool not exposed",
+                Some(&feedback),
+            )
+            .is_none());
+        assert_eq!(
+            worker
+                .state
+                .task_contract
+                .outcome_ledger_shadow(0)
+                .obligations[0]
+                .satisfaction,
+            crate::OutcomeSatisfaction::Pending,
+            "the first capability denial must leave exactly one bounded replan"
+        );
+
+        let repeated = AgentToolRequest {
+            call_id: ToolCallId("call-denied-again".to_string()),
+            ..request.clone()
+        };
+        let repeated_feedback = match worker.admit_tool_call(&repeated) {
+            WorkerToolAdmission::Denied {
+                kind: WorkerToolDenialKind::ActiveDenial(feedback),
+                ..
+            } => feedback,
+            other => panic!("expected the active denial to suppress redispatch, got {other:?}"),
+        };
+        assert_eq!(repeated_feedback.code, "previously_denied_action");
+        assert_eq!(
+            repeated_feedback.recovery,
+            AgentActionRecovery::FinalizeBlocked
+        );
+        assert!(worker
+            .apply_tool_observation_with_denial(
+                &repeated,
+                &ToolOutcomeStatus::Denied,
+                "action already denied",
+                Some(&repeated_feedback),
+            )
+            .is_none());
+        let ledger = worker.state.task_contract.outcome_ledger_shadow(0);
+        assert_eq!(
+            ledger.obligations[0].satisfaction,
+            crate::OutcomeSatisfaction::Blocked
+        );
+        assert_eq!(
+            ledger.obligations[0]
+                .blocker
+                .as_ref()
+                .map(|blocker| blocker.code.as_str()),
+            Some("previously_denied_action")
+        );
     }
 
     #[test]

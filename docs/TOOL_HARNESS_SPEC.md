@@ -57,6 +57,13 @@ The desktop may record it only after the matching runtime transition commits and
 the canonical tool outcome is durable or recoverable. Ordinary success,
 parameter or output variation, exact-call replay, and failed, denied, or
 cancelled calls do not unlock more model, tool, or turn budget.
+Denied observations additionally enter the active `AgentTaskContract` as bounded
+typed facts. A user permission denial goes directly to blocked finalization. A
+runtime-policy or unavailable-capability denial can request one same-epoch
+replan; another denial consumes no new segment and becomes blocked finalization.
+The exact denied invocation, and a denied capability when applicable, is
+intercepted before the permission broker. Read-only work may continue after a
+finalization constraint, but another effect cannot bypass a user denial.
 After a durable steer commit actually applies user guidance, run control may
 open one fresh base segment for the new objective under the existing lineage
 caps. This objective transition is not Goal Delta credit; failed, deleted, and
@@ -205,8 +212,27 @@ matching mutation/verification or interaction postcondition without persisting
 raw tool input or output in the witness. Older outcomes without this metadata
 remain readable and conservatively use the prior fingerprint-only fallback.
 
+Hot and cold permission recovery reconstruct the same
+`cindx.agent.action-denial.v1` fact. Its persisted state contains the contract
+epoch, evidence sequence, tool, SHA-256 input fingerprint, stable kind/code,
+scope, and recovery only; raw tool arguments, denial text, and tool output are
+not copied into the denial record. A blocked obligation remains visible in the
+outcome ledger with denial evidence and can produce only an honestly disclosed
+`constraint_observed` completion. It cannot become satisfied, verified, a Goal
+Delta, a fresh run segment, or learning-quality evidence.
+
+A denied permission resolution, `PermissionResolved`, `ToolCallFinished`, and
+its tool transcript message commit together. The hot or cold task state is ready
+before recovery is claimed; the claim and resumed lifecycle event then share a
+second transaction. A failed claim rolls back, a failed driver handoff releases
+the claim to `Paused`, and startup can replay the canonical denial over an older
+task-state checkpoint. No crash window turns the denial into success or Goal
+Delta credit.
+
 Identical tool arguments may fail twice. A third identical attempt is blocked so
-the model must change its approach.
+the model must use its remaining bounded alternative or report the stable
+blocker. A new prepared objective epoch clears this denial/replan state; a retry
+or continuation of the same objective does not.
 
 ## MCP
 
