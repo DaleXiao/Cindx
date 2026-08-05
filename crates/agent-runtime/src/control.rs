@@ -19,8 +19,12 @@ use std::time::{Duration, Instant};
 
 #[path = "control_construction.rs"]
 mod construction;
+#[path = "control_goal_delta.rs"]
+mod goal_delta;
 #[path = "control_resources.rs"]
 mod resources;
+#[path = "control_steer_commit.rs"]
+mod steer_commit;
 #[path = "control_tool_batch.rs"]
 mod tool_batch;
 
@@ -95,9 +99,11 @@ struct RunMutableState {
     observation_count: usize,
     checkpoint_fingerprints: BTreeSet<u64>,
     checkpoint_count: usize,
-    model_extension_checkpoint: usize,
-    tool_extension_checkpoint: usize,
-    agent_turn_extension_checkpoint: usize,
+    goal_delta_fingerprints: BTreeSet<u64>,
+    goal_delta_count: usize,
+    model_extension_goal_delta: usize,
+    tool_extension_goal_delta: usize,
+    agent_turn_extension_goal_delta: usize,
     model_call_limit: usize,
     tool_call_limit: usize,
     agent_turn_limit: usize,
@@ -151,9 +157,11 @@ impl AgentRunControl {
                 observation_count: snapshot.observation_count,
                 checkpoint_fingerprints: snapshot.checkpoint_fingerprints,
                 checkpoint_count: snapshot.checkpoint_count,
-                model_extension_checkpoint: snapshot.model_extension_checkpoint,
-                tool_extension_checkpoint: snapshot.tool_extension_checkpoint,
-                agent_turn_extension_checkpoint: snapshot.agent_turn_extension_checkpoint,
+                goal_delta_fingerprints: snapshot.goal_delta_fingerprints,
+                goal_delta_count: snapshot.goal_delta_count,
+                model_extension_goal_delta: snapshot.model_extension_goal_delta,
+                tool_extension_goal_delta: snapshot.tool_extension_goal_delta,
+                agent_turn_extension_goal_delta: snapshot.agent_turn_extension_goal_delta,
                 model_call_limit: snapshot.model_call_limit,
                 tool_call_limit: snapshot.tool_call_limit,
                 agent_turn_limit: snapshot.agent_turn_limit,
@@ -206,9 +214,11 @@ impl AgentRunControl {
                         observation_count: snapshot.observation_count,
                         checkpoint_fingerprints: snapshot.checkpoint_fingerprints,
                         checkpoint_count: snapshot.checkpoint_count,
-                        model_extension_checkpoint: snapshot.checkpoint_count,
-                        tool_extension_checkpoint: snapshot.checkpoint_count,
-                        agent_turn_extension_checkpoint: snapshot.checkpoint_count,
+                        goal_delta_fingerprints: snapshot.goal_delta_fingerprints,
+                        goal_delta_count: snapshot.goal_delta_count,
+                        model_extension_goal_delta: snapshot.goal_delta_count,
+                        tool_extension_goal_delta: snapshot.goal_delta_count,
+                        agent_turn_extension_goal_delta: snapshot.goal_delta_count,
                         model_call_limit: budget
                             .initial_model_calls
                             .min(budget.max_model_calls)
@@ -242,6 +252,10 @@ impl AgentRunControl {
 
     pub fn snapshot(&self) -> RunControlSnapshot {
         let state = self.state.lock().expect("run control state poisoned");
+        self.snapshot_locked(&state)
+    }
+
+    fn snapshot_locked(&self, state: &RunMutableState) -> RunControlSnapshot {
         RunControlSnapshot {
             budget: self.budget,
             elapsed_active: state.started_at.elapsed().min(self.budget.max_duration),
@@ -256,9 +270,11 @@ impl AgentRunControl {
             observation_count: state.observation_count,
             checkpoint_fingerprints: state.checkpoint_fingerprints.clone(),
             checkpoint_count: state.checkpoint_count,
-            model_extension_checkpoint: state.model_extension_checkpoint,
-            tool_extension_checkpoint: state.tool_extension_checkpoint,
-            agent_turn_extension_checkpoint: state.agent_turn_extension_checkpoint,
+            goal_delta_fingerprints: state.goal_delta_fingerprints.clone(),
+            goal_delta_count: state.goal_delta_count,
+            model_extension_goal_delta: state.model_extension_goal_delta,
+            tool_extension_goal_delta: state.tool_extension_goal_delta,
+            agent_turn_extension_goal_delta: state.agent_turn_extension_goal_delta,
             model_call_limit: state.model_call_limit,
             tool_call_limit: state.tool_call_limit,
             agent_turn_limit: state.agent_turn_limit,
@@ -318,7 +334,7 @@ impl AgentRunControl {
         let remaining_calls = state.model_call_limit.saturating_sub(model_calls);
         let remaining_turns = state.agent_turn_limit.saturating_sub(agent_turns);
         let turn_extension_available = state.agent_turn_limit < self.budget.max_agent_turns
-            && state.checkpoint_count > state.agent_turn_extension_checkpoint;
+            && state.goal_delta_count > state.agent_turn_extension_goal_delta;
         let remaining_time = self
             .budget
             .max_duration
@@ -945,35 +961,6 @@ impl AgentRunControl {
         Ok(RunTerminalCommit::Committed(value))
     }
 
-    /// Executes one durable steer batch with stop-first semantics. The closure
-    /// runs under the control-state lock and therefore must not call back into
-    /// this control. Failed closures leave the pending queue untouched.
-    pub fn commit_pending_steers_with<T, E, F>(
-        &self,
-        commit: F,
-    ) -> Result<RunSteerBatchCommit<T>, E>
-    where
-        F: FnOnce(&[RunSteer]) -> Result<T, E>,
-    {
-        let mut state = self.state.lock().expect("run control state poisoned");
-        if let Some(reason) = self.refresh_stop_reason_locked(&mut state, Instant::now()) {
-            return Ok(RunSteerBatchCommit::Stopped(reason));
-        }
-        if state.phase == RunPhase::TerminalCommitted {
-            return Ok(RunSteerBatchCommit::NoPending);
-        }
-        let steers = state.pending_steers.iter().cloned().collect::<Vec<_>>();
-        if steers.is_empty() {
-            return Ok(RunSteerBatchCommit::NoPending);
-        }
-        let value = commit(&steers)?;
-        state.pending_steers.drain(..steers.len());
-        if let Some(epoch) = steers.last().map(|steer| steer.epoch) {
-            state.applied_steer_epoch = state.applied_steer_epoch.max(epoch);
-        }
-        Ok(RunSteerBatchCommit::Committed { value, steers })
-    }
-
     pub fn acknowledge_pending_steer(&self, queue_id: &str) -> bool {
         let mut state = self.state.lock().expect("run control state poisoned");
         let Some(index) = state
@@ -1355,7 +1342,7 @@ fn extend_model_budget_if_progressed(
     requested_call: usize,
 ) -> bool {
     if requested_call > budget.max_model_calls
-        || state.checkpoint_count <= state.model_extension_checkpoint
+        || state.goal_delta_count <= state.model_extension_goal_delta
     {
         return false;
     }
@@ -1363,7 +1350,7 @@ fn extend_model_budget_if_progressed(
         .model_call_limit
         .saturating_add(budget.model_calls_per_extension.max(1))
         .min(budget.max_model_calls);
-    state.model_extension_checkpoint = state.checkpoint_count;
+    state.model_extension_goal_delta = state.goal_delta_count;
     state.budget_extensions = state.budget_extensions.saturating_add(1);
     requested_call <= state.model_call_limit
 }
@@ -1374,7 +1361,7 @@ fn extend_tool_budget_if_progressed(
     requested_call: usize,
 ) -> bool {
     if requested_call > budget.max_tool_calls
-        || state.checkpoint_count <= state.tool_extension_checkpoint
+        || state.goal_delta_count <= state.tool_extension_goal_delta
     {
         return false;
     }
@@ -1382,7 +1369,7 @@ fn extend_tool_budget_if_progressed(
         .tool_call_limit
         .saturating_add(budget.tool_calls_per_extension.max(1))
         .min(budget.max_tool_calls);
-    state.tool_extension_checkpoint = state.checkpoint_count;
+    state.tool_extension_goal_delta = state.goal_delta_count;
     state.budget_extensions = state.budget_extensions.saturating_add(1);
     requested_call <= state.tool_call_limit
 }
@@ -1393,7 +1380,7 @@ fn extend_agent_turn_budget_if_progressed(
     requested_turn: usize,
 ) -> bool {
     if requested_turn > budget.max_agent_turns
-        || state.checkpoint_count <= state.agent_turn_extension_checkpoint
+        || state.goal_delta_count <= state.agent_turn_extension_goal_delta
     {
         return false;
     }
@@ -1401,7 +1388,7 @@ fn extend_agent_turn_budget_if_progressed(
         .agent_turn_limit
         .saturating_add(budget.agent_turns_per_extension.max(1))
         .min(budget.max_agent_turns);
-    state.agent_turn_extension_checkpoint = state.checkpoint_count;
+    state.agent_turn_extension_goal_delta = state.goal_delta_count;
     state.budget_extensions = state.budget_extensions.saturating_add(1);
     requested_turn <= state.agent_turn_limit
 }

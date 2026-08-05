@@ -486,7 +486,8 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         status: &ToolOutcomeStatus,
         risk: Option<&ToolRisk>,
         observation: &str,
-    ) {
+    ) -> Option<crate::AgentGoalDelta> {
+        let goal_progress = self.state.task_contract.goal_progress_state();
         let evidence_watermark = self
             .state
             .task_contract
@@ -522,6 +523,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             &mut self.state.messages,
             &new_evidence,
         );
+        self.state.task_contract.goal_delta_since(&goal_progress)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -531,10 +533,12 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         tool_name: &str,
         input_fingerprint: &str,
         target_witness: Option<&str>,
+        effect_witness: Option<&crate::PersistedToolEffectWitness>,
         status: &ToolOutcomeStatus,
         risk: Option<&ToolRisk>,
         observation: &str,
-    ) {
+    ) -> Option<crate::AgentGoalDelta> {
+        let goal_progress = self.state.task_contract.goal_progress_state();
         let evidence_watermark = self
             .state
             .task_contract
@@ -542,10 +546,13 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             .last()
             .map(|evidence| evidence.sequence)
             .unwrap_or_default();
+        let effect_replay = effect_witness
+            .and_then(|witness| witness.replay_for(tool_name, input_fingerprint, risk));
         record_persisted_tool_outcome_with_risk(
             self.state,
             tool_name,
             input_fingerprint,
+            effect_replay.as_deref(),
             status,
             risk,
         );
@@ -581,6 +588,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             &mut self.state.messages,
             &new_evidence,
         );
+        self.state.task_contract.goal_delta_since(&goal_progress)
     }
 }
 
@@ -891,6 +899,7 @@ mod tests {
                 &request.tool_name,
                 &input_fingerprint,
                 None,
+                None,
                 &ToolOutcomeStatus::Denied,
                 Some(&ToolRisk::ReadOnly),
                 "tool=file.read\nstatus=denied\noutput=permission denied",
@@ -934,6 +943,7 @@ mod tests {
             &request.tool_name,
             &input_fingerprint,
             None,
+            None,
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::ReadOnly),
             "tool=file.read\nstatus=succeeded\noutput=workspace evidence",
@@ -975,6 +985,7 @@ mod tests {
             "browser.open",
             &input_fingerprint,
             Some(&witness),
+            None,
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::UsesNetwork),
             "substantive browser evidence",

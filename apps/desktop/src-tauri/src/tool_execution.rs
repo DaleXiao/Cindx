@@ -324,14 +324,6 @@ fn execute_agent_tool_invocation_inner(
             .map(AgentToolEpochGuard::epoch)
             .unwrap_or_else(|| run_context_steer_epoch(run_context));
         control.mark_progress_at(objective_epoch, "tool_result", &tool_name);
-        if matches!(result.status, ToolOutcomeStatus::Succeeded) {
-            control.record_checkpoint_at(
-                objective_epoch,
-                "tool_result",
-                &tool_name,
-                &format!("{tool_name}\n{tool_input}\n{}", result.output),
-            );
-        }
         let progress = control.progress();
         result.metadata.insert(
             "run_checkpoints".to_string(),

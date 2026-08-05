@@ -1,6 +1,16 @@
 use super::*;
 use crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA;
 
+fn record_worker_goal_delta(
+    control: Option<&AgentRunControl>,
+    objective_epoch: u64,
+    goal_delta: Option<&agent_runtime::AgentGoalDelta>,
+) -> bool {
+    control
+        .zip(goal_delta)
+        .is_some_and(|(control, delta)| control.record_goal_delta_at(objective_epoch, delta))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn complete_collaboration_worker_with_tools(
     app: tauri::AppHandle,
@@ -574,7 +584,12 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                             }
                         }
                     };
-                    worker.apply_tool_observation(&call, &status, &observation);
+                    let goal_delta = worker.apply_tool_observation(&call, &status, &observation);
+                    record_worker_goal_delta(
+                        cancellation.as_deref(),
+                        objective_epoch,
+                        goal_delta.as_ref(),
+                    );
                 }
             }
         }
@@ -590,5 +605,52 @@ pub(crate) fn collaboration_worker_stage_class(stage: &str, role: &ModelRole) ->
         inferred_stage_class
     } else {
         RunStageClass::Worker
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collaboration_worker_records_only_current_goal_delta() {
+        let mut worker = IsolatedWorkerRuntime::new(
+            TaskId("worker-goal-delta".to_string()),
+            "inspect the workspace",
+            vec![ToolSpec::builtin(
+                "file.read",
+                "file",
+                "Read a file",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object"}"#,
+            )],
+            1,
+            1,
+        );
+        assert_eq!(worker.require_substantive_evidence(), 1);
+        let request = AgentToolRequest {
+            call_id: agent_core::ToolCallId("worker-read".to_string()),
+            tool_name: "file.read".to_string(),
+            input: r#"{"path":"README.md"}"#.to_string(),
+        };
+        let delta = worker
+            .apply_tool_observation(
+                &request,
+                &ToolOutcomeStatus::Succeeded,
+                "README.md\nproject evidence",
+            )
+            .expect("substantive worker evidence should emit a goal delta");
+
+        let control = AgentRunControl::new("auto");
+        assert!(record_worker_goal_delta(Some(&control), 0, Some(&delta)));
+        assert!(!record_worker_goal_delta(Some(&control), 0, Some(&delta)));
+
+        let stale_control = AgentRunControl::new("auto");
+        assert!(!record_worker_goal_delta(
+            Some(&stale_control),
+            1,
+            Some(&delta),
+        ));
+        assert!(!record_worker_goal_delta(None, 0, Some(&delta)));
     }
 }

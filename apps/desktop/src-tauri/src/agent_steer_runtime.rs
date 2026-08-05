@@ -266,20 +266,22 @@ pub(crate) fn apply_pending_agent_steers_with_cursor(
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
 ) -> Result<AgentSteerApplication, String> {
     let committed = cancellation
-        .commit_pending_steers_with(|pending| {
-            let mut store = state
-                .store
-                .lock()
-                .map_err(|error| steer_storage_error(format!("store lock poisoned: {error}")))?;
-            persist_pending_agent_steer_batch(
-                &mut store,
-                workspace_root,
-                runtime,
-                run_context,
-                pending,
-                snapshot_cursor,
-            )
-        })
+        .commit_pending_steers_with_applied_objective(
+            |pending| {
+                let mut store = state.store.lock().map_err(|error| {
+                    steer_storage_error(format!("store lock poisoned: {error}"))
+                })?;
+                persist_pending_agent_steer_batch(
+                    &mut store,
+                    workspace_root,
+                    runtime,
+                    run_context,
+                    pending,
+                    snapshot_cursor,
+                )
+            },
+            |committed| committed.latest.is_some(),
+        )
         .map_err(|error| error.to_string())?;
 
     match committed {
@@ -434,6 +436,47 @@ mod tests {
     }
 
     #[test]
+    fn durable_applied_steer_opens_the_control_objective_segment() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let run_context = test_run_context();
+        append_queue_action(&mut store, &run_context, "enqueue", "queue-segment");
+        let mut runtime = start_agent_loop(
+            phase16_task_id(),
+            "Original objective",
+            AgentRuntimeConfig::default(),
+        );
+        let mut budget = agent_runtime::RunBudget::for_effort("fast");
+        budget.initial_model_calls = 1;
+        budget.max_model_calls = 3;
+        let control = AgentRunControl::with_budget(budget);
+        assert_eq!(control.begin_model_call("initial"), Ok(1));
+        control.finish_model_call();
+        assert_eq!(control.request_steer("queue-segment"), Ok(true));
+
+        let committed = control
+            .commit_pending_steers_with_applied_objective(
+                |pending| {
+                    store.with_immediate_transaction(|transaction| {
+                        commit_pending_steers(
+                            transaction,
+                            Path::new("."),
+                            &mut runtime,
+                            &run_context,
+                            pending,
+                        )
+                    })
+                },
+                |committed| committed.latest.is_some(),
+            )
+            .expect("durable steer should commit");
+
+        assert!(matches!(committed, RunSteerBatchCommit::Committed { .. }));
+        assert_eq!(control.progress().model_call_limit, 2);
+        assert_eq!(control.begin_model_call_at(1, "steered"), Ok(Some(2)));
+        control.finish_model_call();
+    }
+
+    #[test]
     fn deleted_pending_steer_is_acknowledged_without_execution() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let run_context = test_run_context();
@@ -444,26 +487,40 @@ mod tests {
             "Original objective",
             AgentRuntimeConfig::default(),
         );
-        let committed = store
-            .with_immediate_transaction(|transaction| {
-                commit_pending_steers(
-                    transaction,
-                    Path::new("."),
-                    &mut runtime,
-                    &run_context,
-                    &[RunSteer {
-                        queue_id: "queue-deleted".to_string(),
-                        epoch: 1,
-                    }],
-                )
-            })
-            .expect("deleted steer should resolve");
+        let mut budget = agent_runtime::RunBudget::for_effort("fast");
+        budget.initial_model_calls = 1;
+        budget.max_model_calls = 3;
+        let control = AgentRunControl::with_budget(budget);
+        assert_eq!(control.begin_model_call("initial"), Ok(1));
+        control.finish_model_call();
+        assert_eq!(control.request_steer("queue-deleted"), Ok(true));
+        let committed = match control
+            .commit_pending_steers_with_applied_objective(
+                |pending| {
+                    store.with_immediate_transaction(|transaction| {
+                        commit_pending_steers(
+                            transaction,
+                            Path::new("."),
+                            &mut runtime,
+                            &run_context,
+                            pending,
+                        )
+                    })
+                },
+                |committed| committed.latest.is_some(),
+            )
+            .expect("deleted steer should resolve")
+        {
+            RunSteerBatchCommit::Committed { value, .. } => value,
+            outcome => panic!("deleted steer should commit as a no-op: {outcome:?}"),
+        };
         assert_eq!(
             committed.acknowledged_queue_ids,
             vec!["queue-deleted".to_string()]
         );
         assert!(committed.latest.is_none());
         assert_eq!(runtime.messages.len(), 1);
+        assert_eq!(control.progress().model_call_limit, 1);
     }
 
     #[test]

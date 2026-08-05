@@ -1,8 +1,8 @@
 use crate::{
     sanitize_assistant_content, start_agent_loop, tool_invocation_from_request, AgentAdvance,
-    AgentFailure, AgentKernel, AgentLoopState, AgentRuntimeConfig, AgentToolRequest,
-    AgentTurnBudgetExhausted, AgentTurnPreparationError, ContextGovernorReport, PreparedAgentTurn,
-    WorkerTurnPhase, WorkerTurnPolicy, MAX_IDENTICAL_TOOL_FAILURES,
+    AgentFailure, AgentGoalDelta, AgentKernel, AgentLoopState, AgentRuntimeConfig,
+    AgentToolRequest, AgentTurnBudgetExhausted, AgentTurnPreparationError, ContextGovernorReport,
+    PreparedAgentTurn, WorkerTurnPhase, WorkerTurnPolicy, MAX_IDENTICAL_TOOL_FAILURES,
 };
 use agent_core::{Metadata, TaskId, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec};
 use model_provider::ModelResponse;
@@ -336,7 +336,7 @@ impl IsolatedWorkerRuntime {
         request: &AgentToolRequest,
         status: &ToolOutcomeStatus,
         observation: &str,
-    ) {
+    ) -> Option<AgentGoalDelta> {
         let risk = self
             .tools
             .iter()
@@ -347,7 +347,7 @@ impl IsolatedWorkerRuntime {
             status,
             risk,
             observation,
-        );
+        )
     }
 
     pub fn insert_usage(&mut self, key: impl Into<String>, value: impl Into<String>) {
@@ -597,7 +597,7 @@ mod tests {
             worker.admit_tool_call(&calls[0]),
             WorkerToolAdmission::Allowed
         );
-        worker.apply_tool_observation(&calls[0], &ToolOutcomeStatus::Succeeded, "ok");
+        let _ = worker.apply_tool_observation(&calls[0], &ToolOutcomeStatus::Succeeded, "ok");
 
         let prepared = worker
             .prepare_model_turn(None, None, 16_384, 1_024)
@@ -805,7 +805,15 @@ mod tests {
             worker.admit_tool_call(&calls[0]),
             WorkerToolAdmission::Allowed
         );
-        worker.apply_tool_observation(&calls[0], &ToolOutcomeStatus::Succeeded, "file\t10\ta.md");
+        assert_eq!(
+            worker.apply_tool_observation(
+                &calls[0],
+                &ToolOutcomeStatus::Succeeded,
+                "file\t10\ta.md",
+            ),
+            None,
+            "discovery-only output must not satisfy the substantive evidence contract",
+        );
 
         let repair = worker
             .prepare_model_turn(None, None, 16_384, 1_024)
@@ -834,11 +842,14 @@ mod tests {
             worker.admit_tool_call(&calls[0]),
             WorkerToolAdmission::Allowed
         );
-        worker.apply_tool_observation(
-            &calls[0],
-            &ToolOutcomeStatus::Succeeded,
-            "a.md\nexact value",
-        );
+        let goal_delta = worker
+            .apply_tool_observation(
+                &calls[0],
+                &ToolOutcomeStatus::Succeeded,
+                "a.md\nexact value",
+            )
+            .expect("first substantive worker evidence should advance its contract");
+        assert_eq!(goal_delta.kind_labels(), "obligation_satisfied");
 
         let finalization = worker
             .prepare_model_turn(None, None, 16_384, 1_024)

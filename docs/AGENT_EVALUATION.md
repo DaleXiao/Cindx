@@ -16,6 +16,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md) | `0.1.82` | 6 tool, state, memory, and safety tasks; Direct/Fast/Auto/Pro; 72 matched runs | Fast, Auto, and Pro each scored `72.2%`; Auto and Pro added no quality over Fast and had lower completion plus higher latency; `NO-GO` for orchestration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | Agent Real-World V4 execution contract | current source | Prospective 72-cell matrix with isolated HTTP fixtures and typed tool/effect receipts | Deterministic measurement contract only; no V4 provider-backed observations or intelligence-uplift claim |
+| Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
 The `0.2.3` V3 matrix is the latest complete provider-backed product baseline.
@@ -164,6 +165,15 @@ The V4 contract has deterministic structural coverage through
 `node --test scripts/agent-realworld-contract.test.mjs`, but no V4 provider-backed
 matrix has been executed. It is therefore a prospective measurement contract,
 not evidence that the Agent, Auto, Pro, GEPA, or self-distillation improved.
+
+The exact Goal Delta gate proves that failed, denied, cancelled, unrelated, and
+repeated satisfaction cannot extend a segment, while first satisfaction of a
+contract obligation, first recorded grounding receipt, or verified
+postcondition can. It also proves that the receipt stays bounded when the
+observation is large. Target binding and desktop persistence/recovery remain
+separate deterministic contracts; this exact filter does not prove them. This
+is a run-control improvement, not answer-quality or intelligence uplift without
+a later provider-backed matched run.
 
 `benchmarks/agent/realworld-v3.json` freezes the protocol used by the latest
 measured product baseline. Its 72-cell plan balances treatment position across

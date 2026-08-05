@@ -4,6 +4,7 @@ use agent_core::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 pub const TOOL_RESULT_SCHEMA: &str = "cindx.tool-result.v1";
@@ -12,6 +13,329 @@ pub const TOOL_RISK_METADATA_KEY: &str = "tool_risk";
 pub const TOOL_EFFECT_SEMANTICS_METADATA_KEY: &str = "tool_effect_semantics";
 pub const TOOL_EFFECT_VERIFIER_METADATA_KEY: &str = "tool_effect_verifier";
 pub const TOOL_MODEL_OBSERVATION_METADATA_KEY: &str = "model_observation";
+pub const TOOL_EFFECT_WITNESS_METADATA_KEY: &str = "tool_effect_witness";
+pub const TOOL_EFFECT_WITNESS_SCHEMA: &str = "cindx.tool-effect-witness.v1";
+pub const MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES: usize = 4_096;
+
+const MAX_EFFECT_WITNESS_TARGETS: usize = 8;
+const MAX_EFFECT_WITNESS_PATH_COMPONENTS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistedToolEffectKind {
+    WorkspaceMutation,
+    WorkspaceObservation,
+    ProcessVerification,
+    BrowserAction,
+    BrowserObservation,
+    ComputerAction,
+    ComputerObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedToolEffectWitness {
+    schema: String,
+    tool_name: String,
+    input_fingerprint: String,
+    kind: PersistedToolEffectKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    target_tokens: Vec<String>,
+}
+
+impl PersistedToolEffectWitness {
+    pub fn capture(
+        tool_name: &str,
+        input_json: &str,
+        risk: Option<&ToolRisk>,
+        lineage_scope: &str,
+    ) -> Option<Self> {
+        let kind = match tool_name {
+            "browser.open" | "browser.click" | "browser.type" | "browser.scroll"
+            | "browser.select_tab" => PersistedToolEffectKind::BrowserAction,
+            "browser.extract_text" | "browser.capture" | "browser.tabs" => {
+                PersistedToolEffectKind::BrowserObservation
+            }
+            "computer.click" | "computer.type" | "computer.key" | "computer.scroll" => {
+                PersistedToolEffectKind::ComputerAction
+            }
+            "computer.screenshot" => PersistedToolEffectKind::ComputerObservation,
+            _ => match risk {
+                Some(ToolRisk::WritesWorkspace | ToolRisk::Destructive) => {
+                    PersistedToolEffectKind::WorkspaceMutation
+                }
+                Some(ToolRisk::ReadOnly) if !structured_effect_targets(input_json).is_empty() => {
+                    PersistedToolEffectKind::WorkspaceObservation
+                }
+                Some(ToolRisk::ExecutesProcess)
+                    if process_input_looks_like_verification(input_json) =>
+                {
+                    PersistedToolEffectKind::ProcessVerification
+                }
+                _ => return None,
+            },
+        };
+        let target_tokens = if matches!(
+            kind,
+            PersistedToolEffectKind::WorkspaceMutation
+                | PersistedToolEffectKind::WorkspaceObservation
+        ) {
+            redacted_effect_targets(input_json, lineage_scope)
+        } else {
+            Vec::new()
+        };
+        let witness = Self {
+            schema: TOOL_EFFECT_WITNESS_SCHEMA.to_string(),
+            tool_name: tool_name.to_string(),
+            input_fingerprint: tool_input_fingerprint(tool_name, input_json),
+            kind,
+            target_tokens,
+        };
+        witness.is_valid().then_some(witness)
+    }
+
+    pub fn encode(&self) -> Option<String> {
+        if !self.is_valid() {
+            return None;
+        }
+        let encoded = serde_json::to_string(self).ok()?;
+        (encoded.len() <= MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES).then_some(encoded)
+    }
+
+    pub fn decode(encoded: &str) -> Option<Self> {
+        if encoded.len() > MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES {
+            return None;
+        }
+        let witness = serde_json::from_str::<Self>(encoded).ok()?;
+        witness.is_valid().then_some(witness)
+    }
+
+    pub fn replay_for(
+        &self,
+        tool_name: &str,
+        input_fingerprint: &str,
+        registered_risk: Option<&ToolRisk>,
+    ) -> Option<String> {
+        if !self.is_valid()
+            || self.tool_name != tool_name
+            || self.input_fingerprint != input_fingerprint
+            || !self.matches_tool_and_risk(tool_name, registered_risk)
+        {
+            return None;
+        }
+        let input = match self.kind {
+            PersistedToolEffectKind::WorkspaceMutation
+            | PersistedToolEffectKind::WorkspaceObservation => {
+                serde_json::json!({ "path": self.target_tokens }).to_string()
+            }
+            PersistedToolEffectKind::ProcessVerification => {
+                serde_json::json!({ "command": "verify" }).to_string()
+            }
+            PersistedToolEffectKind::BrowserAction
+            | PersistedToolEffectKind::BrowserObservation
+            | PersistedToolEffectKind::ComputerAction
+            | PersistedToolEffectKind::ComputerObservation => "{}".to_string(),
+        };
+        Some(input)
+    }
+
+    fn matches_tool_and_risk(&self, tool_name: &str, risk: Option<&ToolRisk>) -> bool {
+        match self.kind {
+            PersistedToolEffectKind::WorkspaceMutation => {
+                matches!(
+                    risk,
+                    Some(ToolRisk::WritesWorkspace | ToolRisk::Destructive)
+                )
+            }
+            PersistedToolEffectKind::WorkspaceObservation => {
+                matches!(risk, Some(ToolRisk::ReadOnly))
+            }
+            PersistedToolEffectKind::ProcessVerification => {
+                matches!(risk, Some(ToolRisk::ExecutesProcess))
+            }
+            PersistedToolEffectKind::BrowserAction => matches!(
+                (tool_name, risk),
+                (
+                    "browser.open" | "browser.click" | "browser.scroll" | "browser.select_tab",
+                    Some(ToolRisk::UsesNetwork)
+                ) | ("browser.type", Some(ToolRisk::SensitiveContext))
+            ),
+            PersistedToolEffectKind::BrowserObservation => matches!(
+                (tool_name, risk),
+                (
+                    "browser.extract_text" | "browser.capture" | "browser.tabs",
+                    Some(ToolRisk::UsesNetwork)
+                )
+            ),
+            PersistedToolEffectKind::ComputerAction => matches!(
+                (tool_name, risk),
+                (
+                    "computer.click" | "computer.type" | "computer.scroll",
+                    Some(ToolRisk::SensitiveContext)
+                ) | ("computer.key", Some(ToolRisk::Destructive))
+            ),
+            PersistedToolEffectKind::ComputerObservation => matches!(
+                (tool_name, risk),
+                ("computer.screenshot", Some(ToolRisk::SensitiveContext))
+            ),
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        if self.schema != TOOL_EFFECT_WITNESS_SCHEMA
+            || self.tool_name.trim().is_empty()
+            || self.tool_name.len() > 128
+            || self.input_fingerprint.len() != 64
+            || !self
+                .input_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.target_tokens.len() > MAX_EFFECT_WITNESS_TARGETS
+            || self.target_tokens.iter().any(|target| {
+                target.len() > 320
+                    || !target.starts_with("redacted/")
+                    || !target["redacted/".len()..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || byte == b'/')
+            })
+        {
+            return false;
+        }
+        match self.kind {
+            PersistedToolEffectKind::WorkspaceMutation => true,
+            PersistedToolEffectKind::WorkspaceObservation => !self.target_tokens.is_empty(),
+            _ => self.target_tokens.is_empty(),
+        }
+    }
+}
+
+fn redacted_effect_targets(input_json: &str, lineage_scope: &str) -> Vec<String> {
+    structured_effect_targets(input_json)
+        .into_iter()
+        .filter_map(|target| redacted_effect_target(&target, lineage_scope))
+        .take(MAX_EFFECT_WITNESS_TARGETS)
+        .collect()
+}
+
+fn structured_effect_targets(input_json: &str) -> BTreeSet<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input_json) else {
+        return BTreeSet::new();
+    };
+    let mut targets = BTreeSet::new();
+    collect_effect_targets(&value, None, &mut targets);
+    targets
+}
+
+fn collect_effect_targets(
+    value: &serde_json::Value,
+    key: Option<&str>,
+    targets: &mut BTreeSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                collect_effect_targets(value, Some(key), targets);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_effect_targets(value, key, targets);
+            }
+        }
+        serde_json::Value::String(value)
+            if key.is_some_and(|key| {
+                matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "path" | "file" | "file_path" | "output" | "output_path" | "directory"
+                )
+            }) =>
+        {
+            let normalized = value.trim().trim_end_matches(['/', '\\']).to_string();
+            if !normalized.is_empty() {
+                targets.insert(normalized);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redacted_effect_target(target: &str, lineage_scope: &str) -> Option<String> {
+    let normalized = target.replace('\\', "/");
+    let absolute = normalized.starts_with('/')
+        || normalized
+            .as_bytes()
+            .get(1)
+            .is_some_and(|byte| *byte == b':');
+    let mut components = Vec::<&str>::new();
+    for component in normalized.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component),
+        }
+    }
+    if components.is_empty() {
+        return None;
+    }
+
+    let root = if absolute { "absolute" } else { "relative" };
+    let mut cumulative = String::new();
+    let mut tokens = Vec::new();
+    let prefix_count = components.len().min(MAX_EFFECT_WITNESS_PATH_COMPONENTS);
+    for component in components.iter().take(prefix_count) {
+        if !cumulative.is_empty() {
+            cumulative.push('/');
+        }
+        cumulative.push_str(component);
+        tokens.push(effect_target_digest(lineage_scope, root, &cumulative));
+    }
+    if components.len() > MAX_EFFECT_WITNESS_PATH_COMPONENTS {
+        let full_target = components.join("/");
+        let full_digest = effect_target_digest(lineage_scope, root, &full_target);
+        if tokens.last() != Some(&full_digest) {
+            tokens.pop();
+            tokens.push(full_digest);
+        }
+    }
+    Some(format!("redacted/{}", tokens.join("/")))
+}
+
+fn effect_target_digest(lineage_scope: &str, root: &str, target: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(TOOL_EFFECT_WITNESS_SCHEMA.as_bytes());
+    digest.update(b"\n");
+    digest.update(lineage_scope.as_bytes());
+    digest.update(b"\n");
+    digest.update(root.as_bytes());
+    digest.update(b"\n");
+    digest.update(target.as_bytes());
+    format!("{:x}", digest.finalize())[..32].to_string()
+}
+
+fn process_input_looks_like_verification(input_json: &str) -> bool {
+    let normalized = input_json.to_ascii_lowercase();
+    [
+        " test",
+        "test ",
+        "check",
+        "build",
+        "lint",
+        "verify",
+        "pytest",
+        "vitest",
+        "jest",
+        "cargo test",
+        "cargo check",
+        "swift test",
+        "go test",
+        "git diff",
+        "git status",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolEffectRecoveryPolicy {
@@ -421,6 +745,116 @@ mod tests {
             tool_input_fingerprint("tool", r#"{"b":2,"a":1}"#),
             tool_input_fingerprint("tool", r#"{"a":1,"b":2}"#)
         );
+    }
+
+    #[test]
+    fn persisted_effect_witness_is_bounded_redacted_and_target_stable() {
+        let write_input =
+            r#"{"path":"private/super-secret/goal.md","content":"never-persist-this-secret"}"#;
+        let read_input = r#"{"path":"private/super-secret/goal.md"}"#;
+        let write = PersistedToolEffectWitness::capture(
+            "file.write",
+            write_input,
+            Some(&ToolRisk::WritesWorkspace),
+            "run-a:4",
+        )
+        .expect("workspace mutation should have a durable witness");
+        let read = PersistedToolEffectWitness::capture(
+            "file.read",
+            read_input,
+            Some(&ToolRisk::ReadOnly),
+            "run-a:4",
+        )
+        .expect("targeted read should have a durable witness");
+        let encoded_write = write.encode().expect("write witness encodes");
+        let encoded_read = read.encode().expect("read witness encodes");
+
+        assert!(encoded_write.len() <= MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES);
+        assert!(encoded_read.len() <= MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES);
+        for secret in [
+            "private",
+            "super-secret",
+            "goal.md",
+            "never-persist-this-secret",
+        ] {
+            assert!(!encoded_write.contains(secret));
+            assert!(!encoded_read.contains(secret));
+        }
+        assert_eq!(
+            write.replay_for(
+                "file.write",
+                &tool_input_fingerprint("file.write", write_input),
+                Some(&ToolRisk::WritesWorkspace),
+            ),
+            read.replay_for(
+                "file.read",
+                &tool_input_fingerprint("file.read", read_input),
+                Some(&ToolRisk::ReadOnly),
+            ),
+            "same target in one run should replay to the same pseudonymous path"
+        );
+        assert_eq!(
+            PersistedToolEffectWitness::decode(&encoded_write),
+            Some(write)
+        );
+    }
+
+    #[test]
+    fn persisted_effect_witness_falls_back_safely_across_versions() {
+        let legacy_process = r#"{"kind":"process_verification"}"#;
+        assert!(
+            PersistedToolEffectWitness::decode(legacy_process).is_none(),
+            "an unknown object without the exact schema and invocation binding fails closed"
+        );
+        assert!(PersistedToolEffectWitness::decode(
+            &"x".repeat(MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES + 1)
+        )
+        .is_none());
+
+        let browser = PersistedToolEffectWitness::capture(
+            "browser.click",
+            r##"{"selector":"#secret-button"}"##,
+            Some(&ToolRisk::UsesNetwork),
+            "run-a:4",
+        )
+        .expect("interaction action should have a typed witness");
+        let browser_fingerprint =
+            tool_input_fingerprint("browser.click", r##"{"selector":"#secret-button"}"##);
+        assert!(browser
+            .replay_for(
+                "browser.click",
+                &browser_fingerprint,
+                Some(&ToolRisk::UsesNetwork),
+            )
+            .is_some());
+        assert!(browser
+            .replay_for(
+                "computer.click",
+                &browser_fingerprint,
+                Some(&ToolRisk::SensitiveContext),
+            )
+            .is_none());
+        assert!(browser
+            .replay_for(
+                "browser.click",
+                &tool_input_fingerprint("browser.click", r##"{"selector":"#other"}"##),
+                Some(&ToolRisk::UsesNetwork),
+            )
+            .is_none());
+        let encoded_browser = browser.encode().expect("browser witness encodes");
+        assert!(!encoded_browser.contains("secret-button"));
+        let mut mismatched =
+            serde_json::from_str::<serde_json::Value>(&encoded_browser).expect("witness is JSON");
+        mismatched["kind"] = serde_json::Value::String("workspace_mutation".to_string());
+        let mismatched = PersistedToolEffectWitness::decode(&mismatched.to_string())
+            .expect("shape remains decodable");
+        assert!(mismatched
+            .replay_for(
+                "browser.click",
+                &browser_fingerprint,
+                Some(&ToolRisk::UsesNetwork),
+            )
+            .is_none());
     }
 
     #[test]

@@ -18,8 +18,8 @@ The harness has one lifecycle owner per concern:
 - `agent-runtime` owns `AgentLoopState`, `AgentRunControl`, run budgets,
   cancellation, no-progress detection, repeated-action detection, and typed turn
   budget exhaustion. `PreparedTaskState` owns the prepared objective and epoch
-  facts; `AgentTaskContract` owns obligations and evidence derived for that
-  prepared state.
+  facts; `AgentTaskContract` owns obligations, evidence, and the bounded Goal
+  Delta derived for that prepared state.
 - `agent-application` owns the single run/reprepare driver and the typed run
   lifecycle vocabulary. A steer may request a fresh prepared epoch, but it
   cannot create a second production loop.
@@ -46,6 +46,21 @@ All views derive `idle`, `running`, `waiting_for_permission`, `paused`,
 Reaching a run or turn budget is recoverable control flow: the runtime preserves
 the transcript and the desktop exposes a continuation instead of recording an
 ordinary agent failure.
+
+Run activity and objective progress are separate contracts. Provider bytes,
+tool start/finish, streaming text, and status updates keep the existing
+liveness watchdog current, while generic checkpoints remain diagnostic. Neither
+kind of signal extends a run segment. Budget extension requires a de-duplicated
+Goal Delta from `AgentTaskContract`: first satisfaction of an active obligation,
+first target-bound grounding, or a verified workspace/interaction postcondition.
+The desktop may record it only after the matching runtime transition commits and
+the canonical tool outcome is durable or recoverable. Ordinary success,
+parameter or output variation, exact-call replay, and failed, denied, or
+cancelled calls do not unlock more model, tool, or turn budget.
+After a durable steer commit actually applies user guidance, run control may
+open one fresh base segment for the new objective under the existing lineage
+caps. This objective transition is not Goal Delta credit; failed, deleted, and
+no-op steers open no segment.
 
 ## Fugu-style collaboration and GEPA
 
@@ -85,6 +100,10 @@ their own execution path is included in the matched evaluation protocol.
 - Cancellation remains observable during provider streams and sidecar execution.
 - Long-session regression tests verify that unrelated session growth does not
   increase projection work.
+- Goal Delta identity contains only bounded obligation ids, prompt scope, and
+  verified postcondition ids. It never copies or hashes raw tool output, so
+  large successful reads cannot add another output-sized allocation merely to
+  request budget credit.
 
 ## Tool contract
 
@@ -114,6 +133,10 @@ concurrency, raw output, or artifact behavior.
 
 The runtime preserves model arguments as JSON. Legacy `key=value` input remains
 accepted only by built-in tools for existing sessions and the manual tool runner.
+Successful results still retain their full persistence and UI contract, but an
+interactive, collaboration-worker, or evaluation-worker tool observation can
+extend its run segment only through the post-commit
+`cindx.agent.goal-delta.v1` receipt.
 
 ## Exposure
 
@@ -175,6 +198,12 @@ prepared objective fingerprint, and independent steer/contract epochs. It
 validates the original prompt and durable transcript separately from the
 effective objective, then rebuilds non-persisted target anchors. A successful
 tool call from an older steer epoch does not satisfy a newly steered prompt.
+Successful permission outcomes also persist a bounded, versioned effect witness
+bound to the original tool and input fingerprint. Workspace targets are stored
+only as run-scoped pseudonymous path tokens, so cold replay can reconstruct a
+matching mutation/verification or interaction postcondition without persisting
+raw tool input or output in the witness. Older outcomes without this metadata
+remain readable and conservatively use the prior fingerprint-only fallback.
 
 Identical tool arguments may fail twice. A third identical attempt is blocked so
 the model must change its approach.

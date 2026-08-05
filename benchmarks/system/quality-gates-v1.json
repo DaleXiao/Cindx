@@ -32,6 +32,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-goal-progress-contract",
       "memory-contract",
       "frontend-test"
     ],
@@ -42,6 +43,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-goal-progress-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests"
@@ -87,6 +89,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-goal-progress-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests",
@@ -218,6 +221,25 @@
       "id": "agent-realworld-contract",
       "category": "evaluation_contract",
       "command": ["node", "--test", "scripts/agent-realworld-contract.test.mjs"]
+    },
+    {
+      "id": "agent-goal-progress-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-runtime",
+        "task_contract::goal_delta::tests::agent_goal_progress_contract",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.agent.goal-delta.v1"
+      ]
     },
     {
       "id": "memory-contract",

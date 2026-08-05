@@ -7,7 +7,9 @@ use crate::{
     tool_execution::append_visual_reference_message,
 };
 use agent_core::{MessageRole, Metadata};
-use agent_runtime::{AgentKernel, RunControlSnapshot};
+use agent_runtime::{
+    run_context_steer_epoch, AgentGoalDelta, AgentKernel, AgentRunControl, RunControlSnapshot,
+};
 use orchestrator::AgentPolicy;
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
 
@@ -184,18 +186,11 @@ pub(crate) fn append_observations_to_suspended_run(
     let Some(mut suspended) = take_suspended_agent_run(state, session_id)? else {
         return Ok(());
     };
+    let objective_epoch = run_context_steer_epoch(&suspended.run_context);
+    let mut goal_deltas = Vec::new();
     for resolved in observations {
-        let request = agent_runtime::AgentToolRequest {
-            call_id: resolved.call_id.clone(),
-            tool_name: resolved.tool_name.clone(),
-            input: resolved.input_json.clone(),
-        };
-        AgentKernel::new(&mut suspended.runtime, &[]).apply_tool_observation(
-            &request,
-            &resolved.status,
-            None,
-            &resolved.observation,
-        );
+        let goal_delta = apply_resolved_tool_observation(&mut suspended.runtime, resolved);
+        goal_deltas.extend(goal_delta);
         if let Some(message) = suspended
             .runtime
             .messages
@@ -210,8 +205,125 @@ pub(crate) fn append_observations_to_suspended_run(
             &resolved.image_paths,
         );
     }
-    if let Some(control) = active_agent_run_control(state, Some(session_id))? {
-        suspended.run_control = control.snapshot();
+    let active_control = active_agent_run_control(state, Some(session_id))?;
+    if let Some(control) = active_control {
+        control.commit_goal_deltas_at_with(objective_epoch, &goal_deltas, move |snapshot| {
+            suspended.run_control = snapshot.clone();
+            remember_suspended_agent_run(state, suspended)
+        })?;
+    } else {
+        suspended.run_control = staged_control_snapshot_with_goal_deltas(
+            suspended.run_control,
+            objective_epoch,
+            &goal_deltas,
+        );
+        remember_suspended_agent_run(state, suspended)?;
     }
-    remember_suspended_agent_run(state, suspended)
+    Ok(())
+}
+
+fn staged_control_snapshot_with_goal_deltas(
+    base_snapshot: RunControlSnapshot,
+    objective_epoch: u64,
+    goal_deltas: &[AgentGoalDelta],
+) -> RunControlSnapshot {
+    let staged_control = AgentRunControl::from_snapshot(base_snapshot);
+    for delta in goal_deltas {
+        staged_control.record_goal_delta_at(objective_epoch, delta);
+    }
+    staged_control.snapshot()
+}
+
+fn apply_resolved_tool_observation(
+    runtime: &mut agent_runtime::AgentLoopState,
+    resolved: &ResolvedToolObservation,
+) -> Option<AgentGoalDelta> {
+    let request = agent_runtime::AgentToolRequest {
+        call_id: resolved.call_id.clone(),
+        tool_name: resolved.tool_name.clone(),
+        input: resolved.input_json.clone(),
+    };
+    AgentKernel::new(runtime, &[]).apply_tool_observation(
+        &request,
+        &resolved.status,
+        resolved.risk.as_ref(),
+        &resolved.observation,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{TaskId, ToolCallId, ToolOutcomeStatus, ToolRisk};
+    use agent_runtime::{
+        start_agent_loop, AgentGoalDeltaKind, AgentRuntimeConfig, WorkspaceVerificationPolicy,
+    };
+
+    fn resolved(
+        id: &str,
+        tool_name: &str,
+        input_json: &str,
+        risk: ToolRisk,
+    ) -> ResolvedToolObservation {
+        ResolvedToolObservation {
+            call_id: ToolCallId(id.to_string()),
+            tool_name: tool_name.to_string(),
+            input_json: input_json.to_string(),
+            risk: Some(risk),
+            status: ToolOutcomeStatus::Succeeded,
+            observation: "succeeded".to_string(),
+            image_paths: Vec::new(),
+            message_metadata: Metadata::new(),
+        }
+    }
+
+    fn custom_workspace_verification_delta() -> AgentGoalDelta {
+        let mut runtime = start_agent_loop(
+            TaskId("permission-risk".to_string()),
+            "change and verify",
+            AgentRuntimeConfig::default(),
+        );
+        runtime.task_contract.merge_workspace_verification_policy(
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
+        assert!(apply_resolved_tool_observation(
+            &mut runtime,
+            &resolved(
+                "write",
+                "mcp.custom_write",
+                r#"{"path":"src/lib.rs"}"#,
+                ToolRisk::WritesWorkspace,
+            ),
+        )
+        .is_none());
+        apply_resolved_tool_observation(
+            &mut runtime,
+            &resolved(
+                "verify",
+                "mcp.custom_verify",
+                r#"{"command":"cargo test"}"#,
+                ToolRisk::ExecutesProcess,
+            ),
+        )
+        .expect("the real custom-tool risks should verify the workspace mutation")
+    }
+
+    #[test]
+    fn same_process_permission_replay_uses_the_resolved_tool_risk() {
+        let delta = custom_workspace_verification_delta();
+        assert_eq!(delta.kinds(), &[AgentGoalDeltaKind::WorkspaceVerified]);
+    }
+
+    #[test]
+    fn suspended_snapshot_records_goal_delta_without_an_active_control() {
+        let delta = custom_workspace_verification_delta();
+        let base = AgentRunControl::new("auto").snapshot();
+        let staged = staged_control_snapshot_with_goal_deltas(base, 0, &[delta.clone()]);
+        let restored = AgentRunControl::from_snapshot(staged);
+
+        assert!(
+            !restored.record_goal_delta_at(0, &delta),
+            "the suspended snapshot should retain the admitted Goal Delta fingerprint"
+        );
+    }
 }

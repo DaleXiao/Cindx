@@ -53,7 +53,8 @@ run_agent_task
             -> model request
             -> admitted tool batch
             -> permission suspension/resume when needed
-            -> observations and contract checks
+            -> commit observation; make canonical outcome durable/recoverable
+            -> task-contract Goal Delta admission and contract checks
        -> reprepare after a committed steer, or finish at a typed control boundary
        -> terminal result or typed interruption
   -> completion transaction
@@ -69,7 +70,7 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `agent-core` | Shared ids, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
-| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
+| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, task-contract Goal Delta policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
@@ -137,6 +138,21 @@ Prompt grounding classification, evidence-tool pinning, run-context objective
 selection, and model-stream retry/progress policy are portable
 `agent-runtime` responsibilities. The desktop loop supplies catalog and product
 state, then executes the resulting provider and tool side effects.
+
+`task_contract/goal_delta` compares bounded contract state before and after a
+committed tool observation. It admits only first satisfaction of an active
+obligation, first target-bound grounding, or verification of a workspace or
+interaction postcondition. The desktop adapter records that typed receipt only
+after the matching runtime transition commits and the canonical tool outcome is
+durable or recoverable. Raw tool input/output, ordinary success, replay, and
+failure status cannot mint budget credit. Existing provider/tool activity
+timestamps and generic checkpoints remain liveness or diagnostic signals rather
+than a second semantic-progress authority; only Goal Delta credit extends a run
+segment.
+
+Within run control, `control_steer_commit` owns durable steer-batch commit and
+the bounded base segment opened for an actually applied objective. It does not
+admit Goal Delta credit; that remains isolated in `control_goal_delta`.
 
 The validated conductor decision also supplies execution intent. The desktop
 composition root converts its task class, tool requirement, and vision flag into

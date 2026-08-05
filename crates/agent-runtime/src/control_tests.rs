@@ -28,6 +28,11 @@ fn test_budget() -> RunBudget {
     }
 }
 
+fn record_test_goal_delta(control: &AgentRunControl, identity: &str) -> bool {
+    let delta = crate::AgentGoalDelta::synthetic_for_test(identity);
+    control.record_goal_delta_at(control.steer_epoch(), &delta)
+}
+
 #[test]
 fn pro_budget_allows_a_long_running_segment() {
     let budget = RunBudget::for_effort("pro");
@@ -101,6 +106,88 @@ fn new_at_steer_epoch_starts_with_a_fully_applied_durable_objective() {
             .collect::<Vec<_>>(),
         vec![("next-objective".to_string(), 8)]
     );
+}
+
+#[test]
+fn goal_delta_snapshot_commit_rejects_an_epoch_that_already_lost_to_steer() {
+    let control = AgentRunControl::new("auto");
+    let delta = crate::AgentGoalDelta::synthetic_for_test("stale-goal-delta");
+    assert_eq!(control.request_steer("new-objective"), Ok(true));
+
+    let (_, accepted) = control
+        .commit_goal_deltas_at_with(0, std::slice::from_ref(&delta), |snapshot| {
+            assert_eq!(snapshot.goal_delta_count, 0);
+            assert_eq!(snapshot.pending_steers.len(), 1);
+            Ok::<_, ()>(())
+        })
+        .expect("stale snapshot commit should remain recoverable");
+    assert_eq!(accepted, 0);
+    assert!(control.acknowledge_pending_steer("new-objective"));
+    assert!(control.record_goal_delta_at(1, &delta));
+}
+
+#[test]
+fn goal_delta_snapshot_and_live_credit_linearize_before_concurrent_steer() {
+    let control = Arc::new(AgentRunControl::new("auto"));
+    let delta = crate::AgentGoalDelta::synthetic_for_test("atomic-goal-delta");
+    let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let release_commit = Arc::new(Barrier::new(2));
+    let commit_control = Arc::clone(&control);
+    let commit_release = Arc::clone(&release_commit);
+    let commit = thread::spawn(move || {
+        commit_control
+            .commit_goal_deltas_at_with(0, &[delta], |snapshot| {
+                snapshot_tx
+                    .send(snapshot.clone())
+                    .expect("snapshot receiver should remain available");
+                commit_release.wait();
+                Ok::<_, ()>(())
+            })
+            .expect("recoverable snapshot commit should succeed")
+    });
+
+    let staged = snapshot_rx
+        .recv()
+        .expect("the staged snapshot should be observable");
+    assert_eq!(staged.goal_delta_count, 1);
+    assert!(staged.pending_steers.is_empty());
+
+    let (steer_tx, steer_rx) = mpsc::channel();
+    let steer_control = Arc::clone(&control);
+    let steer = thread::spawn(move || {
+        steer_tx
+            .send(steer_control.request_steer("later-objective"))
+            .expect("steer receiver should remain available");
+    });
+    assert!(
+        steer_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+        "steer must not publish between the recoverable snapshot and live credit"
+    );
+    release_commit.wait();
+    let (_, accepted) = commit.join().expect("goal delta commit should join");
+    assert_eq!(accepted, 1);
+    assert_eq!(
+        steer_rx
+            .recv()
+            .expect("steer should publish after the goal delta commit"),
+        Ok(true)
+    );
+    steer.join().expect("steer request should join");
+
+    let live = control.snapshot();
+    assert_eq!(live.goal_delta_count, 1);
+    assert_eq!(live.pending_steers.len(), 1);
+}
+
+#[test]
+fn failed_goal_delta_snapshot_commit_does_not_publish_live_credit() {
+    let control = AgentRunControl::new("auto");
+    let delta = crate::AgentGoalDelta::synthetic_for_test("failed-snapshot");
+    let result = control
+        .commit_goal_deltas_at_with(0, std::slice::from_ref(&delta), |_| Err::<(), _>("persist"));
+
+    assert_eq!(result, Err("persist"));
+    assert!(control.record_goal_delta_at(0, &delta));
 }
 
 #[test]
@@ -194,7 +281,7 @@ fn successful_provider_responses_keep_runtime_and_control_turn_ledgers_aligned()
 }
 
 #[test]
-fn material_checkpoints_extend_a_segment_but_new_observations_do_not() {
+fn only_goal_deltas_extend_a_segment() {
     let mut budget = test_budget();
     budget.initial_model_calls = 1;
     budget.max_model_calls = 3;
@@ -210,14 +297,194 @@ fn material_checkpoints_extend_a_segment_but_new_observations_do_not() {
     let control = AgentRunControl::with_budget(budget);
     assert_eq!(control.begin_model_call("one"), Ok(1));
     assert!(control.record_checkpoint("model", "answer", "evidence-a"));
+    assert_eq!(control.progress().checkpoints, 1);
+    assert_eq!(
+        control.begin_model_call("two"),
+        Err(RunStopReason::ModelCallBudgetExceeded),
+        "generic checkpoints remain diagnostic and cannot extend budget"
+    );
+
+    let control = AgentRunControl::with_budget(budget);
+    assert_eq!(control.begin_model_call("one"), Ok(1));
+    assert!(record_test_goal_delta(&control, "goal-a"));
     assert_eq!(control.begin_model_call("two"), Ok(2));
-    assert!(!control.record_checkpoint("model", "answer", "evidence-a"));
+    assert!(!record_test_goal_delta(&control, "goal-a"));
     assert_eq!(
         control.begin_model_call("three"),
         Err(RunStopReason::ModelCallBudgetExceeded)
     );
     assert_eq!(control.progress().budget_extensions, 1);
     assert_eq!(control.progress().observations, 0);
+}
+
+#[test]
+fn durable_applied_steer_opens_one_fresh_bounded_objective_segment() {
+    let mut budget = test_budget();
+    budget.max_duration = Duration::from_secs(5);
+    budget.no_progress_timeout = Duration::from_secs(2);
+    budget.initial_model_calls = 1;
+    budget.max_model_calls = 3;
+    budget.initial_tool_calls = 1;
+    budget.max_tool_calls = 3;
+    budget.initial_agent_turns = 1;
+    budget.max_agent_turns = 3;
+    let control = AgentRunControl::with_budget(budget);
+
+    assert_eq!(control.begin_model_call_at(0, "initial"), Ok(Some(1)));
+    control.finish_model_call();
+    assert_eq!(
+        control.begin_tool_call_at(0, "initial", "file.read", "one"),
+        RunToolCallStart::Started(1)
+    );
+    control.finish_tool_call();
+    assert_eq!(control.record_agent_turn_at(0, "initial"), Ok(Some(1)));
+    assert!(record_test_goal_delta(&control, "old-objective-unspent"));
+    let initial_resources = control.progress().resources;
+
+    assert_eq!(control.request_steer("objective-two"), Ok(true));
+    assert_eq!(control.begin_model_call_at(1, "uncommitted"), Ok(None));
+    assert_eq!(
+        control.begin_tool_call_at(1, "uncommitted", "file.read", "two"),
+        RunToolCallStart::RestartAfterSteer
+    );
+    assert_eq!(control.record_agent_turn_at(1, "uncommitted"), Ok(None));
+    assert_eq!(control.progress().model_call_limit, 1);
+
+    assert!(matches!(
+        control
+            .commit_pending_steers_with_applied_objective(
+                |_| Ok::<_, ()>("durable objective two"),
+                |_| true,
+            )
+            .expect("durable steer should commit"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+    let opened = control.progress();
+    assert_eq!(opened.model_call_limit, 2);
+    assert_eq!(opened.tool_call_limit, 2);
+    assert_eq!(opened.agent_turn_limit, 2);
+    assert_eq!(opened.budget_extensions, 0);
+    assert_eq!(opened.resources, initial_resources);
+    {
+        let state = control.state.lock().expect("control state should lock");
+        assert_eq!(state.model_extension_goal_delta, state.goal_delta_count);
+        assert_eq!(state.tool_extension_goal_delta, state.goal_delta_count);
+        assert_eq!(
+            state.agent_turn_extension_goal_delta,
+            state.goal_delta_count
+        );
+    }
+    assert_eq!(control.begin_model_call_at(0, "stale"), Ok(None));
+    assert_eq!(control.begin_model_call_at(1, "objective-two"), Ok(Some(2)));
+    control.finish_model_call();
+    assert_eq!(
+        control.begin_tool_call_at(1, "objective-two", "file.read", "two"),
+        RunToolCallStart::Started(2)
+    );
+    control.finish_tool_call();
+    assert_eq!(
+        control.record_agent_turn_at(1, "objective-two"),
+        Ok(Some(2))
+    );
+
+    let resumed = AgentRunControl::from_snapshot(control.snapshot());
+    let resumed_progress = resumed.progress();
+    assert_eq!(resumed_progress.model_call_limit, 2);
+    assert_eq!(resumed_progress.tool_call_limit, 2);
+    assert_eq!(resumed_progress.agent_turn_limit, 2);
+    assert_eq!(resumed_progress.model_calls, 2);
+    assert_eq!(resumed_progress.tool_calls, 2);
+    assert_eq!(resumed_progress.agent_turns, 2);
+
+    assert_eq!(resumed.request_steer("objective-three"), Ok(true));
+    assert!(matches!(
+        resumed
+            .commit_pending_steers_with_applied_objective(
+                |_| Ok::<_, ()>("durable objective three"),
+                |_| true,
+            )
+            .expect("third objective should commit"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+    let capped = resumed.progress();
+    assert_eq!(capped.model_call_limit, 3);
+    assert_eq!(capped.tool_call_limit, 3);
+    assert_eq!(capped.agent_turn_limit, 3);
+    assert_eq!(
+        resumed.begin_model_call_at(2, "objective-three"),
+        Ok(Some(3))
+    );
+    resumed.finish_model_call();
+    assert_eq!(
+        resumed.begin_tool_call_at(2, "objective-three", "file.read", "three"),
+        RunToolCallStart::Started(3)
+    );
+    resumed.finish_tool_call();
+    assert_eq!(
+        resumed.record_agent_turn_at(2, "objective-three"),
+        Ok(Some(3))
+    );
+
+    assert_eq!(resumed.request_steer("objective-four"), Ok(true));
+    assert!(matches!(
+        resumed
+            .commit_pending_steers_with_applied_objective(
+                |_| Ok::<_, ()>("durable objective four"),
+                |_| true,
+            )
+            .expect("capped objective should still commit"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+    let still_capped = resumed.progress();
+    assert_eq!(still_capped.model_call_limit, budget.max_model_calls);
+    assert_eq!(still_capped.tool_call_limit, budget.max_tool_calls);
+    assert_eq!(still_capped.agent_turn_limit, budget.max_agent_turns);
+    assert_eq!(
+        resumed.begin_model_call_at(3, "over-lineage-cap"),
+        Err(RunStopReason::ModelCallBudgetExceeded)
+    );
+}
+
+#[test]
+fn failed_or_noop_steer_cannot_open_an_objective_segment() {
+    let mut budget = test_budget();
+    budget.max_duration = Duration::from_secs(5);
+    budget.no_progress_timeout = Duration::from_secs(2);
+    budget.initial_model_calls = 1;
+    budget.max_model_calls = 3;
+
+    let failed = AgentRunControl::with_budget(budget);
+    assert_eq!(failed.begin_model_call("initial"), Ok(1));
+    failed.finish_model_call();
+    assert_eq!(failed.request_steer("not-durable"), Ok(true));
+    assert_eq!(
+        failed.commit_pending_steers_with_applied_objective(
+            |_| Err::<(), _>("storage failed"),
+            |_| true,
+        ),
+        Err("storage failed")
+    );
+    assert_eq!(failed.progress().model_call_limit, 1);
+    assert_eq!(failed.pending_steers_snapshot().len(), 1);
+    assert_eq!(failed.begin_model_call_at(1, "uncommitted"), Ok(None));
+
+    let noop = AgentRunControl::with_budget(budget);
+    assert_eq!(noop.begin_model_call("initial"), Ok(1));
+    noop.finish_model_call();
+    assert_eq!(noop.request_steer("deleted"), Ok(true));
+    assert!(matches!(
+        noop.commit_pending_steers_with_applied_objective(
+            |_| Ok::<_, ()>("durable deletion"),
+            |_| false,
+        )
+        .expect("deleted steer acknowledgement should commit"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+    assert_eq!(noop.progress().model_call_limit, 1);
+    assert_eq!(
+        noop.begin_model_call_at(1, "deleted-noop"),
+        Err(RunStopReason::ModelCallBudgetExceeded)
+    );
 }
 
 #[test]
@@ -237,7 +504,7 @@ fn final_available_turn_is_reserved_for_terminal_commit_unless_progress_can_exte
 
     let control = AgentRunControl::with_budget(budget);
     assert_eq!(control.record_agent_turn("executor"), Ok(1));
-    assert!(control.record_checkpoint("tool_result", "evidence", "verified-result"));
+    assert!(record_test_goal_delta(&control, "verified-result"));
     assert_eq!(
         control.continuation_directive(),
         RunContinuationDirective::Continue
@@ -619,10 +886,35 @@ fn snapshot_excludes_permission_wait_time() {
 }
 
 #[test]
+fn snapshot_preserves_unconsumed_goal_credit_and_deduplication() {
+    let mut budget = test_budget();
+    budget.initial_model_calls = 1;
+    budget.max_model_calls = 3;
+    budget.terminal_model_call_reserve = 0;
+    let control = AgentRunControl::with_budget(budget);
+
+    assert!(record_test_goal_delta(&control, "durable-goal"));
+    let snapshot = control.snapshot();
+    assert_eq!(snapshot.goal_delta_count, 1);
+    assert_eq!(snapshot.goal_delta_fingerprints.len(), 1);
+
+    let resumed = AgentRunControl::from_snapshot(snapshot);
+    assert!(!record_test_goal_delta(&resumed, "durable-goal"));
+    assert_eq!(resumed.begin_model_call("first"), Ok(1));
+    resumed.finish_model_call();
+    assert_eq!(resumed.begin_model_call("extended"), Ok(2));
+    resumed.finish_model_call();
+    assert_eq!(
+        resumed.begin_model_call("no-second-extension"),
+        Err(RunStopReason::ModelCallBudgetExceeded)
+    );
+}
+
+#[test]
 fn continuation_starts_a_fresh_bounded_segment_after_budget_exhaustion() {
     let control = AgentRunControl::with_budget(test_budget());
     control.record_partial_output("verified work");
-    assert!(control.record_checkpoint("tool", "created file", "artifact-a"));
+    assert!(record_test_goal_delta(&control, "artifact-a"));
     assert_eq!(control.request_steer("queue-a"), Ok(true));
     assert_eq!(control.begin_model_call("one"), Ok(1));
     assert_eq!(control.begin_model_call("two"), Ok(2));
@@ -1072,19 +1364,19 @@ fn isolated_treatment_preserves_progressive_model_tool_and_turn_limits() {
         assert_eq!(model_lane.begin_model_call("candidate"), Ok(call));
         model_lane.finish_model_call();
     }
-    assert!(model_lane.record_checkpoint("candidate", "verified", "model-checkpoint-1"));
+    assert!(record_test_goal_delta(&model_lane, "model-goal-1"));
     for call in 3..=4 {
         assert_eq!(model_lane.begin_model_call("candidate"), Ok(call));
         model_lane.finish_model_call();
     }
     assert_eq!(model_lane.progress().model_call_limit, 4);
-    assert!(model_lane.record_checkpoint("candidate", "verified", "model-checkpoint-2"));
+    assert!(record_test_goal_delta(&model_lane, "model-goal-2"));
     for call in 5..=6 {
         assert_eq!(model_lane.begin_model_call("candidate"), Ok(call));
         model_lane.finish_model_call();
     }
     assert_eq!(model_lane.progress().model_call_limit, 6);
-    assert!(model_lane.record_checkpoint("candidate", "verified", "model-checkpoint-3"));
+    assert!(record_test_goal_delta(&model_lane, "model-goal-3"));
     assert_eq!(
         model_lane.begin_model_call("candidate"),
         Err(RunStopReason::ModelCallBudgetExceeded)
@@ -1103,7 +1395,7 @@ fn isolated_treatment_preserves_progressive_model_tool_and_turn_limits() {
         );
         tool_lane.finish_tool_call();
     }
-    assert!(tool_lane.record_checkpoint("candidate", "verified", "tool-checkpoint"));
+    assert!(record_test_goal_delta(&tool_lane, "tool-goal"));
     assert_eq!(
         tool_lane.begin_tool_call("candidate", "file.read", "file-4"),
         Ok(4)
@@ -1119,7 +1411,7 @@ fn isolated_treatment_preserves_progressive_model_tool_and_turn_limits() {
     assert_eq!(turn_lane.progress().agent_turn_limit, 2);
     assert_eq!(turn_lane.record_agent_turn("candidate"), Ok(1));
     assert_eq!(turn_lane.record_agent_turn("candidate"), Ok(2));
-    assert!(turn_lane.record_checkpoint("candidate", "verified", "turn-checkpoint"));
+    assert!(record_test_goal_delta(&turn_lane, "turn-goal"));
     assert_eq!(turn_lane.record_agent_turn("candidate"), Ok(3));
     assert_eq!(turn_lane.progress().agent_turn_limit, 4);
 }
@@ -1140,7 +1432,7 @@ fn absorbed_candidate_extension_leaves_model_budget_for_a_reviewer() {
         assert_eq!(candidate.begin_model_call("candidate"), Ok(call));
         candidate.finish_model_call();
     }
-    assert!(candidate.record_checkpoint("candidate", "verified", "candidate-checkpoint"));
+    assert!(record_test_goal_delta(&candidate, "candidate-goal"));
     assert_eq!(candidate.begin_model_call("candidate"), Ok(3));
     candidate.finish_model_call();
     assert_eq!(candidate.progress().model_call_limit, 4);

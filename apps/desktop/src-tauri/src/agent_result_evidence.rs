@@ -1,5 +1,5 @@
 use agent_core::{Event, MessageRole, Metadata, ToolOutcomeStatus, ToolRisk, ToolSource, ToolSpec};
-use agent_runtime::{AgentLoopState, AgentToolRequest, ContractEvidenceKind};
+use agent_runtime::{AgentGoalDelta, AgentLoopState, AgentToolRequest, ContractEvidenceKind};
 use orchestrator::{
     IndependentQualitySource, LearningAttribution, LearningEvidenceV1, LearningTermination,
     LearningUsageCompleteness,
@@ -24,6 +24,7 @@ pub(crate) fn annotate_latest_tool_observation(
     risk: Option<&ToolRisk>,
     steer_epoch: u64,
     postcondition_verified: bool,
+    goal_delta: Option<&AgentGoalDelta>,
 ) {
     let source = tools
         .iter()
@@ -72,6 +73,16 @@ pub(crate) fn annotate_latest_tool_observation(
         message
             .metadata
             .insert("contract_evidence_sequence".to_string(), sequence);
+    }
+    if let Some(delta) = goal_delta {
+        message.metadata.extend([
+            ("goal_delta_schema".to_string(), delta.schema().to_string()),
+            ("goal_delta_kinds".to_string(), delta.kind_labels()),
+            (
+                "goal_delta_fingerprint".to_string(),
+                delta.fingerprint().to_string(),
+            ),
+        ]);
     }
 }
 
