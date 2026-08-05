@@ -149,5 +149,7 @@ node --test scripts/agent-realworld-contract.test.mjs
 ```
 
 It does not contact a provider and cannot establish Agent-quality or intelligence
-uplift. No V4 provider-backed matrix has been run; V3 `0.2.3` remains the latest
-provider-backed decision evidence.
+uplift. The current V4 `0.2.9` provider-backed report is a `VALID_BASELINE`, but
+the collector classifies continuation tool events in two Fast runs as outside
+the current logical run. Its preregistered receipt gate and broad
+orchestration-uplift decision are therefore `NO-GO`.
