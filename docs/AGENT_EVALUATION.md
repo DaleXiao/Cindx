@@ -8,6 +8,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
+| [Agent Real-World V4](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md) | `0.2.9` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 position-balanced provider-backed runs with current-run tool, strategy, and provider receipts | `VALID_BASELINE`, zero setup failures, and zero safety violations; Auto/Pro pass their paired quality, completion, latency, and token gates, but the collector classifies continuation tool events in two Fast runs as outside the current logical run, so the receipt gate fails closed and broad orchestration uplift remains `NO-GO`; no learned artifact was supplied |
 | [Agent Real-World V3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md) | `0.2.3` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 position-balanced provider-backed runs with strategy and provider receipts | `VALID_BASELINE`, zero setup failures, and zero safety violations; receipt evidence fails closed on five browser timeouts, Auto/Pro lose completion despite quality gains, and broad orchestration uplift remains `NO-GO`; no learned artifact was supplied |
 | [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md) | `0.1.98` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 provider-backed runs | `VALID_BASELINE` with zero setup failures and zero safety violations; Auto/Pro trade quality gains for materially lower completion and higher latency, so broad orchestration uplift remains `NO-GO` |
 | [13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md) | `0.1.95` | Exact repair rerun: 2 frozen tool tasks; Fast/Auto/Pro; 6 provider-backed runs | All 6 completed with 7/7 checks and no safety violation; false external grounding is closed on the frozen case; `CALIBRATION_GO` for matrix expansion only |
@@ -15,20 +16,21 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md) | `0.1.82` | Prior 72-cell V2 attempt | Four infrastructure-failed RAG/memory cells make it `INVALID_BASELINE`; retained for diagnosis only |
 | [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md) | `0.1.82` | 6 tool, state, memory, and safety tasks; Direct/Fast/Auto/Pro; 72 matched runs | Fast, Auto, and Pro each scored `72.2%`; Auto and Pro added no quality over Fast and had lower completion plus higher latency; `NO-GO` for orchestration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
-| Agent Real-World V4 execution contract | current source | Prospective 72-cell matrix with isolated HTTP fixtures and typed tool/effect receipts | Deterministic measurement contract only; no V4 provider-backed observations or intelligence-uplift claim |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
-The `0.2.3` V3 matrix is the latest complete provider-backed product baseline.
+The `0.2.9` V4 matrix is the latest complete provider-backed product baseline.
 All 72 cells were retained, with no setup failure and no safety violation. Its
 `VALID_BASELINE` status means the matrix is structurally usable; it is not a
-capability `GO`. Relative to Fast, Auto and Pro each gained `11.1` quality
-points while losing `11.1` completion points and adding `28.163 s` and
-`35.744 s` paired median latency, respectively. Five browser timeouts did not
-reach receipt collection, so the preregistered receipt gate also fails closed.
-Broad orchestration uplift therefore remains `NO-GO`.
+capability `GO`. Relative to Fast, Auto and Pro each gained three quality-pass
+runs and completed one and three additional runs, respectively. Their median
+latency and total-token ratios remained within the separate preregistered
+ceilings. In two Fast runs, the collector nevertheless classified continuation
+tool events as outside the current logical Agent run. That evidence error makes
+the shared receipt gate fail closed, so broad orchestration uplift remains
+`NO-GO`.
 
 The `0.1.95` 13A repair calibration remains the before-matrix confirmation
 that false external grounding was closed on its exact six-run subset. The
@@ -125,39 +127,39 @@ reports are immutable and live under `evaluations/archive/`.
 
 ## Current Real-World Findings
 
-The `0.2.3` V3 baseline contains 72 position-balanced observations. Direct,
-Fast, Auto, and Pro passed `100.0%`, `72.2%`, `83.3%`, and `83.3%` of quality
-checks. Completion was `100.0%`, `77.8%`, `66.7%`, and `66.7%`, respectively.
-The matrix retained 56 completed runs, 10 failed runs, five timeouts, and one
-run waiting for permission. There were no setup failures and no safety
-violations.
+The `0.2.9` V4 baseline contains 72 position-balanced observations. Direct,
+Fast, Auto, and Pro passed `100.0%`, `83.3%`, `100.0%`, and `100.0%` of quality
+checks. Completion was `100.0%`, `77.8%`, `83.3%`, and `94.4%`, respectively.
+The matrix retained 64 completed and eight failed runs, with no timeout,
+permission wait, setup failure, or safety violation.
 
-The signal remains category-specific. Auto and Pro passed all three RAG/memory
-checks where Fast passed none, and all shipping treatments passed all coding
-checks. Browser behavior moved in the opposite direction: Fast passed `2/3`
-quality checks but completed none, while Auto and Pro passed none and completed
-none. All three Pro browser runs reached the frozen 600-second deadline. Auto
-and Pro also verified the denied-mutation effect safely in every repeat but did
-not reach a successful terminal state after denial.
+The remaining signal is category-specific. Auto and Pro passed all three
+RAG/memory checks where Fast passed none, while all treatments passed every
+file, coding, browser, long-horizon, and permission-safety quality check. Browser
+terminal completion was still weak: Fast completed `0/3`, Auto `1/3`, and Pro
+`2/3`. All product treatments completed all three denied-mutation runs with the
+required visible explanation.
 
-Relative to Fast, Auto and Pro each add two quality-pass runs but lose two
-completed runs. Their median latency ratios are `2.60` and `2.67`; token ratios
-are `0.95` and `0.55`, within the separate preregistered ceilings. Because
-completion non-regression fails, neither candidate is eligible. Five browser
-timeouts produced no provider or strategy receipts, which independently makes
-the receipt-evidence gate fail closed. Those timeouts remain product failures
-in the denominator rather than evaluation infrastructure failures.
+Relative to Fast, Auto and Pro each add three quality-pass runs and complete one
+and three additional runs. Their median latency ratios are `2.03` and `1.94`;
+token ratios are `0.90` and `0.80`, within the separate preregistered ceilings.
+Both candidates are individually eligible. The shared promotion gate still
+fails because the evidence collector identifies continuation tool events in two
+Fast runs as outside the current logical Agent run. One affected long-horizon run
+failed and one affected RAG run completed; both remain in the denominator and
+were not rerun.
 
 No frozen Auto or Pro profile artifact was supplied. Strategy receipts identify
-the actual fresh-seed decisions and profiles used by runs that reached evidence
-collection, but V3 provides no evidence of GEPA learning, transfer,
-self-distillation, learned-profile uplift, or Fugu parity. The next measured
-target is therefore narrow: preserve the RAG gain while making browser and
-post-denial convergence at least non-regressive against Fast.
+the actual fresh-seed decisions and profiles, but V4 provides no evidence of
+GEPA learning, transfer, self-distillation, learned-profile uplift, or Fugu
+parity. The next measured target is narrow: eliminate physical-attempt versus
+logical-run lineage-attribution ambiguity without weakening the fail-closed
+receipt contract, then evaluate on newly frozen evidence rather than tuning or
+replaying these 72 cells.
 
 ## Current Product Gate
 
-`benchmarks/agent/realworld-v4.json` freezes the current prospective execution
+`benchmarks/agent/realworld-v4.json` freezes the current execution
 contract. It preserves the six product cases, three repeats, Direct/Fast/Auto/Pro
 treatments, cyclic Latin-square execution order, non-regression thresholds, and
 resource ceilings used by V3. V4 changes the measurement boundary: every browser
@@ -175,9 +177,10 @@ Setup failures, safety violations, incomplete strategy/provider receipts, or
 missing effect evidence make promotion fail closed.
 
 The V4 contract has deterministic structural coverage through
-`node --test scripts/agent-realworld-contract.test.mjs`, but no V4 provider-backed
-matrix has been executed. It is therefore a prospective measurement contract,
-not evidence that the Agent, Auto, Pro, GEPA, or self-distillation improved.
+`node --test scripts/agent-realworld-contract.test.mjs`. The `0.2.9` matrix is
+provider-backed evidence for its exact source revision, but its shared receipt
+gate is `NO-GO`; it authorizes no broad orchestration, GEPA, self-distillation,
+or frontier-intelligence claim.
 
 The exact Goal Delta gate proves that failed, denied, cancelled, unrelated, and
 repeated satisfaction cannot extend a segment, while first satisfaction of a
@@ -185,8 +188,8 @@ contract obligation, first recorded grounding receipt, or verified
 postcondition can. It also proves that the receipt stays bounded when the
 observation is large. Target binding and desktop persistence/recovery remain
 separate deterministic contracts; this exact filter does not prove them. This
-is a run-control improvement, not answer-quality or intelligence uplift without
-a later provider-backed matched run.
+is a run-control improvement. V4 measured the combined shipping path, but it
+contains no causal ablation that attributes quality or completion to Goal Delta.
 
 The typed denial gate proves that a permission denial is `Blocked`, never
 `Satisfied`, carries no Goal Delta, survives bounded checkpoint and hot/cold
@@ -194,19 +197,20 @@ permission recovery without raw arguments, and requires visible denial evidence
 plus an explicit terminal disclosure. Policy and unavailable-capability denials
 share one same-epoch replan token; a subsequent denial finalizes blocked, while a
 new contract epoch clears the state. These are deterministic control-plane
-properties. The V3 post-denial failures remain the latest provider observation,
-so current-source convergence is still unmeasured.
+properties. V4 completed all denied-mutation product runs with the required
+visible disclosure, but that narrow observation does not override the shared
+receipt `NO-GO`.
 
-`benchmarks/agent/realworld-v3.json` freezes the protocol used by the latest
+`benchmarks/agent/realworld-v4.json` freezes the protocol used by the latest
 measured product baseline. Its 72-cell plan balances treatment position across
 case blocks while preserving a globally stable execution index for interruption
-and resume. V3 preregistered non-regression and resource ceilings against Fast:
+and resume. V4 preregistered non-regression and resource ceilings against Fast:
 both Auto and Pro had to preserve quality and completion, stay within their
 separate latency and token ratios, and at least one had to add one passing or
 completed run. Setup failures, safety violations, or incomplete
 strategy/provider receipts made promotion fail closed.
 
-The V3 raw and sanitized schemas bind the exact source revision, application
+The V4 raw and sanitized schemas bind the exact source revision, application
 version, suite and execution-plan digests, configured role models, resolved
 shipping budgets, actual strategy decision/profile hashes, and every successful
 model response. Provider response identifiers and system fingerprints are
@@ -224,11 +228,12 @@ support a GEPA, transfer, self-distillation, or learned-profile claim. A frozen
 artifact authorizes conclusions only about that exact artifact; it does not
 establish general learning uplift or Fugu parity.
 
-The `0.2.3` V3 collection is the latest complete provider-backed product
-baseline. The `0.1.98` V2 baseline remains historical evidence for its source
-revision, and the earlier `0.1.82` V2 attempt remains invalid. V2 and V3 cover
-structured file mutation, code edit plus tests, browser evidence, long-horizon
-migration, indexed knowledge plus cross-session memory, and denied mutation.
+The `0.2.9` V4 collection is the latest complete provider-backed product
+baseline. V3 and the `0.1.98` V2 baseline remain historical evidence for their
+source revisions, and the earlier `0.1.82` V2 attempt remains invalid. V2
+through V4 cover structured file mutation, code edit plus tests, browser
+evidence, long-horizon migration, indexed knowledge plus cross-session memory,
+and denied mutation.
 
 The feature-gated `cindx-agent-realworld-eval` binary drives the shipping Agent,
 tool, permission, RAG, and memory paths. Direct is explicitly marked as a
@@ -247,10 +252,11 @@ the sample's unique temporary root so one treatment cannot contaminate the
 resources or state of the next.
 
 The current provider-backed matrix is recorded in
-[Agent Real-World V3 0.2.3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md)
-with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.json).
-The `0.1.98` V2 baseline, invalid `0.1.82` V2 attempt, and complete V1 baseline remain linked in the
-[evaluation index](evaluations/README.md) as immutable historical evidence.
+[Agent Real-World V4 0.2.9](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md)
+with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.json).
+V3, the `0.1.98` V2 baseline, invalid `0.1.82` V2 attempt, and complete V1
+baseline remain linked in the [evaluation index](evaluations/README.md) as
+immutable historical evidence.
 Cancellation, interruption/resume, user steering, computer interaction, and
 adversarial instruction resistance still require later frozen suites; they
 must not be inferred from this baseline.

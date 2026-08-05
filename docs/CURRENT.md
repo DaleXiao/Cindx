@@ -305,8 +305,8 @@ high-information reflection selection, and absolute holdout non-regression
 gates, but there is still no provider-backed matched evidence that an identified
 evolved profile improves external product quality.
 
-The current source defines Agent Real-World V4 as a prospective execution
-contract. Browser cases receive a per-cell loopback HTTP fixture instead of a
+The current source defines Agent Real-World V4 as the active execution contract.
+Browser cases receive a per-cell loopback HTTP fixture instead of a
 `file://` target. Tool obligations can be satisfied only by successful typed
 receipts from the current run; projected failed, denied, cancelled, and
 unfinished calls remain visible in the tool-call denominator and cannot count as
@@ -315,34 +315,37 @@ cannot emit a final tool receipt. Browser evidence must bind the exact resolved
 target and an artifact or postcondition digest. The denied-mutation product case
 also requires a user-visible permission-denied explanation; an unchanged file
 with an empty Agent answer cannot pass quality. Deterministic tests verify this
-measurement machinery only.
-No V4 provider-backed matrix has been run, so these changes are not evidence of
-an Agent-quality or intelligence improvement.
+measurement machinery only. The completed V4 `0.2.9` provider-backed matrix is
+a `VALID_BASELINE`, but the collector classifies continuation tool events in two
+Fast runs as outside the current logical run. The shared receipt gate and broad
+orchestration-uplift decision are therefore `NO-GO`.
 
 ## Current Evidence Boundary
 
 The latest provider-backed Agent baseline is
-[Cindx Agent Real-World V3 0.2.3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md),
-captured on source commit `af5025f46137096c34bd5dd4f70a89657713fde4`.
+[Cindx Agent Real-World V4 0.2.9](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md),
+captured on source commit `7905405551f3decd38746c45218790cb9a04be37`.
 It retained all 72 position-balanced cells across Direct, Fast, Auto, and Pro,
 with zero setup failures and zero safety violations. The publication contract
 marks it `VALID_BASELINE`; the independent broad orchestration-uplift decision
 is `NO-GO`.
 
-- Direct, Fast, Auto, and Pro scored `100.0%`, `72.2%`, `83.3%`, and `83.3%`
-  quality, with `100.0%`, `77.8%`, `66.7%`, and `66.7%` completion.
-- Relative to Fast, Auto and Pro each gained `11.1` quality points but lost
-  `11.1` completion points and added `28.163 s` and `35.744 s` paired median
-  latency, respectively.
+- Direct, Fast, Auto, and Pro scored `100.0%`, `83.3%`, `100.0%`, and `100.0%`
+  quality, with `100.0%`, `77.8%`, `83.3%`, and `94.4%` completion.
+- Relative to Fast, Auto and Pro each gained three quality-pass runs and
+  completed one and three additional runs, respectively. Their median-latency
+  ratios were `2.03` and `1.94`, while total-token ratios were `0.90` and
+  `0.80`; all were within their preregistered limits.
 - Fast failed the RAG/memory answer check in all three repeats; Auto and Pro
   passed all three after successful setup.
-- Browser evidence remained the dominant failure: Fast passed `2/3` quality
-  checks but completed none, while Auto and Pro passed and completed none; all
-  three Pro browser runs reached the 600-second process deadline.
-- Five browser timeouts did not reach provider/strategy receipt collection, so
-  the preregistered receipt gate fails closed.
-- All product treatments safely passed the denied-mutation verifier, but Auto
-  and Pro did not converge to a successful terminal runtime state after denial.
+- Browser quality passed in every treatment, but terminal completion remained
+  weak: Fast completed `0/3`, Auto `1/3`, and Pro `2/3`.
+- All product treatments completed all denied-mutation runs with the required
+  visible permission-denied explanation.
+- In one failed Fast long-horizon run and one completed Fast RAG run, the
+  collector classified continuation tool events as outside the current logical
+  Agent run. Those evidence errors make the shared receipt gate fail closed;
+  neither cell was rerun.
 
 The `0.1.98` V2 baseline, earlier
 [13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md),
@@ -357,16 +360,16 @@ Therefore the current claim is:
 
 - The control plane, local memory contract, permission boundary, and
   deterministic quality gates have substantial automated coverage.
-- Auto shows a real RAG/memory quality signal in this small matrix, but its
-  overall completion and latency regress materially against Fast.
+- Auto and Pro show a real fresh-seed RAG/memory and completion signal in this
+  small matrix, but the shared receipt gate prevents a broad uplift claim.
 - The current source now has a deterministic, observable Auto
   value-of-computation admission mechanism and bounded single-conductor
   no-progress handling, plus typed denial and bounded same-epoch replan
-  contracts. These contracts have not yet been measured in a fresh
-  provider-backed matched run, so they are not evidence of an intelligence or
-  product-quality uplift.
-- Pro does not provide a broad product advantage over Fast or Auto in the
-  current matrix; its browser completion is the clearest measured weakness.
+  contracts. V4 measured their combined shipping path, but did not isolate
+  their causal contribution.
+- Pro is individually eligible against Fast in V4, but the matrix-wide receipt
+  failure prevents promotion; browser completion remains the clearest measured
+  weakness.
 - No current provider-backed result identifies an evolved profile or proves a
   GEPA, transfer, or self-distillation gain.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.

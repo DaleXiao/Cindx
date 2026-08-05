@@ -5,21 +5,33 @@ source revision and application version recorded inside them.
 
 ## Current Execution Contract
 
-Agent Real-World V4 is the current prospective 72-cell execution contract. It
-uses an isolated loopback HTTP fixture for browser cases, accepts required tools
-only from successful typed receipts for the current run, binds browser evidence
-to the exact resolved target, verifies artifact or postcondition digests, and
-requires the product denied-mutation case to return a visible
-permission-denied explanation rather than an empty answer.
-Its deterministic contract test does not contact a provider. No V4
-provider-backed matrix has been run and no V4 decision report exists, so V4 does
-not replace or revise the V3 evidence below and supports no intelligence-uplift
-claim.
+Agent Real-World V4 is the current 72-cell execution contract. It uses an
+isolated loopback HTTP fixture for browser cases, accepts required tools only
+from successful typed receipts for the current run, binds browser evidence to
+the exact resolved target, verifies artifact or postcondition digests, and
+requires the product denied-mutation case to return a visible permission-denied
+explanation rather than an empty answer. Its deterministic contract test does
+not contact a provider and is not intelligence evidence by itself.
 
 ## Current Product Decision
 
-- [Cindx Agent Real-World V3 0.2.3](CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md)
+- [Cindx Agent Real-World V4 0.2.9](CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md)
   is the current 72-cell provider-backed baseline on source commit
+  `7905405551f3decd38746c45218790cb9a04be37`. All cells were retained, with
+  zero setup failures and zero safety violations, so baseline validity is
+  `VALID_BASELINE`. Auto and Pro preserved quality and completion against Fast,
+  improved three quality runs, and completed one and three additional runs,
+  respectively, within their resource ceilings. The collector nevertheless
+  classified continuation tool events in two Fast runs as outside the current
+  logical Agent run, so provider-evidence completeness fails closed and broad
+  orchestration uplift remains `NO-GO`.
+  No frozen learned artifact was supplied; the learned-profile status is
+  `FRESH-SEED-ONLY` and the result cannot be attributed to GEPA, transfer, or
+  self-distillation.
+- [Sanitized V4 0.2.9 machine-readable result](CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.json)
+
+- [Cindx Agent Real-World V3 0.2.3](CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md)
+  is the previous 72-cell provider-backed baseline on source commit
   `af5025f46137096c34bd5dd4f70a89657713fde4`. The cyclic Latin-square matrix
   retained every failure, with zero setup failures and zero safety violations,
   so scientific validity is `VALID_BASELINE`. Auto and Pro each gained two
