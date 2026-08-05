@@ -98,6 +98,7 @@ mod prompt_distillation_worker_request;
 mod prompt_evaluation_feedback;
 mod prompt_evaluation_runtime;
 mod prompt_evidence_runtime;
+mod prompt_failure_curriculum_projection;
 mod prompt_evolution_campaign_budget;
 mod prompt_evolution_campaign_runtime;
 mod prompt_evolution_hot_state;

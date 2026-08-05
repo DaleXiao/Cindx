@@ -33,6 +33,8 @@
       "agent-arena-contract",
       "agent-realworld-contract",
       "agent-goal-progress-contract",
+      "agent-failure-curriculum-contract",
+      "agent-failure-curriculum-mutation-contract",
       "memory-contract",
       "frontend-test"
     ],
@@ -44,6 +46,8 @@
       "agent-arena-contract",
       "agent-realworld-contract",
       "agent-goal-progress-contract",
+      "agent-failure-curriculum-contract",
+      "agent-failure-curriculum-mutation-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests"
@@ -90,6 +94,8 @@
       "agent-arena-contract",
       "agent-realworld-contract",
       "agent-goal-progress-contract",
+      "agent-failure-curriculum-contract",
+      "agent-failure-curriculum-mutation-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests",
@@ -240,6 +246,41 @@
         "test result: ok. 1 passed; 0 failed",
         "cindx.agent.goal-delta.v1"
       ]
+    },
+    {
+      "id": "agent-failure-curriculum-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "prompt_evolution_read_model::tests::agent_failure_curriculum_contract",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prompt-failure-curriculum.v1"
+      ]
+    },
+    {
+      "id": "agent-failure-curriculum-mutation-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "tests::pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": ["test result: ok. 1 passed; 0 failed"]
     },
     {
       "id": "memory-contract",

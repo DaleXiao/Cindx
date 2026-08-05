@@ -416,6 +416,248 @@ fn untrusted_or_incomplete_runs_only_enter_the_live_canary_control_plane() {
     ));
 }
 
+fn completed_denial_metadata() -> Metadata {
+    let mut contract = agent_runtime::AgentTaskContract::default();
+    contract.begin_action_denial_epoch(0);
+    contract.require_tool_success("shell.run");
+    let input_fingerprint = agent_runtime::tool_input_fingerprint(
+        "shell.run",
+        r#"{"command":"SENSITIVE_FAILURE_CURRICULUM_SENTINEL"}"#,
+    );
+    let denial = contract
+        .record_action_denial(
+            "shell.run",
+            &input_fingerprint,
+            &agent_runtime::AgentActionDenialFeedback::runtime_policy(
+                "shell_policy_denied",
+                agent_runtime::AgentActionRecovery::FinalizeBlocked,
+            ),
+        )
+        .expect("runtime denial should be canonical");
+    let ledger = contract.completed_outcome_ledger(agent_runtime::OutcomeTerminalObservation {
+        steer_epoch: 0,
+        model_turn: 1,
+        answer: "The action was denied, so no command was run.",
+        selected_stage: "blocked_finalizer",
+        selector_quality: ResultQuality::Grounded,
+        selector_marked_verified: false,
+        selector_marked_deliverable: true,
+        selector_evidence_count: 1,
+        trusted_evidence_sequences: &[denial.evidence_sequence],
+    });
+    let mut metadata = Metadata::new();
+    assert!(ledger.insert_metadata(&mut metadata));
+    metadata.insert("outcome_ledger_status".to_string(), "recorded".to_string());
+    metadata
+}
+
+fn failed_ledger_metadata(failure: &AgentFailure) -> Metadata {
+    let ledger = agent_runtime::AgentTaskContract::default().failed_outcome_ledger(0, failure);
+    let mut metadata = Metadata::new();
+    assert!(ledger.insert_metadata(&mut metadata));
+    metadata.insert("outcome_ledger_status".to_string(), "recorded".to_string());
+    metadata
+}
+
+#[test]
+fn agent_failure_curriculum_contract() {
+    let mut denied_events = live_events(
+        "Agent task completed",
+        Some(quality_evidence(
+            IndependentQualitySource::CollaborationQualityGate,
+            9_000,
+            true,
+        )),
+        Some("20"),
+        false,
+        None,
+    );
+    denied_events[3].metadata.insert(
+        "anytime_prompt_learning_eligible".to_string(),
+        "true".to_string(),
+    );
+    denied_events
+        .last_mut()
+        .expect("terminal event")
+        .metadata
+        .extend(completed_denial_metadata());
+
+    let denied_terminal = denied_events.last().expect("terminal event");
+    assert!(crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
+        denied_terminal
+    ));
+    let denied_observation = assert_negative_live_control(&denied_events);
+    assert_eq!(denied_observation.safety_violations, 1);
+    let denied_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&denied_events);
+    assert_eq!(denied_records.len(), 1);
+    assert_eq!(
+        denied_records[0].1.receipt.kind,
+        PromptFailureCurriculumKind::Denial
+    );
+    let encoded_denial = serde_json::to_string(&denied_records[0].1.receipt).unwrap();
+    assert!(!encoded_denial.contains("SENSITIVE_FAILURE_CURRICULUM_SENTINEL"));
+    assert!(!encoded_denial.contains("shell.run"));
+
+    let objective = crate::prompt_learning_runtime::redact_prompt_learning_text(
+        "Run the requested bounded command.",
+    );
+    let run_events = denied_events.iter().collect::<Vec<_>>();
+    let teacher_receipt = crate::prompt_learning_runtime::prompt_learning_receipt(
+        orchestrator::PromptLearningPurpose::AutoTeacher,
+        "run-live",
+        "global",
+        "coding",
+        &objective,
+        &run_events,
+        denied_terminal,
+        0,
+    );
+    assert_eq!(
+        teacher_receipt.rejection,
+        orchestrator::PromptLearningRejection::PermissionDenied
+    );
+    assert!(!teacher_receipt.is_eligible());
+
+    let mut no_progress_events = vec![event(
+        10,
+        EventKind::TaskStatusChanged,
+        "Conductor prompt profile selected",
+        [],
+    )];
+    no_progress_events.push(event(
+        11,
+        EventKind::Error,
+        "Agent task failed",
+        failed_ledger_metadata(&AgentFailure::contract(
+            "no_progress",
+            "SENSITIVE_NO_PROGRESS_SENTINEL",
+        )),
+    ));
+    let no_progress_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&no_progress_events);
+    assert_eq!(no_progress_records.len(), 1);
+    assert_eq!(
+        no_progress_records[0].1.receipt.kind,
+        PromptFailureCurriculumKind::NoProgress
+    );
+    assert!(!serde_json::to_string(&no_progress_records[0].1.receipt)
+        .unwrap()
+        .contains("SENSITIVE_NO_PROGRESS_SENTINEL"));
+
+    let mut provider_events = vec![event(
+        20,
+        EventKind::TaskStatusChanged,
+        "Conductor prompt profile selected",
+        [],
+    )];
+    provider_events.push(event(
+        21,
+        EventKind::Error,
+        "Agent task failed",
+        failed_ledger_metadata(&AgentFailure::new(
+            "provider_timeout",
+            "provider noise",
+            AgentFailureClass::ProviderTransient,
+            true,
+        )),
+    ));
+    assert!(crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&provider_events).is_empty());
+
+    let envelope = AgentRecoveryEnvelope {
+        schema: AGENT_RECOVERY_SCHEMA.to_string(),
+        identity: AgentRecoveryIdentity {
+            project_id: None,
+            session_id: "session-live".to_string(),
+            resume_key: "resume-live".to_string(),
+            source_run_id: "run-live".to_string(),
+            user_turn_sequence: 1,
+            prompt_fingerprint: "prompt-fingerprint".to_string(),
+        },
+        effort: "pro".to_string(),
+        policy: "pro".to_string(),
+        queue_id: None,
+        workflow_resume_key: None,
+        state: AgentRecoveryState::Paused,
+        reason: AgentRecoveryReason::DeadlineExceeded,
+        attempts: 0,
+        model_calls: 1,
+        tool_calls: 0,
+        material_checkpoints: 0,
+        observations: 0,
+        budget_extensions: 0,
+        task_state: None,
+        resource_snapshot: None,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+    };
+    let pause_metadata = [
+        ("stop_reason".to_string(), "deadline_exceeded".to_string()),
+        (
+            "recovery_reason".to_string(),
+            "deadline_exceeded".to_string(),
+        ),
+        (
+            "recovery_envelope".to_string(),
+            serde_json::to_string(&envelope).unwrap(),
+        ),
+    ];
+    let paused_events = vec![
+        event(
+            30,
+            EventKind::TaskStatusChanged,
+            "Conductor prompt profile selected",
+            [],
+        ),
+        event(
+            31,
+            EventKind::TaskStatusChanged,
+            "Agent task paused",
+            pause_metadata.clone(),
+        ),
+        event(
+            32,
+            EventKind::TaskStatusChanged,
+            "Agent task paused",
+            pause_metadata,
+        ),
+    ];
+    let timeout_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&paused_events);
+    assert_eq!(timeout_records.len(), 1);
+    assert_eq!(
+        timeout_records[0].1.receipt.kind,
+        PromptFailureCurriculumKind::Timeout
+    );
+    let first_digest = timeout_records[0].1.receipt.digest().unwrap();
+    let replay_digest = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&paused_events)[0]
+        .1
+        .receipt
+        .digest()
+        .unwrap();
+    assert_eq!(first_digest, replay_digest);
+
+    let mut hot_curricula = vec![timeout_records[0].1.clone()];
+    let mut resolved_events = paused_events.clone();
+    resolved_events.push(event(
+        33,
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        [],
+    ));
+    let resolved_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&resolved_events)
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect();
+    replace_prompt_failure_curriculum_for_run(&mut hot_curricula, "run-live", resolved_records);
+    assert!(hot_curricula.is_empty());
+
+    let mut stale_events = paused_events;
+    stale_events[2]
+        .metadata
+        .insert("steer_epoch".to_string(), "1".to_string());
+    assert!(crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&stale_events).is_empty());
+
+    println!("{}", orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1);
+}
+
 #[test]
 fn live_observations_bind_workflow_and_typed_evidence_to_the_terminal_steer_epoch() {
     let scoped = |sequence: u64,
@@ -958,6 +1200,7 @@ fn legacy_unscoped_prompt_genomes_force_a_read_model_rebuild() {
         }],
         genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
+        failure_curricula: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
         cohort_sequences: BTreeMap::new(),
@@ -995,6 +1238,7 @@ fn prior_projection_version_replays_canonical_events_without_a_delta() {
         genomes: Vec::new(),
         genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
+        failure_curricula: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
         cohort_sequences: BTreeMap::new(),

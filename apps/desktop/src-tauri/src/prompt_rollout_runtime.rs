@@ -175,10 +175,17 @@ pub(crate) fn evaluate_prompt_evolution_read_model(
     model: &PromptEvolutionReadModel,
     effort: &str,
 ) -> Result<PromptEvolutionEvaluation, String> {
-    evaluate_prompt_evolution_with_observations(
+    let failure_curricula = model
+        .failure_curricula
+        .iter()
+        .filter(|record| record.effort == effort)
+        .map(|record| record.receipt.clone())
+        .collect::<Vec<_>>();
+    evaluate_prompt_evolution_with_curriculum(
         &prompt_evolution_profile_events(model),
         effort,
         &model.observations,
+        &failure_curricula,
     )
 }
 

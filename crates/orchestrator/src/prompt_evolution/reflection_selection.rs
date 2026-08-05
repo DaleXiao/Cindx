@@ -45,6 +45,44 @@ pub fn prompt_reflection_packets(
         .collect()
 }
 
+pub fn prompt_reflection_success_anchor(
+    observations: &[PromptEvolutionObservation],
+    profile_id: &str,
+) -> Option<AgentEvaluationReflectionPacket> {
+    let active_dataset_sha256 = latest_scientific_training_dataset_digest(observations)?;
+    let mut candidates = observations
+        .iter()
+        .filter(|observation| {
+            observation.profile_id == profile_id
+                && observation.split == PromptEvaluationSplit::Train
+                && observation.mode == PromptEvaluationMode::PairedExecution
+                && observation.is_scientific_evidence()
+                && observation.scientific_cohort_sha256() == Some(active_dataset_sha256)
+                && observation.format_valid
+                && observation.succeeded
+                && observation.safety_violations == 0
+        })
+        .filter(|observation| {
+            observation
+                .reflection_packet
+                .as_ref()
+                .is_some_and(|packet| packet.candidate_id == profile_id && packet.verifier.passed)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .quality_score
+            .total_cmp(&left.quality_score)
+            .then_with(|| left.latency_ms.cmp(&right.latency_ms))
+            .then_with(|| left.total_tokens.cmp(&right.total_tokens))
+            .then_with(|| left.case_id.cmp(&right.case_id))
+            .then_with(|| left.evaluation_id.cmp(&right.evaluation_id))
+    });
+    candidates
+        .first()
+        .and_then(|observation| observation.reflection_packet.clone())
+}
+
 pub fn prompt_transfer_reflection_packets(
     observations: &[PromptEvolutionObservation],
     profile_id: &str,
@@ -190,10 +228,10 @@ pub fn prompt_transfer_reflection_pairs(
         .collect()
 }
 
-fn select_high_information_observations<'a>(
-    mut observations: Vec<&'a PromptEvolutionObservation>,
+fn select_high_information_observations(
+    mut observations: Vec<&PromptEvolutionObservation>,
     limit: usize,
-) -> Vec<&'a PromptEvolutionObservation> {
+) -> Vec<&PromptEvolutionObservation> {
     observations.sort_by(|left, right| {
         reflection_information_score(right)
             .cmp(&reflection_information_score(left))

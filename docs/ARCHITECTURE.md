@@ -300,6 +300,17 @@ the two foreground runtimes:
    valid frozen snapshot; missing or regressed lineage rolls back to the prior
    stable profile.
 
+An isolated Pro failure curriculum complements these positive observations.
+The desktop projection derives typed, hash-only timeout, denial, and no-progress
+receipts from canonical terminal or recovery events in the current steer epoch.
+The portable orchestrator validates their project, run, profile, policy, epoch,
+and source bindings and converts them only to negative `FailureSeed`
+reflections. A mutation may consume them only when a successful scientific
+train observation for the same profile supplies the comparison anchor. At most
+two diverse failure seeds share the existing six-reflection ceiling with
+ordinary and Auto-transfer evidence. They never enter teacher, Goal Delta,
+canary-success, promotion, or distillation lineages.
+
 This path adds no model call to the foreground user request. Missing independent
 reviewers, incomplete evidence, changed Auto lineage, disagreement, or an
 insufficient train/holdout cohort fails closed and leaves the current stable Pro
@@ -382,7 +393,7 @@ and rollback helpers in `prompt_canary_runtime`; the evolution read model and
 rollout reconciler compose those narrower responsibilities.
 
 The evolution read model scopes learned genomes, observations, offline
-datasets, and rollout state by project. Records without a durable scope are
+datasets, failure curricula, and rollout state by project. Records without a durable scope are
 rebuilt from canonical events before they can participate in selection. Its
 projection version is explicit, so a semantic projection change forces a
 canonical replay instead of trusting a structurally compatible stale cache.

@@ -746,6 +746,42 @@ pub(crate) fn upsert_prompt_observation(
     observations.push((effort, observation));
 }
 
+pub(crate) fn upsert_prompt_failure_curriculum(
+    curricula: &mut Vec<PromptFailureCurriculumRecord>,
+    record: PromptFailureCurriculumRecord,
+) {
+    if record.effort != "pro"
+        || record.scope.trim().is_empty()
+        || !record.receipt.matches_project(&record.scope)
+    {
+        return;
+    }
+    curricula.retain(|existing| {
+        !(existing.scope == record.scope
+            && existing.effort == record.effort
+            && existing.receipt.run_sha256 == record.receipt.run_sha256
+            && existing.receipt.profile_sha256 == record.receipt.profile_sha256
+            && existing.receipt.steer_epoch == record.receipt.steer_epoch
+            && existing.receipt.kind == record.receipt.kind
+            && existing.receipt.failure_code == record.receipt.failure_code
+            && existing.receipt.denial_kind == record.receipt.denial_kind
+            && existing.receipt.tool_sha256 == record.receipt.tool_sha256
+            && existing.receipt.input_fingerprint == record.receipt.input_fingerprint)
+    });
+    curricula.push(record);
+}
+
+pub(crate) fn replace_prompt_failure_curriculum_for_run(
+    curricula: &mut Vec<PromptFailureCurriculumRecord>,
+    run_id: &str,
+    records: Vec<PromptFailureCurriculumRecord>,
+) {
+    curricula.retain(|record| !record.receipt.matches_run(run_id));
+    for record in records {
+        upsert_prompt_failure_curriculum(curricula, record);
+    }
+}
+
 pub(crate) fn build_prompt_evolution_read_model(
     events: &[Event],
     revision: u64,
@@ -759,6 +795,7 @@ pub(crate) fn build_prompt_evolution_read_model(
         genomes: Vec::new(),
         genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
+        failure_curricula: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
         cohort_sequences: BTreeMap::new(),
@@ -773,6 +810,17 @@ pub(crate) fn build_prompt_evolution_read_model(
             .entry(sequence)
             .or_default()
             .push((effort, observation));
+    }
+    let mut curricula_by_sequence = BTreeMap::<u64, Vec<PromptFailureCurriculumRecord>>::new();
+    for (sequence, record) in
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            events,
+        )
+    {
+        curricula_by_sequence
+            .entry(sequence)
+            .or_default()
+            .push(record);
     }
     let mut ordered_events = events.iter().collect::<Vec<_>>();
     ordered_events.sort_by_key(|event| event.sequence);
@@ -801,6 +849,11 @@ pub(crate) fn build_prompt_evolution_read_model(
         if let Some(observations) = observations_by_sequence.remove(&event.sequence) {
             for (effort, observation) in observations {
                 upsert_prompt_observation(&mut model.observations, effort, observation);
+            }
+        }
+        if let Some(records) = curricula_by_sequence.remove(&event.sequence) {
+            for record in records {
+                upsert_prompt_failure_curriculum(&mut model.failure_curricula, record);
             }
         }
         crate::prompt_distillation_runtime::apply_prompt_distillation_event(&mut model, event);
@@ -861,6 +914,7 @@ fn project_prompt_evolution_read_model(
         genomes: Vec::new(),
         genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
+        failure_curricula: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
         cohort_sequences: BTreeMap::new(),
@@ -939,7 +993,9 @@ fn project_prompt_evolution_read_model(
                 upsert_prompt_observation(&mut model.observations, effort, observation);
             }
             crate::prompt_distillation_runtime::apply_prompt_distillation_event(&mut model, event);
-            let terminal_scope = if is_agent_run_terminal(event) {
+            let terminal_scope = if is_agent_run_terminal(event)
+                || AgentRunEvent::from_event(event) == Some(AgentRunEvent::Paused)
+            {
                 event
                     .metadata
                     .get("agent_run_id")
@@ -962,6 +1018,17 @@ fn project_prompt_evolution_read_model(
                 {
                     upsert_prompt_observation(&mut model.observations, effort, observation);
                 }
+                if scope == "agent_run_id" {
+                    let records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&scoped_events)
+                        .into_iter()
+                        .map(|(_, record)| record)
+                        .collect();
+                    replace_prompt_failure_curriculum_for_run(
+                        &mut model.failure_curricula,
+                        value,
+                        records,
+                    );
+                }
             }
             apply_prompt_rollout_event(&mut model, event);
         }
@@ -978,6 +1045,11 @@ fn prompt_genome_scopes_are_valid(model: &PromptEvolutionReadModel) -> bool {
         .iter()
         .all(|record| !record.scope.trim().is_empty())
         && prompt_genome_identities_are_valid(model)
+        && model.failure_curricula.iter().all(|record| {
+            record.effort == "pro"
+                && !record.scope.trim().is_empty()
+                && record.receipt.matches_project(&record.scope)
+        })
 }
 
 fn compare_exchange_prompt_evolution_read_model(

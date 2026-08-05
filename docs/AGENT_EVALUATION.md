@@ -18,6 +18,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Agent Real-World V4 execution contract | current source | Prospective 72-cell matrix with isolated HTTP fixtures and typed tool/effect receipts | Deterministic measurement contract only; no V4 provider-backed observations or intelligence-uplift claim |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
+| Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
 The `0.2.3` V3 matrix is the latest complete provider-backed product baseline.
@@ -59,6 +60,15 @@ it defeated, and uses an immutable, dual-sided staged canary with conflict-safe
 evidence replay. These are deterministic eligibility and rollback mechanisms;
 they do not establish that a distilled Auto profile improves provider-backed
 answer quality.
+
+The current Pro mutation path also has an isolated negative failure curriculum.
+Its exact contract proves that only typed current-epoch timeout, denial, and
+no-progress facts survive redaction; a successful scientific observation must
+anchor their use; selection remains diverse, deterministic, and within the
+existing six-packet context limit; and the same failures remain ineligible for
+positive, teacher, canary-success, promotion, or distillation roles. This proves
+the learning boundary, not that model-generated challengers improve answer
+quality.
 
 ## Evidence Levels
 

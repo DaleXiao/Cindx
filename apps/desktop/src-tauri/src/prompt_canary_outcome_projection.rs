@@ -191,7 +191,10 @@ pub(crate) fn prompt_live_canary_outcome_records_from_events(
                         })
                 })
                 .count() as u64;
-            let succeeded = evidence_succeeded && permission_denials == 0;
+            let blocking_denials = permission_denials.max(u64::from(
+                crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(terminal),
+            ));
+            let succeeded = evidence_succeeded && blocking_denials == 0;
             let total_tokens = learning_evidence
                 .as_ref()
                 .and_then(|evidence| trusted_run_lineage_total_tokens(terminal, evidence))
@@ -239,7 +242,7 @@ pub(crate) fn prompt_live_canary_outcome_records_from_events(
                     split: PromptEvaluationSplit::Train,
                     mode: PromptEvaluationMode::Live,
                     format_valid: completed
-                        && permission_denials == 0
+                        && blocking_denials == 0
                         && learning_evidence.is_some()
                         && (plan.is_some() || bounded_profile),
                     succeeded,
@@ -250,7 +253,7 @@ pub(crate) fn prompt_live_canary_outcome_records_from_events(
                     total_tokens,
                     estimated_cost_microusd: 0,
                     safety_violations: measured_safety_violations
-                        .saturating_add(permission_denials),
+                        .saturating_add(blocking_denials),
                     relative_reward,
                     step_credits,
                     reflection_packet: None,

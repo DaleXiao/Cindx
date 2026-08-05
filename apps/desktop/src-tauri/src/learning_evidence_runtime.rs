@@ -160,6 +160,11 @@ pub(crate) fn routing_learning_evidence(
     else {
         return censored();
     };
+    if crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
+        terminal,
+    ) {
+        return censored();
+    }
     if usage == LearningUsageCompleteness::Missing || termination != LearningTermination::Completed
     {
         return censored();
@@ -234,6 +239,11 @@ pub(crate) fn workflow_learning_evidence(
     }) else {
         return censored();
     };
+    if crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
+        run_terminal,
+    ) {
+        return censored();
+    }
     let Some(persisted) = LearningEvidenceV1::from_metadata(&run_terminal.metadata) else {
         return censored();
     };

@@ -916,6 +916,13 @@ pub(crate) struct PromptEvaluationAttemptState {
     pub(crate) terminal: Option<PromptEvaluationAttemptEventV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PromptFailureCurriculumRecord {
+    pub(crate) scope: String,
+    pub(crate) effort: String,
+    pub(crate) receipt: PromptFailureCurriculumReceiptV1,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PromptEvolutionReadModel {
     pub(crate) schema: String,
@@ -927,6 +934,8 @@ pub(crate) struct PromptEvolutionReadModel {
     #[serde(default)]
     pub(crate) genome_identity_fingerprints: BTreeMap<String, String>,
     pub(crate) observations: Vec<(String, PromptEvolutionObservation)>,
+    #[serde(default)]
+    pub(crate) failure_curricula: Vec<PromptFailureCurriculumRecord>,
     #[serde(default)]
     pub(crate) attempts: BTreeMap<String, PromptEvaluationAttemptState>,
     #[serde(default)]

@@ -3793,6 +3793,7 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
         genomes: Vec::new(),
         genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
+        failure_curricula: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
         cohort_sequences: BTreeMap::new(),
@@ -4001,6 +4002,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         }],
         genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
+        failure_curricula: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
         cohort_sequences: BTreeMap::new(),
@@ -4250,6 +4252,7 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
         }],
         genome_identity_fingerprints: BTreeMap::new(),
         observations: Vec::new(),
+        failure_curricula: Vec::new(),
         attempts: BTreeMap::new(),
         cohorts: BTreeMap::new(),
         cohort_sequences: BTreeMap::new(),
@@ -8778,7 +8781,7 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
         prompt_transfer_reflection_pairs(&observations, profile_id, 2).len(),
         4
     );
-    let packets = prompt_mutation_reflection_packets(&observations, profile_id, "pro");
+    let packets = prompt_mutation_reflection_packets(&observations, &[], profile_id, "pro");
     assert_eq!(packets.len(), 6);
     assert_eq!(
         packets
@@ -8794,6 +8797,76 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             .count(),
         4
     );
+
+    let failure = PromptFailureCurriculumReceiptV1::new(PromptFailureCurriculumInput {
+        kind: PromptFailureCurriculumKind::NoProgress,
+        project_id: "project-a",
+        run_id: "failed-pro-run",
+        profile_id,
+        policy: "pro",
+        task_class: "coding",
+        steer_epoch: 0,
+        contract_epoch: 0,
+        source_event_sequence: 42,
+        source_evidence_sha256: &"f".repeat(64),
+        failure_code: "no_progress",
+        denial_kind: None,
+        tool_name: None,
+        input_fingerprint: None,
+    })
+    .unwrap();
+    let contrastive =
+        prompt_mutation_reflection_packets(&observations, &[failure.clone()], profile_id, "pro");
+    assert_eq!(contrastive.len(), 6);
+    assert_eq!(
+        contrastive
+            .iter()
+            .filter(|packet| {
+                packet.suite_id == orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1
+            })
+            .count(),
+        1
+    );
+    assert!(contrastive.iter().any(|packet| packet.verifier.passed));
+
+    let mut failure_only = observations.clone();
+    for observation in &mut failure_only {
+        observation.succeeded = false;
+        if let Some(packet) = observation.reflection_packet.as_mut() {
+            packet.verifier.passed = false;
+            packet.verifier.score = 0.0;
+        }
+    }
+    let without_anchor =
+        prompt_mutation_reflection_packets(&failure_only, &[failure.clone()], profile_id, "pro");
+    assert!(without_anchor.iter().all(|packet| {
+        packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1
+    }));
+
+    let mut invalid_anchor = observations.clone();
+    for observation in &mut invalid_anchor {
+        if observation.profile_id == profile_id {
+            observation.format_valid = false;
+        }
+    }
+    assert!(prompt_mutation_reflection_packets(
+        &invalid_anchor,
+        &[failure.clone()],
+        profile_id,
+        "pro",
+    )
+    .iter()
+    .all(|packet| packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1));
+
+    let mut unsafe_anchor = observations;
+    for observation in &mut unsafe_anchor {
+        if observation.profile_id == profile_id {
+            observation.safety_violations = 1;
+        }
+    }
+    assert!(prompt_mutation_reflection_packets(&unsafe_anchor, &[failure], profile_id, "pro")
+        .iter()
+        .all(|packet| packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1));
 }
 
 #[test]

@@ -2,17 +2,40 @@ use super::*;
 
 pub(crate) fn prompt_mutation_reflection_packets(
     observations: &[PromptEvolutionObservation],
+    failure_curricula: &[PromptFailureCurriculumReceiptV1],
     profile_id: &str,
     effort: &str,
 ) -> Vec<AgentEvaluationReflectionPacket> {
-    let mut transfer = if effort == "pro" {
+    let transfer = if effort == "pro" {
         prompt_transfer_reflection_pairs(observations, profile_id, 2)
     } else {
         Vec::new()
     };
-    let ordinary_limit = 6usize.saturating_sub(transfer.len());
-    let mut packets = prompt_reflection_packets(observations, profile_id, ordinary_limit);
-    packets.append(&mut transfer);
+    let failures = if effort == "pro" {
+        prompt_failure_reflection_packets(failure_curricula, profile_id, 2)
+    } else {
+        Vec::new()
+    };
+    let ordinary_limit = if failures.is_empty() {
+        6usize.saturating_sub(transfer.len())
+    } else {
+        6
+    };
+    let ordinary = prompt_reflection_packets(observations, profile_id, ordinary_limit);
+    let anchor = (!failures.is_empty())
+        .then(|| prompt_reflection_success_anchor(observations, profile_id))
+        .flatten();
+    let mut packets = if let Some(anchor) = anchor {
+        let mut contrastive = vec![anchor];
+        contrastive.extend(failures);
+        contrastive.extend(transfer.into_iter().take(2));
+        contrastive.extend(ordinary);
+        contrastive
+    } else {
+        let mut packets = ordinary;
+        packets.extend(transfer);
+        packets
+    };
     let mut seen = BTreeSet::new();
     packets.retain(|packet| {
         seen.insert((
@@ -34,10 +57,20 @@ pub(crate) fn evaluate_prompt_evolution(
     evaluate_prompt_evolution_with_observations(events, effort, &observations)
 }
 
+#[cfg(test)]
 pub(crate) fn evaluate_prompt_evolution_with_observations(
     events: &[Event],
     effort: &str,
     all_observations: &[(String, PromptEvolutionObservation)],
+) -> Result<PromptEvolutionEvaluation, String> {
+    evaluate_prompt_evolution_with_curriculum(events, effort, all_observations, &[])
+}
+
+pub(crate) fn evaluate_prompt_evolution_with_curriculum(
+    events: &[Event],
+    effort: &str,
+    all_observations: &[(String, PromptEvolutionObservation)],
+    failure_curricula: &[PromptFailureCurriculumReceiptV1],
 ) -> Result<PromptEvolutionEvaluation, String> {
     let known_population = prompt_genomes_from_events(events, effort);
     let known_ids = known_population
@@ -304,7 +337,14 @@ pub(crate) fn evaluate_prompt_evolution_with_observations(
         .filter(|genome| genome.generation < PROMPT_EVOLUTION_MAX_GENERATION);
     let mutation_trajectories = mutation_candidate
         .as_ref()
-        .map(|parent| prompt_mutation_reflection_packets(&observations, &parent.id, effort))
+        .map(|parent| {
+            prompt_mutation_reflection_packets(
+                &observations,
+                failure_curricula,
+                &parent.id,
+                effort,
+            )
+        })
         .unwrap_or_default();
     let mutation_parent = mutation_candidate.filter(|_| !mutation_trajectories.is_empty());
     Ok(PromptEvolutionEvaluation {
@@ -593,6 +633,7 @@ pub(crate) fn prompt_evolution_state(
         })
         .collect::<BTreeMap<_, _>>();
     let datasets = model.datasets.clone();
+    let failure_curricula = model.failure_curricula;
     let observations = model.observations;
     let mut profile_rows = Vec::new();
     let mut effort_rows = Vec::new();
@@ -608,9 +649,18 @@ pub(crate) fn prompt_evolution_state(
         .snapshot()
         .unwrap_or_default();
     for effort in ["fast", "auto", "pro"] {
-        let evaluation =
-            evaluate_prompt_evolution_with_observations(&events, effort, &observations)
-                .map_err(StorageError::new)?;
+        let effort_failure_curricula = failure_curricula
+            .iter()
+            .filter(|record| record.effort == effort)
+            .map(|record| record.receipt.clone())
+            .collect::<Vec<_>>();
+        let evaluation = evaluate_prompt_evolution_with_curriculum(
+            &events,
+            effort,
+            &observations,
+            &effort_failure_curricula,
+        )
+        .map_err(StorageError::new)?;
         observed_runs += evaluation.observations.len();
         population_size += evaluation.population.len();
         frontier_profiles += evaluation.frontier_ids.len();

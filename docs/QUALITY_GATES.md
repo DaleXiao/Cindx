@@ -104,6 +104,12 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   `Blocked` ledger projection, and visible honest terminal disclosure. This is
   a deterministic control contract, not provider-backed post-denial quality
   evidence.
+- The exact failure-curriculum gates project only canonical current-epoch Pro
+  timeout, denial, and no-progress facts into bounded hash-only negative seeds.
+  It proves redaction, scope binding, deterministic replay and diversity, a
+  successful scientific anchor, the shared six-packet ceiling, and exclusion
+  from positive, teacher, canary-success, promotion, and distillation roles. It
+  does not prove that a generated challenger is more intelligent.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.
