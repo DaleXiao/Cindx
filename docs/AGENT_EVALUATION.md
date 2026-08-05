@@ -15,6 +15,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md) | `0.1.82` | Prior 72-cell V2 attempt | Four infrastructure-failed RAG/memory cells make it `INVALID_BASELINE`; retained for diagnosis only |
 | [Agent Real-World V1](evaluations/CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md) | `0.1.82` | 6 tool, state, memory, and safety tasks; Direct/Fast/Auto/Pro; 72 matched runs | Fast, Auto, and Pro each scored `72.2%`; Auto and Pro added no quality over Fast and had lower completion plus higher latency; `NO-GO` for orchestration uplift |
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
+| Agent Real-World V4 execution contract | current source | Prospective 72-cell matrix with isolated HTTP fixtures and typed tool/effect receipts | Deterministic measurement contract only; no V4 provider-backed observations or intelligence-uplift claim |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
 The `0.2.3` V3 matrix is the latest complete provider-backed product baseline.
@@ -144,16 +145,34 @@ post-denial convergence at least non-regressive against Fast.
 
 ## Current Product Gate
 
-`benchmarks/agent/realworld-v3.json` freezes the current matched product
-protocol. It retains the six V2 product cases and three repeats for Direct,
-Fast, Auto, and Pro, but replaces the fixed treatment sequence with a frozen
-cyclic Latin-square order. The resulting 72-cell plan balances treatment
-position across case blocks while preserving a globally stable execution index
-for interruption and resume. V3 also preregisters non-regression and resource
-ceilings against Fast: both Auto and Pro must preserve quality and completion,
-stay within their separate latency and token ratios, and at least one must add
-one passing or completed run. Setup failures, safety violations, or incomplete
-strategy/provider receipts make promotion fail closed.
+`benchmarks/agent/realworld-v4.json` freezes the current prospective execution
+contract. It preserves the six product cases, three repeats, Direct/Fast/Auto/Pro
+treatments, cyclic Latin-square execution order, non-regression thresholds, and
+resource ceilings used by V3. V4 changes the measurement boundary: every browser
+cell gets an isolated loopback HTTP fixture, and product tool obligations are
+derived from typed receipts for the current Agent run rather than tool-start
+events or tool names alone. Only successful receipts can satisfy a required
+tool. Projected failed, denied, cancelled, and unfinished attempts remain in the
+tool-call denominator; a process-level timeout remains a failed matrix cell even
+when it cannot emit a final tool receipt. Browser verification additionally
+requires the exact resolved URL and artifact or postcondition digests that bind
+evidence to the frozen case.
+Setup failures, safety violations, incomplete strategy/provider receipts, or
+missing effect evidence make promotion fail closed.
+
+The V4 contract has deterministic structural coverage through
+`node --test scripts/agent-realworld-contract.test.mjs`, but no V4 provider-backed
+matrix has been executed. It is therefore a prospective measurement contract,
+not evidence that the Agent, Auto, Pro, GEPA, or self-distillation improved.
+
+`benchmarks/agent/realworld-v3.json` freezes the protocol used by the latest
+measured product baseline. Its 72-cell plan balances treatment position across
+case blocks while preserving a globally stable execution index for interruption
+and resume. V3 preregistered non-regression and resource ceilings against Fast:
+both Auto and Pro had to preserve quality and completion, stay within their
+separate latency and token ratios, and at least one had to add one passing or
+completed run. Setup failures, safety violations, or incomplete
+strategy/provider receipts made promotion fail closed.
 
 The V3 raw and sanitized schemas bind the exact source revision, application
 version, suite and execution-plan digests, configured role models, resolved
@@ -222,14 +241,14 @@ The real-world Agent runner follows the same explicit opt-in boundary:
 
 ```sh
 node scripts/run-agent-realworld.mjs \
-  --raw /private/tmp/cindx-agent-realworld-v3.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V3.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V3.md
+  --raw /private/tmp/cindx-agent-realworld-v4.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V4.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V4.md
 
 node scripts/run-agent-realworld.mjs --execute \
-  --raw /private/tmp/cindx-agent-realworld-v3.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V3.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V3.md
+  --raw /private/tmp/cindx-agent-realworld-v4.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V4.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V4.md
 ```
 
 Without `--execute`, it performs only Git, provider, suite, and output-boundary

@@ -26,9 +26,9 @@ function hash(value) {
 
 function fixture() {
   const suite = {
-    schema: "cindx.agent-realworld-suite.v2",
+    schema: "cindx.agent-realworld-suite.v3",
     id: "fixture",
-    version: 3,
+    version: 4,
     description: "fixture",
     default_replicates: 1,
     per_run_timeout_seconds: 600,
@@ -50,7 +50,16 @@ function fixture() {
       maximum_safety_violations: 0
     },
     treatments: ["direct", "fast", "auto", "pro"],
-    cases: [{ id: "case-a", category: "coding" }]
+    cases: [
+      {
+        id: "case-a",
+        category: "coding",
+        verification: {
+          required_tools_any: ["file.read"],
+          required_tools_all: []
+        }
+      }
+    ]
   };
   const suiteBytes = Buffer.from(JSON.stringify(suite));
   const output = "private answer";
@@ -118,6 +127,23 @@ function fixture() {
     evidence_error: null,
     configured_models: ["model-a"],
     tools_used: entry.treatment === "direct" ? [] : ["file.read"],
+    fixture_receipt: null,
+    tool_receipts:
+      entry.treatment === "direct"
+        ? []
+        : [
+            {
+              call_sha256: hash(`call-${entry.executionIndex}`),
+              tool: "file.read",
+              status: "succeeded",
+              input_fingerprint: hash(`input-${entry.executionIndex}`),
+              started_sequence: 1,
+              finished_sequence: 2,
+              target_sha256: null,
+              evidence_sha256: null,
+              artifacts: []
+            }
+          ],
     memory_records_after_seed: null,
     input_sha256: "a".repeat(64),
     output_sha256: hash(output),
@@ -165,6 +191,13 @@ function fixture() {
       model_calls: 1,
       model_responses: 1,
       tool_calls: entry.treatment === "direct" ? 0 : 1,
+      tool_succeeded: entry.treatment === "direct" ? 0 : 1,
+      tool_failed: 0,
+      tool_cancelled: 0,
+      tool_denied: 0,
+      tool_incomplete: 0,
+      tool_superseded: 0,
+      tool_invalid: 0,
       permission_requests: 0,
       denied_permissions: 0,
       recovery_events: 0,
@@ -182,11 +215,13 @@ function fixture() {
       passed_checks: 1,
       total_checks: 1,
       safety_violations: 0,
-      failures: []
+      failures: [],
+      expected_browser_target_sha256: null,
+      postcondition_receipts: []
     }
   }));
   const raw = {
-    schema: "cindx.agent-realworld-raw.v2",
+    schema: "cindx.agent-realworld-raw.v3",
     suite_id: suite.id,
     suite_version: suite.version,
     suite_description: suite.description,
@@ -210,9 +245,103 @@ function fixture() {
   return { suite, suiteBytes, raw, rawBytes };
 }
 
+function browserFixture() {
+  const value = fixture();
+  const body = "<!doctype html><title>Fixture</title><p>incident evidence</p>";
+  const targetUrl = "http://127.0.0.1:41731/fixture/case-a/site/index.html";
+  const targetSha256 = hash(targetUrl);
+  const bodySha256 = hash(body);
+  value.suite.cases = [
+    {
+      id: "case-a",
+      category: "browser",
+      files: [{ path: "site/index.html", content: body }],
+      verification: {
+        required_tools_any: ["browser.extract_text"],
+        required_tools_all: ["browser.open"],
+        browser_target_receipt: {
+          tools_all: ["browser.open"],
+          tools_any: ["browser.extract_text"],
+          minimum_artifacts: 1
+        }
+      }
+    }
+  ];
+  value.suiteBytes = Buffer.from(JSON.stringify(value.suite));
+  value.raw.suite_sha256 = hash(value.suiteBytes);
+  const profileArtifacts = {
+    auto: { ...value.raw.profile_artifacts.auto, path: null },
+    pro: { ...value.raw.profile_artifacts.pro, path: null }
+  };
+  const plan = evaluationPlan(
+    {
+      suite: value.suite,
+      suiteSha256: value.raw.suite_sha256,
+      gitHead: value.raw.git_commit,
+      replicates: 1,
+      providerBinding: {
+        provider_id: value.raw.provider_id,
+        provider_endpoint: value.raw.provider_endpoint,
+        configured_models: value.raw.configured_models
+      },
+      providerConfigSha256: value.raw.provider_config_sha256,
+      profileArtifacts
+    },
+    {}
+  );
+  value.raw.execution_plan_sha256 = plan.sha256;
+  for (const run of value.raw.runs) {
+    run.category = "browser";
+    run.fixture_receipt = {
+      target_sha256: targetSha256,
+      body_sha256: bodySha256,
+      successful_requests: run.treatment === "direct" ? 0 : 1
+    };
+    run.verification.expected_browser_target_sha256 =
+      run.treatment === "direct" ? null : targetSha256;
+    if (run.treatment === "direct") continue;
+    run.tools_used = ["browser.open", "browser.extract_text"];
+    run.tool_receipts = [
+      {
+        call_sha256: hash(`browser-open-${run.execution_index}`),
+        tool: "browser.open",
+        status: "succeeded",
+        input_fingerprint: hash(`browser-open-input-${run.execution_index}`),
+        started_sequence: 1,
+        finished_sequence: 2,
+        target_sha256: targetSha256,
+        evidence_sha256: null,
+        artifacts: []
+      },
+      {
+        call_sha256: hash(`browser-evidence-${run.execution_index}`),
+        tool: "browser.extract_text",
+        status: "succeeded",
+        input_fingerprint: hash(`browser-evidence-input-${run.execution_index}`),
+        started_sequence: 3,
+        finished_sequence: 4,
+        target_sha256: targetSha256,
+        evidence_sha256: hash("browser evidence"),
+        artifacts: [
+          {
+            path_sha256: hash("artifacts/browser-evidence.txt"),
+            content_sha256: hash("browser evidence"),
+            bytes: 16,
+            mime_type: "text/plain"
+          }
+        ]
+      }
+    ];
+    run.metrics.tool_calls = 2;
+    run.metrics.tool_succeeded = 2;
+  }
+  value.rawBytes = Buffer.from(JSON.stringify(value.raw));
+  return { ...value, targetUrl, targetSha256 };
+}
+
 test("validates the complete matrix and removes private output", () => {
   const report = validateAndSanitize(fixture());
-  assert.equal(report.schema, "cindx.agent-realworld-sanitized.v2");
+  assert.equal(report.schema, "cindx.agent-realworld-sanitized.v3");
   assert.equal(report.decision.status, "VALID_BASELINE");
   assert.equal(report.aggregates.fast.quality_pass_rate, 1);
   assert.equal(report.paired_against_fast.pro.quality_pass_delta, 0);
@@ -239,6 +368,258 @@ test("validates the complete matrix and removes private output", () => {
   assert.match(markdown, /Broad orchestration uplift: \*\*NO-GO\*\*/);
   assert.match(markdown, /fresh-seed quality evidence/i);
   assert.doesNotMatch(markdown, /private answer|secret|key=private/);
+});
+
+test("binds browser success to the exact HTTP fixture target and artifact evidence", () => {
+  const browser = browserFixture();
+  const fast = browser.raw.runs.find((run) => run.treatment === "fast");
+  fast.output = `private ${browser.targetUrl} /private/fixture/site/index.html`;
+  fast.output_sha256 = hash(fast.output);
+  browser.rawBytes = Buffer.from(JSON.stringify(browser.raw));
+  const report = validateAndSanitize(browser);
+  const sanitized = JSON.stringify(report);
+  const sanitizedFast = report.runs.find((run) => run.treatment === "fast");
+  assert.equal(sanitizedFast.fixture_receipt.target_sha256, browser.targetSha256);
+  assert.equal(sanitizedFast.tool_receipts[1].artifacts.length, 1);
+  assert.doesNotMatch(sanitized, /127\.0\.0\.1|\/private\/fixture|site\/index\.html/);
+
+  const wrongTarget = browserFixture();
+  wrongTarget.raw.runs.find((run) => run.treatment === "fast").tool_receipts[1].target_sha256 =
+    hash("http://127.0.0.1:41731/wrong");
+  wrongTarget.rawBytes = Buffer.from(JSON.stringify(wrongTarget.raw));
+  assert.throws(
+    () => validateAndSanitize(wrongTarget),
+    /browser evidence lacks an exact-target artifact receipt/
+  );
+
+  const missingArtifact = browserFixture();
+  missingArtifact.raw.runs.find(
+    (run) => run.treatment === "auto"
+  ).tool_receipts[1].artifacts = [];
+  missingArtifact.rawBytes = Buffer.from(JSON.stringify(missingArtifact.raw));
+  assert.throws(
+    () => validateAndSanitize(missingArtifact),
+    /browser evidence lacks an exact-target artifact receipt/
+  );
+
+  const tamperedBody = browserFixture();
+  tamperedBody.raw.runs.find((run) => run.treatment === "pro").fixture_receipt.body_sha256 =
+    hash("tampered");
+  tamperedBody.rawBytes = Buffer.from(JSON.stringify(tamperedBody.raw));
+  assert.throws(() => validateAndSanitize(tamperedBody), /HTTP fixture body hash mismatch/);
+});
+
+test("counts failed tool receipts without letting them satisfy required tools", () => {
+  const forged = fixture();
+  const fast = forged.raw.runs.find((run) => run.treatment === "fast");
+  fast.tool_receipts[0].status = "failed";
+  fast.tools_used = [];
+  fast.metrics.tool_succeeded = 0;
+  fast.metrics.tool_failed = 1;
+  forged.rawBytes = Buffer.from(JSON.stringify(forged.raw));
+  assert.throws(() => validateAndSanitize(forged), /required tools lack successful receipts/);
+
+  fast.verification.quality_passed = false;
+  fast.verification.external_effect_passed = false;
+  forged.rawBytes = Buffer.from(JSON.stringify(forged.raw));
+  const report = validateAndSanitize(forged);
+  assert.equal(report.aggregates.fast.runs, 1);
+  assert.equal(report.aggregates.fast.tool_calls, 1);
+  assert.equal(report.aggregates.fast.tool_succeeded, 0);
+  assert.equal(report.aggregates.fast.tool_failed, 1);
+  assert.equal(report.aggregates.fast.quality_pass_rate, 0);
+});
+
+test("keeps a timed-out run with no successful tool receipt in the denominator", () => {
+  const timedOut = fixture();
+  const auto = timedOut.raw.runs.find((run) => run.treatment === "auto");
+  auto.completed = false;
+  auto.terminal_status = "timed_out";
+  auto.error = "frozen deadline";
+  auto.tools_used = [];
+  auto.tool_receipts = [];
+  auto.metrics.tool_calls = 0;
+  auto.metrics.tool_succeeded = 0;
+  auto.verification.quality_passed = false;
+  auto.verification.answer_passed = false;
+  auto.verification.external_effect_passed = false;
+  auto.verification.passed_checks = 0;
+  auto.verification.total_checks = 1;
+  auto.verification.postcondition_receipts = [];
+  auto.verification.failures = ["run did not reach verification"];
+  timedOut.rawBytes = Buffer.from(JSON.stringify(timedOut.raw));
+
+  const report = validateAndSanitize(timedOut);
+  assert.equal(report.runs.length, 4);
+  assert.equal(report.outcomes.timeouts, 1);
+  assert.equal(report.aggregates.auto.runs, 1);
+  assert.equal(report.aggregates.auto.tool_calls, 0);
+  assert.equal(report.aggregates.auto.quality_pass_rate, 0);
+});
+
+test("binds completion strictly to the completed terminal status", () => {
+  const falseCompletion = fixture();
+  falseCompletion.raw.runs.find((run) => run.treatment === "auto").terminal_status =
+    "timed_out";
+  falseCompletion.rawBytes = Buffer.from(JSON.stringify(falseCompletion.raw));
+  assert.throws(
+    () => validateAndSanitize(falseCompletion),
+    /completed flag and terminal status disagree/
+  );
+
+  const falseTerminal = fixture();
+  falseTerminal.raw.runs.find((run) => run.treatment === "pro").completed = false;
+  falseTerminal.rawBytes = Buffer.from(JSON.stringify(falseTerminal.raw));
+  assert.throws(
+    () => validateAndSanitize(falseTerminal),
+    /completed flag and terminal status disagree/
+  );
+});
+
+test("binds tool receipt status to a complete ordered lifecycle", () => {
+  const metricByStatus = {
+    succeeded: "tool_succeeded",
+    failed: "tool_failed",
+    cancelled: "tool_cancelled",
+    denied: "tool_denied",
+    superseded: "tool_superseded"
+  };
+  for (const [status, metric] of Object.entries(metricByStatus)) {
+    const value = fixture();
+    const fast = value.raw.runs.find((run) => run.treatment === "fast");
+    fast.tool_receipts[0].status = status;
+    fast.tool_receipts[0].finished_sequence = null;
+    fast.metrics.tool_succeeded = 0;
+    fast.metrics[metric] = 1;
+    if (status !== "succeeded") {
+      fast.tools_used = [];
+      fast.verification.quality_passed = false;
+      fast.verification.external_effect_passed = false;
+    }
+    value.rawBytes = Buffer.from(JSON.stringify(value.raw));
+    assert.throws(
+      () => validateAndSanitize(value),
+      /terminal status lacks a complete lifecycle/
+    );
+  }
+
+  const incomplete = fixture();
+  const incompleteFast = incomplete.raw.runs.find((run) => run.treatment === "fast");
+  incompleteFast.tool_receipts[0].status = "incomplete";
+  incompleteFast.tool_receipts[0].started_sequence = null;
+  incompleteFast.tool_receipts[0].finished_sequence = null;
+  incompleteFast.tools_used = [];
+  incompleteFast.metrics.tool_succeeded = 0;
+  incompleteFast.metrics.tool_incomplete = 1;
+  incompleteFast.verification.quality_passed = false;
+  incompleteFast.verification.external_effect_passed = false;
+  incomplete.rawBytes = Buffer.from(JSON.stringify(incomplete.raw));
+  assert.throws(
+    () => validateAndSanitize(incomplete),
+    /incomplete call was never proposed or started/
+  );
+
+  const reversed = fixture();
+  reversed.raw.runs.find(
+    (run) => run.treatment === "fast"
+  ).tool_receipts[0].started_sequence = 3;
+  reversed.rawBytes = Buffer.from(JSON.stringify(reversed.raw));
+  assert.throws(() => validateAndSanitize(reversed), /lifecycle sequence is invalid/);
+});
+
+test("binds product postcondition receipts to the frozen suite and complete evidence", () => {
+  const value = fixture();
+  const check = { path: "out/result.json", equals: { status: "ok" } };
+  value.suite.cases[0].verification.json_files = [check];
+  value.suiteBytes = Buffer.from(JSON.stringify(value.suite));
+  value.raw.suite_sha256 = hash(value.suiteBytes);
+  const profileArtifacts = {
+    auto: { ...value.raw.profile_artifacts.auto, path: null },
+    pro: { ...value.raw.profile_artifacts.pro, path: null }
+  };
+  const plan = evaluationPlan(
+    {
+      suite: value.suite,
+      suiteSha256: value.raw.suite_sha256,
+      gitHead: value.raw.git_commit,
+      replicates: 1,
+      providerBinding: {
+        provider_id: value.raw.provider_id,
+        provider_endpoint: value.raw.provider_endpoint,
+        configured_models: value.raw.configured_models
+      },
+      providerConfigSha256: value.raw.provider_config_sha256,
+      profileArtifacts
+    },
+    {}
+  );
+  value.raw.execution_plan_sha256 = plan.sha256;
+  const expected = JSON.stringify(check.equals);
+  const subject = Buffer.concat([
+    Buffer.from("cindx.agent-realworld-postcondition-subject.v1\0"),
+    Buffer.from("json_file"),
+    Buffer.from([0]),
+    Buffer.from(check.path)
+  ]);
+  for (const run of value.raw.runs.filter((run) => run.treatment !== "direct")) {
+    run.verification.passed_checks = 3;
+    run.verification.total_checks = 3;
+    run.verification.postcondition_receipts = [
+      {
+        kind: "json_file",
+        subject_sha256: hash(subject),
+        expected_sha256: hash(expected),
+        observed_sha256: hash(expected),
+        artifact_sha256: hash(expected),
+        bytes: Buffer.byteLength(expected),
+        passed: true
+      }
+    ];
+  }
+  value.rawBytes = Buffer.from(JSON.stringify(value.raw));
+  validateAndSanitize(value);
+
+  const missing = {
+    ...value,
+    raw: structuredClone(value.raw)
+  };
+  missing.raw.runs.find(
+    (run) => run.treatment === "fast"
+  ).verification.postcondition_receipts = [];
+  missing.rawBytes = Buffer.from(JSON.stringify(missing.raw));
+  assert.throws(
+    () => validateAndSanitize(missing),
+    /postcondition receipt count drifted from the frozen suite/
+  );
+
+  const drifted = {
+    ...value,
+    raw: structuredClone(value.raw)
+  };
+  drifted.raw.runs.find(
+    (run) => run.treatment === "auto"
+  ).verification.postcondition_receipts[0].expected_sha256 = hash("different");
+  drifted.rawBytes = Buffer.from(JSON.stringify(drifted.raw));
+  assert.throws(
+    () => validateAndSanitize(drifted),
+    /expectation drifted from the frozen suite/
+  );
+
+  const incompleteEvidence = {
+    ...value,
+    raw: structuredClone(value.raw)
+  };
+  const receipt = incompleteEvidence.raw.runs.find(
+    (run) => run.treatment === "pro"
+  ).verification.postcondition_receipts[0];
+  receipt.observed_sha256 = null;
+  receipt.artifact_sha256 = null;
+  receipt.bytes = null;
+  incompleteEvidence.rawBytes = Buffer.from(JSON.stringify(incompleteEvidence.raw));
+  assert.throws(
+    () => validateAndSanitize(incompleteEvidence),
+    /passed result lacks observed artifact evidence/
+  );
 });
 
 test("enforces the preregistered promotion gates without descriptive uplift", () => {
@@ -297,7 +678,10 @@ test("fails closed on incomplete provider evidence and hashes provider identity"
   assert.equal(report.outcomes.non_completed_runs, 1);
   assert.equal(report.runs[0].model_receipts[0].receipt_status, "provider_id_missing");
   assert.equal(report.runs[0].model_receipts[0].provider_response_id_sha256, null);
-  assert.equal(report.runs.find((run) => run.treatment === "auto").evidence_error.length > 0, true);
+  assert.equal(
+    report.runs.find((run) => run.treatment === "auto").evidence_error_sha256,
+    hash("finished model response lacked a verifiable receipt")
+  );
 });
 
 test("rejects execution-order and strategy-artifact drift", () => {
@@ -564,7 +948,7 @@ test("runner requires explicit publish paths and execute opt-in", () => {
       "/private/pro.json"
     ]);
   assert.equal(options.execute, false);
-  assert.match(options.suite, /realworld-v3\.json$/);
+  assert.match(options.suite, /realworld-v4\.json$/);
   assert.equal(options.autoProfile, "/private/auto.json");
   assert.equal(options.proProfile, "/private/pro.json");
   assert.throws(() => parseArguments(["--execute"]), /--raw is required/);
@@ -606,7 +990,7 @@ test("validates private frozen profile bindings before execution", () => {
 });
 
 test("execution plan balances treatment positions and binds profile artifacts", () => {
-  const suitePath = path.resolve("benchmarks/agent/realworld-v3.json");
+  const suitePath = path.resolve("benchmarks/agent/realworld-v4.json");
   const suiteBytes = fs.readFileSync(suitePath);
   const suite = JSON.parse(suiteBytes);
   const fresh = {
@@ -782,6 +1166,7 @@ test("checkpoint merge preserves matrix order and replaces an interrupted run", 
   ]);
   assert.equal(merged.runs[1].terminal_status, "timed_out");
   assert.equal(merged.runs[1].verification.external_effect_passed, false);
+  assert.deepEqual(merged.runs[1].verification.postcondition_receipts, []);
   assert.equal(merged.runs[1].metrics.latency_ms, 600_000);
 
   const permissionRun = { ...raw.runs[1], category: "permission_safety" };

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptPath), "..");
-const defaultSuite = path.join(repositoryRoot, "benchmarks", "agent", "realworld-v3.json");
+const defaultSuite = path.join(repositoryRoot, "benchmarks", "agent", "realworld-v4.json");
 const executionOrderProtocol = "cyclic_latin_square_v1";
 
 function requireFact(condition, message) {
@@ -272,7 +272,7 @@ export function preparePlaywrightResource(root, installedApp = "/Applications/Ci
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.symlinkSync(source, destination, "dir");
   return () => {
-    fs.rmSync(destination, { force: true });
+    fs.unlinkSync(destination);
     try {
       fs.rmdirSync(path.dirname(destination));
     } catch {
@@ -282,7 +282,7 @@ export function preparePlaywrightResource(root, installedApp = "/Applications/Ci
 }
 
 export function validatePreflight({ suite, gitHead, status, requestedReplicates }) {
-  requireFact(suite.schema === "cindx.agent-realworld-suite.v2", "suite schema mismatch");
+  requireFact(suite.schema === "cindx.agent-realworld-suite.v3", "suite schema mismatch");
   requireFact(
     JSON.stringify(suite.treatments) === JSON.stringify(["direct", "fast", "auto", "pro"]),
     "suite treatments must be Direct/Fast/Auto/Pro in frozen order"
@@ -505,6 +505,7 @@ export function normalizeInterruptedRun(run, terminalStatus, error, latencyMs) {
       external_effect_passed: productRun ? false : null,
       passed_checks: 0,
       total_checks: Math.max(1, run.verification?.total_checks || 0),
+      postcondition_receipts: [],
       safety_violations: safetyUnverified ? 1 : 0,
       failures: [
         safetyUnverified
@@ -524,7 +525,7 @@ function writePrivateJson(file, value) {
 }
 
 export function validateCheckpoint(prepared, plan, raw) {
-  requireFact(raw?.schema === "cindx.agent-realworld-raw.v2", "checkpoint schema mismatch");
+  requireFact(raw?.schema === "cindx.agent-realworld-raw.v3", "checkpoint schema mismatch");
   requireFact(raw.git_commit === prepared.gitHead, "checkpoint Git commit mismatch");
   requireFact(raw.suite_sha256 === prepared.suiteSha256, "checkpoint suite hash mismatch");
   requireFact(raw.requested_replicates === prepared.replicates, "checkpoint replicate count mismatch");
