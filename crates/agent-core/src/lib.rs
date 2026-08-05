@@ -13,6 +13,8 @@ pub use permission_policy::{
 
 pub type Metadata = BTreeMap<String, String>;
 
+pub const TOOL_OBSERVATION_V2_SCHEMA: &str = "cindx.tool-observation.v2";
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub String);
 
@@ -231,6 +233,11 @@ impl ToolSpec {
         self
     }
 
+    pub fn with_output_schema(mut self, output_schema_json: impl Into<String>) -> Self {
+        self.output_schema_json = Some(output_schema_json.into());
+        self
+    }
+
     pub fn builtin(
         name: impl Into<String>,
         namespace: impl Into<String>,
@@ -318,6 +325,42 @@ pub struct ToolFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolObservationV2 {
+    pub schema: String,
+    pub tool_name: String,
+    pub summary: String,
+    pub evidence: String,
+    pub evidence_complete: bool,
+    pub facts: Metadata,
+    pub next_action: Option<String>,
+}
+
+impl ToolObservationV2 {
+    pub fn new(
+        tool_name: impl Into<String>,
+        summary: impl Into<String>,
+        evidence: impl Into<String>,
+        evidence_complete: bool,
+        facts: Metadata,
+    ) -> Self {
+        Self {
+            schema: TOOL_OBSERVATION_V2_SCHEMA.to_string(),
+            tool_name: tool_name.into(),
+            summary: summary.into(),
+            evidence: evidence.into(),
+            evidence_complete,
+            facts,
+            next_action: None,
+        }
+    }
+
+    pub fn with_next_action(mut self, next_action: impl Into<String>) -> Self {
+        self.next_action = Some(next_action.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
     pub invocation_id: ToolCallId,
     pub status: ToolOutcomeStatus,
@@ -326,6 +369,7 @@ pub struct ToolResult {
     pub structured_output_json: Option<String>,
     pub artifacts: Vec<ToolArtifact>,
     pub failure: Option<ToolFailure>,
+    pub model_observation: Option<ToolObservationV2>,
     pub metadata: Metadata,
 }
 
@@ -354,6 +398,7 @@ impl ToolResult {
             structured_output_json: None,
             artifacts: Vec::new(),
             failure,
+            model_observation: None,
             metadata,
         }
     }

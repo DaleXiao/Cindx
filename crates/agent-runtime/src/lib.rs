@@ -1,6 +1,6 @@
 use agent_core::{
     Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation,
-    ToolOutcomeStatus, ToolRisk, ToolSpec,
+    ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec, TOOL_OBSERVATION_V2_SCHEMA,
 };
 use model_provider::{
     tool_function_name, ModelCallMode, ModelRequest, ModelResponse, ModelResponseDisposition,
@@ -130,12 +130,13 @@ pub use task_state_wire::{
     PersistedInteractionSurface, PersistedInteractionVerification, PreparedTaskStateCheckpoint,
 };
 pub use tool_runtime::{
-    apply_tool_spec_runtime_metadata, decode_persisted_tool_artifacts, finalize_tool_result,
-    recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,
-    tool_execution_scope_matches, tool_input_fingerprint, tool_invocation_context,
-    tool_invocation_event_metadata, tool_risk_label, ToolEffectRecoveryPolicy,
-    EFFECT_LEDGER_SCHEMA, TOOL_EFFECT_SEMANTICS_METADATA_KEY, TOOL_EFFECT_VERIFIER_METADATA_KEY,
-    TOOL_RESULT_SCHEMA, TOOL_RISK_METADATA_KEY,
+    apply_tool_spec_runtime_metadata, decode_persisted_tool_artifacts,
+    decode_persisted_tool_model_observation, finalize_tool_result, recovery_source_scope_matches,
+    supports_recovery_effect_replay, tool_effect_recovery_policy, tool_execution_scope_matches,
+    tool_input_fingerprint, tool_invocation_context, tool_invocation_event_metadata,
+    tool_risk_label, ToolEffectRecoveryPolicy, EFFECT_LEDGER_SCHEMA,
+    TOOL_EFFECT_SEMANTICS_METADATA_KEY, TOOL_EFFECT_VERIFIER_METADATA_KEY,
+    TOOL_MODEL_OBSERVATION_METADATA_KEY, TOOL_RESULT_SCHEMA, TOOL_RISK_METADATA_KEY,
 };
 pub use turn_budget::AgentTurnBudgetExhausted;
 pub use worker_policy::{WorkerTurnPhase, WorkerTurnPolicy};
@@ -858,6 +859,182 @@ pub fn observation_from_tool_result(tool_name: &str, status: &str, output: &str)
         "tool={tool_name}\nstatus={status}\noutput=\n{}",
         truncate_observation(output)
     )
+}
+
+pub fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) -> String {
+    const MODEL_OBSERVATION_LIMIT: usize = 6000;
+    const TOOL_NAME_LIMIT: usize = 256;
+    const SUMMARY_LIMIT: usize = 512;
+    const FAILURE_CODE_LIMIT: usize = 256;
+    const FACTS_LIMIT: usize = 1600;
+    const NEXT_ACTION_LIMIT: usize = 768;
+    const ARTIFACTS_LIMIT: usize = 1600;
+    let Some(observation) = result
+        .model_observation
+        .as_ref()
+        .filter(|observation| observation.schema == TOOL_OBSERVATION_V2_SCHEMA)
+    else {
+        let mut output = result.output.clone();
+        if let Some(failure) = &result.failure {
+            output = format!(
+                "failure_code={}\nretryable={}\n{}",
+                failure.code, failure.retryable, output
+            );
+        }
+        if !result.artifacts.is_empty() {
+            output.push_str("\n\nArtifacts available in the active workspace:\n");
+            output.push_str(
+                &result
+                    .artifacts
+                    .iter()
+                    .map(|artifact| format!("- {}", artifact.path))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        return observation_from_tool_result(
+            tool_name,
+            tool_outcome_status_label(&result.status),
+            &output,
+        );
+    };
+
+    let effective_tool_name = if observation.tool_name.trim().is_empty() {
+        tool_name
+    } else {
+        observation.tool_name.trim()
+    };
+    let (effective_tool_name, _) = truncate_observation_component(
+        &single_line_observation_field(effective_tool_name),
+        TOOL_NAME_LIMIT,
+    );
+    let (summary, _) = truncate_observation_component(
+        &single_line_observation_field(&observation.summary),
+        SUMMARY_LIMIT,
+    );
+    let mut rendered = format!(
+        "tool={effective_tool_name}\nstatus={}\nschema={}\nsummary={}\nevidence_complete={}",
+        tool_outcome_status_label(&result.status),
+        TOOL_OBSERVATION_V2_SCHEMA,
+        summary,
+        observation.evidence_complete,
+    );
+    if let Some(failure) = &result.failure {
+        let (failure_code, _) = truncate_observation_component(
+            &single_line_observation_field(&failure.code),
+            FAILURE_CODE_LIMIT,
+        );
+        rendered.push_str(&format!(
+            "\nfailure_code={}\nretryable={}",
+            failure_code, failure.retryable
+        ));
+    }
+    if !observation.facts.is_empty() {
+        let facts = serde_json::to_string(&observation.facts).unwrap_or_else(|_| "{}".to_string());
+        let (facts, truncated) = truncate_observation_component(&facts, FACTS_LIMIT);
+        rendered.push_str(if truncated {
+            "\nfacts_excerpt="
+        } else {
+            "\nfacts="
+        });
+        rendered.push_str(&facts);
+    }
+    if let Some(next_action) = observation
+        .next_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|next_action| !next_action.is_empty())
+    {
+        let (next_action, _) = truncate_observation_component(
+            &single_line_observation_field(next_action),
+            NEXT_ACTION_LIMIT,
+        );
+        rendered.push_str("\nnext_action=");
+        rendered.push_str(&next_action);
+    }
+    if !result.artifacts.is_empty() {
+        let artifacts = result
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                serde_json::json!({
+                    "path": artifact.path,
+                    "mime_type": artifact.mime_type,
+                    "title": artifact.title,
+                })
+            })
+            .collect::<Vec<_>>();
+        let artifacts = serde_json::to_string(&artifacts).unwrap_or_else(|_| "[]".to_string());
+        let (artifacts, truncated) = truncate_observation_component(&artifacts, ARTIFACTS_LIMIT);
+        rendered.push_str(if truncated {
+            "\nartifacts_excerpt="
+        } else {
+            "\nartifacts="
+        });
+        rendered.push_str(&artifacts);
+    }
+    rendered.push_str("\noutput=\n");
+    let evidence_budget = MODEL_OBSERVATION_LIMIT.saturating_sub(rendered.chars().count());
+    rendered.push_str(&truncate_typed_observation_evidence(
+        &observation.evidence,
+        evidence_budget,
+    ));
+    rendered
+}
+
+fn tool_outcome_status_label(status: &ToolOutcomeStatus) -> &'static str {
+    match status {
+        ToolOutcomeStatus::Succeeded => "succeeded",
+        ToolOutcomeStatus::Failed => "failed",
+        ToolOutcomeStatus::Cancelled => "cancelled",
+        ToolOutcomeStatus::Denied => "denied",
+    }
+}
+
+fn single_line_observation_field(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_observation_component(value: &str, limit: usize) -> (String, bool) {
+    const MARKER: &str = "...[truncated]...";
+    let character_count = value.chars().count();
+    if character_count <= limit {
+        return (value.to_string(), false);
+    }
+    let marker_count = MARKER.chars().count();
+    if limit <= marker_count {
+        return (value.chars().take(limit).collect(), true);
+    }
+    let retained = limit - marker_count;
+    let tail_count = retained / 4;
+    let head_count = retained - tail_count;
+    let head = value.chars().take(head_count).collect::<String>();
+    let tail = value
+        .chars()
+        .skip(character_count - tail_count)
+        .collect::<String>();
+    (format!("{head}{MARKER}{tail}"), true)
+}
+
+fn truncate_typed_observation_evidence(evidence: &str, limit: usize) -> String {
+    const MARKER: &str = "\n...[model evidence truncated]...\n";
+    let character_count = evidence.chars().count();
+    if character_count <= limit {
+        return evidence.to_string();
+    }
+    let marker_count = MARKER.chars().count();
+    if limit <= marker_count {
+        return evidence.chars().take(limit).collect();
+    }
+    let retained = limit - marker_count;
+    let tail_count = retained / 4;
+    let head_count = retained.saturating_sub(tail_count);
+    let head = evidence.chars().take(head_count).collect::<String>();
+    let tail = evidence
+        .chars()
+        .skip(character_count.saturating_sub(tail_count))
+        .collect::<String>();
+    format!("{head}{MARKER}{tail}")
 }
 
 pub fn repeated_tool_failure_count(

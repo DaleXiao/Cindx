@@ -112,6 +112,9 @@ impl Tool for ToolInspectMeta {
             "namespace": spec.namespace,
             "description": spec.description,
             "inputSchema": serde_json::from_str::<serde_json::Value>(&spec.input_schema_json).unwrap_or_default(),
+            "outputSchema": spec.output_schema_json
+                .as_deref()
+                .and_then(|schema| serde_json::from_str::<serde_json::Value>(schema).ok()),
             "risk": format!("{:?}", spec.risk),
         })
         .to_string();

@@ -393,28 +393,6 @@ pub(crate) fn tool_may_mutate_workspace(tool_name: &str, risk: &ToolRisk) -> boo
     !matches!(risk, ToolRisk::ReadOnly)
 }
 
-pub(crate) fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) -> String {
-    let mut output = result.output.clone();
-    if let Some(failure) = &result.failure {
-        output = format!(
-            "failure_code={}\nretryable={}\n{}",
-            failure.code, failure.retryable, output
-        );
-    }
-    if !result.artifacts.is_empty() {
-        output.push_str("\n\nArtifacts available in the active workspace:\n");
-        output.push_str(
-            &result
-                .artifacts
-                .iter()
-                .map(|artifact| format!("- {}", artifact.path))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
-    }
-    observation_from_tool_result(tool_name, tool_outcome_label(&result.status), &output)
-}
-
 pub(crate) fn tool_result_image_paths(result: &ToolResult) -> Vec<String> {
     result
         .artifacts

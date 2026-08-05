@@ -90,7 +90,27 @@ their own execution path is included in the matched evaluation protocol.
 
 `ToolSpec` carries a stable wire name, namespace, source, exposure policy, risk,
 input JSON Schema, and optional output schema. `ToolResult` can return text,
-images, resources, structured output, artifacts, and a typed failure.
+images, resources, structured output, artifacts, a typed failure, and an optional
+model-facing `cindx.tool-observation.v2` projection. The full result remains the
+authority for persistence, trace, UI, and artifacts; the projection is only the
+bounded evidence passed back to the model.
+
+The v2 projection keeps the tool name, status, summary, completeness, stable
+facts, failure code, artifact references, and an optional next action ahead of
+the evidence body. `output=` remains the final field so an empty evidence body
+cannot satisfy the existing grounding contract. Results without a valid v2
+projection use the prior observation format unchanged. The projection is stored
+with `ToolCallFinished` and restored during exact-call recovery, and its schema
+version participates in the prompt-learning tool-contract digest.
+
+The narrow `tools::tool_contract_v2` adapter owns the hand-written input/output
+schemas and v2 projections currently used by `file.read`, `file.search`,
+`shell.run`, and `browser.extract_text`; execution and permission ownership stays
+in each tool module. Their projections prevent long output from hiding,
+respectively, a model-visible continuation offset, search coverage, process
+termination and complete-stream artifacts, or browser page identity and
+continuation guidance. This migration does not change permission, exposure,
+concurrency, raw output, or artifact behavior.
 
 The runtime preserves model arguments as JSON. Legacy `key=value` input remains
 accepted only by built-in tools for existing sessions and the manual tool runner.

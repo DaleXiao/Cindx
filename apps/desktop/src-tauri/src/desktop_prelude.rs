@@ -41,13 +41,14 @@ pub(crate) use agent_runtime::{
 };
 pub(crate) use agent_runtime::{
     bounded_max_output_tokens, ensure_terminal_commit_instruction, evidence_worker_tools,
-    observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
-    start_agent_loop, start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentFailureClass,
-    AgentKernel, AgentLoopAppendTransaction, AgentRecoveryAction, AgentRunControl,
-    AgentTaskStateSnapshot, AgentToolRequest, AgentTurnPreparationError, ContextGovernorReport,
-    IsolatedWorkerRuntime, ResultQuality, RunBudget, RunContinuationDirective, RunControlSnapshot,
-    RunResourceSnapshot, RunStageClass, RunStopReason, WorkerAdvance, WorkerToolAdmission,
-    WorkspaceVerificationPolicy, DEFAULT_COLLABORATION_WORKER_TURNS,
+    observation_from_agent_tool_result, observation_from_tool_result,
+    resume_agent_loop_from_messages, sanitize_assistant_content, start_agent_loop,
+    start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentFailureClass, AgentKernel,
+    AgentLoopAppendTransaction, AgentRecoveryAction, AgentRunControl, AgentTaskStateSnapshot,
+    AgentToolRequest, AgentTurnPreparationError, ContextGovernorReport, IsolatedWorkerRuntime,
+    ResultQuality, RunBudget, RunContinuationDirective, RunControlSnapshot, RunResourceSnapshot,
+    RunStageClass, RunStopReason, WorkerAdvance, WorkerToolAdmission, WorkspaceVerificationPolicy,
+    DEFAULT_COLLABORATION_WORKER_TURNS,
     MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
 };
 #[rustfmt::skip]

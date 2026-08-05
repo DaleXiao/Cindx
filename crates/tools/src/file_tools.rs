@@ -1,3 +1,4 @@
+use super::tool_contract_v2::{file_read_observation, file_read_spec};
 use super::{
     builtin_tool_spec, parse_bounded_usize_input, parse_input, permission_request, required_input,
     resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result, Tool, ToolError,
@@ -12,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
 const MAX_FILE_READ_BYTES: usize = 256 * 1024;
+const MODEL_FILE_READ_BYTES: usize = 5 * 1024;
 
 pub struct ReadFileTool {
     workspace_root: PathBuf,
@@ -27,13 +29,8 @@ impl ReadFileTool {
 
 impl Tool for ReadFileTool {
     fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "file.read",
-            "Read a bounded UTF-8 byte range inside the workspace. Large files return a continuation offset.",
-            ToolRisk::ReadOnly,
-            "path=<workspace-relative-path>\noffset_bytes=<optional byte offset, default 0>\nmax_bytes=<optional 1-262144, default 131072>",
-        )
-        .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
+        file_read_spec(DEFAULT_FILE_READ_BYTES, MAX_FILE_READ_BYTES)
+            .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -81,6 +78,10 @@ impl Tool for ReadFileTool {
         let returned_bytes = bytes.len();
         let next_offset = offset.saturating_add(returned_bytes as u64);
         let truncated = next_offset < total_bytes;
+        let model_end = utf8_page_end(&bytes, MODEL_FILE_READ_BYTES.min(bytes.len()));
+        let model_returned_bytes = model_end;
+        let model_next_offset = offset.saturating_add(model_returned_bytes as u64);
+        let model_evidence = String::from_utf8_lossy(&bytes[..model_end]).to_string();
         let mut output = String::from_utf8_lossy(&bytes).to_string();
         if truncated {
             if !output.ends_with('\n') {
@@ -91,19 +92,38 @@ impl Tool for ReadFileTool {
             ));
         }
         let mut metadata = Metadata::new();
-        metadata.insert("path".to_string(), path);
+        metadata.insert("path".to_string(), path.clone());
         metadata.insert("bytes".to_string(), total_bytes.to_string());
         metadata.insert("offset_bytes".to_string(), offset.to_string());
         metadata.insert("returned_bytes".to_string(), returned_bytes.to_string());
         metadata.insert("next_offset_bytes".to_string(), next_offset.to_string());
         metadata.insert("truncated".to_string(), truncated.to_string());
 
-        Ok(tool_result(
+        let structured_output = serde_json::json!({
+            "schema": "cindx.file-read-result.v1",
+            "path": path,
+            "offset_bytes": offset,
+            "returned_bytes": returned_bytes,
+            "next_offset_bytes": next_offset,
+            "total_bytes": total_bytes,
+            "truncated": truncated,
+        });
+        let mut result = tool_result(
             invocation.id,
             ToolOutcomeStatus::Succeeded,
             output,
             metadata,
-        ))
+        );
+        result.structured_output_json = Some(structured_output.to_string());
+        result.model_observation = Some(file_read_observation(
+            &path,
+            offset,
+            model_returned_bytes,
+            model_next_offset,
+            total_bytes,
+            model_evidence,
+        ));
+        Ok(result)
     }
 }
 

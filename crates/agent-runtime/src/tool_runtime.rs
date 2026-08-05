@@ -1,6 +1,6 @@
 use agent_core::{
-    Metadata, ToolArtifact, ToolFailure, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk,
-    ToolSpec,
+    Metadata, ToolArtifact, ToolFailure, ToolInvocation, ToolObservationV2, ToolOutcomeStatus,
+    ToolResult, ToolRisk, ToolSpec, TOOL_OBSERVATION_V2_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,6 +11,7 @@ pub const EFFECT_LEDGER_SCHEMA: &str = "cindx.effect-ledger.v1";
 pub const TOOL_RISK_METADATA_KEY: &str = "tool_risk";
 pub const TOOL_EFFECT_SEMANTICS_METADATA_KEY: &str = "tool_effect_semantics";
 pub const TOOL_EFFECT_VERIFIER_METADATA_KEY: &str = "tool_effect_verifier";
+pub const TOOL_MODEL_OBSERVATION_METADATA_KEY: &str = "model_observation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolEffectRecoveryPolicy {
@@ -225,6 +226,47 @@ pub fn finalize_tool_result(
                 .insert("artifacts_json".to_string(), encoded);
         }
     }
+    if let Some(observation) = &result.model_observation {
+        let encoded = serde_json::json!({
+            "schema": observation.schema,
+            "tool_name": observation.tool_name,
+            "summary": observation.summary,
+            "evidence": observation.evidence,
+            "evidence_complete": observation.evidence_complete,
+            "facts": observation.facts,
+            "next_action": observation.next_action,
+        })
+        .to_string();
+        result
+            .metadata
+            .insert(TOOL_MODEL_OBSERVATION_METADATA_KEY.to_string(), encoded);
+    }
+}
+
+pub fn decode_persisted_tool_model_observation(metadata: &Metadata) -> Option<ToolObservationV2> {
+    let value = metadata
+        .get(TOOL_MODEL_OBSERVATION_METADATA_KEY)
+        .and_then(|encoded| serde_json::from_str::<serde_json::Value>(encoded).ok())?;
+    let facts = value
+        .get("facts")?
+        .as_object()?
+        .iter()
+        .map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+        .collect::<Option<Metadata>>()?;
+    let observation = ToolObservationV2 {
+        schema: value.get("schema")?.as_str()?.to_string(),
+        tool_name: value.get("tool_name")?.as_str()?.to_string(),
+        summary: value.get("summary")?.as_str()?.to_string(),
+        evidence: value.get("evidence")?.as_str()?.to_string(),
+        evidence_complete: value.get("evidence_complete")?.as_bool()?,
+        facts,
+        next_action: match value.get("next_action") {
+            Some(serde_json::Value::String(value)) => Some(value.clone()),
+            Some(serde_json::Value::Null) | None => None,
+            Some(_) => return None,
+        },
+    };
+    (observation.schema == TOOL_OBSERVATION_V2_SCHEMA).then_some(observation)
 }
 
 pub fn decode_persisted_tool_artifacts(metadata: &Metadata) -> Vec<ToolArtifact> {

@@ -71,7 +71,10 @@ pub(crate) fn redact_metadata(metadata: &Metadata) -> Metadata {
                         redact_structured_json(value)
                             .unwrap_or_else(|| redact_sensitive_text(value))
                     })
-            } else if key == "raw_tool_calls_json" {
+            } else if matches!(
+                key.as_str(),
+                "raw_tool_calls_json" | "model_observation" | "result_model_observation"
+            ) {
                 redact_structured_json(value).unwrap_or_else(|| redact_sensitive_text(value))
             } else {
                 redact_sensitive_text(value)
@@ -328,4 +331,63 @@ pub(crate) fn redact_prefixed_secret(value: &str, prefix: &str, minimum_length: 
     }
     output.push_str(&value[cursor..]);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{
+        ToolCallId, ToolObservationV2, ToolOutcomeStatus, ToolResult,
+    };
+    use agent_runtime::{
+        decode_persisted_tool_model_observation, finalize_tool_result,
+        TOOL_MODEL_OBSERVATION_METADATA_KEY,
+    };
+
+    #[test]
+    fn redaction_preserves_the_typed_tool_observation_wire() {
+        let mut result = ToolResult::text(
+            ToolCallId("call-observation-redaction".to_string()),
+            ToolOutcomeStatus::Succeeded,
+            "full output",
+            Metadata::new(),
+        );
+        result.model_observation = Some(ToolObservationV2::new(
+            "shell.run",
+            "Credential check completed.",
+            "api_key=secret-value",
+            true,
+            [("password".to_string(), "secret-value".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        finalize_tool_result(
+            &mut result,
+            &ToolCallId("call-observation-redaction".to_string()),
+            "fingerprint",
+            Duration::from_millis(1),
+        );
+        let persisted = result
+            .metadata
+            .into_iter()
+            .map(|(key, value)| (format!("result_{key}"), value))
+            .collect::<Metadata>();
+        let redacted = redact_metadata(&persisted);
+        let restored = redacted
+            .into_iter()
+            .filter_map(|(key, value)| {
+                key.strip_prefix("result_")
+                    .map(|key| (key.to_string(), value))
+            })
+            .collect::<Metadata>();
+        let observation = decode_persisted_tool_model_observation(&restored)
+            .expect("redacted observation should remain decodable");
+
+        assert_eq!(observation.evidence, "api_key=[REDACTED]");
+        assert_eq!(
+            observation.facts.get("password").map(String::as_str),
+            Some("[REDACTED]")
+        );
+        assert!(!restored[TOOL_MODEL_OBSERVATION_METADATA_KEY].contains("secret-value"));
+    }
 }

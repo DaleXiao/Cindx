@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -8,13 +7,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRisk, ToolArtifact, ToolInvocation, ToolOutcomeStatus,
-    ToolResult, ToolRisk, ToolSpec,
+    Metadata, PermissionRequest, PermissionRisk, ToolArtifact, ToolFailure, ToolInvocation,
+    ToolOutcomeStatus, ToolResult, ToolSpec,
 };
 
 use crate::process_control::terminate_process_group;
+use crate::tool_contract_v2::{
+    parse_shell_timeout, shell_contract, shell_result_metadata, shell_run_spec,
+    workspace_relative_artifact, ShellContractInput, ShellResultMetadataInput,
+};
 use crate::{
-    builtin_tool_spec, parse_input, permission_request, required_input, resolve_workspace_path,
+    parse_input, permission_request, required_input, resolve_workspace_path,
     resolve_workspace_read_path, stable_hash, tool_result, Tool, ToolError, ToolExecutionControl,
 };
 
@@ -105,12 +108,7 @@ impl ShellRunTool {
 
 impl Tool for ShellRunTool {
     fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "shell.run",
-            "Run a bounded foreground shell command in the workspace. Background processes are terminated when the command finishes.",
-            ToolRisk::ExecutesProcess,
-            "command=<shell command>\ncwd=<optional workspace-relative path>\ntimeout_seconds=<optional 1-600, default 120>",
-        )
+        shell_run_spec(DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS)
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -174,7 +172,11 @@ impl Tool for ShellRunTool {
         let input = parse_input(&invocation.input_json);
         let command = required_input(&input, "command")?;
         let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
-        let timeout_seconds = parse_timeout_seconds(&input)?;
+        let timeout_seconds = parse_shell_timeout(
+            &input,
+            DEFAULT_SHELL_TIMEOUT_SECONDS,
+            MAX_SHELL_TIMEOUT_SECONDS,
+        )?;
         let resolved_cwd = resolve_workspace_path(&self.workspace_root, &cwd)?;
         let resolved_cwd = resolve_workspace_read_path(&self.workspace_root, &resolved_cwd)?;
         let artifact_dir = self
@@ -214,36 +216,46 @@ impl Tool for ShellRunTool {
             combined.push_str("Command cancelled. The process group was stopped.");
         }
 
-        let mut metadata = Metadata::new();
-        metadata.insert("command".to_string(), command);
-        metadata.insert("cwd".to_string(), cwd);
-        metadata.insert("timeout_seconds".to_string(), timeout_seconds.to_string());
-        metadata.insert("timed_out".to_string(), output.timed_out.to_string());
-        metadata.insert("cancelled".to_string(), output.cancelled.to_string());
-        metadata.insert(
-            "environment_policy".to_string(),
-            "developer_safe_v1".to_string(),
-        );
-        metadata.insert(
-            "stdout_bytes".to_string(),
-            output.stdout.total_bytes.to_string(),
-        );
-        metadata.insert(
-            "stderr_bytes".to_string(),
-            output.stderr.total_bytes.to_string(),
-        );
-        metadata.insert(
-            "output_truncated".to_string(),
-            (output.stdout.preview_truncated || output.stderr.preview_truncated).to_string(),
-        );
-        metadata.insert(
-            "exit_code".to_string(),
-            output
-                .status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "signal".to_string()),
-        );
+        let output_truncated = output.stdout.preview_truncated || output.stderr.preview_truncated;
+        let metadata = shell_result_metadata(ShellResultMetadataInput {
+            command: &command,
+            cwd: &cwd,
+            timeout_seconds,
+            timed_out: output.timed_out,
+            cancelled: output.cancelled,
+            stdout_bytes: output.stdout.total_bytes,
+            stderr_bytes: output.stderr.total_bytes,
+            output_truncated,
+            exit_code: output.status.code(),
+        });
+
+        let stdout_artifact = output
+            .stdout
+            .artifact_path
+            .as_deref()
+            .map(|path| workspace_relative_artifact(&self.workspace_root, path));
+        let stderr_artifact = output
+            .stderr
+            .artifact_path
+            .as_deref()
+            .map(|path| workspace_relative_artifact(&self.workspace_root, path));
+        let stdout_complete = stream_capture_is_complete(&output.stdout);
+        let stderr_complete = stream_capture_is_complete(&output.stderr);
+        let contract = shell_contract(ShellContractInput {
+            cwd: &cwd,
+            exit_code: output.status.code(),
+            stdout_bytes: output.stdout.total_bytes,
+            stderr_bytes: output.stderr.total_bytes,
+            output_truncated,
+            stdout_artifact: stdout_artifact.as_deref(),
+            stderr_artifact: stderr_artifact.as_deref(),
+            stdout_complete,
+            stderr_complete,
+            timed_out: output.timed_out,
+            cancelled: output.cancelled,
+            status_succeeded: output.status.success(),
+            output: &combined,
+        });
 
         let mut result = tool_result(
             invocation.id,
@@ -257,6 +269,15 @@ impl Tool for ShellRunTool {
             combined,
             metadata,
         );
+        if let Some(code) = contract.failure_code {
+            result.failure = Some(ToolFailure {
+                code: code.to_string(),
+                message: result.output.clone(),
+                retryable: false,
+            });
+        }
+        result.structured_output_json = Some(contract.structured_output_json);
+        result.model_observation = Some(contract.observation);
         for (label, capture) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
             if let Some(path) = &capture.artifact_path {
                 result.artifacts.push(ToolArtifact {
@@ -281,19 +302,8 @@ impl Tool for ShellRunTool {
     }
 }
 
-fn parse_timeout_seconds(input: &BTreeMap<String, String>) -> Result<u64, ToolError> {
-    let timeout_seconds = match input.get("timeout_seconds") {
-        Some(value) => value
-            .parse::<u64>()
-            .map_err(|_| ToolError::new("timeout_seconds must be an integer between 1 and 600"))?,
-        None => DEFAULT_SHELL_TIMEOUT_SECONDS,
-    };
-    if !(1..=MAX_SHELL_TIMEOUT_SECONDS).contains(&timeout_seconds) {
-        return Err(ToolError::new(
-            "timeout_seconds must be an integer between 1 and 600",
-        ));
-    }
-    Ok(timeout_seconds)
+fn stream_capture_is_complete(capture: &BoundedStreamCapture) -> bool {
+    !capture.preview_truncated || (capture.artifact_path.is_some() && !capture.artifact_truncated)
 }
 
 fn run_shell_command(
@@ -1028,6 +1038,18 @@ mod tests {
                 .map(String::as_str),
             Some("developer_safe_v1")
         );
+    }
+
+    #[test]
+    fn artifact_safety_limit_never_claims_the_stream_is_complete() {
+        let capture = BoundedStreamCapture {
+            preview_truncated: true,
+            artifact_truncated: true,
+            artifact_path: Some(PathBuf::from("stdout.log")),
+            ..BoundedStreamCapture::default()
+        };
+
+        assert!(!stream_capture_is_complete(&capture));
     }
 
     #[test]
