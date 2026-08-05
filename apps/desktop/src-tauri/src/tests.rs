@@ -9908,9 +9908,34 @@ fn agent_run_budget_extends_only_after_material_progress_and_stops_cycles() {
     for call in 1..=6 {
         assert_eq!(control.begin_model_call("executor"), Ok(call));
     }
-    assert!(control.record_checkpoint("tool_result", "file.read", "new evidence"));
+    let tools = vec![ToolSpec::builtin(
+        "file.read",
+        "test",
+        "Read required evidence",
+        ToolRisk::ReadOnly,
+        r#"{"type":"object"}"#,
+    )];
+    let mut runtime = start_agent_loop(
+        phase16_task_id(),
+        "read required evidence",
+        AgentRuntimeConfig::default(),
+    );
+    runtime.task_contract.require_tool_success("file.read");
+    let delta = AgentKernel::new(&mut runtime, &tools)
+        .apply_tool_observation(
+            &AgentToolRequest {
+                call_id: agent_core::ToolCallId("goal-delta-read".to_string()),
+                tool_name: "file.read".to_string(),
+                input: r#"{"path":"goal.md"}"#.to_string(),
+            },
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            "required evidence",
+        )
+        .expect("the required evidence should emit one Goal Delta");
+    assert!(control.record_goal_delta_at(0, &delta));
     assert_eq!(control.begin_model_call("executor"), Ok(7));
-    assert!(!control.record_checkpoint("tool_result", "file.read", "new evidence"));
+    assert!(!control.record_goal_delta_at(0, &delta));
 
     let cycle_control = AgentRunControl::new("fast");
     for input in ["a", "b", "a", "b", "a", "b", "a"] {

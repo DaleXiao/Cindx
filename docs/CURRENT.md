@@ -68,8 +68,17 @@ A new run currently follows this sequence:
    contract checks, and terminal delivery. Tool exposure is focused by the
    validated conductor decision, and prompt-scoped capability and evidence
    obligations are bound to that epoch. Normal execution and permission recovery
-   use the same planning path. A committed steer returns through the same driver
-   before another epoch can begin.
+   use the same planning path. After the matching runtime transition commits and
+   its canonical tool outcome is durable or recoverable, `AgentTaskContract` may
+   emit a bounded Goal Delta for a newly satisfied obligation, target-bound
+   grounding receipt, or verified postcondition. Ordinary success, changed
+   arguments or output, replay, and failed, denied, or cancelled calls do not
+   receive progress credit or extend the run segment. A committed steer returns
+   through the same driver before another epoch can begin. When that durable
+   commit actually applies user guidance, run control atomically opens one
+   fresh base segment for the new objective without resetting lineage counters
+   or resource limits. Deleted or otherwise no-op steers open no segment, and a
+   steer is not a Goal Delta.
 9. `first_verified` can stop early only for a genuinely verified deliverable.
    At terminal reserve the strongest usable result may still be returned, but
    its failed verification obligations remain explicit degradation rather than
@@ -88,6 +97,11 @@ existing sessions. The v2 checkpoint stores objective fingerprints and typed
 intent, not raw objectives or target anchors. Permission and restart recovery
 rebuild runtime-only anchors from the effective objective and reject mismatched
 lineage instead of silently applying state to another task.
+Provider and tool activity still drives the existing liveness watchdog, while
+generic checkpoints remain diagnostic. Neither extends a run segment: only an
+accepted Goal Delta increments budget credit. This keeps slow valid I/O from
+being mistaken for semantic progress and prevents busy but irrelevant tool
+loops from unlocking the maximum Auto or Pro budget.
 
 ## Data, Memory, and Retrieval
 

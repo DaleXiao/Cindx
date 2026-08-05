@@ -90,6 +90,12 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   loopback HTTP fixture, current-run successful typed tool receipts, exact
   browser target, and artifact/postcondition digest rules without invoking a
   provider.
+- The exact Goal Delta gate admits budget credit only for a first contract
+  obligation, recorded grounding receipt, or verified postcondition. It rejects
+  ordinary success, failure states, and repeated satisfaction, and keeps receipt
+  size independent of raw tool output. Target binding and desktop recovery are
+  covered by their separate contract tests rather than inferred from this exact
+  filter.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.

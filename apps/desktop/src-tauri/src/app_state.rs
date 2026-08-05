@@ -128,6 +128,7 @@ pub(crate) struct ResolvedToolObservation {
     pub(crate) call_id: agent_core::ToolCallId,
     pub(crate) tool_name: String,
     pub(crate) input_json: String,
+    pub(crate) risk: Option<ToolRisk>,
     pub(crate) status: ToolOutcomeStatus,
     pub(crate) observation: String,
     pub(crate) image_paths: Vec<String>,

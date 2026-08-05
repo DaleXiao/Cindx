@@ -109,14 +109,14 @@ pub use run_budget::{
 pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use task_contract::{
-    AgentTaskContract, ContractEvidence, ContractEvidenceKind, GroundedCompletionBasis,
-    GroundedCompletionIssue, GroundedCompletionReceipt, OutcomeClaim, OutcomeClaimDecision,
-    OutcomeClaimEvidenceStatus, OutcomeClaimKind, OutcomeClaimQuality, OutcomeEvidence,
-    OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase, OutcomeLedgerShadow,
+    AgentGoalDelta, AgentGoalDeltaKind, AgentTaskContract, ContractEvidence, ContractEvidenceKind,
+    GroundedCompletionBasis, GroundedCompletionIssue, GroundedCompletionReceipt, OutcomeClaim,
+    OutcomeClaimDecision, OutcomeClaimEvidenceStatus, OutcomeClaimKind, OutcomeClaimQuality,
+    OutcomeEvidence, OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase, OutcomeLedgerShadow,
     OutcomeObligation, OutcomeObligationKind, OutcomePostcondition, OutcomePostconditionKind,
     OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope, OutcomeTerminal,
     OutcomeTerminalObservation, OutcomeTruncation, PromptEvidenceContext,
-    WorkspaceVerificationPolicy, GROUNDED_COMPLETION_DIGEST_METADATA_KEY,
+    WorkspaceVerificationPolicy, GOAL_DELTA_SCHEMA, GROUNDED_COMPLETION_DIGEST_METADATA_KEY,
     GROUNDED_COMPLETION_METADATA_KEY, GROUNDED_COMPLETION_SCHEMA,
     OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
     OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
@@ -134,8 +134,10 @@ pub use tool_runtime::{
     decode_persisted_tool_model_observation, finalize_tool_result, recovery_source_scope_matches,
     supports_recovery_effect_replay, tool_effect_recovery_policy, tool_execution_scope_matches,
     tool_input_fingerprint, tool_invocation_context, tool_invocation_event_metadata,
-    tool_risk_label, ToolEffectRecoveryPolicy, EFFECT_LEDGER_SCHEMA,
+    tool_risk_label, PersistedToolEffectKind, PersistedToolEffectWitness, ToolEffectRecoveryPolicy,
+    EFFECT_LEDGER_SCHEMA, MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES,
     TOOL_EFFECT_SEMANTICS_METADATA_KEY, TOOL_EFFECT_VERIFIER_METADATA_KEY,
+    TOOL_EFFECT_WITNESS_METADATA_KEY, TOOL_EFFECT_WITNESS_SCHEMA,
     TOOL_MODEL_OBSERVATION_METADATA_KEY, TOOL_RESULT_SCHEMA, TOOL_RISK_METADATA_KEY,
 };
 pub use turn_budget::AgentTurnBudgetExhausted;
@@ -1104,6 +1106,7 @@ fn record_persisted_tool_outcome_with_risk(
     state: &mut AgentLoopState,
     tool_name: &str,
     input_fingerprint: &str,
+    redacted_effect_input: Option<&str>,
     status: &ToolOutcomeStatus,
     risk: Option<&ToolRisk>,
 ) {
@@ -1119,7 +1122,9 @@ fn record_persisted_tool_outcome_with_risk(
     }
 
     let pending_before = state.task_contract.pending_interactions().len();
-    let persisted_input = persisted_tool_input_placeholder(input_fingerprint);
+    let persisted_input = redacted_effect_input
+        .map(str::to_string)
+        .unwrap_or_else(|| persisted_tool_input_placeholder(input_fingerprint));
     state
         .task_contract
         .record_tool_outcome(tool_name, &persisted_input, status, risk);

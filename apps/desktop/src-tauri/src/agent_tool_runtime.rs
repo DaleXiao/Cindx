@@ -171,13 +171,13 @@ pub(super) fn commit_agent_tool_observation(
     observation: &str,
     image_paths: &[String],
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
-) -> Result<agent_runtime::RunExecutionStepCommit<()>, String> {
+) -> Result<agent_runtime::RunExecutionStepCommit<Option<agent_runtime::AgentGoalDelta>>, String> {
     cancellation.commit_execution_step_with(epoch_lease, || {
         let mut transaction = AgentLoopAppendTransaction::begin(runtime);
         let previous_message_count = transaction.original_message_count();
-        transaction.with_append_only_mutation(|next_runtime| {
+        let goal_delta = transaction.with_append_only_mutation(|next_runtime| {
             let verified_interactions_before = next_runtime.verified_interactions;
-            AgentKernel::new(next_runtime, tools).apply_tool_observation(
+            let goal_delta = AgentKernel::new(next_runtime, tools).apply_tool_observation(
                 call,
                 status,
                 risk,
@@ -193,8 +193,10 @@ pub(super) fn commit_agent_tool_observation(
                 risk,
                 epoch_lease.epoch(),
                 postcondition_verified,
+                goal_delta.as_ref(),
             );
             append_visual_reference_message(next_runtime, &call.tool_name, image_paths);
+            goal_delta
         });
         let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
             transaction.state(),
@@ -214,13 +216,13 @@ pub(super) fn commit_agent_tool_observation(
         )?;
         transaction.commit();
         *snapshot_cursor = next_cursor;
-        Ok(())
+        Ok(goal_delta)
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn agent_tool_batch_outcome_after_commit(
-    commit: agent_runtime::RunExecutionStepCommit<()>,
+    commit: agent_runtime::RunExecutionStepCommit<Option<agent_runtime::AgentGoalDelta>>,
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
@@ -229,9 +231,15 @@ pub(super) fn agent_tool_batch_outcome_after_commit(
     run_context: &Metadata,
     active_collaboration: Option<&AgentCollaboration>,
     cancellation: &Arc<AgentRunControl>,
+    epoch_lease: agent_runtime::RunEpochLease,
 ) -> Result<Option<AgentToolBatchOutcome>, String> {
     match commit {
-        agent_runtime::RunExecutionStepCommit::Committed(()) => Ok(None),
+        agent_runtime::RunExecutionStepCommit::Committed(goal_delta) => {
+            if let Some(delta) = goal_delta.as_ref() {
+                cancellation.record_goal_delta_at(epoch_lease.epoch(), delta);
+            }
+            Ok(None)
+        }
         agent_runtime::RunExecutionStepCommit::RestartAfterSteer
         | agent_runtime::RunExecutionStepCommit::TerminalCommitted => {
             Ok(Some(AgentToolBatchOutcome::RestartAfterSteer))
@@ -425,6 +433,7 @@ fn execute_agent_tool_batch_serial(
                 run_context,
                 active_collaboration,
                 cancellation,
+                epoch_lease,
             )? {
                 return Ok(outcome);
             }
@@ -473,6 +482,7 @@ fn execute_agent_tool_batch_serial(
                 run_context,
                 active_collaboration,
                 cancellation,
+                epoch_lease,
             )? {
                 return Ok(outcome);
             }
@@ -556,6 +566,7 @@ fn execute_agent_tool_batch_serial(
             run_context,
             active_collaboration,
             cancellation,
+            epoch_lease,
         )? {
             return Ok(outcome);
         }

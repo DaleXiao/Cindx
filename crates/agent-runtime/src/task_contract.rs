@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod goal_delta;
 mod grounded_completion;
 mod outcome_ledger;
 
@@ -15,6 +16,8 @@ pub use grounded_completion::{
     GROUNDED_COMPLETION_DIGEST_METADATA_KEY, GROUNDED_COMPLETION_METADATA_KEY,
     GROUNDED_COMPLETION_SCHEMA,
 };
+
+pub use goal_delta::{AgentGoalDelta, AgentGoalDeltaKind, GOAL_DELTA_SCHEMA};
 
 pub use outcome_ledger::{
     OutcomeClaim, OutcomeClaimDecision, OutcomeClaimEvidenceStatus, OutcomeClaimKind,

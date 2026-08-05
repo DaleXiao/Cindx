@@ -254,9 +254,11 @@ impl AgentRunControl {
                 observation_count: 0,
                 checkpoint_fingerprints: BTreeSet::new(),
                 checkpoint_count: 0,
-                model_extension_checkpoint: 0,
-                tool_extension_checkpoint: 0,
-                agent_turn_extension_checkpoint: 0,
+                goal_delta_fingerprints: BTreeSet::new(),
+                goal_delta_count: 0,
+                model_extension_goal_delta: 0,
+                tool_extension_goal_delta: 0,
+                agent_turn_extension_goal_delta: 0,
                 model_call_limit: budget
                     .initial_model_calls
                     .min(budget.max_model_calls)

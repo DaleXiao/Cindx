@@ -326,17 +326,6 @@ fn execute_prepared_parallel_tool_batch(
             &item.invocation.tool_name,
         );
         let mut result = body.result;
-        if matches!(result.status, ToolOutcomeStatus::Succeeded) {
-            cancellation.record_checkpoint_at(
-                epoch_lease.epoch(),
-                "tool_result",
-                &item.invocation.tool_name,
-                &format!(
-                    "{}\n{}\n{}",
-                    item.invocation.tool_name, item.invocation.input_json, result.output
-                ),
-            );
-        }
         let progress = cancellation.progress();
         result.metadata.insert(
             "run_checkpoints".to_string(),
@@ -427,6 +416,7 @@ fn execute_prepared_parallel_tool_batch(
             run_context,
             active_collaboration,
             cancellation,
+            epoch_lease,
         )? {
             return Ok(Some(outcome));
         }

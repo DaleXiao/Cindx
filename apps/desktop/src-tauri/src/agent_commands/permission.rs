@@ -56,6 +56,7 @@ fn permission_tool_observation_metadata(
     tool_name: &str,
     status: &ToolOutcomeStatus,
     tool_input: &str,
+    risk: Option<&ToolRisk>,
     run_context: &Metadata,
 ) -> Metadata {
     let input_fingerprint = agent_runtime::tool_input_fingerprint(tool_name, tool_input);
@@ -94,6 +95,29 @@ fn permission_tool_observation_metadata(
     ) {
         metadata.insert("evidence_target_witness".to_string(), witness);
     }
+    if matches!(status, ToolOutcomeStatus::Succeeded) {
+        let lineage_scope = format!(
+            "{}:{}",
+            run_context
+                .get("agent_run_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+            permission_prompt_contract_epoch(run_context),
+        );
+        if let Some(witness) = agent_runtime::PersistedToolEffectWitness::capture(
+            tool_name,
+            tool_input,
+            risk,
+            &lineage_scope,
+        )
+        .and_then(|witness| witness.encode())
+        {
+            metadata.insert(
+                agent_runtime::TOOL_EFFECT_WITNESS_METADATA_KEY.to_string(),
+                witness,
+            );
+        }
+    }
     metadata_with_context(metadata, run_context)
 }
 
@@ -105,6 +129,7 @@ struct PersistedPermissionObservation {
     tool_name: String,
     input_fingerprint: String,
     target_witness: Option<String>,
+    effect_witness: Option<agent_runtime::PersistedToolEffectWitness>,
     status: ToolOutcomeStatus,
     observation: String,
 }
@@ -118,6 +143,7 @@ fn persisted_permission_observation_payload_matches(
         && left.tool_name == right.tool_name
         && left.input_fingerprint == right.input_fingerprint
         && left.target_witness == right.target_witness
+        && left.effect_witness == right.effect_witness
         && left.status == right.status
         && left.observation == right.observation
 }
@@ -216,6 +242,13 @@ fn persisted_permission_observations(
                 .filter(|value| !value.trim().is_empty())?
                 .clone();
             let status = persisted_tool_outcome_status(message.metadata.get("status")?)?;
+            let effect_witness = match message
+                .metadata
+                .get(agent_runtime::TOOL_EFFECT_WITNESS_METADATA_KEY)
+            {
+                Some(encoded) => Some(agent_runtime::PersistedToolEffectWitness::decode(encoded)?),
+                None => None,
+            };
             Some(PersistedPermissionObservation {
                 message_index,
                 permission_id: PermissionRequestId(permission_id),
@@ -223,6 +256,7 @@ fn persisted_permission_observations(
                 tool_name,
                 input_fingerprint,
                 target_witness: message.metadata.get("evidence_target_witness").cloned(),
+                effect_witness,
                 status,
                 observation: message.content.clone(),
             })
@@ -370,11 +404,7 @@ pub(crate) fn resolve_agent_permission_blocking(
         let recovery = if snapshot.is_some() {
             None
         } else {
-            peek_agent_recovery_envelope(
-                &store,
-                &recovery_context,
-                &[AgentRecoveryState::Blocked],
-            )?
+            peek_agent_recovery_envelope(&store, &recovery_context, &[AgentRecoveryState::Blocked])?
         };
         let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
             .map_err(|error| error.to_string())?;
@@ -705,6 +735,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         None,
         &completion_intent,
     )?;
+    let mut recovered_goal_deltas = Vec::new();
     for resolved in persisted_permission_observations
         .iter()
         .filter(|observation| observation.message_index >= replay_boundary)
@@ -712,18 +743,37 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         let risk = registry
             .get(&resolved.tool_name)
             .map(|tool| tool.spec().risk);
-        AgentKernel::new(&mut runtime, &tools).apply_persisted_tool_observation(
+        let goal_delta = AgentKernel::new(&mut runtime, &tools).apply_persisted_tool_observation(
             resolved.call_id.clone(),
             &resolved.tool_name,
             &resolved.input_fingerprint,
             resolved.target_witness.as_deref(),
+            resolved.effect_witness.as_ref(),
             &resolved.status,
             risk.as_ref(),
             &resolved.observation,
         );
+        recovered_goal_deltas.extend(goal_delta);
         copy_replayed_contract_evidence_metadata(&runtime, &mut transcript, resolved.message_index);
     }
     runtime.messages = transcript;
+    let objective_epoch = run_context_steer_epoch(&run_context);
+    commit_cold_permission_recovery_before_goal_credit(
+        cancellation,
+        objective_epoch,
+        &recovered_goal_deltas,
+        || {
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            crate::agent_runtime_snapshot::persist_agent_runtime_snapshot(
+                &mut store,
+                &runtime,
+                &run_context,
+            )
+        },
+    )?;
     let prepared = PreparedAgentExecution {
         base_run_context: run_context.clone(),
         run_context,
@@ -732,6 +782,25 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         collaboration: None,
     };
     continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
+}
+
+fn commit_cold_permission_recovery_before_goal_credit(
+    cancellation: &AgentRunControl,
+    objective_epoch: u64,
+    recovered_goal_deltas: &[agent_runtime::AgentGoalDelta],
+    commit_recovered_runtime: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if recovered_goal_deltas.is_empty() {
+        return Ok(());
+    }
+    // Cold recovery has no in-memory suspended snapshot to fall back to. Make
+    // the rebuilt contract state durable before its deltas can extend the live
+    // control; a failed snapshot write therefore leaves the control unchanged.
+    commit_recovered_runtime()?;
+    for delta in recovered_goal_deltas {
+        cancellation.record_goal_delta_at(objective_epoch, delta);
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_agent_permission_request(
@@ -793,7 +862,7 @@ pub(crate) fn resolve_agent_permission_request(
     )
     .map_err(|error| error.to_string())?;
 
-    let (observation, status, image_paths, message_metadata) = if matches!(
+    let (observation, status, image_paths, message_metadata, risk) = if matches!(
         decision,
         PermissionDecision::AllowOnce | PermissionDecision::AllowForSession
     ) {
@@ -807,6 +876,7 @@ pub(crate) fn resolve_agent_permission_request(
         };
         drop(store);
         let registry = tool_registry_for_state(state, root)?;
+        let risk = registry.get(&tool_name).map(|tool| tool.spec().risk);
         let (observation, status, image_paths) =
             match execute_agent_tool_invocation_for_objective_epoch(
                 state,
@@ -842,6 +912,7 @@ pub(crate) fn resolve_agent_permission_request(
             &tool_name,
             &status,
             &tool_input,
+            risk.as_ref(),
             run_context,
         );
         append_message_event_with_metadata(
@@ -861,7 +932,7 @@ pub(crate) fn resolve_agent_permission_request(
                 run_context,
             )?;
         }
-        (observation, status, image_paths, message_metadata)
+        (observation, status, image_paths, message_metadata, risk)
     } else {
         let status = ToolOutcomeStatus::Denied;
         let observation =
@@ -890,6 +961,7 @@ pub(crate) fn resolve_agent_permission_request(
             &tool_name,
             &status,
             &tool_input,
+            None,
             run_context,
         );
         append_message_event_with_metadata(
@@ -900,12 +972,13 @@ pub(crate) fn resolve_agent_permission_request(
             message_metadata.clone(),
         )
         .map_err(|error| error.to_string())?;
-        (observation, status, Vec::new(), message_metadata)
+        (observation, status, Vec::new(), message_metadata, None)
     };
     Ok(ResolvedToolObservation {
         call_id: agent_core::ToolCallId(tool_call_id),
         tool_name,
         input_json: tool_input,
+        risk,
         status,
         observation,
         image_paths,
@@ -1051,6 +1124,7 @@ mod tests {
                 tool_name,
                 &status,
                 r#"{"secret":"super-secret"}"#,
+                None,
                 run_context,
             ),
         )
@@ -1393,6 +1467,7 @@ mod tests {
                 &observation.tool_name,
                 &observation.input_fingerprint,
                 observation.target_witness.as_deref(),
+                observation.effect_witness.as_ref(),
                 &observation.status,
                 risk.as_ref(),
                 &observation.observation,
@@ -1537,6 +1612,270 @@ mod tests {
         assert_eq!(
             AgentKernel::new(&mut restored, &tools).completion_gate_for_task(),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn cold_permission_recovery_reconstructs_verified_workspace_postcondition() {
+        let mut run_context = permission_run_context(0, 0);
+        let conductor_contract = AgentRunDecision::direct("executor")
+            .execution_contract("auto")
+            .to_json()
+            .expect("contract serializes");
+        run_context.insert("conductor_contract".to_string(), conductor_contract);
+        run_context.insert(
+            "effective_prompt_objective".to_string(),
+            "write the requested file and verify it".to_string(),
+        );
+        let tools = vec![
+            ToolSpec::builtin(
+                "file.write",
+                "file",
+                "Write a file",
+                ToolRisk::WritesWorkspace,
+                r#"{"type":"object"}"#,
+            ),
+            ToolSpec::builtin(
+                "file.read",
+                "file",
+                "Read a file",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object"}"#,
+            ),
+        ];
+        let mut original = start_agent_loop(
+            TaskId("cold-workspace-postcondition".to_string()),
+            "write the requested file and verify it",
+            AgentRuntimeConfig::default(),
+        );
+        apply_run_task_contract(&mut original, &run_context, &tools, None)
+            .expect("verification contract applies before the permission pause");
+        let snapshot = AgentTaskStateSnapshot::capture(&original);
+        let boundary = original.messages.len();
+
+        let target = "private/super-secret-goal.md";
+        let write_input = format!(r#"{{"path":"{target}","content":"never-persist-this-secret"}}"#);
+        let read_input = format!(r#"{{"path":"{target}"}}"#);
+        let permission_observation =
+            |permission_id: &str, call_id: &str, tool_name: &str, input: &str, risk: &ToolRisk| {
+                message(
+                    MessageRole::Tool,
+                    "tool completed with bounded evidence",
+                    permission_tool_observation_metadata(
+                        &PermissionRequestId(permission_id.to_string()),
+                        call_id,
+                        tool_name,
+                        &ToolOutcomeStatus::Succeeded,
+                        input,
+                        Some(risk),
+                        &run_context,
+                    ),
+                )
+            };
+        let mut transcript = original.messages.clone();
+        transcript.push(permission_observation(
+            "permission-write",
+            "write",
+            "file.write",
+            &write_input,
+            &ToolRisk::WritesWorkspace,
+        ));
+        transcript.push(permission_observation(
+            "permission-read",
+            "read",
+            "file.read",
+            &read_input,
+            &ToolRisk::ReadOnly,
+        ));
+
+        for persisted in &transcript[boundary..] {
+            let witness = persisted
+                .metadata
+                .get(agent_runtime::TOOL_EFFECT_WITNESS_METADATA_KEY)
+                .expect("successful effect should persist a recovery witness");
+            assert!(witness.len() <= agent_runtime::MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES);
+            for secret in [
+                target,
+                "private",
+                "super-secret",
+                "never-persist-this-secret",
+            ] {
+                assert!(!witness.contains(secret));
+                assert!(persisted
+                    .metadata
+                    .values()
+                    .all(|value| !value.contains(secret)));
+            }
+        }
+
+        let observations = persisted_permission_observations(&transcript, &run_context);
+        assert_eq!(observations.len(), 2);
+        assert!(observations
+            .iter()
+            .all(|observation| observation.effect_witness.is_some()));
+        let (mut restored, replay_boundary) = restore_permission_snapshot_from_boundary(
+            &snapshot,
+            &original.user_prompt,
+            original.prepared_task_state().effective_objective(),
+            &transcript,
+            boundary,
+        )
+        .expect("cold recovery should restore the blocked snapshot");
+        assert_eq!(replay_boundary, boundary);
+        apply_run_task_contract(&mut restored, &run_context, &tools, None)
+            .expect("verification contract reapplies after restart");
+        let mut deltas = Vec::new();
+        for observation in &observations {
+            let risk = tools
+                .iter()
+                .find(|tool| tool.name == observation.tool_name)
+                .map(|tool| &tool.risk);
+            deltas.extend(
+                AgentKernel::new(&mut restored, &tools).apply_persisted_tool_observation(
+                    observation.call_id.clone(),
+                    &observation.tool_name,
+                    &observation.input_fingerprint,
+                    observation.target_witness.as_deref(),
+                    observation.effect_witness.as_ref(),
+                    &observation.status,
+                    risk,
+                    &observation.observation,
+                ),
+            );
+        }
+        assert!(deltas.iter().any(|delta| {
+            delta
+                .kinds()
+                .contains(&agent_runtime::AgentGoalDeltaKind::WorkspaceVerified)
+        }));
+        assert_eq!(
+            AgentKernel::new(&mut restored, &tools).completion_gate_for_task(),
+            Ok(None),
+            "the cold-replayed write/read pair must close the postcondition"
+        );
+        assert!(restored
+            .task_contract
+            .outcome_ledger_shadow(0)
+            .postconditions
+            .iter()
+            .any(|postcondition| {
+                postcondition.status == agent_runtime::OutcomePostconditionStatus::Verified
+            }));
+
+        let mut legacy_transcript = transcript;
+        for message in &mut legacy_transcript[boundary..] {
+            message
+                .metadata
+                .remove(agent_runtime::TOOL_EFFECT_WITNESS_METADATA_KEY);
+        }
+        let legacy_observations =
+            persisted_permission_observations(&legacy_transcript, &run_context);
+        assert!(legacy_observations
+            .iter()
+            .all(|observation| observation.effect_witness.is_none()));
+        let (mut legacy, _) = restore_permission_snapshot_from_boundary(
+            &snapshot,
+            &original.user_prompt,
+            original.prepared_task_state().effective_objective(),
+            &legacy_transcript,
+            boundary,
+        )
+        .expect("old snapshots without a witness remain readable");
+        apply_run_task_contract(&mut legacy, &run_context, &tools, None)
+            .expect("old snapshot contract reapplies");
+        for observation in &legacy_observations {
+            let risk = tools
+                .iter()
+                .find(|tool| tool.name == observation.tool_name)
+                .map(|tool| &tool.risk);
+            AgentKernel::new(&mut legacy, &tools).apply_persisted_tool_observation(
+                observation.call_id.clone(),
+                &observation.tool_name,
+                &observation.input_fingerprint,
+                observation.target_witness.as_deref(),
+                None,
+                &observation.status,
+                risk,
+                &observation.observation,
+            );
+        }
+        assert!(AgentKernel::new(&mut legacy, &tools)
+            .completion_gate_for_task()
+            .expect("legacy completion gate evaluates")
+            .is_some());
+    }
+
+    fn permission_goal_delta() -> agent_runtime::AgentGoalDelta {
+        let tools = vec![ToolSpec::builtin(
+            "file.read",
+            "test",
+            "Read a file",
+            ToolRisk::ReadOnly,
+            r#"{"type":"object"}"#,
+        )];
+        let mut runtime = start_agent_loop(
+            TaskId("cold-permission-credit".to_string()),
+            "read the required file",
+            AgentRuntimeConfig::default(),
+        );
+        runtime.task_contract.require_tool_success("file.read");
+        AgentKernel::new(&mut runtime, &tools)
+            .apply_tool_observation(
+                &AgentToolRequest {
+                    call_id: agent_core::ToolCallId("read".to_string()),
+                    tool_name: "file.read".to_string(),
+                    input: r#"{"path":"goal.md"}"#.to_string(),
+                },
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::ReadOnly),
+                "goal evidence",
+            )
+            .expect("the required tool should produce a Goal Delta")
+    }
+
+    #[test]
+    fn cold_permission_recovery_credits_only_after_runtime_commit() {
+        let empty_commit_called = std::cell::Cell::new(false);
+        commit_cold_permission_recovery_before_goal_credit(
+            &AgentRunControl::new("auto"),
+            0,
+            &[],
+            || {
+                empty_commit_called.set(true);
+                Ok(())
+            },
+        )
+        .expect("an empty recovery should be a no-op");
+        assert!(
+            !empty_commit_called.get(),
+            "a recovery without Goal Deltas should not add a snapshot write"
+        );
+
+        let delta = permission_goal_delta();
+        let failed_control = AgentRunControl::new("auto");
+        let failure = commit_cold_permission_recovery_before_goal_credit(
+            &failed_control,
+            0,
+            std::slice::from_ref(&delta),
+            || Err("injected runtime snapshot failure".to_string()),
+        );
+        assert!(failure.is_err());
+        assert!(
+            failed_control.record_goal_delta_at(0, &delta),
+            "a failed runtime commit must not consume or credit the Goal Delta"
+        );
+
+        let committed_control = AgentRunControl::new("auto");
+        commit_cold_permission_recovery_before_goal_credit(
+            &committed_control,
+            0,
+            std::slice::from_ref(&delta),
+            || Ok(()),
+        )
+        .expect("the committed recovery should be credited");
+        assert!(
+            !committed_control.record_goal_delta_at(0, &delta),
+            "the post-commit Goal Delta should be retained by the live control"
         );
     }
 }

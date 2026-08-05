@@ -578,7 +578,11 @@ pub(crate) fn complete_prompt_evaluation_worker(
                         tool_outcome_label(&status),
                         &output,
                     );
-                    worker.apply_tool_observation(&call, &status, &observation);
+                    if let Some(delta) =
+                        worker.apply_tool_observation(&call, &status, &observation)
+                    {
+                        control.record_goal_delta_at(objective_epoch, &delta);
+                    }
                 }
             }
         }
