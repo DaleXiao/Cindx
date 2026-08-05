@@ -5,29 +5,28 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Instant;
 use tauri::Manager;
 
+mod execution;
+mod http_fixture;
 mod receipts;
 mod runtime;
 mod setup;
 #[cfg(test)]
 mod tests;
+mod tool_receipts;
 mod verification;
 
-use receipts::{
-    model_receipts_from_metadata, ModelReceipt, ResolvedBudgetReceipt, StrategyReceipt,
-};
-use runtime::{collect_event_metrics, run_product_task};
-use setup::{
-    activate_evaluation_data_root, add_recall_session, build_evaluation_app, configure_run_project,
-    seed_memory_fixture_for_case, SetupFailure, SetupFailureCode, SetupFailureStage,
-};
-use verification::{case_input_sha256, direct_prompt, resolved_objective, verify_case};
+use execution::{execute_case, CaseExecutionInput};
+use http_fixture::HttpFixtureReceipt;
+use receipts::{ModelReceipt, ResolvedBudgetReceipt, StrategyReceipt};
+use setup::{activate_evaluation_data_root, build_evaluation_app, SetupFailure};
+use tool_receipts::ToolAttemptReceipt;
+use verification::{case_input_sha256, PostconditionReceipt};
 
-const SUITE_SCHEMA: &str = "cindx.agent-realworld-suite.v2";
-const RAW_SCHEMA: &str = "cindx.agent-realworld-raw.v2";
+const SUITE_SCHEMA: &str = "cindx.agent-realworld-suite.v3";
+const RAW_SCHEMA: &str = "cindx.agent-realworld-raw.v3";
 
 #[derive(Debug, Deserialize)]
 struct RealworldSuite {
@@ -94,7 +93,18 @@ struct VerificationContract {
     #[serde(default)]
     required_tools_all: Vec<String>,
     #[serde(default)]
+    browser_target_receipt: Option<BrowserTargetReceiptContract>,
+    #[serde(default)]
     minimum_denied_permissions: usize,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BrowserTargetReceiptContract {
+    #[serde(default)]
+    tools_all: Vec<String>,
+    #[serde(default)]
+    tools_any: Vec<String>,
+    minimum_artifacts: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +169,13 @@ struct RuntimeMetrics {
     model_calls: usize,
     model_responses: usize,
     tool_calls: usize,
+    tool_succeeded: usize,
+    tool_failed: usize,
+    tool_cancelled: usize,
+    tool_denied: usize,
+    tool_incomplete: usize,
+    tool_superseded: usize,
+    tool_invalid: usize,
     permission_requests: usize,
     denied_permissions: usize,
     recovery_events: usize,
@@ -179,6 +196,8 @@ struct VerificationResult {
     total_checks: usize,
     safety_violations: usize,
     failures: Vec<String>,
+    expected_browser_target_sha256: Option<String>,
+    postcondition_receipts: Vec<PostconditionReceipt>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +213,8 @@ struct RawRun {
     terminal_status: String,
     configured_models: Vec<String>,
     tools_used: Vec<String>,
+    fixture_receipt: Option<HttpFixtureReceipt>,
+    tool_receipts: Vec<ToolAttemptReceipt>,
     memory_records_after_seed: Option<usize>,
     input_sha256: String,
     output_sha256: String,
@@ -241,6 +262,14 @@ struct EventMetrics {
     completion_tokens: u64,
     total_tokens: u64,
     tools: BTreeSet<String>,
+    tool_receipts: Vec<ToolAttemptReceipt>,
+    tool_succeeded: usize,
+    tool_failed: usize,
+    tool_cancelled: usize,
+    tool_denied: usize,
+    tool_incomplete: usize,
+    tool_superseded: usize,
+    tool_invalid: usize,
     resolved_budget: Option<ResolvedBudgetReceipt>,
     strategy_receipt: Option<StrategyReceipt>,
     model_receipts: Vec<ModelReceipt>,
@@ -252,6 +281,25 @@ struct ExecutionCell {
     execution_index: usize,
     treatment_position: usize,
     plan_sha256: String,
+}
+
+struct FailedRunDetails {
+    input_sha256: String,
+    error: String,
+    started: Instant,
+    setup_failure: SetupFailure,
+    setup_latency_ms: u64,
+}
+
+struct RawReportContext<'a> {
+    suite: &'a RealworldSuite,
+    suite_bytes: &'a [u8],
+    provider: &'a ProviderConfig,
+    git_commit: &'a str,
+    replicates: u32,
+    selected_cases: &'a [String],
+    treatments: &'a [Treatment],
+    execution: &'a ExecutionCell,
 }
 
 struct ProductRun {
@@ -269,7 +317,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
         .map_err(|error| format!("failed to locate repository root: {error}"))?;
     let suite_path = std::env::var_os("CINDX_AGENT_REALWORLD_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v3.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v4.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
@@ -379,6 +427,16 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
         .iter()
         .map(|case| case.id.clone())
         .collect::<Vec<_>>();
+    let report_context = RawReportContext {
+        suite: &suite,
+        suite_bytes: &suite_bytes,
+        provider: &provider,
+        git_commit: &git_commit,
+        replicates,
+        selected_cases: &selected_case_names,
+        treatments: &treatments,
+        execution: &execution,
+    };
 
     for replicate in replicate_indices {
         for case in &selected_cases {
@@ -398,43 +456,23 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                     provider.model.clone(),
                     &execution,
                 ));
-                write_raw_report(
-                    &output_path,
-                    &suite,
-                    &suite_bytes,
-                    &provider,
-                    &git_commit,
-                    replicates,
-                    &selected_case_names,
-                    &treatments,
-                    &execution,
-                    &runs,
-                )?;
+                write_raw_report(&output_path, &report_context, &runs)?;
                 let run = execute_case(
                     &app,
                     &state,
                     &provider,
-                    case,
-                    *treatment,
-                    replicate,
-                    &run_root,
                     &evaluation_database,
-                    &execution,
-                    frozen_profile.as_ref(),
+                    CaseExecutionInput {
+                        case,
+                        treatment: *treatment,
+                        replicate,
+                        root: &run_root,
+                        execution: &execution,
+                        frozen_profile: frozen_profile.as_ref(),
+                    },
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;
-                write_raw_report(
-                    &output_path,
-                    &suite,
-                    &suite_bytes,
-                    &provider,
-                    &git_commit,
-                    replicates,
-                    &selected_case_names,
-                    &treatments,
-                    &execution,
-                    &runs,
-                )?;
+                write_raw_report(&output_path, &report_context, &runs)?;
             }
         }
     }
@@ -508,6 +546,51 @@ fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
                     case.id
                 ));
             }
+        }
+        let browser_fixture = case.objective.contains("{{BROWSER_URL}}");
+        match (
+            browser_fixture,
+            case.verification.browser_target_receipt.as_ref(),
+        ) {
+            (true, Some(contract)) => {
+                if !case
+                    .files
+                    .iter()
+                    .any(|fixture| fixture.path == "site/index.html")
+                {
+                    return Err(format!(
+                        "{} browser fixture must provide site/index.html",
+                        case.id
+                    ));
+                }
+                if contract.tools_all.is_empty()
+                    || contract.tools_any.is_empty()
+                    || contract.minimum_artifacts == 0
+                    || contract
+                        .tools_all
+                        .iter()
+                        .chain(&contract.tools_any)
+                        .any(|tool| !tool.starts_with("browser."))
+                {
+                    return Err(format!(
+                        "{} browser receipt contract is incomplete",
+                        case.id
+                    ));
+                }
+            }
+            (true, None) => {
+                return Err(format!(
+                    "{} browser fixture is missing its target receipt contract",
+                    case.id
+                ))
+            }
+            (false, Some(_)) => {
+                return Err(format!(
+                    "{} declares a browser receipt without a browser fixture",
+                    case.id
+                ))
+            }
+            (false, None) => {}
         }
     }
     let required = BTreeSet::from([
@@ -712,279 +795,6 @@ fn materialize_case(root: &Path, case: &RealworldCase) -> Result<(), String> {
     Ok(())
 }
 
-fn execute_case(
-    app: &tauri::App<tauri::Wry>,
-    state: &tauri::State<'_, AppState>,
-    provider: &ProviderConfig,
-    case: &RealworldCase,
-    treatment: Treatment,
-    replicate: u32,
-    root: &Path,
-    evaluation_database: &Path,
-    execution: &ExecutionCell,
-    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
-) -> RawRun {
-    let input_sha256 = case_input_sha256(case);
-    let started = Instant::now();
-    if treatment == Treatment::Direct {
-        let prompt = direct_prompt(case, root);
-        let control = Arc::new(AgentRunControl::with_budget(RunBudget::for_effort("fast")));
-        let completion = complete_collaboration_model_with_control(
-            provider.clone(),
-            ModelRole::Executor,
-            provider.model.clone(),
-            "You are the frozen direct baseline. You have no tools and cannot change external state. Answer only from the supplied fixture evidence; never claim that a file or command was executed."
-                .to_string(),
-            prompt,
-            Some(control),
-            |_| {},
-        );
-        let output = completion.content.unwrap_or_default();
-        let verification = verify_case(case, treatment, root, &output, &[], 0);
-        let model_responses = usize::from(completion.error.is_none());
-        let (model_receipts, evidence_error) = if model_responses == 0 {
-            (Vec::new(), None)
-        } else {
-            match model_receipts_from_metadata(&completion.usage) {
-                Ok(receipts)
-                    if receipts.len() == model_responses
-                        && receipts
-                            .iter()
-                            .all(|receipt| receipt.receipt_status == "observed") =>
-                {
-                    (receipts, None)
-                }
-                Ok(receipts) => (
-                    receipts,
-                    Some("direct provider identity evidence is incomplete".to_string()),
-                ),
-                Err(error) => (Vec::new(), Some(error)),
-            }
-        };
-        return RawRun {
-            execution_index: execution.execution_index,
-            treatment_position: execution.treatment_position,
-            replicate,
-            case_id: case.id.clone(),
-            category: case.category.clone(),
-            treatment,
-            product_mechanism_exercised: false,
-            completed: completion.error.is_none() && !output.trim().is_empty(),
-            terminal_status: if completion.error.is_none() {
-                "completed".to_string()
-            } else {
-                "failed".to_string()
-            },
-            configured_models: vec![provider.model.clone()],
-            tools_used: Vec::new(),
-            memory_records_after_seed: None,
-            input_sha256,
-            output_sha256: sha256_hex(output.as_bytes()),
-            output,
-            error: completion.error,
-            evidence_error,
-            setup_failure: None,
-            resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
-            strategy_receipt: None,
-            model_receipts,
-            metrics: RuntimeMetrics {
-                latency_ms: completion.latency_ms,
-                model_calls: 1,
-                model_responses,
-                prompt_tokens: metadata_u64(&completion.usage, "prompt_tokens"),
-                completion_tokens: metadata_u64(&completion.usage, "completion_tokens"),
-                total_tokens: metadata_u64(&completion.usage, "total_tokens"),
-                resident_kib_after: process_resident_kib(),
-                workspace_bytes_after: directory_size(root),
-                ..RuntimeMetrics::default()
-            },
-            verification,
-        };
-    }
-
-    let key = format!("r{replicate}-{}-{}", case.id, treatment.label());
-    let (project_id, mut session_id) = match configure_run_project(state, root, &key) {
-        Ok(value) => value,
-        Err(error) => {
-            return failed_run(
-                case,
-                treatment,
-                replicate,
-                input_sha256,
-                error,
-                started,
-                SetupFailure::new(
-                    SetupFailureStage::ProjectConfiguration,
-                    SetupFailureCode::Configuration,
-                    false,
-                ),
-                0,
-                execution,
-            )
-        }
-    };
-    let objective = resolved_objective(case, root);
-    let mut setup_latency_ms = 0_u64;
-    let mut memory_records_after_seed = None;
-    if case.index_workspace {
-        let setup_started = Instant::now();
-        let index_result = index_workspace_rag_blocking(
-            app.handle(),
-            RagOperationInput {
-                operation_id: unique_id("realworld-index"),
-            },
-        );
-        setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(setup_started));
-        if let Err(error) = index_result {
-            let setup_failure = if error == RAG_INDEX_CANCELLED {
-                SetupFailure::new(
-                    SetupFailureStage::WorkspaceIndex,
-                    SetupFailureCode::Transient,
-                    true,
-                )
-            } else {
-                SetupFailure::new(
-                    SetupFailureStage::WorkspaceIndex,
-                    SetupFailureCode::Index,
-                    false,
-                )
-            };
-            return failed_run(
-                case,
-                treatment,
-                replicate,
-                input_sha256,
-                error,
-                started,
-                setup_failure,
-                setup_latency_ms,
-                execution,
-            );
-        }
-    }
-    if let Some(seed_prompt) = case.seed_memory_prompt.as_deref() {
-        let setup_started = Instant::now();
-        let seed_result = seed_memory_fixture_for_case(
-            state,
-            evaluation_database,
-            &project_id,
-            &session_id,
-            seed_prompt,
-        );
-        setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(setup_started));
-        memory_records_after_seed = match seed_result {
-            Ok(record_count) => Some(record_count),
-            Err((setup_failure, error)) => {
-                return failed_run(
-                    case,
-                    treatment,
-                    replicate,
-                    input_sha256,
-                    error,
-                    started,
-                    setup_failure,
-                    setup_latency_ms,
-                    execution,
-                )
-            }
-        };
-        let session_started = Instant::now();
-        session_id = match add_recall_session(state, &project_id, &key) {
-            Ok(session_id) => session_id,
-            Err(error) => {
-                setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(session_started));
-                return failed_run(
-                    case,
-                    treatment,
-                    replicate,
-                    input_sha256,
-                    error,
-                    started,
-                    SetupFailure::new(
-                        SetupFailureStage::RecallSession,
-                        SetupFailureCode::Configuration,
-                        false,
-                    ),
-                    setup_latency_ms,
-                    execution,
-                );
-            }
-        };
-        setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(session_started));
-    }
-
-    let product = run_product_task(
-        app.handle(),
-        state,
-        &session_id,
-        &objective,
-        treatment,
-        case.permission_policy,
-    );
-    let output = product.state.latest_answer.clone().unwrap_or_default();
-    let mut event_metrics =
-        match collect_event_metrics(state, &session_id, treatment, frozen_profile) {
-            Ok(metrics) => metrics,
-            Err(error) => EventMetrics {
-                evidence_errors: vec![error],
-                ..EventMetrics::default()
-            },
-        };
-    let tools = std::mem::take(&mut event_metrics.tools)
-        .into_iter()
-        .collect::<Vec<_>>();
-    let denied_permissions = product
-        .denied_permissions
-        .max(event_metrics.denied_permissions);
-    let verification = verify_case(case, treatment, root, &output, &tools, denied_permissions);
-    let evidence_error = (!event_metrics.evidence_errors.is_empty())
-        .then(|| event_metrics.evidence_errors.join(" | "));
-    RawRun {
-        execution_index: execution.execution_index,
-        treatment_position: execution.treatment_position,
-        replicate,
-        case_id: case.id.clone(),
-        category: case.category.clone(),
-        treatment,
-        product_mechanism_exercised: true,
-        completed: product.state.status == "completed",
-        terminal_status: product.state.status.clone(),
-        configured_models: configured_models(provider).into_values().collect(),
-        tools_used: tools,
-        memory_records_after_seed,
-        input_sha256,
-        output_sha256: sha256_hex(output.as_bytes()),
-        output,
-        error: product.error.or(product.state.last_error.clone()),
-        evidence_error,
-        setup_failure: None,
-        resolved_budget: event_metrics
-            .resolved_budget
-            .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment)),
-        strategy_receipt: event_metrics.strategy_receipt,
-        model_receipts: event_metrics.model_receipts,
-        metrics: RuntimeMetrics {
-            latency_ms: elapsed_ms(started).saturating_sub(setup_latency_ms),
-            setup_latency_ms,
-            model_calls: event_metrics.model_calls,
-            model_responses: event_metrics.model_responses,
-            tool_calls: event_metrics.tool_calls,
-            permission_requests: product
-                .permission_requests
-                .max(event_metrics.permission_requests),
-            denied_permissions,
-            recovery_events: event_metrics.recovery_events,
-            prompt_tokens: event_metrics.prompt_tokens,
-            completion_tokens: event_metrics.completion_tokens,
-            total_tokens: event_metrics.total_tokens,
-            context_tokens_used: product.state.context_tokens_used,
-            resident_kib_after: process_resident_kib(),
-            workspace_bytes_after: directory_size(root),
-        },
-        verification,
-    }
-}
-
 fn interrupted_run(
     case: &RealworldCase,
     treatment: Treatment,
@@ -1009,6 +819,8 @@ fn interrupted_run(
             vec![direct_model]
         },
         tools_used: Vec::new(),
+        fixture_receipt: None,
+        tool_receipts: Vec::new(),
         memory_records_after_seed: None,
         input_sha256: case_input_sha256(case),
         output_sha256: sha256_hex(&[]),
@@ -1032,12 +844,8 @@ fn failed_run(
     case: &RealworldCase,
     treatment: Treatment,
     replicate: u32,
-    input_sha256: String,
-    error: String,
-    started: Instant,
-    setup_failure: SetupFailure,
-    setup_latency_ms: u64,
     execution: &ExecutionCell,
+    details: FailedRunDetails,
 ) -> RawRun {
     RawRun {
         execution_index: execution.execution_index,
@@ -1051,19 +859,21 @@ fn failed_run(
         terminal_status: "infrastructure_failed".to_string(),
         configured_models: Vec::new(),
         tools_used: Vec::new(),
+        fixture_receipt: None,
+        tool_receipts: Vec::new(),
         memory_records_after_seed: None,
-        input_sha256,
+        input_sha256: details.input_sha256,
         output_sha256: sha256_hex(&[]),
         output: String::new(),
-        error: Some(error),
+        error: Some(details.error),
         evidence_error: None,
-        setup_failure: Some(setup_failure),
+        setup_failure: Some(details.setup_failure),
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
         model_receipts: Vec::new(),
         metrics: RuntimeMetrics {
-            latency_ms: elapsed_ms(started),
-            setup_latency_ms,
+            latency_ms: elapsed_ms(details.started),
+            setup_latency_ms: details.setup_latency_ms,
             resident_kib_after: process_resident_kib(),
             ..RuntimeMetrics::default()
         },
@@ -1076,33 +886,26 @@ fn failed_run(
 
 fn write_raw_report(
     output_path: &Path,
-    suite: &RealworldSuite,
-    suite_bytes: &[u8],
-    provider: &ProviderConfig,
-    git_commit: &str,
-    replicates: u32,
-    selected_cases: &[String],
-    treatments: &[Treatment],
-    execution: &ExecutionCell,
+    context: &RawReportContext<'_>,
     runs: &[RawRun],
 ) -> Result<(), String> {
     let report = RawReport {
         schema: RAW_SCHEMA,
-        suite_id: &suite.id,
-        suite_version: suite.version,
-        suite_description: &suite.description,
-        suite_sha256: sha256_hex(suite_bytes),
-        execution_order_protocol: &suite.execution_order.protocol,
-        execution_plan_sha256: &execution.plan_sha256,
+        suite_id: &context.suite.id,
+        suite_version: context.suite.version,
+        suite_description: &context.suite.description,
+        suite_sha256: sha256_hex(context.suite_bytes),
+        execution_order_protocol: &context.suite.execution_order.protocol,
+        execution_plan_sha256: &context.execution.plan_sha256,
         generated_at_ms: current_time_millis(),
-        git_commit: git_commit.to_string(),
+        git_commit: context.git_commit.to_string(),
         app_version: env!("CARGO_PKG_VERSION"),
-        provider_id: provider.provider_id.clone(),
-        provider_endpoint: provider.base_url.clone(),
-        configured_models: configured_models(provider),
-        requested_replicates: replicates,
-        selected_cases: selected_cases.to_vec(),
-        selected_treatments: treatments.to_vec(),
+        provider_id: context.provider.provider_id.clone(),
+        provider_endpoint: context.provider.base_url.clone(),
+        configured_models: configured_models(context.provider),
+        requested_replicates: context.replicates,
+        selected_cases: context.selected_cases.to_vec(),
+        selected_treatments: context.treatments.to_vec(),
         runs,
     };
     let encoded = serde_json::to_vec_pretty(&report)

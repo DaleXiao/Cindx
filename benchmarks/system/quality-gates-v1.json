@@ -31,6 +31,7 @@
       "routing-contract",
       "evaluation-foundation",
       "agent-arena-contract",
+      "agent-realworld-contract",
       "memory-contract",
       "frontend-test"
     ],
@@ -40,6 +41,7 @@
       "routing-contract",
       "evaluation-foundation",
       "agent-arena-contract",
+      "agent-realworld-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests"
@@ -84,6 +86,7 @@
       "routing-contract",
       "evaluation-foundation",
       "agent-arena-contract",
+      "agent-realworld-contract",
       "memory-contract",
       "workspace-tests",
       "desktop-tests",
@@ -210,6 +213,11 @@
         { "path": "missing_runs", "equals_path": "required_observations" },
         { "path": "ready_for_scientific_comparison", "equals": false }
       ]
+    },
+    {
+      "id": "agent-realworld-contract",
+      "category": "evaluation_contract",
+      "command": ["node", "--test", "scripts/agent-realworld-contract.test.mjs"]
     },
     {
       "id": "memory-contract",

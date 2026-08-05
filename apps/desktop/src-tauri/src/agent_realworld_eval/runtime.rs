@@ -2,13 +2,14 @@ use super::receipts::{
     is_receipt_bearing_event, model_receipts_from_metadata, resolved_budget_from_events,
     strategy_receipt_from_events, successful_response_count,
 };
+use super::tool_receipts::{project_tool_receipts, ToolReceiptStatus};
 use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment};
 use crate::{
-    agent_events_for_session, begin_agent_run_control_for_effort, phase16_task_id,
-    resolve_agent_permission_blocking, retry_agent_task_blocking, run_agent_task_blocking_inner,
-    AgentState, AgentTaskInput, AppState, EventKind, FrozenPromptProfileSnapshot,
-    SessionActionInput,
+    begin_agent_run_control_for_effort, phase16_task_id, resolve_agent_permission_blocking,
+    retry_agent_task_blocking, run_agent_task_blocking_inner, AgentState, AgentTaskInput, AppState,
+    EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
 };
+use std::path::Path;
 
 const MAX_DRIVER_ROUNDS: usize = 24;
 
@@ -153,13 +154,23 @@ pub(super) fn collect_event_metrics(
     session_id: &str,
     treatment: Treatment,
     frozen_profile: Option<&FrozenPromptProfileSnapshot>,
+    sequence_floor: u64,
+    workspace_root: &Path,
 ) -> Result<EventMetrics, String> {
-    let store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let events = agent_events_for_session(&store, &phase16_task_id(), Some(session_id))
-        .map_err(|error| error.to_string())?;
+    let events = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .list_by_task_and_metadata_after(
+                &phase16_task_id(),
+                "session_id",
+                session_id,
+                sequence_floor,
+            )
+            .map_err(|error| error.to_string())?
+    };
     let mut metrics = EventMetrics::default();
     for event in &events {
         match event.kind {
@@ -202,17 +213,11 @@ pub(super) fn collect_event_metrics(
                     ));
                 }
             }
-            EventKind::ToolCallStarted => {
-                metrics.tool_calls += 1;
-                if let Some(tool) = event.metadata.get("tool") {
-                    metrics.tools.insert(tool.clone());
-                }
-            }
             EventKind::PermissionRequested => metrics.permission_requests += 1,
-            EventKind::PermissionResolved => {
-                if event.metadata.get("decision").map(String::as_str) == Some("deny") {
-                    metrics.denied_permissions += 1;
-                }
+            EventKind::PermissionResolved
+                if event.metadata.get("decision").map(String::as_str) == Some("deny") =>
+            {
+                metrics.denied_permissions += 1;
             }
             _ => {}
         }
@@ -222,6 +227,24 @@ pub(super) fn collect_event_metrics(
             metrics.recovery_events += 1;
         }
     }
+    let projection = project_tool_receipts(&events, workspace_root);
+    metrics.tool_calls = projection.receipts.len();
+    for receipt in &projection.receipts {
+        match receipt.status {
+            ToolReceiptStatus::Succeeded => {
+                metrics.tool_succeeded += 1;
+                metrics.tools.insert(receipt.tool.clone());
+            }
+            ToolReceiptStatus::Failed => metrics.tool_failed += 1,
+            ToolReceiptStatus::Cancelled => metrics.tool_cancelled += 1,
+            ToolReceiptStatus::Denied => metrics.tool_denied += 1,
+            ToolReceiptStatus::Incomplete => metrics.tool_incomplete += 1,
+            ToolReceiptStatus::Superseded => metrics.tool_superseded += 1,
+            ToolReceiptStatus::Invalid => metrics.tool_invalid += 1,
+        }
+    }
+    metrics.tool_receipts = projection.receipts;
+    metrics.evidence_errors.extend(projection.errors);
     metrics.model_calls = metrics.model_calls.max(metrics.model_responses);
     if metrics.model_receipts.len() != metrics.model_responses {
         metrics.evidence_errors.push(format!(
@@ -244,4 +267,14 @@ pub(super) fn collect_event_metrics(
             .saturating_add(metrics.completion_tokens);
     }
     Ok(metrics)
+}
+
+pub(super) fn event_sequence_floor(state: &tauri::State<'_, AppState>) -> Result<u64, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    store
+        .latest_sequence(&phase16_task_id())
+        .map_err(|error| error.to_string())
 }

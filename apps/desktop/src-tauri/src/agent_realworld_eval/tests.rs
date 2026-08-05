@@ -4,8 +4,8 @@ use super::setup::{
     SetupFailureCode, SetupFailureStage,
 };
 use super::{
-    directory_size, failed_run, selected_replicates, ExecutionCell, PermissionPolicy,
-    RealworldCase, Treatment, VerificationContract,
+    directory_size, failed_run, selected_replicates, ExecutionCell, FailedRunDetails,
+    PermissionPolicy, RealworldCase, Treatment, VerificationContract,
 };
 use crate::persistence_runtime::open_app_store_at;
 use agent_core::Metadata;
@@ -127,19 +127,21 @@ fn setup_failure_is_typed_and_preserves_spent_setup_latency() {
         &case,
         Treatment::Auto,
         1,
-        "a".repeat(64),
-        "temporary store lock".to_string(),
-        Instant::now(),
-        SetupFailure::new(
-            SetupFailureStage::MemorySeed,
-            SetupFailureCode::Transient,
-            true,
-        ),
-        37,
         &ExecutionCell {
             execution_index: 1,
             treatment_position: 1,
             plan_sha256: "a".repeat(64),
+        },
+        FailedRunDetails {
+            input_sha256: "a".repeat(64),
+            error: "temporary store lock".to_string(),
+            started: Instant::now(),
+            setup_failure: SetupFailure::new(
+                SetupFailureStage::MemorySeed,
+                SetupFailureCode::Transient,
+                true,
+            ),
+            setup_latency_ms: 37,
         },
     );
     let json = serde_json::to_value(&run).expect("raw run should serialize");

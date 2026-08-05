@@ -2,6 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  sanitizeReceiptEvidence,
+  toolReceiptMetricFields,
+  validateReceiptEvidence,
+  validateSuiteReceiptContracts
+} from "./agent-realworld-receipts.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const setupFailureStages = new Set([
@@ -149,7 +155,7 @@ function validateSetupFailure(run, key, infrastructureFailed) {
 }
 
 function validateSuite(suite) {
-  requireFact(suite?.schema === "cindx.agent-realworld-suite.v2", "suite schema mismatch");
+  requireFact(suite?.schema === "cindx.agent-realworld-suite.v3", "suite schema mismatch");
   requireFact(typeof suite.id === "string" && suite.id.length > 0, "suite id is missing");
   requireFact(Number.isInteger(suite.version) && suite.version > 0, "suite version is invalid");
   requireFact(
@@ -210,6 +216,7 @@ function validateSuite(suite) {
   for (const testCase of suite.cases) {
     requireFact(typeof testCase.id === "string" && !ids.has(testCase.id), "case ids must be unique");
     ids.add(testCase.id);
+    validateSuiteReceiptContracts(testCase);
   }
 }
 
@@ -433,11 +440,16 @@ function validateRun(run, testCase, treatment, replicate, expectedEntry, profile
   requireFact(typeof run.completed === "boolean", `${key}: completed flag is missing`);
   requireFact(typeof run.terminal_status === "string", `${key}: terminal status is missing`);
   requireFact(
+    run.completed === (run.terminal_status === "completed"),
+    `${key}: completed flag and terminal status disagree`
+  );
+  requireFact(
     run.evidence_error === null || typeof run.evidence_error === "string",
     `${key}: evidence error is invalid`
   );
   requireFact(Array.isArray(run.configured_models), `${key}: configured models are missing`);
   requireFact(Array.isArray(run.tools_used), `${key}: tool trace is missing`);
+  requireFact(run.tools_used.every((tool) => typeof tool === "string" && tool.length > 0), `${key}: tool trace is invalid`);
   requireFact(/^[0-9a-f]{64}$/.test(run.input_sha256), `${key}: input hash is invalid`);
   requireFact(/^[0-9a-f]{64}$/.test(run.output_sha256), `${key}: output hash is invalid`);
   requireFact(typeof run.output === "string", `${key}: raw output is missing`);
@@ -453,6 +465,7 @@ function validateRun(run, testCase, treatment, replicate, expectedEntry, profile
     "model_calls",
     "model_responses",
     "tool_calls",
+    ...Object.values(toolReceiptMetricFields),
     "permission_requests",
     "denied_permissions",
     "recovery_events",
@@ -468,6 +481,11 @@ function validateRun(run, testCase, treatment, replicate, expectedEntry, profile
   requireFact(run.verification && typeof run.verification === "object", `${key}: verification is missing`);
   requireFact(typeof run.verification.quality_passed === "boolean", `${key}: quality result is missing`);
   requireFact(typeof run.verification.answer_passed === "boolean", `${key}: answer result is missing`);
+  requireFact(Array.isArray(run.verification.failures), `${key}: verification failures are missing`);
+  requireFact(
+    run.verification.failures.every((failure) => typeof failure === "string"),
+    `${key}: verification failures are invalid`
+  );
   const infrastructureFailed = run.terminal_status === "infrastructure_failed";
   validateSetupFailure(run, key, infrastructureFailed);
   if (infrastructureFailed) {
@@ -482,6 +500,13 @@ function validateRun(run, testCase, treatment, replicate, expectedEntry, profile
     `${key}: external-effect boundary is incorrect`
   );
   finiteNonNegative(run.verification.safety_violations, `${key}: safety violations`);
+  requireFact(
+    run.verification.quality_passed ===
+      (run.verification.answer_passed &&
+        (treatment === "direct" || run.verification.external_effect_passed === true)),
+    `${key}: quality result is inconsistent with answer and external-effect results`
+  );
+  validateReceiptEvidence(run, testCase, key);
   validateResolvedBudget(run, key);
   validateStrategyReceipt(run, key, profileArtifacts);
   validateModelReceipts(run, key);
@@ -514,6 +539,12 @@ function aggregateRuns(runs) {
     model_calls: sum(runs.map((run) => run.metrics.model_calls)),
     model_responses: sum(runs.map((run) => run.metrics.model_responses)),
     tool_calls: sum(runs.map((run) => run.metrics.tool_calls)),
+    ...Object.fromEntries(
+      Object.values(toolReceiptMetricFields).map((field) => [
+        field,
+        sum(runs.map((run) => run.metrics[field]))
+      ])
+    ),
     permission_requests: sum(runs.map((run) => run.metrics.permission_requests)),
     denied_permissions: sum(runs.map((run) => run.metrics.denied_permissions)),
     recovery_events: sum(runs.map((run) => run.metrics.recovery_events)),
@@ -642,7 +673,7 @@ function promotionDecision(suite, runs, aggregates, evidenceComplete, setupFailu
 
 export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
   validateSuite(suite);
-  requireFact(raw?.schema === "cindx.agent-realworld-raw.v2", "raw schema mismatch");
+  requireFact(raw?.schema === "cindx.agent-realworld-raw.v3", "raw schema mismatch");
   requireFact(raw.suite_id === suite.id, "raw suite id mismatch");
   requireFact(raw.suite_version === suite.version, "raw suite version mismatch");
   requireFact(raw.suite_sha256 === sha256(suiteBytes), "frozen suite SHA-256 mismatch");
@@ -749,7 +780,7 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
     .filter(([, artifact]) => artifact.mode === "frozen_profile")
     .map(([effort]) => effort);
   return {
-    schema: "cindx.agent-realworld-sanitized.v2",
+    schema: "cindx.agent-realworld-sanitized.v3",
     suite: {
       id: suite.id,
       version: suite.version,
@@ -824,36 +855,41 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       ])
     ),
     paired_against_fast: pairedDeltas(orderedRuns, "fast"),
-    runs: orderedRuns.map((run) => ({
-      replicate: run.replicate,
-      case_id: run.case_id,
-      category: run.category,
-      treatment: run.treatment,
-      execution_index: run.execution_index,
-      treatment_position: run.treatment_position,
-      product_mechanism_exercised: run.product_mechanism_exercised,
-      completed: run.completed,
-      terminal_status: run.terminal_status,
-      configured_models: run.configured_models,
-      tools_used: run.tools_used,
-      memory_records_after_seed: run.memory_records_after_seed,
-      input_sha256: run.input_sha256,
-      output_sha256: run.output_sha256,
-      setup_failure: run.setup_failure
-        ? {
-            stage: run.setup_failure.stage,
-            code: run.setup_failure.code,
-            retryable: run.setup_failure.retryable
-          }
-        : null,
-      error_kind: runErrorKind(run),
-      evidence_error: run.evidence_error,
-      resolved_budget: run.resolved_budget,
-      strategy_receipt: run.strategy_receipt,
-      model_receipts: run.model_receipts,
-      metrics: run.metrics,
-      verification: run.verification
-    }))
+    runs: orderedRuns.map((run) => {
+      const receiptEvidence = sanitizeReceiptEvidence(run);
+      return {
+        replicate: run.replicate,
+        case_id: run.case_id,
+        category: run.category,
+        treatment: run.treatment,
+        execution_index: run.execution_index,
+        treatment_position: run.treatment_position,
+        product_mechanism_exercised: run.product_mechanism_exercised,
+        completed: run.completed,
+        terminal_status: run.terminal_status,
+        configured_models: run.configured_models,
+        tools_used: run.tools_used,
+        fixture_receipt: receiptEvidence.fixtureReceipt,
+        tool_receipts: receiptEvidence.toolReceipts,
+        memory_records_after_seed: run.memory_records_after_seed,
+        input_sha256: run.input_sha256,
+        output_sha256: run.output_sha256,
+        setup_failure: run.setup_failure
+          ? {
+              stage: run.setup_failure.stage,
+              code: run.setup_failure.code,
+              retryable: run.setup_failure.retryable
+            }
+          : null,
+        error_kind: runErrorKind(run),
+        evidence_error_sha256: run.evidence_error === null ? null : sha256(run.evidence_error),
+        resolved_budget: run.resolved_budget,
+        strategy_receipt: run.strategy_receipt,
+        model_receipts: run.model_receipts,
+        metrics: run.metrics,
+        verification: receiptEvidence.verification
+      };
+    })
   };
 }
 

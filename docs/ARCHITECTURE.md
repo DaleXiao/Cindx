@@ -121,8 +121,17 @@ state.
 
 The feature-gated Agent Real-World driver is also split by responsibility: its
 parent module owns the frozen suite, execution plan, case materialization, and
-raw report, while its `runtime` child owns product-run continuation and event
-metric projection. It is evaluation wiring and does not define shipping policy.
+raw report; its `execution` child owns one-cell Direct or product execution; and
+its `runtime` child owns product-run continuation and event metric projection.
+Its `http_fixture` child owns the ephemeral loopback server and request receipt
+for each browser cell; the resolved URL is part of the case contract rather than
+an ambient browser dependency. Its `tool_receipts` child projects typed attempts
+only from the current Agent run, preserves every projected terminal or unfinished
+attempt in the denominator, and digests workspace-bound artifact evidence.
+Verification accepts a tool obligation only after successful
+completion. Exact browser-target matching and artifact or postcondition digests
+bind observed effects to the frozen case. This is evaluation wiring and does not
+define shipping policy or establish provider-backed intelligence improvement.
 
 Prompt grounding classification, evidence-tool pinning, run-context objective
 selection, and model-stream retry/progress policy are portable

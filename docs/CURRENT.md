@@ -267,6 +267,18 @@ high-information reflection selection, and absolute holdout non-regression
 gates, but there is still no provider-backed matched evidence that an identified
 evolved profile improves external product quality.
 
+The current source defines Agent Real-World V4 as a prospective execution
+contract. Browser cases receive a per-cell loopback HTTP fixture instead of a
+`file://` target. Tool obligations can be satisfied only by successful typed
+receipts from the current run; projected failed, denied, cancelled, and
+unfinished calls remain visible in the tool-call denominator and cannot count as
+tool success. A process-level timeout remains a failed matrix cell even when it
+cannot emit a final tool receipt. Browser evidence must bind the exact resolved
+target and an artifact or postcondition digest. Deterministic tests verify this
+measurement machinery only.
+No V4 provider-backed matrix has been run, so these changes are not evidence of
+an Agent-quality or intelligence improvement.
+
 ## Current Evidence Boundary
 
 The latest provider-backed Agent baseline is

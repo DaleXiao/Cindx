@@ -8,10 +8,11 @@ does not claim Fugu Ultra equivalence.
 
 - `quick`: documentation, version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
-  120-case arena schema/evidence-ingestion contract, memory, and frontend state
-  behavior.
-- `control-plane`: documentation and deterministic agent contracts plus Rust
-  workspace and desktop tests.
+  120-case arena schema/evidence-ingestion contract, the Agent Real-World V4
+  measurement contract, memory, and frontend state behavior.
+- `control-plane`: documentation and deterministic agent contracts, including
+  the Agent Real-World V4 measurement contract, plus Rust workspace and desktop
+  tests.
 - `performance`: long-session incremental projection, bounded context governance,
   graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
   diagnostics.
@@ -24,8 +25,9 @@ does not claim Fugu Ultra equivalence.
   parsing, prepared image/request reuse, retry reuse, and linear frontend
   streaming Markdown work. It uses operation counts and identity invariants,
   never cross-machine wall-clock thresholds.
-- `full`: all shipping deterministic gates, sidecars, frontend production build,
-  and Rust tests; heavier same-machine diagnostics remain in `performance`.
+- `full`: all shipping deterministic gates, including the Agent Real-World V4
+  measurement contract, sidecars, frontend production build, and Rust tests;
+  heavier same-machine diagnostics remain in `performance`.
 
 `scripts/check-desktop-rust-light.sh` is a supplemental compile check, not a
 quality-gate profile. It deliberately avoids frontend bundle resources and the
@@ -84,6 +86,10 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
 - The Agent Arena validates all 120 versioned cases and remains explicitly
   `not_observed` until all 1,440 provider-backed paired runs exist. This is an
   evaluation-contract result, not an Agent-quality pass.
+- The Agent Real-World V4 contract test verifies the frozen matrix, isolated
+  loopback HTTP fixture, current-run successful typed tool receipts, exact
+  browser target, and artifact/postcondition digest rules without invoking a
+  provider.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.
@@ -108,9 +114,20 @@ explicit, billable operation and is never launched by an ordinary quality-gate
 profile. Its default mode performs only dataset, Git, and output-boundary preflight;
 only `--execute` reaches the configured provider.
 
-The Agent Real-World V3 runner is likewise outside deterministic profiles. Its
-complete 72-cell publication contract uses a cyclic Latin-square execution order,
-retains every failed or timed-out cell in the denominator, and requires complete
-strategy and observed provider-response receipts before an uplift decision can be
-`GO`. Frozen learned profiles are optional private inputs; without them the report
-must say `FRESH_SEED_ONLY`, even if Auto or Pro outperform Fast.
+The Agent Real-World V4 provider run is likewise outside deterministic profiles.
+Its complete 72-cell publication contract uses a cyclic Latin-square execution
+order, retains every failed or timed-out cell in the denominator, and requires
+complete strategy, observed provider-response, and successful typed tool receipts
+before an uplift decision can be `GO`. Browser cells use an isolated loopback HTTP
+fixture and must bind the exact resolved target plus artifact or postcondition
+digests. Frozen learned profiles are optional private inputs; without them the
+report must say `FRESH_SEED_ONLY`, even if Auto or Pro outperform Fast. The
+deterministic gate runs only:
+
+```bash
+node --test scripts/agent-realworld-contract.test.mjs
+```
+
+It does not contact a provider and cannot establish Agent-quality or intelligence
+uplift. No V4 provider-backed matrix has been run; V3 `0.2.3` remains the latest
+provider-backed decision evidence.

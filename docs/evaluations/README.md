@@ -3,6 +3,17 @@
 This directory contains current decision evidence. Reports describe only the
 source revision and application version recorded inside them.
 
+## Current Execution Contract
+
+Agent Real-World V4 is the current prospective 72-cell execution contract. It
+uses an isolated loopback HTTP fixture for browser cases, accepts required tools
+only from successful typed receipts for the current run, binds browser evidence
+to the exact resolved target, and verifies artifact or postcondition digests.
+Its deterministic contract test does not contact a provider. No V4
+provider-backed matrix has been run and no V4 decision report exists, so V4 does
+not replace or revise the V3 evidence below and supports no intelligence-uplift
+claim.
+
 ## Current Product Decision
 
 - [Cindx Agent Real-World V3 0.2.3](CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md)
