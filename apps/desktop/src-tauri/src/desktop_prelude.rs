@@ -163,7 +163,7 @@ pub(crate) use crate::tool_runtime_service::{
     completed_exact_tool_result, completed_tool_result, failed_tool_result, finalize_tool_result,
     tool_input_fingerprint, tool_invocation_context, tool_invocation_event_metadata,
 };
-pub(crate) use agent_application::{AgentRunEvent, AgentRunEventDecodeError, AgentRunStatus};
+pub(crate) use agent_application::{AgentRunEvent, AgentRunStatus};
 pub(crate) use agent_core::{permission_can_allow_session, permission_capability_matches};
 pub(crate) use agent_runtime::{
     exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,

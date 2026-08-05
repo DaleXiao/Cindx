@@ -1,4 +1,5 @@
 use super::*;
+use crate::append_message_event_with_metadata;
 use agent_core::{insert_event_type_v1, EventTypeV1, EVENT_TYPE_METADATA_KEY};
 
 fn run_metadata(session_id: &str, run_id: &str, with_prompt: bool) -> Metadata {
@@ -12,6 +13,260 @@ fn run_metadata(session_id: &str, run_id: &str, with_prompt: bool) -> Metadata {
         metadata.insert("prompt".to_string(), "finish the task".to_string());
     }
     metadata
+}
+
+#[test]
+fn startup_recovery_replays_denial_after_a_pre_denial_snapshot() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let prompt = "protect the workspace";
+    let run_context = [
+        ("project_id".to_string(), "project-denial".to_string()),
+        ("session_id".to_string(), "session-denial".to_string()),
+        ("agent_run_id".to_string(), "run-denial".to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+        ("prompt_contract_epoch".to_string(), "0".to_string()),
+        ("effective_prompt_objective".to_string(), prompt.to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        metadata_with_context(
+            [
+                ("prompt".to_string(), prompt.to_string()),
+                ("initial_prompt_objective".to_string(), prompt.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            &run_context,
+        ),
+    )
+    .expect("run should start");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        prompt,
+        run_context.clone(),
+    )
+    .expect("prompt should persist");
+    let mut runtime = start_agent_loop(
+        phase16_task_id(),
+        prompt,
+        agent_runtime::AgentRuntimeConfig::default(),
+    );
+    runtime.task_contract.require_tool_success("shell.run");
+    let task_state = agent_runtime::AgentTaskStateSnapshot::capture(&runtime);
+    let events = store
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-denial")
+        .expect("events should load");
+    let recovery_metadata = agent_recovery_metadata_with_task_state(
+        &events,
+        &run_context,
+        AgentRecoveryState::Blocked,
+        AgentRecoveryReason::WaitingForPermission,
+        Metadata::new(),
+        Some(&task_state),
+        None,
+    )
+    .expect("blocked recovery should encode");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task waiting for permission",
+        recovery_metadata,
+    )
+    .expect("blocked checkpoint should persist");
+    crate::agent_runtime_snapshot::persist_agent_runtime_snapshot(
+        &mut store,
+        &runtime,
+        &run_context,
+    )
+    .expect("pre-denial snapshot should persist");
+
+    let permission_id = agent_core::PermissionRequestId("permission-denial".to_string());
+    let tool_input = r#"{"command":"touch protected"}"#;
+    store
+        .save_permission_request(
+            agent_core::PermissionRequest {
+                id: permission_id.clone(),
+                task_id: phase16_task_id(),
+                risk: agent_core::PermissionRisk::Execute,
+                action: "shell.run".to_string(),
+                reason: "requires approval".to_string(),
+                scope: "workspace".to_string(),
+                metadata: run_context.clone(),
+            },
+            10,
+        )
+        .expect("permission should persist");
+    let resolution = agent_core::PermissionResolution {
+        request_id: permission_id.clone(),
+        decision: agent_core::PermissionDecision::Deny,
+        resolved_at_ms: 20,
+        resolved_by: "local-user".to_string(),
+    };
+    let input_fingerprint = agent_runtime::tool_input_fingerprint("shell.run", tool_input);
+    store
+        .with_immediate_transaction(|transaction| {
+            transaction.resolve_permission_in_transaction(&resolution)?;
+            append_event(
+                transaction,
+                &phase16_task_id(),
+                EventKind::PermissionResolved,
+                "Permission denied",
+                metadata_with_context(
+                    [
+                        ("permission_id".to_string(), permission_id.0.clone()),
+                        ("decision".to_string(), "deny".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    &run_context,
+                ),
+            )?;
+            append_message_event_with_metadata(
+                transaction,
+                &phase16_task_id(),
+                MessageRole::Tool,
+                "The user denied this tool call.",
+                metadata_with_context(
+                    [
+                        ("kind".to_string(), "tool_observation".to_string()),
+                        ("tool_call_id".to_string(), "call-denial".to_string()),
+                        ("tool".to_string(), "shell.run".to_string()),
+                        ("status".to_string(), "denied".to_string()),
+                        ("permission_id".to_string(), permission_id.0.clone()),
+                        (
+                            "permission_observation_schema".to_string(),
+                            "cindx.permission-tool-observation.v1".to_string(),
+                        ),
+                        (
+                            "permission_observation_provenance".to_string(),
+                            "runtime_permission_resolution".to_string(),
+                        ),
+                        ("tool_input_fingerprint".to_string(), input_fingerprint.clone()),
+                        ("action_denial_schema".to_string(), agent_runtime::ACTION_DENIAL_SCHEMA.to_string()),
+                        ("action_denial_kind".to_string(), "user_permission".to_string()),
+                        ("action_denial_code".to_string(), "user_permission_denied".to_string()),
+                        ("action_denial_recovery".to_string(), "finalize_blocked".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    &run_context,
+                ),
+            )
+        })
+        .expect("resolution and denial observation should commit");
+
+    assert_eq!(
+        reconcile_interrupted_agent_runs(&mut store).expect("startup recovery should reconcile"),
+        1
+    );
+    let events = store
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-denial")
+        .expect("recovered events should load");
+    let recovered = latest_agent_recovery_envelope(&events)
+        .unwrap_or_else(|| panic!("a paused recovery envelope should be present: {events:#?}"));
+    assert_eq!(recovered.state, AgentRecoveryState::Paused);
+    let recovered_task = recovered
+        .task_state
+        .expect("startup replay must preserve the typed task state");
+    let ledger = recovered_task.task_contract.outcome_ledger_shadow(0);
+    assert!(ledger.obligations.iter().any(|obligation| {
+        obligation.satisfaction == agent_runtime::OutcomeSatisfaction::Blocked
+            && obligation
+                .blocker
+                .as_ref()
+                .is_some_and(|blocker| blocker.code == "user_permission_denied")
+    }));
+}
+
+#[test]
+fn recovery_claim_rolls_back_with_its_enclosing_transaction() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let context = run_metadata("session-claim-rollback", "run-claim-rollback", true);
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        context.clone(),
+    )
+    .expect("run should start");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "finish the task",
+        context.clone(),
+    )
+    .expect("prompt should persist");
+    let events = store
+        .list_by_task_and_metadata(
+            &phase16_task_id(),
+            "session_id",
+            "session-claim-rollback",
+        )
+        .expect("events should load");
+    let paused = agent_recovery_metadata_with_task_state(
+        &events,
+        &context,
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::DeadlineExceeded,
+        Metadata::new(),
+        None,
+        None,
+    )
+    .expect("pause checkpoint should build");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task paused",
+        paused,
+    )
+    .expect("pause should persist");
+
+    let injected = store.with_immediate_transaction(|store| {
+        claim_agent_recovery_envelope_in_transaction(
+            store,
+            &context,
+            &[AgentRecoveryState::Paused],
+            AgentRecoveryReason::UserContinued,
+        )
+        .map_err(StorageError::new)?
+        .expect("checkpoint should be claimable inside the transaction");
+        Err::<(), _>(StorageError::new("injected post-claim failure"))
+    });
+    assert!(injected.is_err());
+
+    let claimed = claim_agent_recovery_envelope(
+        &mut store,
+        &context,
+        &[AgentRecoveryState::Paused],
+        AgentRecoveryReason::UserContinued,
+    )
+    .expect("rolled-back claim should remain available")
+    .expect("paused checkpoint should still exist");
+    assert_eq!(claimed.attempts, 1);
+    assert!(pause_permission_recovery_after_handoff_error(&mut store, &context)
+        .expect("a failed permission handoff should release the claim"));
+    let events = store
+        .list_by_task_and_metadata(
+            &phase16_task_id(),
+            "session_id",
+            "session-claim-rollback",
+        )
+        .expect("released recovery events should load");
+    let released = latest_agent_recovery_envelope(&events)
+        .expect("the released claim should remain recoverable");
+    assert_eq!(released.state, AgentRecoveryState::Paused);
+    assert_eq!(released.reason.label(), "permission_handoff_failed");
 }
 
 #[test]

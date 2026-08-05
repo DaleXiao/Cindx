@@ -73,7 +73,19 @@ A new run currently follows this sequence:
    emit a bounded Goal Delta for a newly satisfied obligation, target-bound
    grounding receipt, or verified postcondition. Ordinary success, changed
    arguments or output, replay, and failed, denied, or cancelled calls do not
-   receive progress credit or extend the run segment. A committed steer returns
+   receive progress credit or extend the run segment. A trusted denial is stored
+   as bounded epoch, tool, input-fingerprint, kind, code, scope, and recovery
+   facts rather than raw arguments or output. User permission denial enters
+   blocked finalization; policy or capability denial receives at most one
+   same-epoch replan before blocked finalization. The same denied action is
+   intercepted before another permission request. A blocked obligation is never
+   marked satisfied, and terminal delivery requires both visible denial evidence
+   and an explicit blocker disclosure; it remains substantive rather than
+   grounded or verified quality. Permission resolution and its canonical denial
+   observation commit together; recovery state is prepared before an atomic
+   claim/resume transition, failed handoff returns to `Paused`, and startup
+   replay repairs an older checkpoint from that canonical observation. A
+   committed steer returns
    through the same driver before another epoch can begin. When that durable
    commit actually applies user guidance, run control atomically opens one
    fresh base segment for the new objective without resetting lineage counters
@@ -288,7 +300,9 @@ receipts from the current run; projected failed, denied, cancelled, and
 unfinished calls remain visible in the tool-call denominator and cannot count as
 tool success. A process-level timeout remains a failed matrix cell even when it
 cannot emit a final tool receipt. Browser evidence must bind the exact resolved
-target and an artifact or postcondition digest. Deterministic tests verify this
+target and an artifact or postcondition digest. The denied-mutation product case
+also requires a user-visible permission-denied explanation; an unchanged file
+with an empty Agent answer cannot pass quality. Deterministic tests verify this
 measurement machinery only.
 No V4 provider-backed matrix has been run, so these changes are not evidence of
 an Agent-quality or intelligence improvement.
@@ -335,7 +349,8 @@ Therefore the current claim is:
   overall completion and latency regress materially against Fast.
 - The current source now has a deterministic, observable Auto
   value-of-computation admission mechanism and bounded single-conductor
-  no-progress handling. These contracts have not yet been measured in a fresh
+  no-progress handling, plus typed denial and bounded same-epoch replan
+  contracts. These contracts have not yet been measured in a fresh
   provider-backed matched run, so they are not evidence of an intelligence or
   product-quality uplift.
 - Pro does not provide a broad product advantage over Fast or Auto in the

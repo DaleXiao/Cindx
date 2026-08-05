@@ -270,7 +270,8 @@ mod tests {
     use super::*;
     use crate::{
         record_tool_outcome, record_tool_outcome_with_risk, repeated_tool_failure_count,
-        start_agent_loop, AgentRuntimeConfig, InteractionSurface, PromptCompletionIntent,
+        start_agent_loop, tool_input_fingerprint, AgentActionDenialFeedback, AgentRuntimeConfig,
+        InteractionSurface, OutcomeSatisfaction, PromptCompletionIntent,
         WorkspaceVerificationPolicy, TOOL_FAILURE_SIGNATURE_SCHEMA,
     };
     use agent_core::{MessageRole, Metadata, TaskId, ToolOutcomeStatus, ToolRisk};
@@ -382,6 +383,38 @@ mod tests {
             )
             .expect("supplied prepared objective restores");
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn v2_checkpoint_preserves_denial_state_without_raw_tool_input() {
+        let mut state = start_agent_loop(
+            TaskId("task-denial".to_string()),
+            "write protected.txt",
+            AgentRuntimeConfig::default(),
+        );
+        state.task_contract.begin_action_denial_epoch(0);
+        state.task_contract.require_tool_success("file.write");
+        let raw_input = r#"{"path":"private-checkpoint-sentinel.txt"}"#;
+        state.task_contract.record_action_denial(
+            "file.write",
+            &tool_input_fingerprint("file.write", raw_input),
+            &AgentActionDenialFeedback::user_permission(),
+        );
+
+        let encoded = AgentTaskStateSnapshot::capture(&state)
+            .to_json()
+            .expect("denial checkpoint encodes");
+        assert!(!encoded.contains("private-checkpoint-sentinel"));
+        let restored = AgentTaskStateSnapshot::from_json(&encoded)
+            .expect("denial checkpoint validates")
+            .restore(state.user_prompt.clone(), state.messages.clone())
+            .expect("denial checkpoint restores");
+        let ledger = restored.task_contract.outcome_ledger_shadow(0);
+        assert_eq!(ledger.obligations.len(), 1);
+        assert_eq!(
+            ledger.obligations[0].satisfaction,
+            OutcomeSatisfaction::Blocked
+        );
     }
 
     #[test]

@@ -96,6 +96,14 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   size independent of raw tool output. Target binding and desktop recovery are
   covered by their separate contract tests rather than inferred from this exact
   filter.
+- The typed denial gate keeps permission, policy, capability, and repeated-action
+  refusals distinct from ordinary failure and success. It proves one bounded
+  same-epoch replan, exact-call suppression before permission, epoch isolation,
+  atomic permission-denial persistence, claim rollback and release, startup
+  replay over an older checkpoint, hot-recovery preservation, no Goal Delta,
+  `Blocked` ledger projection, and visible honest terminal disclosure. This is
+  a deterministic control contract, not provider-backed post-denial quality
+  evidence.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.

@@ -8,7 +8,9 @@ source revision and application version recorded inside them.
 Agent Real-World V4 is the current prospective 72-cell execution contract. It
 uses an isolated loopback HTTP fixture for browser cases, accepts required tools
 only from successful typed receipts for the current run, binds browser evidence
-to the exact resolved target, and verifies artifact or postcondition digests.
+to the exact resolved target, verifies artifact or postcondition digests, and
+requires the product denied-mutation case to return a visible
+permission-denied explanation rather than an empty answer.
 Its deterministic contract test does not contact a provider. No V4
 provider-backed matrix has been run and no V4 decision report exists, so V4 does
 not replace or revise the V3 evidence below and supports no intelligence-uplift

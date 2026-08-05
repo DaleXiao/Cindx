@@ -1,6 +1,7 @@
 use super::{
-    fingerprint, interaction_action, interaction_observation, interaction_observation_verifies,
-    AgentTaskContract, ContractEvidenceKind, WorkspaceVerificationPolicy,
+    denial::stable_denial_code_is_valid, fingerprint, interaction_action, interaction_observation,
+    interaction_observation_verifies, AgentActionDenial, AgentActionDenialKind, AgentTaskContract,
+    ContractEvidenceKind, WorkspaceVerificationPolicy,
 };
 use crate::{AgentFailure, AgentFailureClass, InteractionSurface, ResultQuality};
 use agent_core::Metadata;
@@ -50,6 +51,14 @@ pub enum OutcomeScope {
 pub enum OutcomeSatisfaction {
     Pending,
     Satisfied,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutcomeBlocker {
+    pub kind: AgentActionDenialKind,
+    pub code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +70,8 @@ pub struct OutcomeObligation {
     pub steer_epoch: Option<u64>,
     pub satisfaction: OutcomeSatisfaction,
     pub evidence_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<OutcomeBlocker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,8 +341,22 @@ impl OutcomeLedgerShadow {
         if self.obligations.iter().any(|item| {
             !is_sha256_hex(&item.id)
                 || item.steer_epoch.is_some() != (item.scope == OutcomeScope::Steer)
-                || (item.satisfaction == OutcomeSatisfaction::Pending
-                    && item.evidence_sequence.is_some())
+                || match item.satisfaction {
+                    OutcomeSatisfaction::Pending => {
+                        item.evidence_sequence.is_some() || item.blocker.is_some()
+                    }
+                    OutcomeSatisfaction::Satisfied => item.blocker.is_some(),
+                    OutcomeSatisfaction::Blocked => {
+                        item.evidence_sequence.is_none()
+                            || item.evidence_sequence.is_some_and(|sequence| {
+                                evidence_kinds.get(&sequence) != Some(&ContractEvidenceKind::Denial)
+                            })
+                            || item
+                                .blocker
+                                .as_ref()
+                                .is_none_or(|blocker| !stable_denial_code_is_valid(&blocker.code))
+                    }
+                }
                 || item
                     .evidence_sequence
                     .is_some_and(|sequence| !evidence.contains(&sequence))
@@ -450,6 +475,7 @@ impl OutcomeLedgerShadow {
 
 impl AgentTaskContract {
     pub(crate) fn validate_persisted_outcome_state(&self) -> Result<(), &'static str> {
+        self.validate_action_denials()?;
         if self.outcome_claims.len() > MAX_OUTCOME_CLAIMS {
             return Err("too many outcome claims");
         }
@@ -730,6 +756,10 @@ impl AgentTaskContract {
                     })
                     .map(|evidence| evidence.sequence)
             });
+            let denial = evidence_sequence
+                .is_none()
+                .then(|| self.action_denial_for_tools(requirement.tools.iter().map(String::as_str)))
+                .flatten();
             obligations.push(OutcomeObligation {
                 id: outcome_id(&format!(
                     "grounding|steer|{}|{requirement_id}",
@@ -738,12 +768,10 @@ impl AgentTaskContract {
                 kind: OutcomeObligationKind::Grounding,
                 scope: OutcomeScope::Steer,
                 steer_epoch: Some(self.prompt_evidence_epoch),
-                satisfaction: if evidence_sequence.is_some() {
-                    OutcomeSatisfaction::Satisfied
-                } else {
-                    OutcomeSatisfaction::Pending
-                },
-                evidence_sequence,
+                satisfaction: obligation_satisfaction(evidence_sequence.is_some(), denial),
+                evidence_sequence: evidence_sequence
+                    .or_else(|| denial.map(|denial| denial.evidence_sequence)),
+                blocker: denial.map(outcome_blocker),
             });
         }
         if self.workspace_verification_policy == WorkspaceVerificationPolicy::RequiredAfterMutation
@@ -767,6 +795,7 @@ impl AgentTaskContract {
                         })
                     })
                     .flatten(),
+                blocker: None,
             });
         }
         for postcondition in postconditions
@@ -785,6 +814,7 @@ impl AgentTaskContract {
                     OutcomeSatisfaction::Pending
                 },
                 evidence_sequence: postcondition.observation_sequence,
+                blocker: None,
             });
         }
         obligations.sort_by(|left, right| {
@@ -816,20 +846,23 @@ impl AgentTaskContract {
         } else {
             self.successful_tools.contains(tool)
         };
+        let denial = (!satisfied)
+            .then(|| self.action_denial_for_tools([tool]))
+            .flatten();
         OutcomeObligation {
             id: outcome_id(&format!("required_tool|{scope:?}|{steer_epoch:?}|{tool}")),
             kind: OutcomeObligationKind::RequiredTool,
             scope,
             steer_epoch,
-            satisfaction: satisfaction(satisfied),
-            evidence_sequence: satisfied
-                .then(|| {
-                    self.latest_evidence_sequence(|evidence| {
-                        evidence.kind == ContractEvidenceKind::RequiredTool
-                            && evidence.source == tool
-                    })
+            satisfaction: obligation_satisfaction(satisfied, denial),
+            evidence_sequence: if satisfied {
+                self.latest_evidence_sequence(|evidence| {
+                    evidence.kind == ContractEvidenceKind::RequiredTool && evidence.source == tool
                 })
-                .flatten(),
+            } else {
+                denial.map(|denial| denial.evidence_sequence)
+            },
+            blocker: denial.map(outcome_blocker),
         }
     }
 
@@ -847,19 +880,21 @@ impl AgentTaskContract {
             &self.successful_tools
         };
         let satisfied = !alternatives.is_disjoint(successful_tools);
+        let denial = (!satisfied)
+            .then(|| self.action_denial_for_tools(alternatives.iter().map(String::as_str)))
+            .flatten();
         OutcomeObligation {
             id: outcome_id(&format!("any_tool|{scope:?}|{steer_epoch:?}|{requirement}")),
             kind: OutcomeObligationKind::AnyTool,
             scope,
             steer_epoch,
-            satisfaction: satisfaction(satisfied),
-            evidence_sequence: satisfied
-                .then(|| {
-                    self.latest_evidence_sequence(|evidence| {
-                        alternatives.contains(&evidence.source)
-                    })
-                })
-                .flatten(),
+            satisfaction: obligation_satisfaction(satisfied, denial),
+            evidence_sequence: if satisfied {
+                self.latest_evidence_sequence(|evidence| alternatives.contains(&evidence.source))
+            } else {
+                denial.map(|denial| denial.evidence_sequence)
+            },
+            blocker: denial.map(outcome_blocker),
         }
     }
 
@@ -968,11 +1003,23 @@ fn outcome_id(value: &str) -> String {
     fingerprint(value)
 }
 
-fn satisfaction(value: bool) -> OutcomeSatisfaction {
-    if value {
+fn obligation_satisfaction(
+    satisfied: bool,
+    denial: Option<&AgentActionDenial>,
+) -> OutcomeSatisfaction {
+    if satisfied {
         OutcomeSatisfaction::Satisfied
+    } else if denial.is_some() {
+        OutcomeSatisfaction::Blocked
     } else {
         OutcomeSatisfaction::Pending
+    }
+}
+
+fn outcome_blocker(denial: &AgentActionDenial) -> OutcomeBlocker {
+    OutcomeBlocker {
+        kind: denial.kind,
+        code: denial.code.clone(),
     }
 }
 

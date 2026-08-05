@@ -9,6 +9,20 @@ pub(crate) enum AgentToolBatchOutcome {
     Paused(Box<AgentState>),
 }
 
+fn agent_tool_batch_contains_active_denial(
+    runtime: &mut agent_runtime::AgentLoopState,
+    registry: &ToolRegistry,
+    tools: &[ToolSpec],
+    calls: &[AgentToolRequest],
+) -> bool {
+    calls.iter().any(|call| {
+        let risk = registry.get(&call.tool_name).map(|tool| tool.spec().risk);
+        AgentKernel::new(&mut *runtime, tools)
+            .action_denial_for_invocation(call, risk.as_ref())
+            .is_some()
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentToolPermissionGateOutcome {
     Pending,
@@ -169,6 +183,7 @@ pub(super) fn commit_agent_tool_observation(
     status: &ToolOutcomeStatus,
     risk: Option<&ToolRisk>,
     observation: &str,
+    denial: Option<&agent_runtime::AgentActionDenialFeedback>,
     image_paths: &[String],
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
 ) -> Result<agent_runtime::RunExecutionStepCommit<Option<agent_runtime::AgentGoalDelta>>, String> {
@@ -177,12 +192,8 @@ pub(super) fn commit_agent_tool_observation(
         let previous_message_count = transaction.original_message_count();
         let goal_delta = transaction.with_append_only_mutation(|next_runtime| {
             let verified_interactions_before = next_runtime.verified_interactions;
-            let goal_delta = AgentKernel::new(next_runtime, tools).apply_tool_observation(
-                call,
-                status,
-                risk,
-                observation,
-            );
+            let goal_delta = AgentKernel::new(next_runtime, tools)
+                .apply_tool_observation_with_denial(call, status, risk, observation, denial);
             let postcondition_verified =
                 next_runtime.verified_interactions > verified_interactions_before;
             crate::agent_result_evidence::annotate_latest_tool_observation(
@@ -275,8 +286,11 @@ pub(crate) fn execute_agent_tool_batch(
     calls: Vec<AgentToolRequest>,
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
 ) -> Result<AgentToolBatchOutcome, String> {
-    if let Some(outcome) =
-        crate::agent_parallel_tool_runtime::try_execute_parallel_agent_tool_batch(
+    let contains_active_denial =
+        agent_tool_batch_contains_active_denial(runtime, registry, tools, &calls);
+    if !contains_active_denial {
+        if let Some(outcome) =
+            crate::agent_parallel_tool_runtime::try_execute_parallel_agent_tool_batch(
             app,
             state,
             workspace_root,
@@ -290,9 +304,9 @@ pub(crate) fn execute_agent_tool_batch(
             tools,
             &calls,
             snapshot_cursor,
-        )?
-    {
-        return Ok(outcome);
+        )? {
+            return Ok(outcome);
+        }
     }
     execute_agent_tool_batch_serial(
         app,
@@ -366,6 +380,7 @@ fn execute_agent_tool_batch_serial(
             agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);
         }
         let permission_request = tool.and_then(|tool| tool.permission_request(&invocation));
+        let tool_risk = tool.map(|tool| tool.spec().risk.clone());
         let mut store = state
             .store
             .lock()
@@ -383,25 +398,85 @@ fn execute_agent_tool_batch_serial(
                 .map_err(|error| error.to_string())?;
         }
 
+        if completed_result.is_none() {
+            let prior_denial = AgentKernel::new(&mut *runtime, tools)
+                .action_denial_for_invocation(&call, tool_risk.as_ref());
+            if let Some(denial) = prior_denial {
+                let observation = observation_from_tool_result(
+                    &call.tool_name,
+                    "denied",
+                    "Cindx blocked this action because the current objective already contains a trusted denial. Report the blocker or wait for new user guidance.",
+                );
+                append_tool_finished_event(
+                    &mut store,
+                    &runtime.task_id,
+                    &call.call_id.0,
+                    &call.tool_name,
+                    "denied",
+                    &observation,
+                    [("failure_code".to_string(), denial.code.to_string())]
+                        .into_iter()
+                        .collect(),
+                    Some(run_context),
+                )
+                .map_err(|error| error.to_string())?;
+                drop(store);
+                let commit = commit_agent_tool_observation(
+                    state,
+                    runtime,
+                    run_context,
+                    cancellation,
+                    epoch_lease,
+                    tools,
+                    &call,
+                    &ToolOutcomeStatus::Denied,
+                    tool_risk.as_ref(),
+                    &observation,
+                    Some(&denial),
+                    &[],
+                    snapshot_cursor,
+                )?;
+                if let Some(outcome) = agent_tool_batch_outcome_after_commit(
+                    commit,
+                    app,
+                    state,
+                    workspace_root,
+                    runtime,
+                    prompt,
+                    run_context,
+                    active_collaboration,
+                    cancellation,
+                    epoch_lease,
+                )? {
+                    return Ok(outcome);
+                }
+                continue;
+            }
+        }
+
         if completed_result.is_none()
             && AgentKernel::new(&mut *runtime, tools).repeated_tool_failure_count(&call)
                 >= MAX_IDENTICAL_TOOL_FAILURES
         {
+            let denial = agent_runtime::AgentActionDenialFeedback::runtime_policy(
+                "repeated_tool_failure",
+                agent_runtime::AgentActionRecovery::Replan,
+            );
             let observation = observation_from_tool_result(
-                            &call.tool_name,
-                            "failed",
-                            "Cindx blocked this identical tool call after repeated failures. Change the arguments or use a different approach.",
-                        );
+                &call.tool_name,
+                "denied",
+                "Cindx blocked this identical tool call after repeated failures. Change the arguments once or report the blocker.",
+            );
             append_tool_finished_event(
                 &mut store,
                 &runtime.task_id,
                 &call.call_id.0,
                 &call.tool_name,
-                "failed",
+                "denied",
                 &observation,
                 [(
                     "failure_code".to_string(),
-                    "repeated_call_blocked".to_string(),
+                    denial.code.to_string(),
                 )]
                 .into_iter()
                 .collect(),
@@ -417,9 +492,10 @@ fn execute_agent_tool_batch_serial(
                 epoch_lease,
                 tools,
                 &call,
-                &ToolOutcomeStatus::Failed,
-                None,
+                &ToolOutcomeStatus::Denied,
+                tool_risk.as_ref(),
                 &observation,
+                Some(&denial),
                 &[],
                 snapshot_cursor,
             )?;
@@ -440,10 +516,13 @@ fn execute_agent_tool_batch_serial(
             continue;
         }
 
-        let Some(tool) = tool else {
+        let Some(_tool) = tool else {
+            let denial = agent_runtime::AgentActionDenialFeedback::capability_unavailable(
+                "tool_capability_unavailable",
+            );
             let observation = observation_from_tool_result(
                 &call.tool_name,
-                "failed",
+                "denied",
                 "Unknown tool requested by model.",
             );
             append_tool_finished_event(
@@ -451,9 +530,11 @@ fn execute_agent_tool_batch_serial(
                 &runtime.task_id,
                 &call.call_id.0,
                 &call.tool_name,
-                "failed",
+                "denied",
                 &observation,
-                Metadata::new(),
+                [("failure_code".to_string(), denial.code.to_string())]
+                    .into_iter()
+                    .collect(),
                 Some(run_context),
             )
             .map_err(|error| error.to_string())?;
@@ -466,9 +547,10 @@ fn execute_agent_tool_batch_serial(
                 epoch_lease,
                 tools,
                 &call,
-                &ToolOutcomeStatus::Failed,
+                &ToolOutcomeStatus::Denied,
                 None,
                 &observation,
+                Some(&denial),
                 &[],
                 snapshot_cursor,
             )?;
@@ -488,7 +570,7 @@ fn execute_agent_tool_batch_serial(
             }
             continue;
         };
-        let tool_risk = tool.spec().risk;
+        let tool_risk = tool_risk.expect("registered tool has a risk classification");
 
         if completed_result.is_none() {
             if let Some(request) = permission_request {
@@ -553,6 +635,7 @@ fn execute_agent_tool_batch_serial(
             &result.status,
             Some(&tool_risk),
             &observation,
+            None,
             &image_paths,
             snapshot_cursor,
         )?;
@@ -739,6 +822,38 @@ mod tests {
 
         assert!(runtime_has_tool_observation(&runtime, "call-a"));
         assert!(!runtime_has_tool_observation(&runtime, "call-b"));
+    }
+
+    #[test]
+    fn active_denial_forces_a_read_batch_out_of_the_parallel_fast_path() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let registry = ToolRegistry::with_workspace_tools(workspace.path());
+        let tools = registry.specs();
+        let mut runtime = start_agent_loop(
+            TaskId("parallel-denial".to_string()),
+            "read README.md",
+            AgentRuntimeConfig::default(),
+        );
+        let call = AgentToolRequest {
+            call_id: ToolCallId("read-denied".to_string()),
+            tool_name: "file.read".to_string(),
+            input: r#"{"path":"README.md"}"#.to_string(),
+        };
+        runtime.task_contract.record_action_denial(
+            &call.tool_name,
+            &tool_input_fingerprint(&call.tool_name, &call.input),
+            &agent_runtime::AgentActionDenialFeedback::runtime_policy(
+                "read_policy_denied",
+                agent_runtime::AgentActionRecovery::FinalizeBlocked,
+            ),
+        );
+
+        assert!(agent_tool_batch_contains_active_denial(
+            &mut runtime,
+            &registry,
+            &tools,
+            std::slice::from_ref(&call),
+        ));
     }
 
     #[test]

@@ -221,6 +221,7 @@
       "permission_policy": "deny_mutations",
       "verification": {
         "direct_output_contains": ["permission", "denied"],
+        "output_contains": ["permission", "denied"],
         "exact_files": [
           {
             "path": "protected.txt",

@@ -54,7 +54,7 @@ run_agent_task
             -> admitted tool batch
             -> permission suspension/resume when needed
             -> commit observation; make canonical outcome durable/recoverable
-            -> task-contract Goal Delta admission and contract checks
+            -> task-contract Goal Delta / typed denial admission and contract checks
        -> reprepare after a committed steer, or finish at a typed control boundary
        -> terminal result or typed interruption
   -> completion transaction
@@ -70,7 +70,7 @@ the same run-control and lifecycle vocabulary. They are not independent loops.
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `agent-core` | Shared ids, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
-| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, task-contract Goal Delta policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
+| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, task-contract Goal Delta and denial/replan policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
@@ -149,6 +149,24 @@ failure status cannot mint budget credit. Existing provider/tool activity
 timestamps and generic checkpoints remain liveness or diagnostic signals rather
 than a second semantic-progress authority; only Goal Delta credit extends a run
 segment.
+
+`task_contract/denial` owns the other side of that transition. It records only
+bounded typed denial facts tied to the active prepared-contract epoch, projects a
+terminal denial as `Blocked` rather than `Satisfied`, and owns the single
+same-epoch replan token for policy or capability denial. User permission denial
+goes directly to blocked finalization, while a new prepared-contract epoch clears
+the prior objective's denial state. `AgentKernel` binds denial evidence to the
+tool observation and completion receipt. Desktop adapters classify trusted
+permission and dispatch outcomes and suppress a denied invocation before the
+permission broker. Permission resolution, its canonical denied tool outcome,
+and the transcript observation share one SQLite transaction. Hot or rebuilt
+cold task state is ready before a separate transaction claims the recovery
+checkpoint and records the resumed lifecycle; startup replay reconstructs a
+committed denial if an older checkpoint predates it. Within the desktop adapter,
+`agent_recovery_service` composes claim and startup reconciliation,
+`agent_permission_recovery` owns the failed-handoff transaction, and
+`agent_recovery_status` owns typed lifecycle and cancellation projection.
+Desktop code does not own another loop, retry budget, or semantic replan policy.
 
 Within run control, `control_steer_commit` owns durable steer-batch commit and
 the bounded base segment opened for an actually applied objective. It does not

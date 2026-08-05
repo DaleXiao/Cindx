@@ -533,10 +533,16 @@ pub(crate) fn complete_prompt_evaluation_worker(
             WorkerAdvance::ToolCalls { calls } => {
                 for call in calls {
                     let admission = worker.admit_tool_call(&call);
-                    let (status, output) = if let WorkerToolAdmission::Denied { reason, .. } =
-                        admission
+                    let (status, output, denial) = if let WorkerToolAdmission::Denied {
+                        kind,
+                        reason,
+                    } = admission
                     {
-                        (ToolOutcomeStatus::Denied, reason.to_string())
+                        (
+                            ToolOutcomeStatus::Denied,
+                            reason.to_string(),
+                            Some(kind.action_feedback()),
+                        )
                     } else {
                         let mut invocation = worker.tool_invocation(&call);
                         invocation.proposed_by_model = "prompt-evaluation-worker".to_string();
@@ -555,11 +561,11 @@ pub(crate) fn complete_prompt_evaluation_worker(
                         match registry.permissionless_read_tool(&invocation) {
                             Ok(tool) => {
                                 match tool.execute_with_control(invocation, &tool_control) {
-                                    Ok(result) => (result.status, result.output),
-                                    Err(error) => (ToolOutcomeStatus::Failed, error.message),
+                                    Ok(result) => (result.status, result.output, None),
+                                    Err(error) => (ToolOutcomeStatus::Failed, error.message, None),
                                 }
                             }
-                            Err(error) => (ToolOutcomeStatus::Denied, error.message),
+                            Err(error) => (ToolOutcomeStatus::Denied, error.message, None),
                         }
                     };
                     evidence.push(CollaborationEvidence {
@@ -578,9 +584,12 @@ pub(crate) fn complete_prompt_evaluation_worker(
                         tool_outcome_label(&status),
                         &output,
                     );
-                    if let Some(delta) =
-                        worker.apply_tool_observation(&call, &status, &observation)
-                    {
+                    if let Some(delta) = worker.apply_tool_observation_with_denial(
+                        &call,
+                        &status,
+                        &observation,
+                        denial.as_ref(),
+                    ) {
                         control.record_goal_delta_at(objective_epoch, &delta);
                     }
                 }
@@ -717,8 +726,7 @@ pub(crate) fn append_prompt_pairwise_observations(
     let encoded_genomes = serde_json::to_string(&genomes)
         .map_err(|error| format!("prompt genomes serialization failed: {error}"))?;
     crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
-        let model =
-            load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+        let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
         let identity = observations[0]
             .provenance
             .matched_evaluation
@@ -865,8 +873,7 @@ pub(crate) fn append_prompt_transfer_observations(
         .as_ref()
         .ok_or_else(|| "prompt transfer observation is missing provenance".to_string())?;
     crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
-        let model =
-            load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+        let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
         let identity = observations[0]
             .provenance
             .matched_evaluation

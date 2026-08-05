@@ -43,6 +43,7 @@ fn grounded_completion_quality(basis: agent_runtime::GroundedCompletionBasis) ->
         agent_runtime::GroundedCompletionBasis::SelfContained => ResultQuality::Substantive,
         agent_runtime::GroundedCompletionBasis::EvidenceVisible => ResultQuality::Grounded,
         agent_runtime::GroundedCompletionBasis::PostconditionVerified => ResultQuality::Verified,
+        agent_runtime::GroundedCompletionBasis::ConstraintObserved => ResultQuality::Substantive,
     }
 }
 
@@ -51,6 +52,7 @@ fn grounded_completion_basis_label(basis: agent_runtime::GroundedCompletionBasis
         agent_runtime::GroundedCompletionBasis::SelfContained => "self_contained",
         agent_runtime::GroundedCompletionBasis::EvidenceVisible => "evidence_visible",
         agent_runtime::GroundedCompletionBasis::PostconditionVerified => "postcondition_verified",
+        agent_runtime::GroundedCompletionBasis::ConstraintObserved => "constraint_observed",
     }
 }
 
@@ -195,6 +197,10 @@ pub(crate) fn finalize_agent_completion(
 
     let terminal_result_stage = if synthesized {
         "synthesizer"
+    } else if grounded_completion_receipt.basis
+        == agent_runtime::GroundedCompletionBasis::ConstraintObserved
+    {
+        "constrained_executor"
     } else if grounded_completion_receipt.basis
         == agent_runtime::GroundedCompletionBasis::PostconditionVerified
     {
@@ -627,6 +633,12 @@ mod tests {
                 agent_runtime::GroundedCompletionBasis::PostconditionVerified
             ),
             ResultQuality::Verified
+        );
+        assert_eq!(
+            grounded_completion_quality(
+                agent_runtime::GroundedCompletionBasis::ConstraintObserved
+            ),
+            ResultQuality::Substantive
         );
     }
 }

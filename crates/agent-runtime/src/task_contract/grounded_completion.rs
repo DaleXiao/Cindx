@@ -1,7 +1,7 @@
 use super::{
-    fingerprint, AgentTaskContract, ContractEvidenceKind, OutcomeLedgerPhase, OutcomeLedgerShadow,
-    OutcomeObligationKind, OutcomePostcondition, OutcomePostconditionStatus, OutcomeSatisfaction,
-    OutcomeScope,
+    fingerprint, AgentActionDenialKind, AgentTaskContract, ContractEvidenceKind,
+    OutcomeLedgerPhase, OutcomeLedgerShadow, OutcomeObligationKind, OutcomePostcondition,
+    OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope,
 };
 use agent_core::Metadata;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,7 @@ pub enum GroundedCompletionBasis {
     SelfContained,
     EvidenceVisible,
     PostconditionVerified,
+    ConstraintObserved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,8 @@ pub struct GroundedCompletionReceipt {
     pub obligation_digest: String,
     pub covered_obligation_ids: Vec<String>,
     pub visible_evidence_sequences: Vec<u64>,
+    #[serde(default)]
+    pub constraint_codes: Vec<String>,
     pub basis: GroundedCompletionBasis,
 }
 
@@ -47,6 +50,7 @@ pub enum GroundedCompletionIssue {
     PendingPostconditions(Vec<String>),
     MissingEvidence(Vec<String>),
     EvidenceNotVisible(Vec<u64>),
+    MissingConstraintDisclosure(Vec<String>),
     InvalidReceipt,
     ReceiptLineageChanged,
 }
@@ -113,7 +117,10 @@ impl GroundedCompletionReceipt {
         let required_evidence = required_evidence_sequences(&ledger)
             .into_iter()
             .collect::<Vec<_>>();
-        let expected_basis = if required_postconditions
+        let expected_constraint_codes = constraint_codes(&ledger);
+        let expected_basis = if !expected_constraint_codes.is_empty() {
+            GroundedCompletionBasis::ConstraintObserved
+        } else if required_postconditions
             .iter()
             .any(|item| item.status == OutcomePostconditionStatus::Verified)
         {
@@ -129,6 +136,7 @@ impl GroundedCompletionReceipt {
             || delivered.content_bytes != receipt.content_bytes
             || delivered.available_evidence_sequences != required_evidence
             || receipt.visible_evidence_sequences != required_evidence
+            || receipt.constraint_codes != expected_constraint_codes
             || receipt.covered_obligation_ids != covered_ids
             || receipt.basis != expected_basis
             || receipt.obligation_digest
@@ -170,11 +178,20 @@ impl GroundedCompletionReceipt {
                 GroundedCompletionBasis::SelfContained => {
                     self.covered_obligation_ids.is_empty()
                         && self.visible_evidence_sequences.is_empty()
+                        && self.constraint_codes.is_empty()
                 }
                 GroundedCompletionBasis::EvidenceVisible
                 | GroundedCompletionBasis::PostconditionVerified => {
                     !self.covered_obligation_ids.is_empty()
                         && !self.visible_evidence_sequences.is_empty()
+                        && self.constraint_codes.is_empty()
+                }
+                GroundedCompletionBasis::ConstraintObserved => {
+                    !self.covered_obligation_ids.is_empty()
+                        && !self.visible_evidence_sequences.is_empty()
+                        && !self.constraint_codes.is_empty()
+                        && self.constraint_codes.len() <= MAX_COVERED_REQUIREMENTS
+                        && strictly_increasing_strings(&self.constraint_codes)
                 }
             }
     }
@@ -227,6 +244,13 @@ impl AgentTaskContract {
             ));
         }
 
+        let constraint_codes = constraint_codes(&ledger);
+        if !constraint_codes.is_empty() && !constraint_disclosed(answer, &ledger) {
+            return Err(GroundedCompletionIssue::MissingConstraintDisclosure(
+                constraint_codes,
+            ));
+        }
+
         let visible_evidence = visible_evidence_sequences
             .iter()
             .copied()
@@ -256,7 +280,9 @@ impl AgentTaskContract {
         let verified_postcondition = required_postconditions
             .iter()
             .any(|item| item.status == OutcomePostconditionStatus::Verified);
-        let basis = if verified_postcondition {
+        let basis = if !constraint_codes.is_empty() {
+            GroundedCompletionBasis::ConstraintObserved
+        } else if verified_postcondition {
             GroundedCompletionBasis::PostconditionVerified
         } else if covered_obligation_ids.is_empty() {
             GroundedCompletionBasis::SelfContained
@@ -275,6 +301,7 @@ impl AgentTaskContract {
             obligation_digest,
             covered_obligation_ids,
             visible_evidence_sequences: required_evidence.into_iter().collect(),
+            constraint_codes,
             basis,
         })
     }
@@ -389,23 +416,70 @@ fn obligation_evidence_kinds_are_valid(ledger: &OutcomeLedgerShadow) -> bool {
         let Some(sequence) = item.evidence_sequence else {
             return false;
         };
-        matches!(
-            (item.kind, evidence.get(&sequence)),
-            (
-                OutcomeObligationKind::RequiredTool,
-                Some(ContractEvidenceKind::RequiredTool)
-            ) | (
-                OutcomeObligationKind::Grounding,
-                Some(ContractEvidenceKind::Grounding)
-            ) | (
-                OutcomeObligationKind::WorkspaceVerification,
-                Some(ContractEvidenceKind::Verification),
-            ) | (
-                OutcomeObligationKind::InteractionObservation,
-                Some(ContractEvidenceKind::InteractionObservation),
-            ) | (OutcomeObligationKind::AnyTool, Some(_))
-        )
+        if item.satisfaction == OutcomeSatisfaction::Blocked {
+            return item.blocker.is_some()
+                && matches!(evidence.get(&sequence), Some(ContractEvidenceKind::Denial));
+        }
+        item.satisfaction == OutcomeSatisfaction::Satisfied
+            && matches!(
+                (item.kind, evidence.get(&sequence)),
+                (
+                    OutcomeObligationKind::RequiredTool,
+                    Some(ContractEvidenceKind::RequiredTool)
+                ) | (
+                    OutcomeObligationKind::Grounding,
+                    Some(ContractEvidenceKind::Grounding)
+                ) | (
+                    OutcomeObligationKind::WorkspaceVerification,
+                    Some(ContractEvidenceKind::Verification),
+                ) | (
+                    OutcomeObligationKind::InteractionObservation,
+                    Some(ContractEvidenceKind::InteractionObservation),
+                ) | (OutcomeObligationKind::AnyTool, Some(_))
+            )
     })
+}
+
+fn constraint_codes(ledger: &OutcomeLedgerShadow) -> Vec<String> {
+    ledger
+        .obligations
+        .iter()
+        .filter(|item| item.satisfaction == OutcomeSatisfaction::Blocked)
+        .filter_map(|item| item.blocker.as_ref().map(|blocker| blocker.code.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn constraint_disclosed(answer: &str, ledger: &OutcomeLedgerShadow) -> bool {
+    let normalized = answer.to_ascii_lowercase();
+    ledger
+        .obligations
+        .iter()
+        .filter(|item| item.satisfaction == OutcomeSatisfaction::Blocked)
+        .filter_map(|item| item.blocker.as_ref())
+        .all(|blocker| {
+            normalized.contains(&blocker.code)
+                || match blocker.kind {
+                    AgentActionDenialKind::UserPermission => {
+                        (normalized.contains("permission") && normalized.contains("denied"))
+                            || (answer.contains("权限") && answer.contains("拒绝"))
+                    }
+                    AgentActionDenialKind::RuntimePolicy => {
+                        (normalized.contains("policy")
+                            && (normalized.contains("blocked") || normalized.contains("denied")))
+                            || (answer.contains("策略")
+                                && (answer.contains("阻止") || answer.contains("拒绝")))
+                    }
+                    AgentActionDenialKind::CapabilityUnavailable => {
+                        normalized.contains("unavailable") || answer.contains("不可用")
+                    }
+                    AgentActionDenialKind::RepeatedAction => {
+                        (normalized.contains("repeated") && normalized.contains("blocked"))
+                            || (answer.contains("重复") && answer.contains("阻止"))
+                    }
+                }
+        })
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -451,6 +525,7 @@ mod tests {
                 GroundedCompletionBasis::SelfContained => ResultQuality::Substantive,
                 GroundedCompletionBasis::EvidenceVisible => ResultQuality::Grounded,
                 GroundedCompletionBasis::PostconditionVerified => ResultQuality::Verified,
+                GroundedCompletionBasis::ConstraintObserved => ResultQuality::Substantive,
             },
             selector_marked_verified: receipt.basis
                 == GroundedCompletionBasis::PostconditionVerified,
@@ -581,6 +656,60 @@ mod tests {
         assert_eq!(
             contract.grounded_completion_required_evidence_sequences(0),
             vec![sequence]
+        );
+    }
+
+    #[test]
+    fn blocked_completion_requires_visible_denial_and_honest_disclosure() {
+        let mut contract = AgentTaskContract::default();
+        contract.begin_action_denial_epoch(4);
+        contract.require_tool_success("file.write");
+        let input_fingerprint =
+            crate::tool_input_fingerprint("file.write", r#"{"path":"protected.txt"}"#);
+        let denial = contract
+            .record_action_denial(
+                "file.write",
+                &input_fingerprint,
+                &crate::AgentActionDenialFeedback::user_permission(),
+            )
+            .expect("permission denial should be trusted");
+
+        assert_eq!(
+            contract.grounded_completion_receipt(4, 2, "done", &[denial.evidence_sequence]),
+            Err(GroundedCompletionIssue::MissingConstraintDisclosure(vec![
+                "user_permission_denied".to_string()
+            ]))
+        );
+        assert_eq!(
+            contract.grounded_completion_receipt(4, 2, "Permission denied.", &[]),
+            Err(GroundedCompletionIssue::EvidenceNotVisible(vec![
+                denial.evidence_sequence
+            ]))
+        );
+
+        let receipt = contract
+            .grounded_completion_receipt(
+                4,
+                2,
+                "Permission denied, so protected.txt was not changed.",
+                &[denial.evidence_sequence],
+            )
+            .expect("an honest blocked result should be deliverable");
+        assert_eq!(receipt.basis, GroundedCompletionBasis::ConstraintObserved);
+        assert_eq!(
+            receipt.constraint_codes,
+            vec!["user_permission_denied".to_string()]
+        );
+        assert_eq!(
+            GroundedCompletionReceipt::from_terminal_metadata(
+                &completed_metadata(
+                    &contract,
+                    &receipt,
+                    "Permission denied, so protected.txt was not changed.",
+                ),
+                "Permission denied, so protected.txt was not changed.",
+            ),
+            Some(receipt)
         );
     }
 

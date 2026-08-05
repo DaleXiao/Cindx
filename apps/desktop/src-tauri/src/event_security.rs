@@ -325,7 +325,7 @@ pub(crate) fn redact_prefixed_secret(value: &str, prefix: &str, minimum_length: 
         if end.saturating_sub(start) >= minimum_length {
             output.push_str("[REDACTED]");
         } else {
-            output.push_str(prefix);
+            output.push_str(&value[start..end]);
         }
         cursor = end;
     }
@@ -343,6 +343,19 @@ mod tests {
         decode_persisted_tool_model_observation, finalize_tool_result,
         TOOL_MODEL_OBSERVATION_METADATA_KEY,
     };
+
+    #[test]
+    fn short_secret_like_prefix_does_not_corrupt_typed_schema_ids() {
+        assert_eq!(
+            redact_sensitive_text("cindx.agent.task-state.v2"),
+            "cindx.agent.task-state.v2"
+        );
+        assert_eq!(redact_sensitive_text("sk-short"), "sk-short");
+        assert_eq!(
+            redact_sensitive_text("sk-1234567890abcdef"),
+            "[REDACTED]"
+        );
+    }
 
     #[test]
     fn redaction_preserves_the_typed_tool_observation_wire() {
