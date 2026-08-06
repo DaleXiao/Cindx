@@ -67,7 +67,7 @@ function validateSuite(suite) {
   }
   const control = suite.cases.find((testCase) => testCase.memory_effect.role === "irrelevant_control");
   requireFact(control.verification?.output_not_contains?.length > 0, "irrelevant control decoy contract is missing");
-  const readOnlyTools = new Set(["file.read", "file.read_many", "file.search"]);
+  const readOnlyTools = new Set(["file.list", "file.read", "file.read_many", "file.search", "tool.inspect", "tool.search"]);
   for (const testCase of suite.cases) {
     requireFact(testCase.permission_policy === "deny_mutations", `${testCase.id}: mutations are not denied`);
     requireFact(testCase.verification?.allowed_tools?.length > 0, `${testCase.id}: tool allowlist is missing`);

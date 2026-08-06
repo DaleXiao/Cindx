@@ -168,6 +168,9 @@ test("an irrelevant-memory control must actually recall its decoy", () => {
 test("an effectful tool attempt cannot pass the frozen read-only contract", () => {
   const raw = rawFixture();
   const run = raw.runs[0];
+  run.tool_receipts.push({ tool: "file.list", status: "succeeded" });
+  run.tool_receipts.push({ tool: "tool.search", status: "succeeded" });
+  assert.doesNotThrow(() => analyzeMemoryEffect(suite, raw));
   run.tool_receipts.push({ tool: "file.write", status: "denied" });
   assert.throws(() => analyzeMemoryEffect(suite, raw), /tool safety receipt mismatch/);
 });

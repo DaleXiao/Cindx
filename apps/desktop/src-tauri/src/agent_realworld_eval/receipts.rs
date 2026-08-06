@@ -140,7 +140,15 @@ pub(super) fn strategy_receipt_from_events(
         .get("execution_constraint")
         .map(String::as_str)
         .unwrap_or("native");
-    if treatment.is_grounded_direct() {
+    if treatment.is_memory_evaluation() {
+        if execution_constraint != "matched_memory_effect"
+            || decision.execution != orchestrator::AgentExecutionMode::Direct
+        {
+            return Err(
+                "memory-effect receipt must prove its matched direct constraint".to_string(),
+            );
+        }
+    } else if treatment.is_grounded_direct() {
         if execution_constraint != "grounded_direct"
             || decision.execution != orchestrator::AgentExecutionMode::Direct
         {
@@ -630,6 +638,54 @@ mod tests {
         .expect("grounded strategy");
 
         assert_eq!(receipt.execution_constraint, "grounded_direct");
+        assert_eq!(receipt.execution_mode, "direct");
+    }
+
+    #[test]
+    fn memory_effect_receipt_proves_the_matched_constraint() {
+        let mut decision = AgentRunDecision::direct("configured-model");
+        decision.memory = orchestrator::MemoryRecallPlan {
+            policy: orchestrator::MemoryRecallPolicy::Relevant,
+            query: "durable project requirements and prior-session facts".to_string(),
+        };
+        let genome = ConductorPromptGenome::seed_for_effort("auto");
+        let metadata = Metadata::from([
+            (
+                "run_decision".to_string(),
+                serde_json::to_string(&decision).unwrap(),
+            ),
+            (
+                "prompt_genome".to_string(),
+                serde_json::to_string(&genome).unwrap(),
+            ),
+            ("profile_source".to_string(), "seed_fallback".to_string()),
+            ("requested_policy".to_string(), "auto_router".to_string()),
+            ("collaboration_policy".to_string(), "single".to_string()),
+            (
+                "decision_source".to_string(),
+                "matched_memory_evaluation".to_string(),
+            ),
+            ("routing_signature".to_string(), "frozen-route".to_string()),
+            (
+                "execution_constraint".to_string(),
+                "matched_memory_effect".to_string(),
+            ),
+        ]);
+
+        let receipt = strategy_receipt_from_events(
+            &[event(
+                "Agent run decision selected",
+                EventKind::TaskStatusChanged,
+                metadata,
+            )],
+            Treatment::MemoryOn,
+            None,
+        )
+        .expect("strategy receipt")
+        .expect("memory-effect strategy");
+
+        assert_eq!(receipt.decision_source, "matched_memory_evaluation");
+        assert_eq!(receipt.execution_constraint, "matched_memory_effect");
         assert_eq!(receipt.execution_mode, "direct");
     }
 }

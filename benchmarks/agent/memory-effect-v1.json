@@ -38,7 +38,7 @@
         "output_contains": ["QUARTZ-731", "Alina Park"],
         "required_tools_any": [],
         "required_tools_all": [],
-        "allowed_tools": ["file.read", "file.read_many", "file.search"],
+        "allowed_tools": ["file.list", "file.read", "file.read_many", "file.search", "tool.inspect", "tool.search"],
         "minimum_denied_permissions": 0
       }
     },
@@ -60,7 +60,7 @@
         "output_contains": ["73%", "#ops-aurora"],
         "required_tools_any": [],
         "required_tools_all": [],
-        "allowed_tools": ["file.read", "file.read_many", "file.search"],
+        "allowed_tools": ["file.list", "file.read", "file.read_many", "file.search", "tool.inspect", "tool.search"],
         "minimum_denied_permissions": 0
       }
     },
@@ -83,7 +83,7 @@
         "output_not_contains": ["Red Juniper", "Niko Vale"],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
         "required_tools_all": [],
-        "allowed_tools": ["file.read", "file.read_many", "file.search"],
+        "allowed_tools": ["file.list", "file.read", "file.read_many", "file.search", "tool.inspect", "tool.search"],
         "minimum_denied_permissions": 0
       }
     }
