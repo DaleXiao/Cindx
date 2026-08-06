@@ -24,6 +24,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
 | Typed collaboration execution contract | current source | Deterministic worker tool-policy separation, current-epoch evidence projection, target binding, duplicate contribution rejection, and cited verification receipts | Workflow evidence and verdict authority fail closed; no provider-backed collaboration-quality or intelligence-uplift claim |
 | Causal Router v2 contract | current source | Deterministic exact-input fingerprints, complete executable action identities, tri-state effect authority, indexed exact context-and-action evidence, conservative value decomposition, 4 KiB receipt, and 2-lookup/2-action scaling bounds | Routing provenance and bounded admission are verified; no provider-backed quality or Auto/Pro uplift claim |
+| Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
@@ -109,6 +110,13 @@ deterministic policy identity, receipt integrity, counterfactual availability,
 effect-authority enforcement, and bounded operation counts. They do not show
 that the selected route produces a better provider answer; that requires a new
 frozen matched provider run with failures retained in the denominator.
+The `context-compiler-contract` and `context-compiler-scaling` gates likewise
+verify the fixed authoritative-objective policy, bounded no-text receipt, and
+candidate-proportional operation counts without using wall-clock time. They do
+not call a provider, exercise GEPA, or establish that the selected context
+improves answer quality. A quality claim requires a separately frozen matched
+provider treatment that isolates this compiler policy and retains failures in
+the denominator.
 
 ### 3. Provider reasoning diagnostics
 

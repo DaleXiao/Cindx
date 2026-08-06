@@ -305,6 +305,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 &overlays,
                 context_window_tokens,
                 max_output_tokens,
+                self.state.prepared_task_state(),
             );
             context.validate_required_invariants()?;
         }
@@ -904,6 +905,7 @@ fn reproject_prepared_request_with_overlays(
     overlays: &[Message],
     context_window_tokens: u64,
     max_output_tokens: u64,
+    prepared_task: &crate::PreparedTaskState,
 ) {
     let Some(system) = request
         .messages
@@ -913,14 +915,17 @@ fn reproject_prepared_request_with_overlays(
         return;
     };
     let previous = context.clone();
-    let (messages, mut reprojected) = crate::context_governor::govern_model_messages_with_overlays(
-        &request.messages[1..],
-        system.content.clone(),
-        overlays,
-        tools,
-        context_window_tokens,
-        max_output_tokens,
-    );
+    let (messages, mut reprojected) =
+        crate::context_governor::govern_model_messages_with_overlays_for_objective(
+            &request.messages[1..],
+            system.content.clone(),
+            overlays,
+            tools,
+            context_window_tokens,
+            max_output_tokens,
+            prepared_task.effective_objective(),
+            prepared_task.objective_fingerprint(),
+        );
     reprojected.applied |= previous.applied;
     reprojected.repair_attempted |= previous.repair_attempted;
     reprojected.repair_succeeded |= previous.repair_succeeded;
@@ -938,9 +943,22 @@ fn reproject_prepared_request_with_overlays(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    for (source, tokens) in previous.omitted_source_tokens {
-        *reprojected.omitted_source_tokens.entry(source).or_default() += tokens;
+    for (source, tokens) in &previous.omitted_source_tokens {
+        *reprojected
+            .omitted_source_tokens
+            .entry(source.clone())
+            .or_default() += tokens;
     }
+    let selected_source_counts = reprojected.context_compiler.selected_source_counts.clone();
+    let mut omitted_source_counts = reprojected.context_compiler.omitted_source_counts.clone();
+    for (source, count) in &previous.context_compiler.omitted_source_counts {
+        *omitted_source_counts.entry(source.clone()).or_default() += count;
+    }
+    reprojected.context_compiler.relevance_applied |= previous.context_compiler.relevance_applied;
+    reprojected.refresh_context_compiler_projection(selected_source_counts, omitted_source_counts);
+    reprojected
+        .context_compiler
+        .merge_operation_counts(&previous.context_compiler);
     request.messages = messages;
     reprojected.insert_metadata(&mut request.metadata);
     *context = reprojected;
@@ -1233,6 +1251,57 @@ mod tests {
         assert_eq!(prepared.request.tools, tools);
         assert_eq!(prepared.request.metadata["agent_turn"], "0");
         assert_eq!(state.turn, 0);
+    }
+
+    #[test]
+    fn overlay_reprojection_preserves_prior_context_compiler_relevance() {
+        let mut state = start_agent_loop(
+            TaskId("context-reprojection".to_string()),
+            "inspect the retained target context",
+            AgentRuntimeConfig::default(),
+        );
+        let mut knowledge = Message {
+            role: MessageRole::System,
+            content: "retained target context ".repeat(8_000),
+            metadata: Default::default(),
+        };
+        knowledge
+            .metadata
+            .insert("kind".to_string(), "knowledge_context".to_string());
+        state.messages.insert(0, knowledge);
+        let (mut request, mut context) =
+            model_request_for_turn_with_context_budget(&mut state, &[], None, None, 4_096, 1_024);
+        assert!(context.context_compiler.relevance_applied);
+
+        let (_, fresh_projection) =
+            crate::context_governor::govern_model_messages_with_overlays_for_objective(
+                &request.messages[1..],
+                request.messages[0].content.clone(),
+                &[],
+                &[],
+                4_096,
+                1_024,
+                state.prepared_task_state().effective_objective(),
+                state.prepared_task_state().objective_fingerprint(),
+            );
+        assert!(!fresh_projection.context_compiler.relevance_applied);
+
+        reproject_prepared_request_with_overlays(
+            &mut request,
+            &mut context,
+            &[],
+            &[],
+            4_096,
+            1_024,
+            state.prepared_task_state(),
+        );
+
+        assert!(context.context_compiler.relevance_applied);
+        assert!(context.context_compiler.digest_valid());
+        assert_eq!(
+            request.metadata["context_compiler_receipt_digest"],
+            context.context_compiler.canonical_digest
+        );
     }
 
     #[test]

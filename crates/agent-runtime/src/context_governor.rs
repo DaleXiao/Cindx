@@ -1,3 +1,7 @@
+use crate::context_compiler::{
+    context_source_counts, context_source_counts_for_indices, context_source_identity,
+    ContextCompiler, ContextCompilerReceipt, MAX_CONTEXT_COMPILER_RECEIPT_BYTES,
+};
 use crate::context_engine::{
     estimate_model_message_tokens, estimate_text_tokens, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
 };
@@ -46,6 +50,7 @@ pub struct ContextGovernorReport {
     pub protected_sources_satisfied: bool,
     pub tool_round_integrity_satisfied: bool,
     pub allocation: ContextBudgetAllocation,
+    pub context_compiler: ContextCompilerReceipt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +96,7 @@ impl ContextGovernorReport {
         }
     }
 
-    pub(crate) fn insert_metadata(&self, metadata: &mut Metadata) {
+    pub fn insert_metadata(&self, metadata: &mut Metadata) {
         metadata.insert(
             "context_governor_schema".to_string(),
             CONTEXT_GOVERNOR_SCHEMA.to_string(),
@@ -189,6 +194,70 @@ impl ContextGovernorReport {
             ])
             .unwrap_or_else(|_| "[]".to_string()),
         );
+        if let Some(receipt) = self.context_compiler.to_bounded_json() {
+            metadata.insert(
+                "context_compiler_schema".to_string(),
+                self.context_compiler.schema.clone(),
+            );
+            metadata.insert(
+                "context_compiler_policy".to_string(),
+                self.context_compiler.policy.clone(),
+            );
+            metadata.insert(
+                "context_compiler_receipt_digest".to_string(),
+                self.context_compiler.canonical_digest.clone(),
+            );
+            metadata.insert("context_compiler_receipt_json".to_string(), receipt);
+        } else {
+            debug_assert!(
+                false,
+                "context compiler receipt exceeded {MAX_CONTEXT_COMPILER_RECEIPT_BYTES} bytes"
+            );
+        }
+    }
+
+    pub(crate) fn refresh_context_compiler_projection(
+        &mut self,
+        selected_source_counts: BTreeMap<String, u64>,
+        omitted_source_counts: BTreeMap<String, u64>,
+    ) {
+        self.context_compiler.selected_source_tokens = self.selected_source_tokens.clone();
+        self.context_compiler.omitted_source_tokens = self.omitted_source_tokens.clone();
+        self.context_compiler.selected_source_counts = selected_source_counts;
+        self.context_compiler.omitted_source_counts = omitted_source_counts;
+        self.context_compiler.counts = crate::context_compiler::ContextCompilerCounts {
+            candidate_sources: self
+                .context_compiler
+                .selected_source_counts
+                .values()
+                .chain(self.context_compiler.omitted_source_counts.values())
+                .copied()
+                .sum(),
+            selected_sources: self
+                .context_compiler
+                .selected_source_counts
+                .values()
+                .copied()
+                .sum(),
+            omitted_sources: self
+                .context_compiler
+                .omitted_source_counts
+                .values()
+                .copied()
+                .sum(),
+            original_messages: self.original_messages as u64,
+            projected_messages: self.projected_messages as u64,
+            omitted_messages: self.omitted_messages as u64,
+            truncated_messages: self.truncated_messages as u64,
+        };
+        self.context_compiler.hard_invariants =
+            crate::context_compiler::ContextCompilerHardInvariants {
+                hard_limit_satisfied: self.hard_limit_satisfied,
+                current_request_preserved: self.current_request_preserved,
+                protected_sources_satisfied: self.protected_sources_satisfied,
+                tool_round_integrity_satisfied: self.tool_round_integrity_satisfied,
+            };
+        self.context_compiler.seal();
     }
 }
 
@@ -238,6 +307,34 @@ pub(crate) fn govern_model_messages_with_overlays(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn govern_model_messages_with_overlays_for_objective(
+    state_messages: &[Message],
+    system_prompt: String,
+    context_overlays: &[Message],
+    tools: &[ToolSpec],
+    context_window_tokens: u64,
+    max_output_tokens: u64,
+    objective: &str,
+    objective_fingerprint: &str,
+) -> (Vec<Message>, ContextGovernorReport) {
+    let state_message_tokens = state_messages
+        .iter()
+        .map(estimate_model_message_tokens)
+        .collect::<Vec<_>>();
+    govern_model_messages_with_overlays_and_estimates_for_objective(
+        state_messages,
+        &state_message_tokens,
+        system_prompt,
+        context_overlays,
+        tools,
+        context_window_tokens,
+        max_output_tokens,
+        objective,
+        objective_fingerprint,
+    )
+}
+
 pub(crate) fn govern_model_messages_with_overlays_and_estimates(
     state_messages: &[Message],
     state_message_tokens: &[u64],
@@ -247,7 +344,39 @@ pub(crate) fn govern_model_messages_with_overlays_and_estimates(
     context_window_tokens: u64,
     max_output_tokens: u64,
 ) -> (Vec<Message>, ContextGovernorReport) {
+    let objective = state_messages
+        .iter()
+        .rfind(|message| is_user_turn_start(message))
+        .map(|message| message.content.as_str())
+        .unwrap_or_default();
+    let objective_fingerprint = crate::task_state_lineage::text_fingerprint(objective);
+    govern_model_messages_with_overlays_and_estimates_for_objective(
+        state_messages,
+        state_message_tokens,
+        system_prompt,
+        context_overlays,
+        tools,
+        context_window_tokens,
+        max_output_tokens,
+        objective,
+        &objective_fingerprint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn govern_model_messages_with_overlays_and_estimates_for_objective(
+    state_messages: &[Message],
+    state_message_tokens: &[u64],
+    system_prompt: String,
+    context_overlays: &[Message],
+    tools: &[ToolSpec],
+    context_window_tokens: u64,
+    max_output_tokens: u64,
+    objective: &str,
+    objective_fingerprint: &str,
+) -> (Vec<Message>, ContextGovernorReport) {
     debug_assert_eq!(state_messages.len(), state_message_tokens.len());
+    let mut compiler = ContextCompiler::new(objective, objective_fingerprint);
     let context_window_tokens = context_window_tokens.max(4_096);
     let input_budget_tokens = input_budget_tokens(context_window_tokens, max_output_tokens);
     let system_message = Message {
@@ -281,55 +410,56 @@ pub(crate) fn govern_model_messages_with_overlays_and_estimates(
         let current_request_preserved = current_request_preserved(state_messages, &messages);
         let protected_sources_satisfied = protected_sources_satisfied(state_messages, &messages);
         let tool_round_integrity_satisfied = tool_round_integrity_satisfied(&messages);
-        let projected = (
-            messages,
-            ContextGovernorReport {
-                applied: false,
-                repair_attempted: false,
-                repair_succeeded: false,
-                context_window_tokens,
-                input_budget_tokens,
-                estimated_original_tokens,
-                estimated_projected_tokens: estimated_original_tokens,
-                original_messages: state_messages.len(),
-                projected_messages: state_messages.len() + context_overlays.len() + 1,
-                omitted_messages: 0,
-                truncated_messages: 0,
-                hard_limit_satisfied: true,
-                selected_context_sources,
-                omitted_context_sources: Vec::new(),
-                selected_source_tokens,
-                omitted_source_tokens: BTreeMap::new(),
-                current_request_preserved,
-                protected_sources_satisfied,
-                tool_round_integrity_satisfied,
-                allocation: ContextBudgetAllocation {
-                    core_tokens: fixed_core_tokens(system_tokens, tool_tokens),
-                    current_request_tokens: state_messages
-                        .iter()
-                        .rposition(is_user_turn_start)
-                        .map(|index| state_message_tokens[index])
-                        .unwrap_or_default(),
-                    protected_context_tokens: selected_system_context_tokens(
-                        state_messages,
-                        state_message_tokens,
-                        true,
-                    )
-                    .saturating_add(overlay_tokens),
-                    supplemental_context_tokens: selected_system_context_tokens(
-                        state_messages,
-                        state_message_tokens,
-                        false,
-                    ),
-                    recent_conversation_tokens: conversation_tokens_except_current(
-                        state_messages,
-                        state_message_tokens,
-                    ),
-                    archive_digest_tokens: 0,
-                    unused_tokens: input_budget_tokens.saturating_sub(estimated_original_tokens),
-                },
+        let selected_source_counts = context_source_counts(&messages);
+        let mut report = ContextGovernorReport {
+            applied: false,
+            repair_attempted: false,
+            repair_succeeded: false,
+            context_window_tokens,
+            input_budget_tokens,
+            estimated_original_tokens,
+            estimated_projected_tokens: estimated_original_tokens,
+            original_messages: state_messages.len(),
+            projected_messages: state_messages.len() + context_overlays.len() + 1,
+            omitted_messages: 0,
+            truncated_messages: 0,
+            hard_limit_satisfied: true,
+            selected_context_sources,
+            omitted_context_sources: Vec::new(),
+            selected_source_tokens,
+            omitted_source_tokens: BTreeMap::new(),
+            current_request_preserved,
+            protected_sources_satisfied,
+            tool_round_integrity_satisfied,
+            allocation: ContextBudgetAllocation {
+                core_tokens: fixed_core_tokens(system_tokens, tool_tokens),
+                current_request_tokens: state_messages
+                    .iter()
+                    .rposition(is_user_turn_start)
+                    .map(|index| state_message_tokens[index])
+                    .unwrap_or_default(),
+                protected_context_tokens: selected_system_context_tokens(
+                    state_messages,
+                    state_message_tokens,
+                    true,
+                )
+                .saturating_add(overlay_tokens),
+                supplemental_context_tokens: selected_system_context_tokens(
+                    state_messages,
+                    state_message_tokens,
+                    false,
+                ),
+                recent_conversation_tokens: conversation_tokens_except_current(
+                    state_messages,
+                    state_message_tokens,
+                ),
+                archive_digest_tokens: 0,
+                unused_tokens: input_budget_tokens.saturating_sub(estimated_original_tokens),
             },
-        );
+            context_compiler: compiler.into_receipt(false),
+        };
+        report.refresh_context_compiler_projection(selected_source_counts, BTreeMap::new());
+        let projected = (messages, report);
         return repair_projection_if_needed(
             state_messages,
             &system_message,
@@ -389,7 +519,7 @@ pub(crate) fn govern_model_messages_with_overlays_and_estimates(
         state_messages,
         state_message_tokens,
         system_context_budget,
-        current_user_index.map(|index| state_messages[index].content.as_str()),
+        &mut compiler,
         &mut selected,
         &mut replacements,
         &mut truncated_messages,
@@ -548,7 +678,9 @@ pub(crate) fn govern_model_messages_with_overlays_and_estimates(
             )
         })
         .sum::<u64>();
-    let report = ContextGovernorReport {
+    let selected_source_counts = context_source_counts(&messages);
+    let omitted_source_counts = context_source_counts_for_indices(state_messages, &omitted_indices);
+    let mut report = ContextGovernorReport {
         applied: true,
         repair_attempted: false,
         repair_succeeded: false,
@@ -577,7 +709,9 @@ pub(crate) fn govern_model_messages_with_overlays_and_estimates(
             archive_digest_tokens,
             unused_tokens: input_budget_tokens.saturating_sub(estimated_projected_tokens),
         },
+        context_compiler: compiler.into_receipt(true),
     };
+    report.refresh_context_compiler_projection(selected_source_counts, omitted_source_counts);
     repair_projection_if_needed(
         state_messages,
         &system_message,
@@ -611,6 +745,7 @@ fn repair_projection_if_needed(
         return projected;
     }
 
+    let compiler_receipt = projected.1.context_compiler.clone();
     if let Some((messages, mut report)) = repair_context_projection(
         state_messages,
         system_message,
@@ -622,6 +757,7 @@ fn repair_projection_if_needed(
         context_window_tokens,
         input_budget_tokens,
         estimated_original_tokens,
+        compiler_receipt,
     ) {
         report.repair_attempted = true;
         report.repair_succeeded = report.validate_required_invariants().is_ok();
@@ -646,6 +782,7 @@ fn repair_context_projection(
     context_window_tokens: u64,
     input_budget_tokens: u64,
     estimated_original_tokens: u64,
+    compiler_receipt: ContextCompilerReceipt,
 ) -> Option<(Vec<Message>, ContextGovernorReport)> {
     let fixed_tokens = system_tokens
         .saturating_add(overlay_tokens)
@@ -866,7 +1003,9 @@ fn repair_context_projection(
             )
         })
         .sum::<u64>();
-    let report = ContextGovernorReport {
+    let selected_source_counts = context_source_counts(&messages);
+    let omitted_source_counts = context_source_counts_for_indices(state_messages, &omitted_indices);
+    let mut report = ContextGovernorReport {
         applied: true,
         repair_attempted: true,
         repair_succeeded: false,
@@ -895,7 +1034,9 @@ fn repair_context_projection(
             archive_digest_tokens,
             unused_tokens: input_budget_tokens.saturating_sub(estimated_projected_tokens),
         },
+        context_compiler: compiler_receipt,
     };
+    report.refresh_context_compiler_projection(selected_source_counts, omitted_source_counts);
     Some((messages, report))
 }
 
@@ -1096,34 +1237,6 @@ fn protected_sources_satisfied(original: &[Message], projected: &[Message]) -> b
     required.is_subset(&selected)
 }
 
-fn context_source_identity(message: &Message) -> Option<String> {
-    let source = ContextSourceKind::from_message(message)?;
-    if source == ContextSourceKind::GroundingEvidence {
-        return Some(format!(
-            "{}:{}:{}:{}",
-            source.as_str(),
-            message
-                .metadata
-                .get("kind")
-                .map(String::as_str)
-                .unwrap_or("unknown"),
-            message
-                .metadata
-                .get("prompt_contract_epoch")
-                .map(String::as_str)
-                .unwrap_or("0"),
-            message
-                .metadata
-                .get("requirement_ids_json")
-                .or_else(|| message.metadata.get("requirement_id"))
-                .or_else(|| message.metadata.get("collaboration_id"))
-                .map(String::as_str)
-                .unwrap_or("default"),
-        ));
-    }
-    Some(source.as_str().to_string())
-}
-
 fn tool_round_integrity_satisfied(messages: &[Message]) -> bool {
     let mut proposed = BTreeSet::new();
     let mut observed = BTreeSet::new();
@@ -1148,139 +1261,18 @@ fn tool_round_integrity_satisfied(messages: &[Message]) -> bool {
     proposed == observed
 }
 
-fn system_context_priority(message: &Message) -> u8 {
-    ContextSourceKind::from_message(message)
-        .map(ContextSourceKind::priority)
-        .unwrap_or_default()
-}
-
-fn system_context_is_protected(message: &Message) -> bool {
-    ContextSourceKind::from_message(message).is_some_and(ContextSourceKind::is_protected)
-}
-
-fn context_relevance_score(message: &Message, objective_terms: &BTreeSet<String>) -> u16 {
-    if objective_terms.is_empty() {
-        return 0;
-    }
-    let message_terms = context_relevance_terms(&message.content);
-    let overlap = objective_terms.intersection(&message_terms).count();
-    if overlap == 0 {
-        return 0;
-    }
-    let identifier_overlap = objective_terms
-        .intersection(&message_terms)
-        .filter(|term| is_context_identifier(term))
-        .count();
-    let coverage = overlap.saturating_mul(30) / objective_terms.len().max(1);
-    overlap
-        .saturating_mul(12)
-        .saturating_add(coverage)
-        .saturating_add(identifier_overlap.saturating_mul(50))
-        .min(u16::MAX as usize) as u16
-}
-
-fn context_relevance_terms(text: &str) -> BTreeSet<String> {
-    text.split(|character: char| {
-        !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
-    })
-    .map(|term| {
-        term.trim_matches(|character: char| matches!(character, '.' | '/' | ':' | '-' | '@'))
-            .to_lowercase()
-    })
-    .filter(|term| {
-        !term.is_empty()
-            && (term.chars().count() > 1 || term.chars().any(char::is_numeric))
-            && !matches!(
-                term.as_str(),
-                "a" | "an"
-                    | "and"
-                    | "are"
-                    | "as"
-                    | "at"
-                    | "be"
-                    | "by"
-                    | "for"
-                    | "from"
-                    | "in"
-                    | "is"
-                    | "it"
-                    | "of"
-                    | "on"
-                    | "or"
-                    | "that"
-                    | "the"
-                    | "this"
-                    | "to"
-                    | "was"
-                    | "what"
-                    | "when"
-                    | "where"
-                    | "which"
-                    | "with"
-            )
-    })
-    .collect()
-}
-
-fn is_context_identifier(term: &str) -> bool {
-    term.chars()
-        .any(|character| matches!(character, '_' | '-' | '.' | '/' | ':' | '@'))
-        || term.chars().any(char::is_numeric)
-}
-
-fn system_context_key(message: &Message, index: usize) -> String {
-    if let Some(identity) = context_source_identity(message) {
-        if ContextSourceKind::from_message(message).is_some_and(ContextSourceKind::is_protected) {
-            return identity;
-        }
-    }
-    message
-        .metadata
-        .get("kind")
-        .or_else(|| message.metadata.get("collaboration_stage"))
-        .cloned()
-        .unwrap_or_else(|| format!("system-{index}"))
-}
-
 fn select_system_contexts(
     messages: &[Message],
     message_tokens: &[u64],
     budget: u64,
-    current_objective: Option<&str>,
+    compiler: &mut ContextCompiler<'_>,
     selected: &mut BTreeSet<usize>,
     replacements: &mut BTreeMap<usize, Message>,
     truncated_messages: &mut usize,
 ) {
-    let objective_terms = current_objective
-        .map(context_relevance_terms)
-        .unwrap_or_default();
-    let mut seen = BTreeSet::new();
-    let mut candidates = messages
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, message)| ContextSourceKind::from_message(message).is_some())
-        .filter(|(index, message)| seen.insert(system_context_key(message, *index)))
-        .map(|(index, message)| {
-            (
-                index,
-                system_context_is_protected(message),
-                context_relevance_score(message, &objective_terms),
-                system_context_priority(message),
-            )
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then(right.2.cmp(&left.2))
-            .then(right.3.cmp(&left.3))
-            .then(right.0.cmp(&left.0))
-    });
-
     let mut remaining = budget;
-    for (index, _, _, _) in candidates {
+    for candidate in compiler.rank_context_sources(messages) {
+        let index = candidate.index;
         if remaining < 64 {
             break;
         }
@@ -1809,12 +1801,15 @@ mod tests {
         let mut selected = BTreeSet::new();
         let mut replacements = BTreeMap::new();
         let mut truncated = 0;
+        let objective = "Why did max_turns discard the final answer?";
+        let objective_fingerprint = crate::task_state_lineage::text_fingerprint(objective);
+        let mut compiler = ContextCompiler::new(objective, &objective_fingerprint);
 
         select_system_contexts(
             &messages,
             &tokens,
             128,
-            Some("Why did max_turns discard the final answer?"),
+            &mut compiler,
             &mut selected,
             &mut replacements,
             &mut truncated,

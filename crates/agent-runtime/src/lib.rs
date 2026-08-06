@@ -14,6 +14,7 @@ const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 mod adaptive_loop;
 mod anytime_parallel;
 mod completion_intent;
+mod context_compiler;
 mod context_engine;
 mod context_governor;
 mod context_projection;
@@ -53,6 +54,11 @@ pub use anytime_parallel::{AnytimeQuorumExecution, AnytimeQuorumPolicy};
 pub use completion_intent::{
     prompt_completion_intent, prompt_evidence_target_anchors, prompt_replaces_prior_objective,
     PromptCompletionIntent, PromptEffectAuthority, PromptToolRequirement,
+};
+pub use context_compiler::{
+    ContextCompilerCounts, ContextCompilerHardInvariants, ContextCompilerOperationCounts,
+    ContextCompilerReceipt, CONTEXT_COMPILER_POLICY, CONTEXT_COMPILER_RECEIPT_SCHEMA,
+    MAX_CONTEXT_COMPILER_RECEIPT_BYTES,
 };
 pub use context_engine::{
     context_prompt_reserve, estimate_context_tokens, estimate_message_tokens, estimate_text_tokens,
@@ -566,15 +572,20 @@ pub fn model_request_for_turn_with_context_budget_and_overlays(
 ) -> (ModelRequest, ContextGovernorReport) {
     let system_prompt = agent_system_prompt_with_context(tools, user_instructions, runtime_context);
     state.context_token_ledger.synchronize(&state.messages);
-    let (messages, report) = context_governor::govern_model_messages_with_overlays_and_estimates(
-        &state.messages,
-        state.context_token_ledger.tokens(),
-        system_prompt,
-        context_overlays,
-        tools,
-        context_window_tokens,
-        max_output_tokens,
-    );
+    let effective_objective = state.prepared_task_state.effective_objective();
+    let objective_fingerprint = state.prepared_task_state.objective_fingerprint();
+    let (messages, report) =
+        context_governor::govern_model_messages_with_overlays_and_estimates_for_objective(
+            &state.messages,
+            state.context_token_ledger.tokens(),
+            system_prompt,
+            context_overlays,
+            tools,
+            context_window_tokens,
+            max_output_tokens,
+            effective_objective,
+            objective_fingerprint,
+        );
     let mut metadata = [
         ("agent_task_id".to_string(), state.task_id.0.clone()),
         ("agent_turn".to_string(), state.turn.to_string()),
