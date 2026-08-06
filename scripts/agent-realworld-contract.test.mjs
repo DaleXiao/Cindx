@@ -24,32 +24,64 @@ function hash(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function fixture() {
+function fixture({ current = false } = {}) {
+  const treatments = current
+    ? ["oracle_reference", "grounded_direct", "auto", "pro"]
+    : ["direct", "fast", "auto", "pro"];
+  const oracleTreatment = current ? "oracle_reference" : "direct";
+  const isOracle = (treatment) => treatment === oracleTreatment;
   const suite = {
-    schema: "cindx.agent-realworld-suite.v3",
+    schema: current ? "cindx.agent-realworld-suite.v4" : "cindx.agent-realworld-suite.v3",
     id: "fixture",
-    version: 4,
+    version: current ? 5 : 4,
     description: "fixture",
     default_replicates: 1,
     per_run_timeout_seconds: 600,
     execution_order: {
       protocol: "cyclic_latin_square_v1",
-      base_treatments: ["direct", "fast", "auto", "pro"]
+      base_treatments: treatments
     },
-    promotion_v1: {
-      schema: "cindx.agent-realworld-promotion.v1",
-      baseline: "fast",
-      candidates: {
-        auto: { maximum_median_latency_ratio: 3, maximum_total_token_ratio: 4 },
-        pro: { maximum_median_latency_ratio: 6, maximum_total_token_ratio: 8 }
-      },
-      minimum_quality_delta: 0,
-      minimum_completion_delta: 0,
-      minimum_any_improvement_runs: 1,
-      maximum_setup_failures: 0,
-      maximum_safety_violations: 0
-    },
-    treatments: ["direct", "fast", "auto", "pro"],
+    ...(current
+      ? {
+          claim_contract_v2: {
+            schema: "cindx.agent-realworld-claims.v2",
+            baseline: "grounded_direct",
+            oracle_reference: "oracle_reference",
+            candidates: {
+              auto: {
+                budget_relation: "iso_budget",
+                maximum_median_latency_ratio: 3,
+                maximum_total_token_ratio: 4
+              },
+              pro: {
+                budget_relation: "descriptive_only",
+                maximum_median_latency_ratio: 6,
+                maximum_total_token_ratio: 8
+              }
+            },
+            minimum_quality_delta: 0,
+            minimum_completion_delta: 0,
+            minimum_any_quality_improvement_runs: 1,
+            maximum_setup_failures: 0,
+            maximum_safety_violations: 0
+          }
+        }
+      : {
+          promotion_v1: {
+            schema: "cindx.agent-realworld-promotion.v1",
+            baseline: "fast",
+            candidates: {
+              auto: { maximum_median_latency_ratio: 3, maximum_total_token_ratio: 4 },
+              pro: { maximum_median_latency_ratio: 6, maximum_total_token_ratio: 8 }
+            },
+            minimum_quality_delta: 0,
+            minimum_completion_delta: 0,
+            minimum_any_improvement_runs: 1,
+            maximum_setup_failures: 0,
+            maximum_safety_violations: 0
+          }
+        }),
+    treatments,
     cases: [
       {
         id: "case-a",
@@ -121,15 +153,15 @@ function fixture() {
     treatment: entry.treatment,
     execution_index: entry.executionIndex,
     treatment_position: entry.treatmentPosition,
-    product_mechanism_exercised: entry.treatment !== "direct",
+    product_mechanism_exercised: !isOracle(entry.treatment),
     completed: true,
     terminal_status: "completed",
     evidence_error: null,
     configured_models: ["model-a"],
-    tools_used: entry.treatment === "direct" ? [] : ["file.read"],
+    tools_used: isOracle(entry.treatment) ? [] : ["file.read"],
     fixture_receipt: null,
     tool_receipts:
-      entry.treatment === "direct"
+      isOracle(entry.treatment)
         ? []
         : [
             {
@@ -152,18 +184,27 @@ function fixture() {
     setup_failure: null,
     resolved_budget: { ...resolvedBudget },
     strategy_receipt:
-      entry.treatment === "direct"
+      isOracle(entry.treatment)
         ? null
         : {
-            requested_policy: entry.treatment,
-            effective_policy: entry.treatment,
+            requested_policy: entry.treatment === "grounded_direct" ? "auto" : entry.treatment,
+            effective_policy: entry.treatment === "grounded_direct" ? "single" : entry.treatment,
             execution_mode: "direct",
             decision_source: "fixture",
+            ...(current
+              ? {
+                  execution_constraint:
+                    entry.treatment === "grounded_direct" ? "grounded_direct" : "native"
+                }
+              : {}),
             decision_sha256: hash(`decision-${entry.executionIndex}`),
             routing_signature_sha256: hash(`routing-${entry.executionIndex}`),
             profile_source: "built_in_seed",
-            profile_id: `${entry.treatment}-seed`,
-            profile_sha256: hash(`${entry.treatment}-seed`),
+            profile_id:
+              entry.treatment === "grounded_direct" ? "auto-seed" : `${entry.treatment}-seed`,
+            profile_sha256: hash(
+              entry.treatment === "grounded_direct" ? "auto-seed" : `${entry.treatment}-seed`
+            ),
             profile_generation: 0,
             parent_profile_ids: [],
             learned_artifact_sha256: null,
@@ -186,12 +227,12 @@ function fixture() {
       }
     ],
     metrics: {
-      latency_ms: entry.treatment === "fast" ? 10 : 20,
+      latency_ms: ["fast", "grounded_direct"].includes(entry.treatment) ? 10 : 20,
       setup_latency_ms: 0,
       model_calls: 1,
       model_responses: 1,
-      tool_calls: entry.treatment === "direct" ? 0 : 1,
-      tool_succeeded: entry.treatment === "direct" ? 0 : 1,
+      tool_calls: isOracle(entry.treatment) ? 0 : 1,
+      tool_succeeded: isOracle(entry.treatment) ? 0 : 1,
       tool_failed: 0,
       tool_cancelled: 0,
       tool_denied: 0,
@@ -211,7 +252,7 @@ function fixture() {
     verification: {
       quality_passed: true,
       answer_passed: true,
-      external_effect_passed: entry.treatment === "direct" ? null : true,
+      external_effect_passed: isOracle(entry.treatment) ? null : true,
       passed_checks: 1,
       total_checks: 1,
       safety_violations: 0,
@@ -221,7 +262,7 @@ function fixture() {
     }
   }));
   const raw = {
-    schema: "cindx.agent-realworld-raw.v3",
+    schema: current ? "cindx.agent-realworld-raw.v4" : "cindx.agent-realworld-raw.v3",
     suite_id: suite.id,
     suite_version: suite.version,
     suite_description: suite.description,
@@ -368,6 +409,22 @@ test("validates the complete matrix and removes private output", () => {
   assert.match(markdown, /Broad orchestration uplift: \*\*NO-GO\*\*/);
   assert.match(markdown, /fresh-seed quality evidence/i);
   assert.doesNotMatch(markdown, /private answer|secret|key=private/);
+});
+
+test("separates current grounded-direct mechanism claims without inventing learning uplift", () => {
+  const report = validateAndSanitize(fixture({ current: true }));
+  assert.equal(report.schema, "cindx.agent-realworld-sanitized.v4");
+  assert.equal(report.decision.status, "VALID_BASELINE");
+  assert.equal(report.decision.mechanism_claims.adaptive_direct.state, "NEUTRAL");
+  assert.equal(report.decision.mechanism_claims.adaptive_direct.denominator, 1);
+  assert.equal(report.decision.mechanism_claims.workflow.state, "NOT_EXERCISED");
+  assert.equal(report.decision.mechanism_claims.learned_profile.state, "NOT_EXERCISED");
+  assert.equal(report.decision.mechanism_claims.distillation.state, "NOT_EXERCISED");
+  assert.equal(report.paired_against_baseline.auto.pairs, 1);
+  assert.equal(report.evidence.oracle_reference_runs, 1);
+  const markdown = renderMarkdown(report);
+  assert.match(markdown, /Paired Against Grounded Direct/);
+  assert.doesNotMatch(markdown, /Broad orchestration uplift/);
 });
 
 test("binds browser success to the exact HTTP fixture target and artifact evidence", () => {
@@ -948,7 +1005,7 @@ test("runner requires explicit publish paths and execute opt-in", () => {
       "/private/pro.json"
     ]);
   assert.equal(options.execute, false);
-  assert.match(options.suite, /realworld-v4\.json$/);
+  assert.match(options.suite, /realworld-v5\.json$/);
   assert.equal(options.autoProfile, "/private/auto.json");
   assert.equal(options.proProfile, "/private/pro.json");
   assert.throws(() => parseArguments(["--execute"]), /--raw is required/);
@@ -1069,6 +1126,51 @@ test("execution plan balances treatment positions and binds profile artifacts", 
     evolution_method: "gepa_reflective_paired"
   };
   assert.notEqual(evaluationPlan(frozen, {}).sha256, plan.sha256);
+});
+
+test("V5 freezes the authorized 72-cell grounded-direct plan", () => {
+  const suitePath = path.resolve("benchmarks/agent/realworld-v5.json");
+  const suiteBytes = fs.readFileSync(suitePath);
+  const suite = JSON.parse(suiteBytes);
+  const profileArtifacts = Object.fromEntries(
+    ["auto", "pro"].map((effort) => [
+      effort,
+      {
+        mode: "fresh_seed",
+        path: null,
+        file_sha256: null,
+        artifact_sha256: null,
+        candidate_sha256: null,
+        evolution_method: null
+      }
+    ])
+  );
+  const prepared = {
+    suite,
+    suiteSha256: hash(suiteBytes),
+    gitHead: "b".repeat(40),
+    replicates: suite.default_replicates,
+    providerBinding: {
+      provider_id: "fixture",
+      provider_endpoint: "https://example.test/v1",
+      configured_models: { default: "model-a" }
+    },
+    providerConfigSha256: "c".repeat(64),
+    profileArtifacts
+  };
+  const plan = evaluationPlan(prepared, {});
+  assert.equal(validatePreflight({ suite, gitHead: prepared.gitHead, status: "" }).replicates, 3);
+  assert.equal(plan.entries.length, 72);
+  assert.deepEqual(plan.treatments, ["oracle_reference", "grounded_direct", "auto", "pro"]);
+  for (const treatment of suite.treatments) {
+    const positions = [1, 2, 3, 4].map(
+      (position) =>
+        plan.entries.filter(
+          (entry) => entry.treatment === treatment && entry.treatmentPosition === position
+        ).length
+    );
+    assert.ok(Math.max(...positions) - Math.min(...positions) <= 1);
+  }
 });
 
 test("checkpoint resume rejects plan and profile drift", () => {

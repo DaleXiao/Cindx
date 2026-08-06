@@ -232,7 +232,12 @@
     {
       "id": "agent-realworld-contract",
       "category": "evaluation_contract",
-      "command": ["node", "--test", "scripts/agent-realworld-contract.test.mjs"]
+      "command": [
+        "node",
+        "--test",
+        "scripts/agent-realworld-contract.test.mjs",
+        "scripts/agent-realworld-claims.test.mjs"
+      ]
     },
     {
       "id": "agent-run-lineage-contract",

@@ -8,10 +8,10 @@ does not claim Fugu Ultra equivalence.
 
 - `quick`: documentation, version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
-  120-case arena schema/evidence-ingestion contract, the Agent Real-World V4
+  120-case arena schema/evidence-ingestion contract, the Agent Real-World V5
   measurement contract, memory, and frontend state behavior.
 - `control-plane`: documentation and deterministic agent contracts, including
-  the Agent Real-World V4 measurement contract, plus Rust workspace and desktop
+  the Agent Real-World V5 measurement contract, plus Rust workspace and desktop
   tests.
 - `performance`: long-session incremental projection, bounded context governance,
   graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
@@ -25,7 +25,7 @@ does not claim Fugu Ultra equivalence.
   parsing, prepared image/request reuse, retry reuse, and linear frontend
   streaming Markdown work. It uses operation counts and identity invariants,
   never cross-machine wall-clock thresholds.
-- `full`: all shipping deterministic gates, including the Agent Real-World V4
+- `full`: all shipping deterministic gates, including the Agent Real-World V5
   measurement contract, sidecars, frontend production build, and Rust tests;
   heavier same-machine diagnostics remain in `performance`.
 
@@ -86,10 +86,11 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
 - The Agent Arena validates all 120 versioned cases and remains explicitly
   `not_observed` until all 1,440 provider-backed paired runs exist. This is an
   evaluation-contract result, not an Agent-quality pass.
-- The Agent Real-World V4 contract test verifies the frozen matrix, isolated
-  loopback HTTP fixture, current-run successful typed tool receipts, exact
-  browser target, and artifact/postcondition digest rules without invoking a
-  provider.
+- The Agent Real-World V5 contract tests verify the frozen four-arm matrix,
+  iso-budget Grounded Direct baseline, separated mechanism claims, exact-parent
+  fail-closed boundary, failed-cell denominator, isolated loopback HTTP fixture,
+  current-run successful typed tool receipts, exact browser target, and
+  artifact/postcondition digest rules without invoking a provider.
 - The exact Agent run-lineage gate proves the versioned logical/physical
   identity contract, three-attempt legacy continuation projection, stable steer
   identity, and fail-closed cycle/cross-scope handling. Storage and desktop
@@ -141,22 +142,23 @@ explicit, billable operation and is never launched by an ordinary quality-gate
 profile. Its default mode performs only dataset, Git, and output-boundary preflight;
 only `--execute` reaches the configured provider.
 
-The Agent Real-World V4 provider run is likewise outside deterministic profiles.
+The Agent Real-World V5 provider run is likewise outside deterministic profiles.
 Its complete 72-cell publication contract uses a cyclic Latin-square execution
-order, retains every failed or timed-out cell in the denominator, and requires
-complete strategy, observed provider-response, and successful typed tool receipts
-before an uplift decision can be `GO`. Browser cells use an isolated loopback HTTP
-fixture and must bind the exact resolved target plus artifact or postcondition
-digests. Frozen learned profiles are optional private inputs; without them the
-report must say `FRESH_SEED_ONLY`, even if Auto or Pro outperform Fast. The
-deterministic gate runs only:
+order across Oracle Reference, Grounded Direct, Auto, and Pro. It retains every
+failed, timed-out, or denied cell in the denominator and requires complete
+strategy, observed provider-response, and successful typed tool receipts before
+any scoped mechanism claim can improve. Browser cells use an isolated loopback
+HTTP fixture and must bind the exact resolved target plus artifact or
+postcondition digests. Frozen learned profiles are optional private inputs;
+without an actually executed exact stable parent, learned-profile and
+distillation claims remain `NOT_EXERCISED`. The deterministic gate runs only:
 
 ```bash
-node --test scripts/agent-realworld-contract.test.mjs
+node --test scripts/agent-realworld-contract.test.mjs scripts/agent-realworld-claims.test.mjs
 ```
 
 It does not contact a provider and cannot establish Agent-quality or intelligence
-uplift. The current V4 `0.2.9` provider-backed report is a `VALID_BASELINE`, but
+uplift. The historical V4 `0.2.9` provider-backed report is a `VALID_BASELINE`, but
 the collector classifies continuation tool events in two Fast runs as outside
 the current logical run. Its preregistered receipt gate and broad
 orchestration-uplift decision are therefore `NO-GO`. Current source repairs the

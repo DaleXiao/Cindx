@@ -8,6 +8,18 @@ import {
   validateReceiptEvidence,
   validateSuiteReceiptContracts
 } from "./agent-realworld-receipts.mjs";
+import { evaluateCurrentShippingClaims } from "./agent-realworld-current-claims.mjs";
+import { renderCurrentRealworldMarkdown } from "./agent-realworld-current-report.mjs";
+import {
+  pairedDeltas,
+  promotionDecision
+} from "./agent-realworld-comparison.mjs";
+import {
+  EXECUTION_ORDER_PROTOCOL as executionOrderProtocol,
+  isCurrentClaimProtocol,
+  isOracleReference,
+  protocolForSuite
+} from "./agent-realworld-protocol.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const setupFailureStages = new Set([
@@ -24,7 +36,6 @@ const setupFailureCodes = new Set([
   "transient",
   "provider"
 ]);
-const executionOrderProtocol = "cyclic_latin_square_v1";
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const budgetFields = [
   "max_duration_ms",
@@ -155,7 +166,7 @@ function validateSetupFailure(run, key, infrastructureFailed) {
 }
 
 function validateSuite(suite) {
-  requireFact(suite?.schema === "cindx.agent-realworld-suite.v3", "suite schema mismatch");
+  const protocol = protocolForSuite(suite);
   requireFact(typeof suite.id === "string" && suite.id.length > 0, "suite id is missing");
   requireFact(Number.isInteger(suite.version) && suite.version > 0, "suite version is invalid");
   requireFact(
@@ -170,8 +181,8 @@ function validateSuite(suite) {
   );
   requireFact(Array.isArray(suite.cases) && suite.cases.length > 0, "suite cases are missing");
   requireFact(
-    JSON.stringify(suite.treatments) === JSON.stringify(["direct", "fast", "auto", "pro"]),
-    "suite treatments must be Direct/Fast/Auto/Pro in frozen order"
+    JSON.stringify(suite.treatments) === JSON.stringify(protocol.treatments),
+    "suite treatments do not match the frozen protocol order"
   );
   requireFact(
     suite.execution_order?.protocol === executionOrderProtocol,
@@ -182,25 +193,44 @@ function validateSuite(suite) {
       JSON.stringify(suite.treatments),
     "suite execution-order treatments must match the frozen treatment order"
   );
-  const promotion = suite.promotion_v1;
+  const contract = isCurrentClaimProtocol(suite) ? suite.claim_contract_v2 : suite.promotion_v1;
   requireFact(
-    promotion?.schema === "cindx.agent-realworld-promotion.v1",
-    "suite promotion contract is missing"
+    contract?.schema ===
+      (isCurrentClaimProtocol(suite)
+        ? "cindx.agent-realworld-claims.v2"
+        : "cindx.agent-realworld-promotion.v1"),
+    "suite claim contract is missing"
   );
-  requireFact(promotion.baseline === "fast", "promotion baseline must be fast");
   requireFact(
-    JSON.stringify(Object.keys(promotion.candidates || {})) === JSON.stringify(["auto", "pro"]),
-    "promotion candidates must be Auto and Pro"
+    contract.baseline === protocol.groundedDirect || contract.baseline === "fast",
+    "claim baseline does not match the suite protocol"
   );
-  requireFact(promotion.minimum_quality_delta === 0, "promotion quality floor must be zero");
-  requireFact(promotion.minimum_completion_delta === 0, "promotion completion floor must be zero");
-  requireFact(
-    promotion.minimum_any_improvement_runs === 1,
-    "promotion must require at least one additional passing run"
-  );
-  requireFact(promotion.maximum_setup_failures === 0, "promotion setup-failure limit must be zero");
-  requireFact(promotion.maximum_safety_violations === 0, "promotion safety limit must be zero");
-  for (const [candidate, limits] of Object.entries(promotion.candidates)) {
+  if (isCurrentClaimProtocol(suite)) {
+    requireFact(contract.oracle_reference === protocol.oracleReference, "oracle reference drifted");
+    requireFact(
+      JSON.stringify(Object.keys(contract.candidates || {})) === JSON.stringify(["auto", "pro"]),
+      "claim candidates must be Auto and Pro"
+    );
+    requireFact(
+      contract.candidates.auto.budget_relation === "iso_budget" &&
+        contract.candidates.pro.budget_relation === "descriptive_only",
+      "claim budget relations drifted"
+    );
+  } else {
+    requireFact(
+      JSON.stringify(Object.keys(contract.candidates || {})) === JSON.stringify(["auto", "pro"]),
+      "promotion candidates must be Auto and Pro"
+    );
+  }
+  requireFact(contract.minimum_quality_delta === 0, "claim quality floor must be zero");
+  requireFact(contract.minimum_completion_delta === 0, "claim completion floor must be zero");
+  const minimumImprovement = isCurrentClaimProtocol(suite)
+    ? contract.minimum_any_quality_improvement_runs
+    : contract.minimum_any_improvement_runs;
+  requireFact(minimumImprovement === 1, "claim must require at least one additional quality pass");
+  requireFact(contract.maximum_setup_failures === 0, "claim setup-failure limit must be zero");
+  requireFact(contract.maximum_safety_violations === 0, "claim safety limit must be zero");
+  for (const [candidate, limits] of Object.entries(contract.candidates)) {
     requireFact(
       Number.isFinite(limits.maximum_median_latency_ratio) &&
         limits.maximum_median_latency_ratio >= 1,
@@ -312,16 +342,13 @@ function validateResolvedBudget(run, key) {
   );
 }
 
-function validateStrategyReceipt(run, key, profileArtifacts) {
-  if (run.treatment === "direct") {
-    requireFact(run.strategy_receipt === null, `${key}: Direct must not claim a product strategy`);
+function validateStrategyReceipt(run, key, profileArtifacts, suite) {
+  if (isOracleReference(suite, run.treatment)) {
+    requireFact(run.strategy_receipt === null, `${key}: oracle reference must not claim a product strategy`);
     return;
   }
   if (run.strategy_receipt === null) {
-    requireFact(
-      !run.completed && !["completed", "failed"].includes(run.terminal_status),
-      `${key}: executed product run is missing its strategy receipt`
-    );
+    requireFact(!run.completed, `${key}: completed product run is missing its strategy receipt`);
     return;
   }
   const receipt = run.strategy_receipt;
@@ -348,9 +375,22 @@ function validateStrategyReceipt(run, key, profileArtifacts) {
     `${key}: workflow profile receipt is missing`
   );
   requireFact(
-    receipt.execution_mode !== "workflow" || receipt.workflow_profile_exercised,
+    !run.completed || receipt.execution_mode !== "workflow" || receipt.workflow_profile_exercised,
     `${key}: workflow strategy did not exercise the selected profile`
   );
+  const executionConstraint = receipt.execution_constraint ?? "native";
+  requireFact(
+    executionConstraint === "native" || executionConstraint === "grounded_direct",
+    `${key}: execution constraint is invalid`
+  );
+  if (run.treatment === "grounded_direct") {
+    requireFact(
+      executionConstraint === "grounded_direct" && receipt.execution_mode === "direct",
+      `${key}: grounded direct constraint was not exercised`
+    );
+  } else {
+    requireFact(executionConstraint === "native", `${key}: native treatment claimed a constraint`);
+  }
   const artifact = profileArtifacts[run.treatment];
   if (artifact?.mode === "frozen_profile") {
     requireFact(
@@ -429,7 +469,7 @@ function validateModelReceipts(run, key) {
   }
 }
 
-function validateRun(run, testCase, treatment, replicate, expectedEntry, profileArtifacts) {
+function validateRun(run, testCase, treatment, replicate, expectedEntry, profileArtifacts, suite) {
   const key = `${testCase.id}/${treatment}/r${replicate}`;
   requireFact(run.case_id === testCase.id, `${key}: case id mismatch`);
   requireFact(run.category === testCase.category, `${key}: category mismatch`);
@@ -455,7 +495,7 @@ function validateRun(run, testCase, treatment, replicate, expectedEntry, profile
   requireFact(typeof run.output === "string", `${key}: raw output is missing`);
   requireFact(sha256(Buffer.from(run.output)) === run.output_sha256, `${key}: output hash mismatch`);
   requireFact(
-    run.product_mechanism_exercised === (treatment !== "direct"),
+    run.product_mechanism_exercised === !isOracleReference(suite, treatment),
     `${key}: product mechanism boundary is incorrect`
   );
   requireFact(run.metrics && typeof run.metrics === "object", `${key}: runtime metrics are missing`);
@@ -492,7 +532,7 @@ function validateRun(run, testCase, treatment, replicate, expectedEntry, profile
     requireFact(run.completed === false, `${key}: infrastructure failure cannot be completed`);
   }
   requireFact(
-    treatment === "direct"
+    isOracleReference(suite, treatment)
       ? run.verification.external_effect_passed === null
       : infrastructureFailed
         ? run.verification.external_effect_passed === null
@@ -503,12 +543,12 @@ function validateRun(run, testCase, treatment, replicate, expectedEntry, profile
   requireFact(
     run.verification.quality_passed ===
       (run.verification.answer_passed &&
-        (treatment === "direct" || run.verification.external_effect_passed === true)),
+        (isOracleReference(suite, treatment) || run.verification.external_effect_passed === true)),
     `${key}: quality result is inconsistent with answer and external-effect results`
   );
   validateReceiptEvidence(run, testCase, key);
   validateResolvedBudget(run, key);
-  validateStrategyReceipt(run, key, profileArtifacts);
+  validateStrategyReceipt(run, key, profileArtifacts, suite);
   validateModelReceipts(run, key);
 }
 
@@ -553,47 +593,6 @@ function aggregateRuns(runs) {
   };
 }
 
-function pairedDeltas(runs, baseline) {
-  const byKey = new Map(
-    runs
-      .filter((run) => run.treatment === baseline)
-      .map((run) => [`${run.case_id}/r${run.replicate}`, run])
-  );
-  const result = {};
-  for (const treatment of ["direct", "fast", "auto", "pro"]) {
-    if (treatment === baseline) continue;
-    const pairs = runs
-      .filter((run) => run.treatment === treatment)
-      .map((run) => [run, byKey.get(`${run.case_id}/r${run.replicate}`)])
-      .filter(([, base]) => base);
-    result[treatment] = {
-      pairs: pairs.length,
-      quality_pass_delta: pairs.length
-        ? sum(
-            pairs.map(
-              ([candidate, base]) =>
-                Number(candidate.verification.quality_passed) -
-                Number(base.verification.quality_passed)
-            )
-          ) / pairs.length
-        : null,
-      completion_delta: pairs.length
-        ? sum(pairs.map(([candidate, base]) => Number(candidate.completed) - Number(base.completed))) /
-          pairs.length
-        : null,
-      median_latency_delta_ms: pairs.length
-        ? percentile(pairs.map(([candidate, base]) => candidate.metrics.latency_ms - base.metrics.latency_ms), 0.5)
-        : null
-    };
-  }
-  return result;
-}
-
-function boundedRatio(candidate, baseline) {
-  if (baseline === 0) return candidate === 0 ? 1 : null;
-  return candidate / baseline;
-}
-
 function providerEvidenceComplete(run) {
   return (
     run.evidence_error == null &&
@@ -602,78 +601,15 @@ function providerEvidenceComplete(run) {
   );
 }
 
-function strategyEvidenceComplete(run) {
-  return run.treatment === "direct" || run.strategy_receipt !== null;
-}
-
-function promotionDecision(suite, runs, aggregates, evidenceComplete, setupFailures, safetyViolations) {
-  const contract = suite.promotion_v1;
-  const baselineRuns = runs.filter((run) => run.treatment === contract.baseline);
-  const baseline = aggregates[contract.baseline];
-  const candidateGates = {};
-  for (const [candidate, limits] of Object.entries(contract.candidates)) {
-    const candidateRuns = runs.filter((run) => run.treatment === candidate);
-    const qualityDeltaRuns =
-      candidateRuns.filter((run) => run.verification.quality_passed).length -
-      baselineRuns.filter((run) => run.verification.quality_passed).length;
-    const completionDeltaRuns =
-      candidateRuns.filter((run) => run.completed).length -
-      baselineRuns.filter((run) => run.completed).length;
-    const latencyRatio = boundedRatio(
-      aggregates[candidate].latency_ms.median,
-      baseline.latency_ms.median
-    );
-    const tokenRatio = boundedRatio(aggregates[candidate].total_tokens, baseline.total_tokens);
-    const gates = {
-      quality_non_regression: qualityDeltaRuns >= contract.minimum_quality_delta,
-      completion_non_regression: completionDeltaRuns >= contract.minimum_completion_delta,
-      improves_at_least_one_run:
-        Math.max(qualityDeltaRuns, completionDeltaRuns) >=
-        contract.minimum_any_improvement_runs,
-      latency_within_limit:
-        latencyRatio !== null && latencyRatio <= limits.maximum_median_latency_ratio,
-      tokens_within_limit:
-        tokenRatio !== null && tokenRatio <= limits.maximum_total_token_ratio
-    };
-    candidateGates[candidate] = {
-      quality_delta_runs: qualityDeltaRuns,
-      completion_delta_runs: completionDeltaRuns,
-      median_latency_ratio: latencyRatio,
-      maximum_median_latency_ratio: limits.maximum_median_latency_ratio,
-      total_token_ratio: tokenRatio,
-      maximum_total_token_ratio: limits.maximum_total_token_ratio,
-      gates,
-      eligible: Object.values(gates).every(Boolean)
-    };
-  }
-  const sharedGates = {
-    receipt_evidence_complete: evidenceComplete,
-    setup_failures_within_limit: setupFailures <= contract.maximum_setup_failures,
-    safety_violations_within_limit: safetyViolations <= contract.maximum_safety_violations,
-    all_candidates_preserve_quality_and_completion: Object.values(candidateGates).every(
-      (candidate) =>
-        candidate.gates.quality_non_regression && candidate.gates.completion_non_regression
-    ),
-    all_candidates_within_resource_limits: Object.values(candidateGates).every(
-      (candidate) => candidate.gates.latency_within_limit && candidate.gates.tokens_within_limit
-    ),
-    at_least_one_candidate_improves: Object.values(candidateGates).some(
-      (candidate) => candidate.gates.improves_at_least_one_run
-    )
-  };
-  return {
-    schema: contract.schema,
-    baseline: contract.baseline,
-    status: Object.values(sharedGates).every(Boolean) ? "GO" : "NO_GO",
-    shared_gates: sharedGates,
-    candidates: candidateGates,
-    minimum_improvement: `${contract.minimum_any_improvement_runs}/${baselineRuns.length}`
-  };
+function strategyEvidenceComplete(run, suite) {
+  return isOracleReference(suite, run.treatment) || run.strategy_receipt !== null;
 }
 
 export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
   validateSuite(suite);
-  requireFact(raw?.schema === "cindx.agent-realworld-raw.v3", "raw schema mismatch");
+  const protocol = protocolForSuite(suite);
+  const currentClaims = isCurrentClaimProtocol(suite);
+  requireFact(raw?.schema === protocol.rawSchema, "raw schema mismatch");
   requireFact(raw.suite_id === suite.id, "raw suite id mismatch");
   requireFact(raw.suite_version === suite.version, "raw suite version mismatch");
   requireFact(raw.suite_sha256 === sha256(suiteBytes), "frozen suite SHA-256 mismatch");
@@ -731,7 +667,7 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
             entry.treatment === treatment &&
             entry.replicate === replicate
         );
-        validateRun(run, testCase, treatment, replicate, expectedEntry, raw.profile_artifacts);
+        validateRun(run, testCase, treatment, replicate, expectedEntry, raw.profile_artifacts, suite);
         orderedRuns.push(run);
       }
     }
@@ -756,7 +692,7 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
   const incompleteRuns = orderedRuns.filter(
     (run) =>
       run.terminal_status === "infrastructure_failed" ||
-      (run.treatment !== "direct" && run.verification.external_effect_passed === null)
+      (!isOracleReference(suite, run.treatment) && run.verification.external_effect_passed === null)
   );
   const outcomes = summarizeOutcomes(orderedRuns, suite.treatments);
   const providerEvidenceIncompleteRuns = orderedRuns.filter(
@@ -764,23 +700,28 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
   );
   const providerEvidenceCompleteMatrix = providerEvidenceIncompleteRuns.length === 0;
   const strategyEvidenceIncompleteRuns = orderedRuns.filter(
-    (run) => !strategyEvidenceComplete(run)
+    (run) => !strategyEvidenceComplete(run, suite)
   );
   const receiptEvidenceCompleteMatrix =
     providerEvidenceCompleteMatrix && strategyEvidenceIncompleteRuns.length === 0;
-  const promotion = promotionDecision(
-    suite,
-    orderedRuns,
-    aggregates,
-    receiptEvidenceCompleteMatrix && incompleteRuns.length === 0,
-    outcomes.setup_failures,
-    safetyViolations
-  );
+  const promotion = currentClaims
+    ? null
+    : promotionDecision(
+        suite,
+        orderedRuns,
+        aggregates,
+        receiptEvidenceCompleteMatrix && incompleteRuns.length === 0,
+        outcomes.setup_failures,
+        safetyViolations
+      );
+  const mechanismClaims = currentClaims
+    ? evaluateCurrentShippingClaims(orderedRuns, suite.claim_contract_v2)
+    : null;
   const frozenProfiles = Object.entries(raw.profile_artifacts)
     .filter(([, artifact]) => artifact.mode === "frozen_profile")
     .map(([effort]) => effort);
   return {
-    schema: "cindx.agent-realworld-sanitized.v3",
+    schema: protocol.sanitizedSchema,
     suite: {
       id: suite.id,
       version: suite.version,
@@ -791,7 +732,9 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       replicates: suite.default_replicates,
       per_run_timeout_seconds: suite.per_run_timeout_seconds,
       execution_order_protocol: executionOrderProtocol,
-      promotion_v1: suite.promotion_v1
+      ...(currentClaims
+        ? { claim_contract_v2: suite.claim_contract_v2 }
+        : { promotion_v1: suite.promotion_v1 })
     },
     evidence: {
       raw_sha256: sha256(rawBytes),
@@ -806,7 +749,15 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
       complete_matrix: incompleteRuns.length === 0,
       incomplete_runs: incompleteRuns.length,
       product_runs: orderedRuns.filter((run) => run.product_mechanism_exercised).length,
-      direct_runs: orderedRuns.filter((run) => !run.product_mechanism_exercised).length,
+      ...(currentClaims
+        ? {
+            oracle_reference_runs: orderedRuns.filter(
+              (run) => !run.product_mechanism_exercised
+            ).length
+          }
+        : {
+            direct_runs: orderedRuns.filter((run) => !run.product_mechanism_exercised).length
+          }),
       execution_plan_sha256: raw.execution_plan_sha256,
       profile_artifacts: raw.profile_artifacts,
       provider_evidence_complete: providerEvidenceCompleteMatrix,
@@ -816,23 +767,31 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
     },
     decision: {
       status:
-        incompleteRuns.length > 0
+        incompleteRuns.length > 0 || (currentClaims && !receiptEvidenceCompleteMatrix)
           ? "INVALID_BASELINE"
           : safetyViolations === 0
             ? "VALID_BASELINE"
             : "SAFETY_FAILURE",
       safety_violations: safetyViolations,
-      uplift_status: promotion.status,
-      uplift_reason:
-        promotion.status === "GO"
-          ? `The preregistered promotion_v1 gates passed; at least one candidate improved by ${promotion.minimum_improvement} without Auto/Pro quality, completion, latency, token, setup, or safety regression.`
-          : "At least one preregistered promotion_v1 gate failed; failures remain in the denominator and no uplift is authorized.",
-      promotion_v1: promotion,
-      learned_profile_status:
-        frozenProfiles.length > 0 ? "FROZEN_ARTIFACT_EVALUATED" : "FRESH_SEED_ONLY",
+      ...(currentClaims
+        ? { mechanism_claims: mechanismClaims }
+        : {
+            uplift_status: promotion.status,
+            uplift_reason:
+              promotion.status === "GO"
+                ? `The preregistered promotion_v1 gates passed; at least one candidate improved by ${promotion.minimum_improvement} without Auto/Pro quality, completion, latency, token, setup, or safety regression.`
+                : "At least one preregistered promotion_v1 gate failed; failures remain in the denominator and no uplift is authorized.",
+            promotion_v1: promotion,
+            learned_profile_status:
+              frozenProfiles.length > 0 ? "FROZEN_ARTIFACT_EVALUATED" : "FRESH_SEED_ONLY"
+          }),
       claim_boundary:
         incompleteRuns.length > 0
           ? "Infrastructure failures make this matrix invalid for capability promotion or treatment comparison."
+          : currentClaims && !receiptEvidenceCompleteMatrix
+            ? "Provider or strategy receipt coverage is incomplete, so no mechanism uplift claim is authorized."
+            : currentClaims
+              ? "Adaptive-direct and workflow conclusions are limited to complete iso-budget GroundedDirect/Auto pairs. Learned-profile and distillation uplift require an actually executed exact stable parent and remain NOT_EXERCISED here. Pro is descriptive because its native budget differs."
           : frozenProfiles.length === 0
             ? "This matrix evaluates fresh-seed product quality only. It provides no evidence of GEPA learning, distillation, learned-profile uplift, or Fugu parity."
             : `This matrix evaluates only the bound frozen ${frozenProfiles.join(" and ")} profile artifact(s); it does not establish general GEPA, distillation, or Fugu parity.`
@@ -854,7 +813,14 @@ export function validateAndSanitize({ suite, suiteBytes, raw, rawBytes }) {
         )
       ])
     ),
-    paired_against_fast: pairedDeltas(orderedRuns, "fast"),
+    paired_against_baseline: pairedDeltas(
+      orderedRuns,
+      currentClaims ? protocol.groundedDirect : "fast",
+      suite.treatments
+    ),
+    ...(currentClaims
+      ? {}
+      : { paired_against_fast: pairedDeltas(orderedRuns, "fast", suite.treatments) }),
     runs: orderedRuns.map((run) => {
       const receiptEvidence = sanitizeReceiptEvidence(run);
       return {
@@ -913,6 +879,9 @@ function statusCount(outcome, status) {
 }
 
 export function renderMarkdown(report) {
+  if (report.suite.claim_contract_v2) {
+    return renderCurrentRealworldMarkdown(report);
+  }
   const reportKind = report.decision.status === "VALID_BASELINE" ? "Baseline" : "Evaluation";
   const lines = [
     `# Cindx Agent Real-World ${reportKind} ${report.evidence.app_version}`,

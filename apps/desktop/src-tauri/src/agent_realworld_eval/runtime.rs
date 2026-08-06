@@ -4,10 +4,11 @@ use super::receipts::{
 };
 use super::tool_receipts::{project_tool_receipts, ToolReceiptStatus};
 use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment};
+use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::{
     begin_agent_run_control_for_effort, phase16_task_id, resolve_agent_permission_blocking,
-    retry_agent_task_blocking, run_agent_task_blocking_inner, AgentState, AgentTaskInput, AppState,
-    EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
+    retry_agent_task_blocking, run_agent_task_blocking_inner_with_execution_constraint, AgentState,
+    AgentTaskInput, AppState, EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
 };
 use std::path::Path;
 
@@ -21,11 +22,18 @@ pub(super) fn run_product_task(
     treatment: Treatment,
     permission_policy: PermissionPolicy,
 ) -> ProductRun {
-    let effort = treatment.label();
+    let effort = treatment
+        .product_effort()
+        .expect("product runner cannot execute an oracle reference");
+    let execution_constraint = if treatment.is_grounded_direct() {
+        AgentExecutionConstraint::GroundedDirect
+    } else {
+        AgentExecutionConstraint::Native
+    };
     let initial = (|| -> Result<AgentState, String> {
         let lease = begin_agent_run_control_for_effort(state, session_id, effort, None)?;
         let control = lease.control();
-        let result = run_agent_task_blocking_inner(
+        let result = run_agent_task_blocking_inner_with_execution_constraint(
             app,
             state.clone(),
             AgentTaskInput {
@@ -37,6 +45,7 @@ pub(super) fn run_product_task(
                 attachments: Vec::new(),
             },
             &control,
+            execution_constraint,
         );
         drop(lease);
         result

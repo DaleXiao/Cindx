@@ -16,6 +16,7 @@ mod setup;
 #[cfg(test)]
 mod tests;
 mod tool_receipts;
+mod treatments;
 mod verification;
 
 use execution::{execute_case, CaseExecutionInput};
@@ -23,10 +24,8 @@ use http_fixture::HttpFixtureReceipt;
 use receipts::{ModelReceipt, ResolvedBudgetReceipt, StrategyReceipt};
 use setup::{activate_evaluation_data_root, build_evaluation_app, SetupFailure};
 use tool_receipts::ToolAttemptReceipt;
+use treatments::{expected_treatments, raw_schema, Treatment};
 use verification::{case_input_sha256, PostconditionReceipt};
-
-const SUITE_SCHEMA: &str = "cindx.agent-realworld-suite.v3";
-const RAW_SCHEMA: &str = "cindx.agent-realworld-raw.v3";
 
 #[derive(Debug, Deserialize)]
 struct RealworldSuite {
@@ -130,36 +129,6 @@ struct CommandCheck {
     program: String,
     args: Vec<String>,
     stdout_contains: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Treatment {
-    Direct,
-    Fast,
-    Auto,
-    Pro,
-}
-
-impl Treatment {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "direct" => Ok(Self::Direct),
-            "fast" => Ok(Self::Fast),
-            "auto" => Ok(Self::Auto),
-            "pro" => Ok(Self::Pro),
-            other => Err(format!("unsupported treatment {other}")),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Direct => "direct",
-            Self::Fast => "fast",
-            Self::Auto => "auto",
-            Self::Pro => "pro",
-        }
-    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -317,7 +286,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
         .map_err(|error| format!("failed to locate repository root: {error}"))?;
     let suite_path = std::env::var_os("CINDX_AGENT_REALWORLD_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v4.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/realworld-v5.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
@@ -484,27 +453,27 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
 }
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
-    if suite.schema != SUITE_SCHEMA {
-        return Err(format!("unsupported suite schema {}", suite.schema));
-    }
+    let expected = expected_treatments(&suite.schema)
+        .ok_or_else(|| format!("unsupported suite schema {}", suite.schema))?;
     if !(60..=3600).contains(&suite.per_run_timeout_seconds) {
         return Err("suite per-run timeout must be between 60 and 3600 seconds".to_string());
     }
     if suite.id.trim().is_empty() || suite.version == 0 || suite.default_replicates == 0 {
         return Err("suite identity and replicate count must be non-empty".to_string());
     }
-    let treatment_set = suite
+    let treatments = suite
         .treatments
         .iter()
         .map(|label| Treatment::parse(label).map(|treatment| treatment.label()))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if treatment_set != BTreeSet::from(["direct", "fast", "auto", "pro"]) {
-        return Err("suite must contain direct, fast, auto, and pro exactly once".to_string());
-    }
+        .collect::<Result<Vec<_>, _>>()?;
     if suite.execution_order.protocol != "cyclic_latin_square_v1"
-        || suite.execution_order.base_treatments != ["direct", "fast", "auto", "pro"]
+        || treatments != expected
+        || suite.execution_order.base_treatments != expected
     {
-        return Err("suite must use the frozen cyclic_latin_square_v1 treatment order".to_string());
+        return Err(format!(
+            "suite must use the frozen cyclic_latin_square_v1 treatment order for {}",
+            suite.schema
+        ));
     }
     let mut ids = BTreeSet::new();
     let mut categories = BTreeSet::new();
@@ -720,9 +689,9 @@ fn load_evaluation_frozen_profile(
     else {
         return Ok(None);
     };
-    if !matches!(treatment, Treatment::Auto | Treatment::Pro) {
+    let Some(effort) = treatment.profile_effort() else {
         return Err("frozen profile artifacts are valid only for Auto or Pro cells".to_string());
-    }
+    };
     let canonical = path.canonicalize().map_err(|error| {
         format!(
             "failed to resolve frozen profile {}: {error}",
@@ -739,11 +708,10 @@ fn load_evaluation_frozen_profile(
         )
     })?;
     let snapshot = FrozenPromptProfileSnapshot::from_json_slice(&encoded)?;
-    if snapshot.effort != treatment.label() {
+    if snapshot.effort != effort {
         return Err(format!(
             "frozen profile effort {} does not match treatment {}",
-            snapshot.effort,
-            treatment.label()
+            snapshot.effort, effort
         ));
     }
     let artifact_sha256 = snapshot.artifact_sha256()?;
@@ -802,7 +770,7 @@ fn interrupted_run(
     direct_model: String,
     execution: &ExecutionCell,
 ) -> RawRun {
-    let product_mechanism_exercised = treatment != Treatment::Direct;
+    let product_mechanism_exercised = !treatment.is_oracle_reference();
     RawRun {
         execution_index: execution.execution_index,
         treatment_position: execution.treatment_position,
@@ -854,7 +822,7 @@ fn failed_run(
         case_id: case.id.clone(),
         category: case.category.clone(),
         treatment,
-        product_mechanism_exercised: treatment != Treatment::Direct,
+        product_mechanism_exercised: !treatment.is_oracle_reference(),
         completed: false,
         terminal_status: "infrastructure_failed".to_string(),
         configured_models: Vec::new(),
@@ -890,7 +858,7 @@ fn write_raw_report(
     runs: &[RawRun],
 ) -> Result<(), String> {
     let report = RawReport {
-        schema: RAW_SCHEMA,
+        schema: raw_schema(&context.suite.schema).expect("validated suite schema"),
         suite_id: &context.suite.id,
         suite_version: context.suite.version,
         suite_description: &context.suite.description,

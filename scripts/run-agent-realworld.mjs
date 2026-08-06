@@ -4,11 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  EXECUTION_ORDER_PROTOCOL as executionOrderProtocol,
+  protocolForSuite
+} from "./agent-realworld-protocol.mjs";
+import { normalizeInterruptedRun } from "./agent-realworld-interruption.mjs";
+
+export { normalizeInterruptedRun };
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptPath), "..");
-const defaultSuite = path.join(repositoryRoot, "benchmarks", "agent", "realworld-v4.json");
-const executionOrderProtocol = "cyclic_latin_square_v1";
+const defaultSuite = path.join(repositoryRoot, "benchmarks", "agent", "realworld-v5.json");
 
 function requireFact(condition, message) {
   if (!condition) throw new Error(message);
@@ -282,10 +288,10 @@ export function preparePlaywrightResource(root, installedApp = "/Applications/Ci
 }
 
 export function validatePreflight({ suite, gitHead, status, requestedReplicates }) {
-  requireFact(suite.schema === "cindx.agent-realworld-suite.v3", "suite schema mismatch");
+  const protocol = protocolForSuite(suite);
   requireFact(
-    JSON.stringify(suite.treatments) === JSON.stringify(["direct", "fast", "auto", "pro"]),
-    "suite treatments must be Direct/Fast/Auto/Pro in frozen order"
+    JSON.stringify(suite.treatments) === JSON.stringify(protocol.treatments),
+    "suite treatments do not match the frozen protocol order"
   );
   requireFact(
     suite.execution_order?.protocol === executionOrderProtocol &&
@@ -293,11 +299,19 @@ export function validatePreflight({ suite, gitHead, status, requestedReplicates 
         JSON.stringify(suite.treatments),
     "suite execution-order contract mismatch"
   );
-  requireFact(
-    suite.promotion_v1?.schema === "cindx.agent-realworld-promotion.v1" &&
-      suite.promotion_v1.baseline === "fast",
-    "suite promotion contract mismatch"
-  );
+  if (protocol.claimContract === "claim_contract_v2") {
+    requireFact(
+      suite.claim_contract_v2?.schema === "cindx.agent-realworld-claims.v2" &&
+        suite.claim_contract_v2.baseline === protocol.groundedDirect,
+      "suite claim contract mismatch"
+    );
+  } else {
+    requireFact(
+      suite.promotion_v1?.schema === "cindx.agent-realworld-promotion.v1" &&
+        suite.promotion_v1.baseline === "fast",
+      "suite promotion contract mismatch"
+    );
+  }
   requireFact(
     Number.isInteger(suite.per_run_timeout_seconds) &&
       suite.per_run_timeout_seconds >= 60 &&
@@ -487,35 +501,6 @@ export function runKey(run) {
   return `${run.case_id}/${run.treatment}/r${run.replicate}`;
 }
 
-export function normalizeInterruptedRun(run, terminalStatus, error, latencyMs) {
-  const productRun = run.treatment !== "direct";
-  const safetyUnverified = productRun && run.category === "permission_safety";
-  return {
-    ...run,
-    completed: false,
-    terminal_status: terminalStatus,
-    output: "",
-    output_sha256: crypto.createHash("sha256").update("").digest("hex"),
-    error,
-    metrics: { ...run.metrics, latency_ms: latencyMs },
-    verification: {
-      ...run.verification,
-      quality_passed: false,
-      answer_passed: false,
-      external_effect_passed: productRun ? false : null,
-      passed_checks: 0,
-      total_checks: Math.max(1, run.verification?.total_checks || 0),
-      postcondition_receipts: [],
-      safety_violations: safetyUnverified ? 1 : 0,
-      failures: [
-        safetyUnverified
-          ? "permission safety could not be verified before the run stopped"
-          : "run did not reach verification"
-      ]
-    }
-  };
-}
-
 function writePrivateJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
@@ -525,7 +510,10 @@ function writePrivateJson(file, value) {
 }
 
 export function validateCheckpoint(prepared, plan, raw) {
-  requireFact(raw?.schema === "cindx.agent-realworld-raw.v3", "checkpoint schema mismatch");
+  requireFact(
+    raw?.schema === protocolForSuite(prepared.suite).rawSchema,
+    "checkpoint schema mismatch"
+  );
   requireFact(raw.git_commit === prepared.gitHead, "checkpoint Git commit mismatch");
   requireFact(raw.suite_sha256 === prepared.suiteSha256, "checkpoint suite hash mismatch");
   requireFact(raw.requested_replicates === prepared.replicates, "checkpoint replicate count mismatch");
@@ -609,6 +597,10 @@ function runSingleEvaluation(binary, prepared, entry) {
     });
     requireFact(fs.existsSync(partRaw), `run ${entry.caseId}/${entry.treatment}/r${entry.replicate} produced no checkpoint`);
     const report = JSON.parse(fs.readFileSync(partRaw, "utf8"));
+    requireFact(
+      report.schema === protocolForSuite(prepared.suite).rawSchema,
+      "run checkpoint schema mismatch"
+    );
     requireFact(report.git_commit === prepared.gitHead, "run checkpoint Git commit mismatch");
     requireFact(report.suite_sha256 === prepared.suiteSha256, "run checkpoint suite hash mismatch");
     requireFact(report.execution_order_protocol === executionOrderProtocol, "run checkpoint execution-order protocol mismatch");
@@ -659,7 +651,7 @@ function usage() {
   return [
     "Usage: node scripts/run-agent-realworld.mjs [--execute] \\",
     "  --raw PATH --sanitized PATH --markdown PATH [--suite PATH] [--replicates N] \\",
-    "  [--cases id,id] [--treatments direct,fast,auto,pro] \\",
+    "  [--cases id,id] [--treatments oracle_reference,grounded_direct,auto,pro] \\",
     "  [--auto-profile PRIVATE_PATH] [--pro-profile PRIVATE_PATH]",
     "",
     "Without --execute, only Git, provider, suite, and output-boundary preflight runs.",
@@ -693,7 +685,7 @@ export function main(argv = process.argv.slice(2)) {
     prepared.executionPlanSha256 = plan.sha256;
     const runs = checkpointRuns(prepared, plan);
     process.stdout.write(
-      `Running ${plan.entries.length} provider-backed Direct/Fast/Auto/Pro samples; ${runs.size} resumed.\n`
+      `Running ${plan.entries.length} provider-backed ${plan.treatments.join("/")} samples; ${runs.size} resumed.\n`
     );
     let report = null;
     for (const [index, entry] of plan.entries.entries()) {

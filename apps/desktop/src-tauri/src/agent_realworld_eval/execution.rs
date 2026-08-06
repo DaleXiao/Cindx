@@ -78,7 +78,7 @@ pub(super) fn execute_case(
         None
     };
     let browser_url = http_fixture.as_ref().map(HttpFixture::url);
-    if treatment == Treatment::Direct {
+    if treatment.is_oracle_reference() {
         let prompt = match direct_prompt(case, root, browser_url) {
             Ok(prompt) => prompt,
             Err(error) => {

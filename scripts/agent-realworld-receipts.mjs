@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 
 const sha256Pattern = /^[0-9a-f]{64}$/;
+const isOracleTreatment = (treatment) =>
+  treatment === "direct" || treatment === "oracle_reference";
 const postconditionSubjectDomain = Buffer.from(
   "cindx.agent-realworld-postcondition-subject.v1\0"
 );
@@ -183,7 +185,7 @@ function validateFixtureReceipt(run, testCase, key) {
     run.fixture_receipt.body_sha256 === sha256(Buffer.from(fixture.content)),
     `${key}: HTTP fixture body hash mismatch`
   );
-  if (run.treatment === "direct") {
+  if (isOracleTreatment(run.treatment)) {
     requireFact(
       run.verification.expected_browser_target_sha256 === null,
       `${key}: Direct must not claim product browser-target verification`
@@ -286,11 +288,11 @@ function validateToolReceipts(run, testCase, key, fixtureReceipt) {
     `${key}: tools_used must contain only the successful tool set`
   );
   requireFact(
-    run.treatment !== "direct" || run.tool_receipts.length === 0,
+    !isOracleTreatment(run.treatment) || run.tool_receipts.length === 0,
     `${key}: Direct must not claim product tool receipts`
   );
 
-  if (run.treatment === "direct") return;
+  if (isOracleTreatment(run.treatment)) return;
   const requiredAny = testCase.verification.required_tools_any;
   const requiredAll = testCase.verification.required_tools_all;
   const requiredToolsPassed =
@@ -337,7 +339,7 @@ function validatePostconditionReceipts(run, testCase, key) {
   const interrupted = ["infrastructure_failed", "timed_out", "running"].includes(
     run.terminal_status
   );
-  const expected = run.treatment === "direct" || interrupted
+  const expected = isOracleTreatment(run.treatment) || interrupted
     ? []
     : frozenPostconditions(testCase);
   requireFact(

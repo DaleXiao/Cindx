@@ -84,7 +84,7 @@ pub(super) fn verify_case(
 ) -> VerificationResult {
     let mut result = VerificationResult::default();
     let output_lower = output.to_lowercase();
-    let answer_values = if treatment == Treatment::Direct {
+    let answer_values = if treatment.is_oracle_reference() {
         &case.verification.direct_output_contains
     } else {
         &case.verification.output_contains
@@ -97,7 +97,7 @@ pub(super) fn verify_case(
         );
     }
     result.answer_passed = result.failures.is_empty();
-    if treatment == Treatment::Direct {
+    if treatment.is_oracle_reference() {
         result.external_effect_passed = None;
         result.quality_passed = result.answer_passed;
         return result;

@@ -8,6 +8,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
+| Agent Real-World V5 contract | current source | 6 frozen product cases; Oracle Reference/Grounded Direct/Auto/Pro; 72 position-balanced cells | Deterministic contract only until the complete provider-backed matrix is retained; separates adaptive-direct, workflow, learned-profile, and distillation claims and fails closed on missing exact-parent or receipt evidence |
 | [Agent Real-World V4](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md) | `0.2.9` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 position-balanced provider-backed runs with current-run tool, strategy, and provider receipts | `VALID_BASELINE`, zero setup failures, and zero safety violations; Auto/Pro pass their paired quality, completion, latency, and token gates, but the collector classifies continuation tool events in two Fast runs as outside the current logical run, so the receipt gate fails closed and broad orchestration uplift remains `NO-GO`; no learned artifact was supplied |
 | [Agent Real-World V3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md) | `0.2.3` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 position-balanced provider-backed runs with strategy and provider receipts | `VALID_BASELINE`, zero setup failures, and zero safety violations; receipt evidence fails closed on five browser timeouts, Auto/Pro lose completion despite quality gains, and broad orchestration uplift remains `NO-GO`; no learned artifact was supplied |
 | [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md) | `0.1.98` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 provider-backed runs | `VALID_BASELINE` with zero setup failures and zero safety violations; Auto/Pro trade quality gains for materially lower completion and higher latency, so broad orchestration uplift remains `NO-GO` |
@@ -162,28 +163,35 @@ these 72 cells.
 
 ## Current Product Gate
 
-`benchmarks/agent/realworld-v4.json` freezes the current execution
-contract. It preserves the six product cases, three repeats, Direct/Fast/Auto/Pro
-treatments, cyclic Latin-square execution order, non-regression thresholds, and
-resource ceilings used by V3. V4 changes the measurement boundary: every browser
-cell gets an isolated loopback HTTP fixture, and product tool obligations are
-derived from typed receipts for the current Agent run rather than tool-start
-events or tool names alone. Only successful receipts can satisfy a required
-tool. Projected failed, denied, cancelled, and unfinished attempts remain in the
-tool-call denominator; a process-level timeout remains a failed matrix cell even
-when it cannot emit a final tool receipt. Browser verification additionally
-requires the exact resolved URL and artifact or postcondition digests that bind
-evidence to the frozen case. The denied-mutation product treatment must also
-return text containing `permission` and `denied`; preserving the protected file
-while returning an empty answer is safe but does not pass answer quality.
-Setup failures, safety violations, incomplete strategy/provider receipts, or
-missing effect evidence make promotion fail closed.
+`benchmarks/agent/realworld-v5.json` freezes the current execution contract. It
+preserves V4's six product cases, three repeats, cyclic Latin-square ordering,
+isolated browser fixture, typed effect receipts, exact target binding, and
+permission-safety checks. Its four treatments are deliberately different:
 
-The V4 contract has deterministic structural coverage through
-`node --test scripts/agent-realworld-contract.test.mjs`. The `0.2.9` matrix is
-provider-backed evidence for its exact source revision, but its shared receipt
-gate is `NO-GO`; it authorizes no broad orchestration, GEPA, self-distillation,
-or frontier-intelligence claim.
+- `oracle_reference` is the former no-tools Direct answer ceiling and is not a
+  product baseline;
+- `grounded_direct` runs Auto's shipping policy and budget through the same
+  AgentKernel, models, tools, retrieval, memory, permissions, and external
+  postcondition verifier, while disabling workflow collaboration after routing;
+- `auto` is the iso-budget adaptive candidate;
+- `pro` is reported descriptively because its native budget is larger.
+
+Adaptive-direct and workflow conclusions use only their actual matched route
+subsets, so a mixed Auto matrix does not collapse both mechanisms into one
+claim. Workflow requires `workflow_profile_exercised=true`. A result without an
+observed behavior difference is at most `NEUTRAL`; a positive state additionally
+requires the frozen quality improvement, completion non-regression, latency,
+token, setup, and safety gates. Failed, timed-out, denied, and early
+unclassifiable runs remain in the matched denominator. Learned-profile and
+Pro-to-Auto distillation claims require receipts proving that the challenger was
+compared with its actually executed exact stable parent; otherwise they remain
+`NOT_EXERCISED`.
+
+The V5 contract has deterministic structural coverage through
+`node --test scripts/agent-realworld-contract.test.mjs scripts/agent-realworld-claims.test.mjs`.
+This validates the mechanism only. Until a complete provider-backed V5 matrix
+is retained, V4 `0.2.9` remains the latest measured product baseline and no new
+intelligence claim is authorized.
 
 The exact Goal Delta gate proves that failed, denied, cancelled, unrelated, and
 repeated satisfaction cannot extend a segment, while first satisfaction of a
@@ -204,8 +212,8 @@ properties. V4 completed all denied-mutation product runs with the required
 visible disclosure, but that narrow observation does not override the shared
 receipt `NO-GO`.
 
-`benchmarks/agent/realworld-v4.json` freezes the protocol used by the latest
-measured product baseline. Its 72-cell plan balances treatment position across
+`benchmarks/agent/realworld-v4.json` remains the immutable protocol used by the
+latest measured V4 product baseline. Its 72-cell plan balances treatment position across
 case blocks while preserving a globally stable execution index for interruption
 and resume. V4 preregistered non-regression and resource ceilings against Fast:
 both Auto and Pro had to preserve quality and completion, stay within their
@@ -282,14 +290,14 @@ The real-world Agent runner follows the same explicit opt-in boundary:
 
 ```sh
 node scripts/run-agent-realworld.mjs \
-  --raw /private/tmp/cindx-agent-realworld-v4.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V4.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V4.md
+  --raw /private/tmp/cindx-agent-realworld-v5.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V5.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V5.md
 
 node scripts/run-agent-realworld.mjs --execute \
-  --raw /private/tmp/cindx-agent-realworld-v4.raw.json \
-  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V4.json \
-  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V4.md
+  --raw /private/tmp/cindx-agent-realworld-v5.raw.json \
+  --sanitized docs/evaluations/CINDX_AGENT_REALWORLD_V5.json \
+  --markdown docs/evaluations/CINDX_AGENT_REALWORLD_V5.md
 ```
 
 Without `--execute`, it performs only Git, provider, suite, and output-boundary
