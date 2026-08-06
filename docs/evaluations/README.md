@@ -5,18 +5,30 @@ source revision and application version recorded inside them.
 
 ## Current Execution Contract
 
-Agent Real-World V4 is the current 72-cell execution contract. It uses an
-isolated loopback HTTP fixture for browser cases, accepts required tools only
-from successful typed receipts for the current run, binds browser evidence to
-the exact resolved target, verifies artifact or postcondition digests, and
-requires the product denied-mutation case to return a visible permission-denied
-explanation rather than an empty answer. Its deterministic contract test does
-not contact a provider and is not intelligence evidence by itself.
+Agent Real-World V5 is the current 72-cell execution contract. It preserves the
+frozen cases and typed evidence boundaries while separating the no-tools Oracle
+Reference from an iso-budget Grounded Direct product baseline. Auto's actual
+adaptive-direct and workflow subsets are evaluated separately; learned-profile
+and distillation claims require the executed exact stable parent. Its
+deterministic contract test does not contact a provider and is not intelligence
+evidence by itself.
 
 ## Current Product Decision
 
-- [Cindx Agent Real-World V4 0.2.9](CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md)
+- [Cindx Agent Real-World V5 0.2.11](CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md)
   is the current 72-cell provider-backed baseline on source commit
+  `3765d23042dcafaeb721accc0460f149e1ea5ade`. All cells were retained, with
+  complete provider and strategy evidence, zero setup failures, zero timeouts,
+  and zero safety violations, so baseline validity is `VALID_BASELINE`. Auto
+  preserved Grounded Direct quality and completion, reduced median latency by
+  `5,989 ms`, and used `1.8%` more total tokens. With no matched quality
+  improvement, adaptive-direct is `NEUTRAL`. Workflow, learned-profile, and
+  distillation were not exercised. Pro's higher completion is descriptive
+  because its native budget differs.
+- [Sanitized V5 0.2.11 machine-readable result](CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.json)
+
+- [Cindx Agent Real-World V4 0.2.9](CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md)
+  is the previous 72-cell provider-backed baseline on source commit
   `7905405551f3decd38746c45218790cb9a04be37`. All cells were retained, with
   zero setup failures and zero safety violations, so baseline validity is
   `VALID_BASELINE`. Auto and Pro preserved quality and completion against Fast,
