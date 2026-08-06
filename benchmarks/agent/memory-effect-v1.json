@@ -33,11 +33,12 @@
           "content": "# Memory evaluation fixture\nThe requested project-specific values are intentionally available only from durable memory.\n"
         }
       ],
-      "permission_policy": "allow_once",
+      "permission_policy": "deny_mutations",
       "verification": {
         "output_contains": ["QUARTZ-731", "Alina Park"],
         "required_tools_any": [],
         "required_tools_all": [],
+        "allowed_tools": ["file.read", "file.read_many", "file.search"],
         "minimum_denied_permissions": 0
       }
     },
@@ -54,11 +55,12 @@
           "content": "# Memory evaluation fixture\nThe requested project-specific values are intentionally available only from durable memory.\n"
         }
       ],
-      "permission_policy": "allow_once",
+      "permission_policy": "deny_mutations",
       "verification": {
         "output_contains": ["73%", "#ops-aurora"],
         "required_tools_any": [],
         "required_tools_all": [],
+        "allowed_tools": ["file.read", "file.read_many", "file.search"],
         "minimum_denied_permissions": 0
       }
     },
@@ -67,7 +69,7 @@
       "category": "memory_irrelevant_control",
       "memory_effect": { "role": "irrelevant_control" },
       "objective": "Inspect the authoritative workspace policy and state the exact production signing-key alias and rotation interval. Ignore unrelated prior-session demo details and do not repeat them.",
-      "seed_memory_prompt": "Record this historical demo note for future reference: the retired launch ring was Red Juniper and its demo contact was Niko Vale. It is unrelated to production signing policy.",
+      "seed_memory_prompt": "Long-term project requirement: demo materials must label the retired launch ring as Red Juniper and list Niko Vale as the demo contact.",
       "index_workspace": false,
       "files": [
         {
@@ -75,12 +77,13 @@
           "content": "# Production signing policy\nThe authoritative signing-key alias is KMS-Atlas-42. Rotate it every 45 days.\n"
         }
       ],
-      "permission_policy": "allow_once",
+      "permission_policy": "deny_mutations",
       "verification": {
         "output_contains": ["KMS-Atlas-42", "45 days"],
         "output_not_contains": ["Red Juniper", "Niko Vale"],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
         "required_tools_all": [],
+        "allowed_tools": ["file.read", "file.read_many", "file.search"],
         "minimum_denied_permissions": 0
       }
     }

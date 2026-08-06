@@ -230,6 +230,21 @@ pub(super) fn verify_case(
             format!("required tool {tool} did not complete successfully"),
         );
     }
+    if !case.verification.allowed_tools.is_empty() {
+        for receipt in tool_receipts {
+            record_check(
+                &mut result,
+                case.verification
+                    .allowed_tools
+                    .iter()
+                    .any(|allowed| allowed == &receipt.tool),
+                format!(
+                    "tool {} is outside the frozen evaluation allowlist",
+                    receipt.tool
+                ),
+            );
+        }
+    }
     if let Some(contract) = case.verification.browser_target_receipt.as_ref() {
         let expected_target = fixture_receipt.map(|receipt| receipt.target_sha256.as_str());
         result.expected_browser_target_sha256 = expected_target.map(str::to_string);
@@ -393,6 +408,40 @@ mod tests {
 
         assert!(!tool_requirement_satisfied(&observed, "file.write"));
         assert!(!tool_requirement_satisfied(&observed, "shell.run"));
+    }
+
+    #[test]
+    fn evaluation_tool_allowlist_rejects_even_an_unsuccessful_effect_attempt() {
+        let root = tempfile::tempdir().expect("workspace");
+        let case = RealworldCase {
+            id: "memory-effect".to_string(),
+            category: "memory_required".to_string(),
+            objective: "answer from memory".to_string(),
+            seed_memory_prompt: Some("Long-term project requirement: retain X.".to_string()),
+            index_workspace: false,
+            files: Vec::new(),
+            permission_policy: PermissionPolicy::DenyMutations,
+            verification: VerificationContract {
+                output_contains: vec!["X".to_string()],
+                allowed_tools: vec!["file.read".to_string()],
+                ..VerificationContract::default()
+            },
+            memory_effect: None,
+        };
+        let observed = [receipt("file.write", ToolReceiptStatus::Denied)];
+
+        let result = verify_case(
+            &case,
+            Treatment::MemoryOn,
+            root.path(),
+            "X",
+            &observed,
+            None,
+            1,
+        );
+
+        assert!(!result.external_effect_passed.expect("product effect"));
+        assert!(!result.quality_passed);
     }
 
     #[test]

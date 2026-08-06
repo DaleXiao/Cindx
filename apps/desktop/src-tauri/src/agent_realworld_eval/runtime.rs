@@ -28,7 +28,9 @@ pub(super) fn run_product_task(
     let effort = treatment
         .product_effort()
         .expect("product runner cannot execute an oracle reference");
-    let execution_constraint = if treatment.is_grounded_direct() {
+    let execution_constraint = if treatment.is_memory_evaluation() {
+        AgentExecutionConstraint::MatchedMemoryEffect
+    } else if treatment.is_grounded_direct() {
         AgentExecutionConstraint::GroundedDirect
     } else {
         AgentExecutionConstraint::Native

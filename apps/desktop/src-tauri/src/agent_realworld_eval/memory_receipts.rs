@@ -61,6 +61,27 @@ pub(super) fn validate_memory_effect_suite(suite: &super::RealworldSuite) -> Res
     if control.verification.output_not_contains.is_empty() {
         return Err("memory-effect irrelevant control must forbid at least one decoy".to_string());
     }
+    for test_case in &suite.cases {
+        if !matches!(
+            test_case.permission_policy,
+            super::PermissionPolicy::DenyMutations
+        ) {
+            return Err(format!(
+                "{} must deny mutations during memory-effect evaluation",
+                test_case.id
+            ));
+        }
+        if test_case.verification.allowed_tools.is_empty()
+            || test_case.verification.allowed_tools.iter().any(|tool| {
+                !matches!(tool.as_str(), "file.read" | "file.read_many" | "file.search")
+            })
+        {
+            return Err(format!(
+                "{} must freeze a non-empty read-only tool allowlist",
+                test_case.id
+            ));
+        }
+    }
     Ok(())
 }
 

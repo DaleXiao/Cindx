@@ -5,6 +5,7 @@ use orchestrator::{AgentExecutionMode, AgentRouteRequirements, AgentRunDecision,
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentPlanningSource {
     FastDirect,
+    MatchedMemoryEvaluation,
     DynamicConductor,
     DynamicConductorReplanned,
     CalibratedDirect,
@@ -16,6 +17,7 @@ impl AgentPlanningSource {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::FastDirect => "fast_direct",
+            Self::MatchedMemoryEvaluation => "matched_memory_evaluation",
             Self::DynamicConductor => "dynamic_conductor_v2",
             Self::DynamicConductorReplanned => "dynamic_conductor_replanned",
             Self::CalibratedDirect => "dynamic_conductor_calibrated_direct",
