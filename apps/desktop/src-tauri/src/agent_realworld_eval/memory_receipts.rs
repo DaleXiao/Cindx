@@ -73,7 +73,15 @@ pub(super) fn validate_memory_effect_suite(suite: &super::RealworldSuite) -> Res
         }
         if test_case.verification.allowed_tools.is_empty()
             || test_case.verification.allowed_tools.iter().any(|tool| {
-                !matches!(tool.as_str(), "file.read" | "file.read_many" | "file.search")
+                !matches!(
+                    tool.as_str(),
+                    "file.list"
+                        | "file.read"
+                        | "file.read_many"
+                        | "file.search"
+                        | "tool.inspect"
+                        | "tool.search"
+                )
             })
         {
             return Err(format!(

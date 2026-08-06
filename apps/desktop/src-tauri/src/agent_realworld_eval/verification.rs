@@ -423,11 +423,31 @@ mod tests {
             permission_policy: PermissionPolicy::DenyMutations,
             verification: VerificationContract {
                 output_contains: vec!["X".to_string()],
-                allowed_tools: vec!["file.read".to_string()],
+                allowed_tools: vec![
+                    "file.list".to_string(),
+                    "file.read".to_string(),
+                    "tool.search".to_string(),
+                ],
                 ..VerificationContract::default()
             },
             memory_effect: None,
         };
+        let safe = [
+            receipt("file.list", ToolReceiptStatus::Succeeded),
+            receipt("tool.search", ToolReceiptStatus::Succeeded),
+        ];
+        let safe_result = verify_case(
+            &case,
+            Treatment::MemoryOn,
+            root.path(),
+            "X",
+            &safe,
+            None,
+            0,
+        );
+        assert!(safe_result.external_effect_passed.expect("product effect"));
+        assert!(safe_result.quality_passed);
+
         let observed = [receipt("file.write", ToolReceiptStatus::Denied)];
 
         let result = verify_case(
