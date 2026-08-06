@@ -205,6 +205,7 @@ pub(crate) fn memory_record(
         last_recalled_at_ms: None,
         observed_use_count: 0,
         last_observed_use_at_ms: None,
+        utility: crate::MemoryUtilitySummary::default(),
         superseded_by: None,
         superseded_at_ms: None,
     }

@@ -1,0 +1,88 @@
+{
+  "schema": "cindx.agent-memory-effect-suite.v1",
+  "id": "cindx-agent-memory-effect-v1",
+  "version": 1,
+  "description": "Frozen matched provider-backed ablation of routed project memory with two memory-required cases and one irrelevant-memory negative control.",
+  "default_replicates": 3,
+  "per_run_timeout_seconds": 600,
+  "execution_order": {
+    "protocol": "cyclic_latin_square_v1",
+    "base_treatments": ["memory_on", "memory_off"]
+  },
+  "memory_effect_contract_v1": {
+    "schema": "cindx.agent-memory-effect-contract.v1",
+    "on": "memory_on",
+    "off": "memory_off",
+    "required_cases": 2,
+    "irrelevant_controls": 1,
+    "replicates": 3,
+    "cells": 18
+  },
+  "treatments": ["memory_on", "memory_off"],
+  "cases": [
+    {
+      "id": "memory-required-release-provenance",
+      "category": "memory_required",
+      "memory_effect": { "role": "required" },
+      "objective": "Use the durable project requirement from the prior session to state the exact build provenance salt and release steward. Do not guess. Return one concise sentence containing both values.",
+      "seed_memory_prompt": "Record this durable project requirement for future sessions: the build provenance salt is QUARTZ-731 and the release steward is Alina Park.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "README.md",
+          "content": "# Memory evaluation fixture\nThe requested project-specific values are intentionally available only from durable memory.\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "output_contains": ["QUARTZ-731", "Alina Park"],
+        "required_tools_any": [],
+        "required_tools_all": [],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "memory-required-cache-escalation",
+      "category": "memory_required",
+      "memory_effect": { "role": "required" },
+      "objective": "Use durable project memory from the prior session to state the exact emergency cache-drain threshold and escalation channel. Do not guess. Return one concise sentence containing both values.",
+      "seed_memory_prompt": "Record this durable project requirement for future sessions: emergency cache drain starts at 73% utilization and the escalation channel is #ops-aurora.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "README.md",
+          "content": "# Memory evaluation fixture\nThe requested project-specific values are intentionally available only from durable memory.\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "output_contains": ["73%", "#ops-aurora"],
+        "required_tools_any": [],
+        "required_tools_all": [],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "memory-irrelevant-signing-policy",
+      "category": "memory_irrelevant_control",
+      "memory_effect": { "role": "irrelevant_control" },
+      "objective": "Inspect the authoritative workspace policy and state the exact production signing-key alias and rotation interval. Ignore unrelated prior-session demo details and do not repeat them.",
+      "seed_memory_prompt": "Record this historical demo note for future reference: the retired launch ring was Red Juniper and its demo contact was Niko Vale. It is unrelated to production signing policy.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "policy/signing.md",
+          "content": "# Production signing policy\nThe authoritative signing-key alias is KMS-Atlas-42. Rotate it every 45 days.\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "output_contains": ["KMS-Atlas-42", "45 days"],
+        "output_not_contains": ["Red Juniper", "Niko Vale"],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": [],
+        "minimum_denied_permissions": 0
+      }
+    }
+  ]
+}

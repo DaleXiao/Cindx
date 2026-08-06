@@ -84,7 +84,7 @@ stored as a second trajectory blob.
 | `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, bounded cognitive projection and adaptive cursor, task-contract Goal Delta and denial/replan policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
-| `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
+| `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, typed experience/utility receipts, and lexical/semantic recall | Workspace file indexing or product event joins |
 | `agent-rag` | Workspace chunking, embeddings, file-backed index, optional LanceDB implementation, semantic search | Graph relationships or session memory |
 | `agent-graph` | Graph extraction, provenance, persistence, direct expansion and graph-guided retrieval inputs | Vector storage |
 | `agent-storage` | SQLite event/state contracts, indexed logical-run event scope, and implementation | Agent decisions or logical permission scope |
@@ -129,6 +129,15 @@ touch Tauri or product state:
   application driver, runtime, and orchestrator contracts.
 - Background memory refresh, session-title refinement, and prompt evaluation.
 
+The portable `agent-memory` crate owns the v7 experience key, influence/effect
+receipts, bounded utility summary, authority-sensitive lifetime, and recall
+weighting. The desktop `memory_projection_runtime::attribution` adapter owns only the
+event-backed join from a recalled set to the terminal event. It stores bounded
+hashes and identities, not raw prompts or outputs, and replays a batch only
+after every referenced recall and terminal event validates. Completion does not
+load, serialize, or publish a full memory ledger while holding the terminal
+transaction.
+
 Workspace patch planning, hashing, target locking, race rechecks, atomic
 publication, and receipts stay in `tools`. The desktop adapter does not own a
 second file-mutation implementation; it persists the effect contract and uses
@@ -143,6 +152,10 @@ parent module owns the frozen suite, execution plan, case materialization, and
 raw report; its `treatments` child owns versioned treatment and schema identity;
 its `execution` child owns one-cell oracle-reference or product execution; and
 its `runtime` child owns product-run continuation and event metric projection.
+Its `memory_receipts` child owns the frozen memory-on/off receipt projection;
+the evaluation-only constraint is applied after routing and changes only the
+effective memory policy, so neither arm can silently change model, tools,
+retrieval, workflow, risk, or budget.
 Its `http_fixture` child owns the ephemeral loopback server and request receipt
 for each browser cell; the resolved URL is part of the case contract rather than
 an ambient browser dependency. Its `tool_receipts` child projects typed attempts

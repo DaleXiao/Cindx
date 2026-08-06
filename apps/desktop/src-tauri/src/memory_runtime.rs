@@ -698,6 +698,12 @@ pub(crate) fn commit_prepared_memory_recall(
             .collect::<Vec<_>>()
             .join(","),
     );
+    crate::memory_projection_runtime::attribution::insert_memory_recall_attribution_source(
+        &mut metadata,
+        run_context,
+        &prepared.recall_projection_sha256,
+        &recalls,
+    );
     append_event(
         store,
         task_id,
@@ -726,6 +732,7 @@ pub(crate) fn refresh_project_memory_after_run(
     load_project_memory_ledger(store, project_id).map(Some)
 }
 
+#[cfg(test)]
 pub(crate) fn record_project_memory_observed_use(
     store: &mut SqliteStore,
     task_id: &TaskId,

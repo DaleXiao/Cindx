@@ -124,6 +124,7 @@ fn file_backed_memory_seed_is_visible_to_an_independent_eval_reader() {
     assert!(readback.record_count > 0);
     assert!(readback.user_requirement.contains("Orion Harbor"));
     assert!(readback.user_requirement.contains("Mina Chen"));
+    assert_eq!(readback.projection_sha256.len(), 64);
     assert!(!production_database.exists());
 }
 
@@ -165,6 +166,7 @@ fn setup_failure_is_typed_and_preserves_spent_setup_latency() {
         files: Vec::new(),
         permission_policy: PermissionPolicy::AllowOnce,
         verification: VerificationContract::default(),
+        memory_effect: None,
     };
     let run = failed_run(
         &case,

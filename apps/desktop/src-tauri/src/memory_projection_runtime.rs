@@ -19,6 +19,9 @@ use agent_memory::{
 use agent_storage::{SqliteStore, StorageError};
 use std::collections::BTreeMap;
 
+pub(crate) mod attribution;
+use attribution::replay_project_memory_attribution;
+
 mod run_identity_projection;
 
 use run_identity_projection::{
@@ -208,6 +211,7 @@ pub(crate) fn load_project_memory_ledger_inner(
         replay_project_memory_record(&mut ledger, event, project_id);
         replay_project_memory_management(&mut ledger, event, project_id);
         replay_project_memory_measurement(&mut ledger, event, project_id);
+        replay_project_memory_attribution(store, &mut ledger, event, project_id)?;
     }
     let quarantine_needs_persistence =
         !ledger.quarantine_authoritative && !ledger.quarantined_records.is_empty();

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   EXECUTION_ORDER_PROTOCOL as executionOrderProtocol,
+  isMemoryEffectProtocol,
   protocolForSuite
 } from "./agent-realworld-protocol.mjs";
 import { normalizeInterruptedRun } from "./agent-realworld-interruption.mjs";
@@ -299,7 +300,23 @@ export function validatePreflight({ suite, gitHead, status, requestedReplicates 
         JSON.stringify(suite.treatments),
     "suite execution-order contract mismatch"
   );
-  if (protocol.claimContract === "claim_contract_v2") {
+  if (protocol.claimContract === "memory_effect_v1") {
+    const contract = suite.memory_effect_contract_v1;
+    requireFact(
+      contract?.schema === "cindx.agent-memory-effect-contract.v1" &&
+        contract.on === "memory_on" &&
+        contract.off === "memory_off" &&
+        contract.required_cases === 2 &&
+        contract.irrelevant_controls === 1 &&
+        contract.replicates === 3 &&
+        contract.cells === 18,
+      "suite memory-effect contract mismatch"
+    );
+    requireFact(
+      suite.default_replicates === 3 && suite.cases?.length === 3,
+      "memory-effect protocol must freeze three cases and three replicates"
+    );
+  } else if (protocol.claimContract === "claim_contract_v2") {
     requireFact(
       suite.claim_contract_v2?.schema === "cindx.agent-realworld-claims.v2" &&
         suite.claim_contract_v2.baseline === protocol.groundedDirect,
@@ -324,6 +341,9 @@ export function validatePreflight({ suite, gitHead, status, requestedReplicates 
     ? Number.parseInt(requestedReplicates, 10)
     : suite.default_replicates;
   requireFact(Number.isInteger(replicates) && replicates > 0, "replicates must be positive");
+  if (protocol.claimContract === "memory_effect_v1") {
+    requireFact(replicates === 3, "memory-effect protocol requires exactly three replicates");
+  }
   return { replicates };
 }
 
@@ -382,10 +402,13 @@ function evaluationBinary() {
 }
 
 function analyzerInvocation(prepared) {
+  const analyzer = isMemoryEffectProtocol(prepared.suite)
+    ? "agent-memory-effect-contract.mjs"
+    : "agent-realworld-contract.mjs";
   return {
     command: process.execPath,
     args: [
-      path.join(repositoryRoot, "scripts", "agent-realworld-contract.mjs"),
+      path.join(repositoryRoot, "scripts", analyzer),
       "--suite",
       prepared.suitePath,
       "--raw",
@@ -423,7 +446,11 @@ export function evaluationEnvironment(base, prepared, entry, output, tempRoot) {
   delete environment.CINDX_AGENT_REALWORLD_PROFILE_PATH;
   delete environment.CINDX_AGENT_REALWORLD_PROFILE_ARTIFACT_SHA256;
   delete environment.CINDX_AGENT_REALWORLD_PROFILE_MODE;
-  const artifact = prepared.profileArtifacts?.[entry.treatment];
+  const artifact = prepared.profileArtifacts?.[
+    entry.treatment === "memory_on" || entry.treatment === "memory_off"
+      ? "auto"
+      : entry.treatment
+  ];
   if (artifact) {
     environment.CINDX_AGENT_REALWORLD_PROFILE_MODE = artifact.mode;
     if (artifact.path) {
@@ -651,7 +678,7 @@ function usage() {
   return [
     "Usage: node scripts/run-agent-realworld.mjs [--execute] \\",
     "  --raw PATH --sanitized PATH --markdown PATH [--suite PATH] [--replicates N] \\",
-    "  [--cases id,id] [--treatments oracle_reference,grounded_direct,auto,pro] \\",
+    "  [--cases id,id] [--treatments oracle_reference,grounded_direct,auto,pro|memory_on,memory_off] \\",
     "  [--auto-profile PRIVATE_PATH] [--pro-profile PRIVATE_PATH]",
     "",
     "Without --execute, only Git, provider, suite, and output-boundary preflight runs.",

@@ -1,3 +1,4 @@
+use crate::sha256_hex;
 use crate::{
     app_state::{AppState, ToolRegistryCache},
     attachment_upload_batches::AttachmentUploadBatches,
@@ -339,6 +340,13 @@ impl MemorySeedFixtureError {
 pub(super) struct SeededMemoryReadback {
     pub(super) record_count: usize,
     pub(super) user_requirement: String,
+    pub(super) projection_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SeededMemoryFixtureReceipt {
+    pub(super) record_count: usize,
+    pub(super) projection_sha256: String,
 }
 
 pub(super) fn persist_memory_seed_fixture(
@@ -426,9 +434,31 @@ pub(super) fn read_seeded_memory_fixture(
             "evaluation memory fixture is empty or invisible for session {session_id}"
         )));
     }
+    let mut projection = loaded
+        .ledger
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.kind.label(),
+                record.trust.label(),
+                record.content.trim(),
+                record.importance,
+            )
+        })
+        .collect::<Vec<_>>();
+    projection.sort();
+    let projection = serde_json::to_vec(&projection).map_err(|error| {
+        MemorySeedFixtureError::Data(format!(
+            "failed to encode evaluation memory fixture receipt: {error}"
+        ))
+    })?;
+    let mut receipt_bytes = b"cindx.agent-memory-effect-seed.v1\0".to_vec();
+    receipt_bytes.extend_from_slice(&projection);
     Ok(SeededMemoryReadback {
         record_count: loaded.ledger.records.len(),
         user_requirement,
+        projection_sha256: sha256_hex(&receipt_bytes),
     })
 }
 
@@ -438,7 +468,7 @@ pub(super) fn seed_memory_fixture_for_case(
     project_id: &str,
     session_id: &str,
     seed_prompt: &str,
-) -> Result<usize, (SetupFailure, String)> {
+) -> Result<SeededMemoryFixtureReceipt, (SetupFailure, String)> {
     let mut run_context =
         project_session_metadata_for_session(state, Some(session_id)).map_err(|error| {
             (
@@ -474,7 +504,10 @@ pub(super) fn seed_memory_fixture_for_case(
     read_seeded_memory_fixture(database_path, project_id, session_id)
         .map(|readback| {
             debug_assert!(!readback.user_requirement.is_empty());
-            readback.record_count
+            SeededMemoryFixtureReceipt {
+                record_count: readback.record_count,
+                projection_sha256: readback.projection_sha256,
+            }
         })
         .map_err(|error| {
             let failure = error.setup_failure();

@@ -163,6 +163,7 @@ pub(super) fn execute_case(
             fixture_receipt,
             tool_receipts: Vec::new(),
             memory_records_after_seed: None,
+            memory_seed_sha256: None,
             input_sha256,
             output_sha256: sha256_hex(output.as_bytes()),
             output,
@@ -171,6 +172,7 @@ pub(super) fn execute_case(
             setup_failure: None,
             resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
             strategy_receipt: None,
+            memory_evaluation_receipt: None,
             model_receipts,
             metrics: RuntimeMetrics {
                 latency_ms: completion.latency_ms,
@@ -234,6 +236,7 @@ pub(super) fn execute_case(
     };
     let mut setup_latency_ms = 0_u64;
     let mut memory_records_after_seed = None;
+    let mut memory_seed_sha256 = None;
     if case.index_workspace {
         let setup_started = Instant::now();
         let index_result = index_workspace_rag_blocking(
@@ -283,7 +286,10 @@ pub(super) fn execute_case(
         );
         setup_latency_ms = setup_latency_ms.saturating_add(elapsed_ms(setup_started));
         memory_records_after_seed = match seed_result {
-            Ok(record_count) => Some(record_count),
+            Ok(receipt) => {
+                memory_seed_sha256 = Some(receipt.projection_sha256);
+                Some(receipt.record_count)
+            }
             Err((setup_failure, error)) => {
                 return failed_run(
                     case,
@@ -406,6 +412,7 @@ pub(super) fn execute_case(
         fixture_receipt,
         tool_receipts,
         memory_records_after_seed,
+        memory_seed_sha256,
         input_sha256,
         output_sha256: sha256_hex(output.as_bytes()),
         output,
@@ -416,6 +423,7 @@ pub(super) fn execute_case(
             .resolved_budget
             .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment)),
         strategy_receipt: event_metrics.strategy_receipt,
+        memory_evaluation_receipt: event_metrics.memory_evaluation_receipt,
         model_receipts: event_metrics.model_receipts,
         metrics: RuntimeMetrics {
             latency_ms: elapsed_ms(started).saturating_sub(setup_latency_ms),

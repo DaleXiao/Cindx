@@ -22,6 +22,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
 | Typed collaboration execution contract | current source | Deterministic worker tool-policy separation, current-epoch evidence projection, target binding, duplicate contribution rejection, and cited verification receipts | Workflow evidence and verdict authority fail closed; no provider-backed collaboration-quality or intelligence-uplift claim |
 | Causal Router v2 contract | current source | Deterministic exact-input fingerprints, complete executable action identities, tri-state effect authority, indexed exact context-and-action evidence, conservative value decomposition, 4 KiB receipt, and 2-lookup/2-action scaling bounds | Routing provenance and bounded admission are verified; no provider-backed quality or Auto/Pro uplift claim |
+| Memory-effect V1 contract | current source | 3 frozen cases; memory-on/memory-off; 3 repeats; 18 cells and 9 matched pairs with one irrelevant-memory control | Deterministic receipt and analyzer checks pass; provider-backed effect is not claimed until the exact-revision matrix is executed and published |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
 The `0.2.11` V5 matrix is the latest complete provider-backed product baseline.
@@ -90,6 +91,12 @@ and graph invariants. They answer “does this contract hold?” They do not ans
 Versioned manifests under `benchmarks/` validate routing contracts, memory
 recall fixtures, evaluation schemas, resource invariants, and safety behavior.
 Synthetic or fixture-based scores must remain labeled as contract results.
+The memory-effect V1 contract additionally proves that memory-off is imposed
+only after routing, both arms retain the same non-memory decision and budget,
+all 18 cells remain in the denominator, outputs and provider receipts are
+revalidated, and the irrelevant-memory control must pass in both arms before a
+positive decision is possible. It does not call a provider in deterministic
+profiles and does not itself prove useful memory.
 The `causal-router-v2-contract` and `causal-router-v2-scaling` gates establish
 deterministic policy identity, receipt integrity, counterfactual availability,
 effect-authority enforcement, and bounded operation counts. They do not show

@@ -33,6 +33,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
@@ -43,6 +44,8 @@
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
       "memory-contract",
+      "memory-attribution-contract",
+      "memory-attribution-atomicity-contract",
       "frontend-test"
     ],
     "control-plane": [
@@ -53,6 +56,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
@@ -63,6 +67,8 @@
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
       "memory-contract",
+      "memory-attribution-contract",
+      "memory-attribution-atomicity-contract",
       "workspace-tests",
       "desktop-tests"
     ],
@@ -112,6 +118,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
@@ -122,6 +129,8 @@
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
       "memory-contract",
+      "memory-attribution-contract",
+      "memory-attribution-atomicity-contract",
       "workspace-tests",
       "desktop-tests",
       "frontend-test",
@@ -294,6 +303,15 @@
         "--test",
         "scripts/agent-realworld-contract.test.mjs",
         "scripts/agent-realworld-claims.test.mjs"
+      ]
+    },
+    {
+      "id": "agent-memory-effect-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "node",
+        "--test",
+        "scripts/agent-memory-effect-contract.test.mjs"
       ]
     },
     {
@@ -475,6 +493,38 @@
         { "path": "security_cases", "equals": 6 },
         { "path": "security_case_failures", "equals": 0 }
       ]
+    },
+    {
+      "id": "memory-attribution-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "memory_projection_runtime::attribution::contract::persistence::tests::recovery_attempts_join_once_by_logical_run_and_keep_physical_audit_ids",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": ["test result: ok. 1 passed; 0 failed"]
+    },
+    {
+      "id": "memory-attribution-atomicity-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "memory_projection_runtime::attribution::contract::replay::tests::malformed_later_attribution_cannot_partially_apply_an_earlier_one",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": ["test result: ok. 1 passed; 0 failed"]
     },
     {
       "id": "workspace-tests",

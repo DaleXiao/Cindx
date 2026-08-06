@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 mod checkpoint;
+mod experience;
 mod extraction;
 mod learning_evidence;
 mod ledger;
@@ -13,6 +14,13 @@ pub use checkpoint::{
     build_restore_context_pack, build_session_checkpoint, build_session_checkpoint_at,
     checkpoint_to_markdown, conversation_memory_to_markdown, CheckpointOptions, RestoreContextPack,
     SessionCheckpoint,
+};
+pub use experience::{
+    memory_influence_receipt_sha256, record_memory_utility, MemoryEffectKind, MemoryEffectReceipt,
+    MemoryEvidenceKind, MemoryExperienceKey, MemoryInfluenceKind, MemoryInfluenceReceipt,
+    MemoryUtilityAttribution, MemoryUtilityDisposition, MemoryUtilitySummary,
+    MAX_MEMORY_UTILITY_ATTRIBUTIONS, MAX_MEMORY_UTILITY_VALIDITY_MS, MEMORY_EFFECT_RECEIPT_SCHEMA,
+    MEMORY_INFLUENCE_RECEIPT_SCHEMA, MEMORY_UTILITY_ATTRIBUTION_SCHEMA,
 };
 pub use extraction::{extract_durable_memories, is_durable_tool_memory_source};
 pub use ledger::{
@@ -30,7 +38,7 @@ pub use semantic::{
     MAX_SEMANTIC_MEMORY_CANDIDATES, SEMANTIC_MEMORY_BATCH_SCHEMA,
 };
 
-pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v6";
+pub const MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v7";
 pub const MEMORY_CONTROL_SCHEMA: &str = "cindx.memory-control.v1";
 pub const MEMORY_USER_CONFIRMATION_SCHEMA: &str = "cindx.memory-user-confirmation.v1";
 pub const USER_REQUIREMENT_EVIDENCE_SCHEMA: &str = "cindx.user-requirement-evidence.v1";
@@ -202,6 +210,8 @@ pub struct MemoryRecord {
     pub observed_use_count: u64,
     #[serde(default)]
     pub last_observed_use_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "MemoryUtilitySummary::is_empty")]
+    pub utility: MemoryUtilitySummary,
     #[serde(default)]
     pub superseded_by: Option<String>,
     #[serde(default)]
@@ -1263,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn repeatedly_recalled_but_unused_memory_is_deprioritized() {
+    fn legacy_lexical_observation_counts_do_not_change_recall_weight() {
         let events = vec![
             event(
                 1,
@@ -1302,8 +1312,17 @@ mod tests {
             10,
         );
 
-        assert_eq!(recalls[0].record.id, "useful");
-        assert!(recalls[0].score > recalls[1].score);
+        let useful_score = recalls
+            .iter()
+            .find(|recall| recall.record.id == "useful")
+            .expect("useful fixture should recall")
+            .score;
+        let noisy_score = recalls
+            .iter()
+            .find(|recall| recall.record.id == "noisy")
+            .expect("noisy fixture should recall")
+            .score;
+        assert!((useful_score - noisy_score).abs() < f64::EPSILON);
     }
 
     #[test]

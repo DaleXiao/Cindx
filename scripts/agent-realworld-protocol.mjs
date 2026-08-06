@@ -18,6 +18,15 @@ const protocols = Object.freeze({
     oracleReference: "oracle_reference",
     groundedDirect: "grounded_direct",
     claimContract: "claim_contract_v2"
+  }),
+  "cindx.agent-memory-effect-suite.v1": Object.freeze({
+    suiteSchema: "cindx.agent-memory-effect-suite.v1",
+    rawSchema: "cindx.agent-memory-effect-raw.v1",
+    sanitizedSchema: "cindx.agent-memory-effect-sanitized.v1",
+    treatments: Object.freeze(["memory_on", "memory_off"]),
+    oracleReference: null,
+    groundedDirect: null,
+    claimContract: "memory_effect_v1"
   })
 });
 
@@ -33,4 +42,8 @@ export function isOracleReference(suite, treatment) {
 
 export function isCurrentClaimProtocol(suite) {
   return protocolForSuite(suite).claimContract === "claim_contract_v2";
+}
+
+export function isMemoryEffectProtocol(suite) {
+  return protocolForSuite(suite).claimContract === "memory_effect_v1";
 }
