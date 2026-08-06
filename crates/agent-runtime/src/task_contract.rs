@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) mod cognitive_state;
 mod denial;
 mod goal_delta;
 mod grounded_completion;
@@ -18,6 +19,10 @@ pub(crate) mod test_support;
 pub use denial::{
     AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,
     AgentActionRecovery, ACTION_DENIAL_SCHEMA,
+};
+
+pub use cognitive_state::{
+    AgentCognitiveFocus, AgentCognitiveState, COGNITIVE_STATE_MAX_BYTES, COGNITIVE_STATE_SCHEMA,
 };
 
 pub use grounded_completion::{

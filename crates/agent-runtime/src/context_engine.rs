@@ -11,6 +11,7 @@ pub const CONTEXT_SOURCE_SCHEMA: &str = "cindx.context-source.v1";
 pub enum ContextSourceKind {
     ImageGenerationPolicy,
     CollaborationTrustPolicy,
+    CognitiveState,
     WorkflowExecutionContract,
     GroundingEvidence,
     AgentEvidence,
@@ -122,6 +123,15 @@ impl ContextSourceKind {
         Some(match message.metadata.get("kind").map(String::as_str) {
             Some("image_generation_policy") => Self::ImageGenerationPolicy,
             Some("collaboration_trust_policy") => Self::CollaborationTrustPolicy,
+            Some("cognitive_state")
+                if message
+                    .metadata
+                    .get("cognitive_state_schema")
+                    .map(String::as_str)
+                    == Some("cindx.agent.cognitive-state.v1") =>
+            {
+                Self::CognitiveState
+            }
             Some("workflow_execution_contract") => Self::WorkflowExecutionContract,
             Some("agent_evidence_packet") => Self::AgentEvidence,
             Some("context_restore_pack") => Self::RestorePack,
@@ -139,6 +149,7 @@ impl ContextSourceKind {
         match self {
             Self::ImageGenerationPolicy => "image_generation_policy",
             Self::CollaborationTrustPolicy => "collaboration_trust_policy",
+            Self::CognitiveState => "cognitive_state",
             Self::WorkflowExecutionContract => "workflow_execution_contract",
             Self::GroundingEvidence => "grounding_evidence",
             Self::AgentEvidence => "agent_evidence_packet",
@@ -157,6 +168,7 @@ impl ContextSourceKind {
         match self {
             Self::ImageGenerationPolicy => 100,
             Self::CollaborationTrustPolicy => 100,
+            Self::CognitiveState => 100,
             Self::WorkflowExecutionContract => 99,
             Self::GroundingEvidence => 98,
             Self::AgentEvidence => 98,
@@ -179,6 +191,7 @@ impl ContextSourceKind {
             self,
             Self::ImageGenerationPolicy
                 | Self::CollaborationTrustPolicy
+                | Self::CognitiveState
                 | Self::WorkflowExecutionContract
                 | Self::GroundingEvidence
                 | Self::AgentEvidence

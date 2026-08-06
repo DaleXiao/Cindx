@@ -544,6 +544,7 @@ const desktopDtoContractRustTest = read(
   "apps/desktop/src-tauri/src/view_model_contract_tests.rs"
 );
 const shippingPerformanceGateIds = [
+  "agent-cognitive-loop-scaling",
   "session-projection-scaling",
   "agent-runtime-snapshot-scaling",
   "prompt-learning-outbox-scaling",
@@ -553,6 +554,13 @@ const shippingPerformanceGateIds = [
   "frontend-streaming-markdown-scaling"
 ];
 const shippingPerformanceProofs = new Map([
+  [
+    "agent-cognitive-loop-scaling",
+    [
+      "task_contract::cognitive_state::tests::compact_cognitive_state_and_adaptive_loop_scaling_contract",
+      "cindx.agent-cognitive-loop-scaling.v1"
+    ]
+  ],
   [
     "session-projection-scaling",
     [

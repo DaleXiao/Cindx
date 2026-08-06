@@ -29,6 +29,19 @@ enum AgentToolPermissionGateOutcome {
     Reused,
 }
 
+pub(super) struct AgentToolObservationCommit {
+    goal_delta: Option<agent_runtime::AgentGoalDelta>,
+    continuation: Option<AgentToolContinuation>,
+}
+
+struct AgentToolContinuation {
+    scope: String,
+    tool_name: String,
+    input: String,
+    effect_semantics: agent_core::ToolEffectSemantics,
+    evidence_complete: Option<bool>,
+}
+
 fn pending_permission_matches_exact_invocation(
     pending: &PermissionRequest,
     candidate: &PermissionRequest,
@@ -186,17 +199,44 @@ pub(super) fn commit_agent_tool_observation(
     postcondition_evidence: Option<&agent_core::ToolPostconditionEvidence>,
     observation: &str,
     denial: Option<&agent_runtime::AgentActionDenialFeedback>,
+    tool_result: Option<&ToolResult>,
     image_paths: &[String],
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
-) -> Result<agent_runtime::RunExecutionStepCommit<Option<agent_runtime::AgentGoalDelta>>, String> {
+) -> Result<agent_runtime::RunExecutionStepCommit<AgentToolObservationCommit>, String> {
     let postcondition_scope = agent_runtime::postcondition_lineage_scope(run_context);
+    let continuation = effect_spec.map(|spec| AgentToolContinuation {
+        scope: run_context
+            .get("stage")
+            .or_else(|| run_context.get("collaboration_stage"))
+            .map(String::as_str)
+            .unwrap_or("executor")
+            .to_string(),
+        tool_name: call.tool_name.clone(),
+        input: call.input.clone(),
+        effect_semantics: spec.effect_semantics.clone(),
+        evidence_complete: tool_result
+            .filter(|result| matches!(result.status, ToolOutcomeStatus::Succeeded))
+            .and_then(|result| result.model_observation.as_ref())
+            .filter(|observation| observation.schema == agent_core::TOOL_OBSERVATION_V2_SCHEMA)
+            .map(|observation| observation.evidence_complete),
+    });
     cancellation.commit_execution_step_with(epoch_lease, || {
         let mut transaction = AgentLoopAppendTransaction::begin(runtime);
         let previous_message_count = transaction.original_message_count();
         let goal_delta = transaction.with_append_only_mutation(|next_runtime| {
-            let transition = AgentKernel::new(next_runtime, tools)
-                .with_postcondition_scope(postcondition_scope.as_deref())
-                .apply_tool_observation_transition_with_contract(
+            let mut kernel = AgentKernel::new(next_runtime, tools)
+                .with_postcondition_scope(postcondition_scope.as_deref());
+            let transition = match tool_result {
+                Some(result) => kernel.apply_tool_result_transition_with_contract(
+                    call,
+                    risk,
+                    effect_spec,
+                    postcondition_evidence,
+                    result,
+                    observation,
+                    denial,
+                ),
+                None => kernel.apply_tool_observation_transition_with_contract(
                     call,
                     status,
                     risk,
@@ -204,7 +244,8 @@ pub(super) fn commit_agent_tool_observation(
                     postcondition_evidence,
                     observation,
                     denial,
-                );
+                ),
+            };
             crate::agent_result_evidence::annotate_latest_tool_observation(
                 next_runtime,
                 tools,
@@ -237,13 +278,16 @@ pub(super) fn commit_agent_tool_observation(
         )?;
         transaction.commit();
         *snapshot_cursor = next_cursor;
-        Ok(goal_delta)
+        Ok(AgentToolObservationCommit {
+            goal_delta,
+            continuation,
+        })
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn agent_tool_batch_outcome_after_commit(
-    commit: agent_runtime::RunExecutionStepCommit<Option<agent_runtime::AgentGoalDelta>>,
+    commit: agent_runtime::RunExecutionStepCommit<AgentToolObservationCommit>,
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
@@ -255,9 +299,19 @@ pub(super) fn agent_tool_batch_outcome_after_commit(
     epoch_lease: agent_runtime::RunEpochLease,
 ) -> Result<Option<AgentToolBatchOutcome>, String> {
     match commit {
-        agent_runtime::RunExecutionStepCommit::Committed(goal_delta) => {
-            if let Some(delta) = goal_delta.as_ref() {
+        agent_runtime::RunExecutionStepCommit::Committed(committed) => {
+            if let Some(delta) = committed.goal_delta.as_ref() {
                 cancellation.record_goal_delta_at(epoch_lease.epoch(), delta);
+            }
+            if let Some(continuation) = committed.continuation {
+                cancellation.record_tool_continuation_at(
+                    epoch_lease.epoch(),
+                    &continuation.scope,
+                    &continuation.tool_name,
+                    &continuation.input,
+                    &continuation.effect_semantics,
+                    continuation.evidence_complete,
+                );
             }
             Ok(None)
         }
@@ -445,6 +499,7 @@ fn execute_agent_tool_batch_serial(
                     None,
                     &observation,
                     Some(&denial),
+                    None,
                     &[],
                     snapshot_cursor,
                 )?;
@@ -510,6 +565,7 @@ fn execute_agent_tool_batch_serial(
                 None,
                 &observation,
                 Some(&denial),
+                None,
                 &[],
                 snapshot_cursor,
             )?;
@@ -567,6 +623,7 @@ fn execute_agent_tool_batch_serial(
                 None,
                 &observation,
                 Some(&denial),
+                None,
                 &[],
                 snapshot_cursor,
             )?;
@@ -657,6 +714,7 @@ fn execute_agent_tool_batch_serial(
             postcondition_evidence.as_ref(),
             &observation,
             None,
+            Some(&result),
             &image_paths,
             snapshot_cursor,
         )?;

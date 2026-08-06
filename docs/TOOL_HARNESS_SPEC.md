@@ -165,6 +165,17 @@ projection use the prior observation format unchanged. The projection is stored
 with `ToolCallFinished` and restored during exact-call recovery, and its schema
 version participates in the prompt-learning tool-contract digest.
 
+After a successful v2 observation explicitly reports `evidence_complete=false`,
+run control may record an exact continuation only when the registered tool
+effect is `read_only` or `idempotent`. The lease is bound to the current epoch,
+execution scope, tool name, and byte-identical input. It only excludes that exact
+continuation from repeated-action and cycle classification; every invocation
+still consumes the existing tool-call budget and passes the existing permission,
+admission, and cancellation boundaries. Complete, failed, legacy/untyped, or
+non-idempotent observations do not create the lease, and steer clears it. The
+lease itself grants no Goal Delta, verification authority, permission reuse, or
+additional effect authority.
+
 The narrow `tools::tool_contract_v2` adapter owns the hand-written input/output
 schemas and v2 projections used by `file.read`, `shell.run`, and
 `browser.extract_text`. `file_query_contract_v3` owns search options, cursor,
@@ -194,6 +205,12 @@ collaboration, steer, and contract epochs, and are never recovered from an OS
 PID after restart. Input uses a bounded writer queue and a payload-bound one-shot
 permission. A parent-death watchdog and the AppState manager prevent ordinary
 cancel or application exit from leaving a managed child group behind.
+
+`process.poll` is registered as idempotent so an incomplete typed cursor page can
+request the exact same bounded poll again without being mistaken for an action
+cycle. This classification does not make process activation a new permission
+grant, does not authorize `process.input`, and does not relax owner, epoch,
+resource, poll-count, or tool-call limits.
 
 The runtime preserves model arguments as JSON. Legacy `key=value` input remains
 accepted only by built-in tools for existing sessions and the manual tool runner.

@@ -1,4 +1,4 @@
-use crate::{AgentLoopState, AgentTaskContract, PreparedTaskState};
+use crate::{AdaptiveLoopCursor, AgentLoopState, AgentTaskContract, PreparedTaskState};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -14,6 +14,7 @@ struct AgentLoopControlCheckpoint {
     interaction_verification_gate_requests: usize,
     task_contract: AgentTaskContract,
     prepared_task_state: PreparedTaskState,
+    adaptive_loop_cursor: AdaptiveLoopCursor,
 }
 
 impl AgentLoopControlCheckpoint {
@@ -30,6 +31,7 @@ impl AgentLoopControlCheckpoint {
             interaction_verification_gate_requests: state.interaction_verification_gate_requests,
             task_contract: state.task_contract.clone(),
             prepared_task_state: state.prepared_task_state().clone(),
+            adaptive_loop_cursor: state.adaptive_loop_cursor.clone(),
         }
     }
 
@@ -45,6 +47,7 @@ impl AgentLoopControlCheckpoint {
         state.interaction_verification_gate_requests = self.interaction_verification_gate_requests;
         state.task_contract = self.task_contract;
         state.replace_prepared_task_state(self.prepared_task_state);
+        state.adaptive_loop_cursor = self.adaptive_loop_cursor;
     }
 }
 
@@ -146,7 +149,10 @@ impl Drop for AgentLoopAppendTransaction<'_> {
 mod tests {
     use super::*;
     use crate::{start_agent_loop, AgentRuntimeConfig, WorkspaceVerificationPolicy};
-    use agent_core::{Message, MessageRole, Metadata, TaskId};
+    use agent_core::{
+        Message, MessageRole, Metadata, TaskId, ToolCallId, ToolObservationV2, ToolOutcomeStatus,
+        ToolResult,
+    };
 
     #[test]
     fn failed_append_transaction_restores_messages_and_control_state() {
@@ -155,6 +161,25 @@ mod tests {
             "inspect",
             AgentRuntimeConfig::default(),
         );
+        let typed_result = ToolResult {
+            invocation_id: ToolCallId("call-1".to_string()),
+            status: ToolOutcomeStatus::Succeeded,
+            output: String::new(),
+            content: Vec::new(),
+            structured_output_json: None,
+            artifacts: Vec::new(),
+            failure: None,
+            model_observation: Some(ToolObservationV2::new(
+                "workspace.read",
+                "stable",
+                "stable",
+                true,
+                [("revision".to_string(), "1".to_string())]
+                    .into_iter()
+                    .collect(),
+            )),
+            metadata: Metadata::new(),
+        };
         let before = state.clone();
         {
             let mut transaction = AgentLoopAppendTransaction::begin(&mut state);
@@ -190,6 +215,8 @@ mod tests {
                     "inspect",
                     crate::PromptCompletionIntent::default(),
                 ));
+                state.observe_adaptive_tool_result("file.read", "{}", &typed_result, None);
+                state.observe_adaptive_tool_result("file.read", "{}", &typed_result, None);
                 state.messages.push(Message {
                     role: MessageRole::Assistant,
                     content: "candidate".to_string(),

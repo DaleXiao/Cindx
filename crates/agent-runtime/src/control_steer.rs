@@ -101,6 +101,7 @@ pub struct RunControlSnapshot {
     pub(super) partial_output: String,
     pub(super) action_history: BTreeMap<String, (u64, usize)>,
     pub(super) recent_actions: BTreeMap<String, VecDeque<u64>>,
+    pub(super) continuation_actions: BTreeMap<String, u64>,
     pub(super) observation_fingerprints: BTreeSet<u64>,
     pub(super) observation_count: usize,
     pub(super) checkpoint_fingerprints: BTreeSet<u64>,

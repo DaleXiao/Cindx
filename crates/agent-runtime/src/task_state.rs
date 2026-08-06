@@ -157,6 +157,9 @@ impl AgentTaskStateSnapshot {
             verified_interactions: self.verified_interactions,
             interaction_verification_gate_requests: self.interaction_verification_gate_requests,
             task_contract: self.task_contract.clone(),
+            adaptive_loop_cursor: crate::AdaptiveLoopCursor::for_steer_epoch(
+                prepared_task_state.steer_epoch(),
+            ),
             prepared_task_state,
             context_token_ledger: Default::default(),
         })

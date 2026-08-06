@@ -27,6 +27,8 @@ mod resources;
 mod steer_commit;
 #[path = "control_tool_batch.rs"]
 mod tool_batch;
+#[path = "control_tool_continuation.rs"]
+mod tool_continuation;
 
 const PARTIAL_OUTPUT_MAX_CHARS: usize = 24_000;
 
@@ -95,6 +97,7 @@ struct RunMutableState {
     partial_output: String,
     action_history: BTreeMap<String, (u64, usize)>,
     recent_actions: BTreeMap<String, VecDeque<u64>>,
+    continuation_actions: BTreeMap<String, u64>,
     observation_fingerprints: BTreeSet<u64>,
     observation_count: usize,
     checkpoint_fingerprints: BTreeSet<u64>,
@@ -153,6 +156,7 @@ impl AgentRunControl {
                 partial_output: snapshot.partial_output,
                 action_history: snapshot.action_history,
                 recent_actions: snapshot.recent_actions,
+                continuation_actions: snapshot.continuation_actions,
                 observation_fingerprints: snapshot.observation_fingerprints,
                 observation_count: snapshot.observation_count,
                 checkpoint_fingerprints: snapshot.checkpoint_fingerprints,
@@ -210,6 +214,7 @@ impl AgentRunControl {
                         partial_output: snapshot.partial_output,
                         action_history: snapshot.action_history,
                         recent_actions: snapshot.recent_actions,
+                        continuation_actions: snapshot.continuation_actions,
                         observation_fingerprints: snapshot.observation_fingerprints,
                         observation_count: snapshot.observation_count,
                         checkpoint_fingerprints: snapshot.checkpoint_fingerprints,
@@ -266,6 +271,7 @@ impl AgentRunControl {
             partial_output: state.partial_output.clone(),
             action_history: state.action_history.clone(),
             recent_actions: state.recent_actions.clone(),
+            continuation_actions: state.continuation_actions.clone(),
             observation_fingerprints: state.observation_fingerprints.clone(),
             observation_count: state.observation_count,
             checkpoint_fingerprints: state.checkpoint_fingerprints.clone(),
@@ -665,6 +671,11 @@ impl AgentRunControl {
     ) -> Result<usize, RunStopReason> {
         let call = self.tool_calls.fetch_add(1, Ordering::SeqCst) + 1;
         let signature = fingerprint(&(tool_name, input));
+        let continuation_signature = state.continuation_actions.get(scope).copied();
+        let is_continuation = continuation_signature == Some(signature);
+        if continuation_signature.is_some() && !is_continuation {
+            state.continuation_actions.remove(scope);
+        }
         if call > state.tool_call_limit
             && !extend_tool_budget_if_progressed(&self.budget, state, call)
         {
@@ -672,29 +683,31 @@ impl AgentRunControl {
             state.stop_reason = Some(RunStopReason::ToolCallBudgetExceeded);
             return Err(RunStopReason::ToolCallBudgetExceeded);
         }
-        let history = state
-            .action_history
-            .entry(scope.to_string())
-            .or_insert((signature, 0));
-        if history.0 == signature {
-            history.1 += 1;
-        } else {
-            *history = (signature, 1);
-        }
-        if history.1 > self.budget.max_identical_actions {
-            self.tool_calls.fetch_sub(1, Ordering::SeqCst);
-            state.stop_reason = Some(RunStopReason::RepeatedAction);
-            return Err(RunStopReason::RepeatedAction);
-        }
-        let recent = state.recent_actions.entry(scope.to_string()).or_default();
-        recent.push_back(signature);
-        while recent.len() > 24 {
-            recent.pop_front();
-        }
-        if has_repeated_action_cycle(recent, self.budget.max_identical_actions + 1) {
-            self.tool_calls.fetch_sub(1, Ordering::SeqCst);
-            state.stop_reason = Some(RunStopReason::RepeatedAction);
-            return Err(RunStopReason::RepeatedAction);
+        if !is_continuation {
+            let history = state
+                .action_history
+                .entry(scope.to_string())
+                .or_insert((signature, 0));
+            if history.0 == signature {
+                history.1 += 1;
+            } else {
+                *history = (signature, 1);
+            }
+            if history.1 > self.budget.max_identical_actions {
+                self.tool_calls.fetch_sub(1, Ordering::SeqCst);
+                state.stop_reason = Some(RunStopReason::RepeatedAction);
+                return Err(RunStopReason::RepeatedAction);
+            }
+            let recent = state.recent_actions.entry(scope.to_string()).or_default();
+            recent.push_back(signature);
+            while recent.len() > 24 {
+                recent.pop_front();
+            }
+            if has_repeated_action_cycle(recent, self.budget.max_identical_actions + 1) {
+                self.tool_calls.fetch_sub(1, Ordering::SeqCst);
+                state.stop_reason = Some(RunStopReason::RepeatedAction);
+                return Err(RunStopReason::RepeatedAction);
+            }
         }
         state.active_tool_calls = state.active_tool_calls.saturating_add(1);
         state.stage = "tool".to_string();

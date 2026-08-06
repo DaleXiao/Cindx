@@ -1139,6 +1139,12 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
     let prepared = AgentKernel::new(&mut runtime, &tools)
         .prepare_model_turn(None, None, 4_096, 1_024)
         .expect("three collaboration domains remain dispatchable");
+    assert!(prepared.request.messages.iter().any(|message| {
+        message.metadata.get("kind").map(String::as_str) == Some("collaboration_trust_policy")
+    }));
+    assert!(!prepared.request.messages.iter().any(|message| {
+        message.metadata.get("kind").map(String::as_str) == Some("cognitive_state")
+    }));
     for (scope, _, sentinel) in requirements {
         let capsule = prepared
             .request
