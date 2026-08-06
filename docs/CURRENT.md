@@ -317,25 +317,28 @@ high-information reflection selection, and absolute holdout non-regression
 gates, but there is still no provider-backed matched evidence that an identified
 evolved profile improves external product quality.
 
-The current source defines Agent Real-World V4 as the active execution contract.
-Browser cases receive a per-cell loopback HTTP fixture instead of a
-`file://` target. Tool obligations can be satisfied only by successful typed
-receipts from the current logical run; projected failed, denied, cancelled, and
-unfinished calls remain visible in the tool-call denominator and cannot count as
-tool success. A process-level timeout remains a failed matrix cell even when it
-cannot emit a final tool receipt. Browser evidence must bind the exact resolved
-target and an artifact or postcondition digest. The denied-mutation product case
-also requires a user-visible permission-denied explanation; an unchanged file
-with an empty Agent answer cannot pass quality. Deterministic tests verify this
-measurement machinery only. The completed V4 `0.2.9` provider-backed matrix is
-a `VALID_BASELINE`, but the collector classifies continuation tool events in two
-Fast runs as outside the current logical run. The shared receipt gate and broad
-orchestration-uplift decision are therefore `NO-GO`. Current source resolves
-physical continuation attempts through the versioned logical-run identity and
-a fail-closed legacy lineage projection. That is a deterministic attribution
-fix, not a reinterpretation of the recorded V4 matrix; a newly frozen
-provider-backed run is still required before making a quality or
-orchestration-uplift claim.
+The current source defines Agent Real-World V5 as the active execution contract.
+It renames the no-tools Direct ceiling to `oracle_reference` and introduces an
+iso-budget `grounded_direct` product baseline. Grounded Direct uses Auto's
+shipping AgentKernel, model routing, tools, retrieval, memory, permissions, and
+external postcondition verifier, but constrains the routed decision to direct
+execution; internal independent-worker verification is therefore normalized to
+self-check. Auto remains the adaptive candidate and Pro remains descriptive
+because its native budget differs. Mixed Auto routing is evaluated as separate
+matched adaptive-direct and workflow subsets. Workflow uplift requires an
+observed workflow profile; learned-profile and distillation uplift require the
+actually executed exact stable parent. No observed mechanism difference can be
+reported only as `NEUTRAL`, while missing evidence is `NOT_EXERCISED` or
+`INVALID_EVIDENCE`. Failed, timed-out, denied, and unclassified early runs remain
+in their matched denominator. Deterministic tests verify this measurement and
+claim machinery only; they do not establish intelligence uplift.
+
+V5 preserves V4's six frozen cases, three repeats, isolated browser fixture,
+typed current-logical-run tool receipts, exact target and artifact binding, and
+visible permission-denial requirement. The completed V4 `0.2.9` matrix remains
+historical evidence for its exact revision: it is a `VALID_BASELINE`, but two
+Fast continuation receipts fail closed and broad orchestration uplift remains
+`NO-GO`.
 
 ## Current Evidence Boundary
 
@@ -346,6 +349,10 @@ It retained all 72 position-balanced cells across Direct, Fast, Auto, and Pro,
 with zero setup failures and zero safety violations. The publication contract
 marks it `VALID_BASELINE`; the independent broad orchestration-uplift decision
 is `NO-GO`.
+
+Agent Real-World V5 is the current source protocol but has not yet replaced this
+provider-backed baseline. Until a complete V5 matrix is retained, its new
+mechanism classifications are a deterministic evaluation contract only.
 
 - Direct, Fast, Auto, and Pro scored `100.0%`, `83.3%`, `100.0%`, and `100.0%`
   quality, with `100.0%`, `77.8%`, `83.3%`, and `94.4%` completion.

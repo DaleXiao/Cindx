@@ -200,6 +200,12 @@ tool class, vision requirement, risk, retrieval channels, and memory policy are
 preserved. Trace metadata distinguishes the workflow candidate from the final
 direct or grounded-direct route and records the bounded admission inputs.
 
+The provider-backed V5 evaluation can apply the same collapse as an explicit
+Grounded Direct constraint after Auto routing. It preserves the product model,
+tool, retrieval, memory, permission, and external postcondition paths while
+removing collaboration. The constraint is written only by the feature-gated
+evaluation driver; normal product ingress remains native.
+
 Every conductor provider request has a 45-second no-progress boundary. A
 single configured conductor therefore degrades through the existing typed
 fallback instead of consuming the whole run deadline without bytes; once a

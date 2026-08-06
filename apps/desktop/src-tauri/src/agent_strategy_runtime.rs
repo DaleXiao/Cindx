@@ -21,6 +21,7 @@ use crate::agent_conductor_runtime::{
 use crate::agent_conductor_scheduler::{
     schedule_conductor_decision, ConductorDecisionOutcome, ConductorDecisionSchedule,
 };
+use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::app_state::AppState;
 use crate::collaboration_service::{collaboration_recent_context, truncate_for_collaboration};
 use crate::collaboration_stage_runtime::CollaborationStageError;
@@ -92,6 +93,8 @@ pub(crate) fn plan_agent_run(
         cancellation,
     } = request;
     ensure_planning_current(cancellation)?;
+    let execution_constraint = AgentExecutionConstraint::from_context(run_context)
+        .map_err(CollaborationStageError::Failed)?;
     run_context
         .entry("prompt_objective".to_string())
         .or_insert_with(|| truncate_for_collaboration(prompt, 6_000));
@@ -119,6 +122,9 @@ pub(crate) fn plan_agent_run(
             route_requirements,
         )
         .map_err(CollaborationStageError::Failed)?;
+        let decision = execution_constraint
+            .apply(decision, effort)
+            .map_err(CollaborationStageError::Failed)?;
         let planned = finalize_planned_run(
             prompt,
             candidates,
@@ -256,6 +262,14 @@ pub(crate) fn plan_agent_run(
             (decision, source, Some(reason))
         }
     };
+    let decision = execution_constraint
+        .apply(decision, effort)
+        .map_err(CollaborationStageError::Failed)?;
+    if execution_constraint.is_grounded_direct() {
+        decision
+            .validate(&allowed_models, max_parallelism)
+            .map_err(CollaborationStageError::Failed)?;
+    }
     let planned = finalize_planned_run(
         prompt,
         candidates,

@@ -132,7 +132,8 @@ state.
 
 The feature-gated Agent Real-World driver is also split by responsibility: its
 parent module owns the frozen suite, execution plan, case materialization, and
-raw report; its `execution` child owns one-cell Direct or product execution; and
+raw report; its `treatments` child owns versioned treatment and schema identity;
+its `execution` child owns one-cell oracle-reference or product execution; and
 its `runtime` child owns product-run continuation and event metric projection.
 Its `http_fixture` child owns the ephemeral loopback server and request receipt
 for each browser cell; the resolved URL is part of the case contract rather than
@@ -143,6 +144,13 @@ Verification accepts a tool obligation only after successful
 completion. Exact browser-target matching and artifact or postcondition digests
 bind observed effects to the frozen case. This is evaluation wiring and does not
 define shipping policy or establish provider-backed intelligence improvement.
+
+V5's Grounded Direct arm enters the same Auto planning path, then applies one
+typed evaluation constraint after the conductor decision. That constraint
+preserves the selected model, tool class, retrieval, memory, vision, risk, and
+task classification while collapsing workflow parallelism and independent
+worker verification to a valid direct decision. Native product runs carry no
+constraint metadata, so the seam is unreachable from ordinary product ingress.
 
 Prompt grounding classification, evidence-tool pinning, run-context objective
 selection, and model-stream retry/progress policy are portable

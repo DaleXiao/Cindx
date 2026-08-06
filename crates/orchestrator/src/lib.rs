@@ -11,6 +11,7 @@ mod computation_value;
 mod conductor_runtime;
 mod evaluation;
 mod evolution_campaign;
+mod execution_constraint;
 mod execution_contract;
 mod policy;
 mod prompt_distillation_gate;

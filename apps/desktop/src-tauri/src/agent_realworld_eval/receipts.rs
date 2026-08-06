@@ -23,11 +23,7 @@ pub(super) struct ResolvedBudgetReceipt {
 
 impl ResolvedBudgetReceipt {
     pub(super) fn for_treatment(treatment: Treatment) -> Self {
-        let effort = match treatment {
-            Treatment::Direct | Treatment::Fast => "fast",
-            Treatment::Auto => "auto",
-            Treatment::Pro => "pro",
-        };
+        let effort = treatment.product_effort().unwrap_or("fast");
         Self::from_budget(RunBudget::for_effort(effort))
     }
 
@@ -55,6 +51,7 @@ pub(super) struct StrategyReceipt {
     pub(super) effective_policy: String,
     pub(super) execution_mode: String,
     pub(super) decision_source: String,
+    pub(super) execution_constraint: String,
     pub(super) decision_sha256: String,
     pub(super) routing_signature_sha256: String,
     pub(super) profile_source: String,
@@ -87,7 +84,7 @@ pub(super) fn resolved_budget_from_events(
     treatment: Treatment,
 ) -> Result<ResolvedBudgetReceipt, String> {
     let expected = ResolvedBudgetReceipt::for_treatment(treatment);
-    if treatment == Treatment::Direct {
+    if treatment.is_oracle_reference() {
         return Ok(expected);
     }
     let event = events
@@ -127,7 +124,7 @@ pub(super) fn strategy_receipt_from_events(
     treatment: Treatment,
     frozen_profile: Option<&FrozenPromptProfileSnapshot>,
 ) -> Result<Option<StrategyReceipt>, String> {
-    if treatment == Treatment::Direct {
+    if treatment.is_oracle_reference() {
         return Ok(None);
     }
     let event = events
@@ -138,6 +135,22 @@ pub(super) fn strategy_receipt_from_events(
     let decision_json = required_metadata_any(&event.metadata, &["run_decision", "decision"])?;
     let decision = serde_json::from_str::<AgentRunDecision>(decision_json)
         .map_err(|error| format!("agent strategy decision receipt is invalid: {error}"))?;
+    let execution_constraint = event
+        .metadata
+        .get("execution_constraint")
+        .map(String::as_str)
+        .unwrap_or("native");
+    if treatment.is_grounded_direct() {
+        if execution_constraint != "grounded_direct"
+            || decision.execution != orchestrator::AgentExecutionMode::Direct
+        {
+            return Err(
+                "grounded-direct receipt must prove its direct execution constraint".to_string(),
+            );
+        }
+    } else if execution_constraint != "native" {
+        return Err("native treatment claimed an evaluation execution constraint".to_string());
+    }
     let genome_json = required_metadata(&event.metadata, "prompt_genome")?;
     let genome = serde_json::from_str::<ConductorPromptGenome>(genome_json)
         .map_err(|error| format!("agent strategy profile receipt is invalid: {error}"))?;
@@ -161,7 +174,7 @@ pub(super) fn strategy_receipt_from_events(
     let learned = match (frozen_profile, profile_source.as_str()) {
         (Some(snapshot), "evaluation_frozen_profile") => {
             snapshot.validate()?;
-            if snapshot.effort != treatment.label()
+            if snapshot.effort != treatment.profile_effort().unwrap_or_default()
                 || snapshot.genome.id != genome.id
                 || snapshot.candidate_sha256 != profile_sha256
             {
@@ -196,6 +209,7 @@ pub(super) fn strategy_receipt_from_events(
         }
         .to_string(),
         decision_source: required_metadata(&event.metadata, "decision_source")?.to_string(),
+        execution_constraint: execution_constraint.to_string(),
         decision_sha256: domain_hash("cindx.agent-run-decision.v1\0", decision_json),
         routing_signature_sha256: domain_hash(
             "cindx.agent-routing-signature.v1\0",
@@ -422,6 +436,11 @@ mod tests {
     #[test]
     fn persisted_product_budget_must_match_the_resolved_treatment_budget() {
         let budget = ResolvedBudgetReceipt::for_treatment(Treatment::Auto);
+        assert_eq!(
+            ResolvedBudgetReceipt::for_treatment(Treatment::GroundedDirect),
+            budget,
+            "grounded direct must remain iso-budget with Auto"
+        );
         let mut metadata = Metadata::from([
             (
                 "run_budget_ms".to_string(),
@@ -529,5 +548,44 @@ mod tests {
         );
         assert_eq!(receipt.execution_mode, "direct");
         assert!(receipt.learned_artifact_sha256.is_none());
+    }
+
+    #[test]
+    fn grounded_direct_receipt_proves_the_execution_constraint() {
+        let decision = AgentRunDecision::direct("configured-model");
+        let genome = ConductorPromptGenome::seed_for_effort("auto");
+        let metadata = Metadata::from([
+            (
+                "run_decision".to_string(),
+                serde_json::to_string(&decision).unwrap(),
+            ),
+            (
+                "prompt_genome".to_string(),
+                serde_json::to_string(&genome).unwrap(),
+            ),
+            ("profile_source".to_string(), "seed_fallback".to_string()),
+            ("requested_policy".to_string(), "auto_router".to_string()),
+            ("collaboration_policy".to_string(), "single".to_string()),
+            ("decision_source".to_string(), "fixture".to_string()),
+            ("routing_signature".to_string(), "frozen-route".to_string()),
+            (
+                "execution_constraint".to_string(),
+                "grounded_direct".to_string(),
+            ),
+        ]);
+        let receipt = strategy_receipt_from_events(
+            &[event(
+                "Agent run decision selected",
+                EventKind::TaskStatusChanged,
+                metadata,
+            )],
+            Treatment::GroundedDirect,
+            None,
+        )
+        .expect("strategy receipt")
+        .expect("grounded strategy");
+
+        assert_eq!(receipt.execution_constraint, "grounded_direct");
+        assert_eq!(receipt.execution_mode, "direct");
     }
 }
