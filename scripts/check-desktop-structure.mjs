@@ -3601,7 +3601,10 @@ assert(
   "Session outputs must survive restarts through revisioned reconstruction and invalidate with session runtime state"
 );
 assert(
-  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v6"') &&
+  agentMemorySource.includes('MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v7"') &&
+    agentMemorySource.includes('MEMORY_INFLUENCE_RECEIPT_SCHEMA: &str = "cindx.memory-influence-receipt.v1"') &&
+    agentMemorySource.includes('MEMORY_EFFECT_RECEIPT_SCHEMA: &str = "cindx.memory-effect-receipt.v1"') &&
+    agentMemorySource.includes("mod experience;") &&
     agentMemorySource.includes("USER_REQUIREMENT_EVIDENCE_SCHEMA") &&
     agentMemorySource.includes("user_requirement_evidence") &&
     agentMemorySource.includes("mod extraction;") &&
@@ -4378,6 +4381,9 @@ assert(
     memoryEvaluationLabSource.includes("independently_verify_requirement") &&
     memoryEvaluationLabSource.includes("semantic_laundering_failures") &&
     qualityGateManifest.profiles["ci-contract"].includes("memory-contract") &&
+    qualityGateManifest.profiles["ci-contract"].includes("memory-attribution-contract") &&
+    qualityGateManifest.profiles["ci-contract"].includes("memory-attribution-atomicity-contract") &&
+    qualityGateManifest.profiles["ci-contract"].includes("agent-memory-effect-contract") &&
     qualityGateDoc.includes("Memory recall is 100% at top-1 and recall@3"),
   "Project memory must have a versioned deterministic recall and trust-boundary gate"
 );

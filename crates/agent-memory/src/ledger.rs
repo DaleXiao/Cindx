@@ -1,8 +1,8 @@
 use crate::memory_text::{memory_terms, normalize_memory_text};
 use crate::requirement_scope::{contains_instruction_override, contains_sensitive_value};
 use crate::{
-    MemoryControlAction, MemoryKind, MemoryLedger, MemoryMergeStats, MemoryRecord, MemoryTrust,
-    QuarantinedMemoryRecord,
+    memory_content_sha256, MemoryControlAction, MemoryKind, MemoryLedger, MemoryMergeStats,
+    MemoryRecord, MemoryTrust, QuarantinedMemoryRecord,
 };
 
 const MAX_QUARANTINED_MEMORY_RECORDS: usize = 256;
@@ -163,6 +163,15 @@ pub fn merge_memory_records(
         if candidate.provenance.project_id != ledger.project_id || !candidate.is_recall_eligible() {
             continue;
         }
+        let candidate_has_durable_authority =
+            candidate.kind == MemoryKind::Requirement && candidate.trust == MemoryTrust::UserStated;
+        let candidate_memory_sha256 = memory_content_sha256(&candidate.content);
+        candidate.utility.retain_valid_for(
+            &candidate.id,
+            &candidate.provenance.project_id,
+            &candidate_memory_sha256,
+            candidate_has_durable_authority,
+        );
         let control_id = ledger
             .records
             .iter()
@@ -240,6 +249,16 @@ pub fn merge_memory_records(
                     existing.observed_use_count = candidate.observed_use_count;
                     existing.last_observed_use_at_ms = candidate.last_observed_use_at_ms;
                 }
+                existing.utility.merge_bounded(&candidate.utility);
+                let existing_has_durable_authority = existing.kind == MemoryKind::Requirement
+                    && existing.trust == MemoryTrust::UserStated;
+                let existing_memory_sha256 = memory_content_sha256(&existing.content);
+                existing.utility.retain_valid_for(
+                    &existing.id,
+                    &existing.provenance.project_id,
+                    &existing_memory_sha256,
+                    existing_has_durable_authority,
+                );
                 changed = *existing != before;
             }
             let active = ledger.records[existing_index].clone();

@@ -236,9 +236,20 @@ loops from unlocking the maximum Auto or Pro budget.
   store cannot be opened; the application does not silently continue with an
   in-memory substitute.
 - Durable memory is produced from completed or explicitly eligible run
-  evidence. Recall combines lexical and semantic evidence with trust,
-  deduplication, supersession, current-request conflict suppression, and
-  session-diversity controls. Semantic curation is reserved for workflow,
+  evidence. The v7 ledger stores a bounded, typed utility history keyed by
+  project, session, logical run, steer epoch, and memory identity. Ordinary
+  co-occurrence, answer overlap, verified outcomes, corrections, and
+  counterexamples remain `Unknown`; only a matched evaluation receipt can mark
+  memory `Helpful` or `Harmful`.
+- Production completion records an immutable recall-to-terminal attribution
+  source without synchronously rewriting the ledger. Replay validates the
+  exact recall and terminal events, their digests, and logical-run lineage
+  before atomically applying the bounded batch. Recovery attempts may join one
+  logical run, while their physical attempt identities remain auditable.
+- Recall combines lexical and semantic evidence with trust, typed matched
+  utility, deduplication, supersession, current-request conflict suppression,
+  and session-diversity controls. Legacy lexical use counters remain readable
+  but no longer affect ranking. Semantic curation is reserved for workflow,
   workspace-evidence, or durable-effect runs; direct self-contained text runs
   use deterministic projection.
 - Workspace knowledge is separate from memory. The current retrieval adapter
@@ -248,7 +259,8 @@ loops from unlocking the maximum Auto or Pro budget.
   lookup, and graph walk. Results retain source provenance.
 - A passing deterministic memory benchmark proves the frozen recall contract;
   it does not prove that every live agent run requests and uses the right
-  memory.
+  memory. The separate 18-cell memory-on/off contract proves only measurement
+  integrity until an exact-revision provider run is published.
 
 ## Prompt Evolution
 

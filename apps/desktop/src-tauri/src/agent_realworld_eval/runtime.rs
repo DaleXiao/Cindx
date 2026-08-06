@@ -1,3 +1,4 @@
+use super::memory_receipts::memory_evaluation_receipt_from_events;
 use super::receipts::{
     is_receipt_bearing_event, model_receipts_from_metadata, resolved_budget_from_events,
     strategy_receipt_from_events, successful_response_count,
@@ -5,10 +6,12 @@ use super::receipts::{
 use super::tool_receipts::{project_tool_receipts, ToolReceiptStatus};
 use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment};
 use crate::agent_execution_constraint::AgentExecutionConstraint;
+use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::{
     begin_agent_run_control_for_effort, phase16_task_id, resolve_agent_permission_blocking,
-    retry_agent_task_blocking, run_agent_task_blocking_inner_with_execution_constraint, AgentState,
-    AgentTaskInput, AppState, EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
+    retry_agent_task_blocking, run_agent_task_blocking_inner_with_evaluation_constraints,
+    AgentState, AgentTaskInput, AppState, EventKind, FrozenPromptProfileSnapshot,
+    SessionActionInput,
 };
 use std::path::Path;
 
@@ -30,10 +33,15 @@ pub(super) fn run_product_task(
     } else {
         AgentExecutionConstraint::Native
     };
+    let memory_constraint = match treatment {
+        Treatment::MemoryOn => AgentMemoryEvaluationConstraint::MemoryOn,
+        Treatment::MemoryOff => AgentMemoryEvaluationConstraint::MemoryOff,
+        _ => AgentMemoryEvaluationConstraint::Native,
+    };
     let initial = (|| -> Result<AgentState, String> {
         let lease = begin_agent_run_control_for_effort(state, session_id, effort, None)?;
         let control = lease.control();
-        let result = run_agent_task_blocking_inner_with_execution_constraint(
+        let result = run_agent_task_blocking_inner_with_evaluation_constraints(
             app,
             state.clone(),
             AgentTaskInput {
@@ -46,6 +54,7 @@ pub(super) fn run_product_task(
             },
             &control,
             execution_constraint,
+            memory_constraint,
         );
         drop(lease);
         result
@@ -268,6 +277,10 @@ pub(super) fn collect_event_metrics(
     }
     match strategy_receipt_from_events(&events, treatment, frozen_profile) {
         Ok(receipt) => metrics.strategy_receipt = receipt,
+        Err(error) => metrics.evidence_errors.push(error),
+    }
+    match memory_evaluation_receipt_from_events(&events, treatment) {
+        Ok(receipt) => metrics.memory_evaluation_receipt = receipt,
         Err(error) => metrics.evidence_errors.push(error),
     }
     if metrics.total_tokens == 0 {

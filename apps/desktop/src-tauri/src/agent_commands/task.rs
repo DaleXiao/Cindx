@@ -7,6 +7,7 @@ use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
+use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
 use crate::suspended_run_runtime::{
     clear_suspended_agent_run, suspended_agent_run_control_snapshot, suspended_agent_run_policy,
@@ -84,6 +85,24 @@ pub(crate) fn run_agent_task_blocking_inner_with_execution_constraint(
     cancellation: &Arc<AgentRunControl>,
     execution_constraint: AgentExecutionConstraint,
 ) -> Result<AgentState, String> {
+    run_agent_task_blocking_inner_with_evaluation_constraints(
+        app,
+        state,
+        input,
+        cancellation,
+        execution_constraint,
+        AgentMemoryEvaluationConstraint::Native,
+    )
+}
+
+pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: AgentTaskInput,
+    cancellation: &Arc<AgentRunControl>,
+    execution_constraint: AgentExecutionConstraint,
+    memory_constraint: AgentMemoryEvaluationConstraint,
+) -> Result<AgentState, String> {
     let effort = AgentPolicy::parse_ingress(&input.effort);
     let user_prompt = input.prompt.trim().to_string();
     let queue_id = input.queue_id.clone();
@@ -127,6 +146,9 @@ pub(crate) fn run_agent_task_blocking_inner_with_execution_constraint(
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     assign_initial_agent_run_identity(&mut run_context)?;
     execution_constraint.write_to_context(&mut run_context);
+    if !memory_constraint.is_native() {
+        memory_constraint.write_to_context(&mut run_context);
+    }
     run_context.insert("steer_epoch".to_string(), "0".to_string());
     run_context.insert(
         "initial_prompt_objective".to_string(),

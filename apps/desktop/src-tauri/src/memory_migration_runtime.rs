@@ -5,7 +5,8 @@ use agent_memory::{
 use agent_storage::{SqliteStore, StorageError};
 
 const LEGACY_UNVERIFIED_MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v4";
-const PREVIOUS_TRUSTED_MEMORY_LEDGER_SCHEMA: &str = "cindx.memory-ledger.v5";
+const PREVIOUS_TRUSTED_MEMORY_LEDGER_SCHEMAS: [&str; 2] =
+    ["cindx.memory-ledger.v6", "cindx.memory-ledger.v5"];
 
 pub(crate) struct CachedMemoryMigration {
     pub(crate) ledger: Option<MemoryLedger>,
@@ -39,7 +40,7 @@ pub(crate) fn load_cached_memory_for_migration(
         {
             match ledger.schema.as_str() {
                 MEMORY_LEDGER_SCHEMA => return Some(ledger),
-                PREVIOUS_TRUSTED_MEMORY_LEDGER_SCHEMA => {
+                previous if PREVIOUS_TRUSTED_MEMORY_LEDGER_SCHEMAS.contains(&previous) => {
                     ledger.schema = MEMORY_LEDGER_SCHEMA.to_string();
                     migrated = true;
                     return Some(ledger);
@@ -78,6 +79,7 @@ pub(crate) fn memory_ledger_is_intrinsically_valid(
         memory_record_has_valid_envelope(project_id, ledger.revision, record)
             && !record.contains_sensitive_persisted_value()
             && record.is_recall_eligible()
+            && record.utility.is_structurally_valid_for(record)
     }) && ledger.quarantined_records.iter().all(|item| {
         !item.reason.trim().is_empty()
             && memory_record_has_valid_envelope(project_id, ledger.revision, &item.record)

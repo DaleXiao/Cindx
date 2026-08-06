@@ -10,11 +10,12 @@ does not claim Fugu Ultra equivalence.
 - `ci-contract`: quick checks plus routing, the typed collaboration execution
   contract, the Causal Router v2 contract and scaling bound, Evaluation v2 foundation, the
   120-case arena schema/evidence-ingestion contract, the Agent Real-World V5
-  measurement contract, the exact managed-process session contract, memory, and
-  frontend state behavior.
+  measurement contract, the 18-cell memory-effect evidence contract, the exact
+  managed-process session contract, memory attribution, and frontend state
+  behavior.
 - `control-plane`: documentation and deterministic agent contracts, including
   typed collaboration execution, the Agent Real-World V5 measurement, and
-  managed-process session contracts,
+  memory-effect and managed-process session contracts,
   plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
@@ -169,6 +170,15 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   from positive, teacher, canary-success, promotion, and distillation roles. It
   does not prove that a generated challenger is more intelligent.
 - Memory recall is 100% at top-1 and recall@3 with no trust or dedup failures.
+- The two memory-attribution exact gates prove that recovery attempts join by
+  one logical run, retain physical-attempt audit identities, and cannot replay
+  a partial batch. Portable memory tests separately prove bounded full-key
+  replacement, unknown-by-default utility, authority-sensitive expiry, and
+  matched-receipt-only helpful/harmful classification.
+- The deterministic memory-effect gate validates the frozen 18-cell
+  memory-on/off protocol, complete provider-receipt coverage, raw/output
+  digests, failed-cell denominator, regression precedence, and irrelevant
+  control. It does not call a provider or establish live memory benefit.
 - Queue, steer, permission suspension, recovery, and session projections pass the
   desktop Rust control-plane tests.
 - Each exact-filtered Rust shipping gate must prove that precisely one matching test
@@ -214,3 +224,15 @@ the current logical run. Its preregistered receipt gate and broad
 orchestration-uplift decision are therefore `NO-GO`. Current source repairs the
 deterministic identity/projection boundary, but the historical matrix remains
 unchanged and a newly frozen provider run is required for any revised decision.
+
+The memory-effect V1 provider matrix is a separate explicit, billable run. Its
+deterministic analyzer is exercised with:
+
+```bash
+node --test scripts/agent-memory-effect-contract.test.mjs
+```
+
+Only a clean exact-revision `--execute` run of
+`benchmarks/agent/memory-effect-v1.json`, followed by publication of sanitized
+evidence, may classify memory as `IMPROVED`, `NEUTRAL`, `REGRESSED`,
+`NOT_EXERCISED`, or `INVALID_EVIDENCE`. Raw provider output remains outside Git.

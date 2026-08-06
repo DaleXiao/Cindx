@@ -96,6 +96,13 @@ pub(super) fn verify_case(
             format!("output is missing {value:?}"),
         );
     }
+    for value in &case.verification.output_not_contains {
+        record_check(
+            &mut result,
+            !output_lower.contains(&value.to_lowercase()),
+            format!("output contains forbidden decoy {value:?}"),
+        );
+    }
     result.answer_passed = result.failures.is_empty();
     if treatment.is_oracle_reference() {
         result.external_effect_passed = None;
@@ -410,6 +417,7 @@ mod tests {
                 }),
                 ..VerificationContract::default()
             },
+            memory_effect: None,
         };
         let fixture = HttpFixtureReceipt {
             target_sha256: "f".repeat(64),
@@ -446,5 +454,44 @@ mod tests {
             0,
         );
         assert!(passed.external_effect_passed.expect("product effect"));
+    }
+
+    #[test]
+    fn memory_negative_control_rejects_decoy_output() {
+        let root = tempfile::tempdir().expect("workspace");
+        let case = RealworldCase {
+            id: "memory-control".to_string(),
+            category: "memory_irrelevant_control".to_string(),
+            objective: "answer from the authoritative fixture".to_string(),
+            seed_memory_prompt: Some("obsolete Red Juniper note".to_string()),
+            index_workspace: false,
+            files: vec![FixtureFile {
+                path: "policy.md".to_string(),
+                content: "KMS-Atlas-42".to_string(),
+            }],
+            permission_policy: PermissionPolicy::AllowOnce,
+            verification: VerificationContract {
+                output_contains: vec!["KMS-Atlas-42".to_string()],
+                output_not_contains: vec!["Red Juniper".to_string()],
+                ..VerificationContract::default()
+            },
+            memory_effect: None,
+        };
+
+        let result = verify_case(
+            &case,
+            Treatment::MemoryOn,
+            root.path(),
+            "KMS-Atlas-42, not Red Juniper",
+            &[],
+            None,
+            0,
+        );
+
+        assert!(!result.answer_passed);
+        assert!(result
+            .failures
+            .iter()
+            .any(|failure| failure.contains("forbidden decoy")));
     }
 }

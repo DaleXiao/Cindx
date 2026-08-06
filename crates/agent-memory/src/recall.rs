@@ -105,7 +105,7 @@ pub fn recall_memories_at(
             let relevance_score = (overlap_score * 0.68 + if exact { 0.32 } else { 0.0 })
                 * record.kind.recall_weight()
                 * record.trust.recall_weight()
-                * memory_usefulness_weight(record)
+                * memory_usefulness_weight(record, now_ms)
                 * (0.8 + recency * 0.2)
                 * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
                 * if cross_session { 1.08 } else { 0.92 };
@@ -199,7 +199,7 @@ pub fn fuse_memory_recalls_at(
         let semantic_score = semantic_score
             * record.kind.recall_weight()
             * record.trust.recall_weight()
-            * memory_usefulness_weight(record)
+            * memory_usefulness_weight(record, now_ms)
             * (0.8 + recency * 0.2)
             * (0.85 + f64::from(record.importance) / 100.0 * 0.15)
             * if cross_session { 1.08 } else { 0.92 }
@@ -414,18 +414,19 @@ pub fn record_memory_observed_uses(
     used
 }
 
-fn memory_usefulness_weight(record: &MemoryRecord) -> f64 {
-    if record.recall_count < 2 {
-        return 1.0;
-    }
-    let utilization = record.observed_use_count as f64 / record.recall_count.max(1) as f64;
-    let calibrated = (0.84 + utilization.min(1.0) * 0.24).clamp(0.84, 1.08);
-    if matches!(record.kind, MemoryKind::Requirement)
-        && matches!(record.trust, MemoryTrust::UserStated)
-    {
-        calibrated.max(0.94)
-    } else {
-        calibrated
+fn memory_usefulness_weight(record: &MemoryRecord, now_ms: u64) -> f64 {
+    match record.utility.disposition_for_at(record, now_ms) {
+        crate::MemoryUtilityDisposition::Helpful => 1.04,
+        crate::MemoryUtilityDisposition::Harmful => {
+            if matches!(record.kind, MemoryKind::Requirement)
+                && matches!(record.trust, MemoryTrust::UserStated)
+            {
+                0.94
+            } else {
+                0.84
+            }
+        }
+        crate::MemoryUtilityDisposition::Unknown => 1.0,
     }
 }
 

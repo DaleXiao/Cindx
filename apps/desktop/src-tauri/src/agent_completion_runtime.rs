@@ -515,6 +515,12 @@ pub(crate) fn finalize_agent_completion(
     {
         return Err("grounded terminal lineage validation failed".to_string());
     }
+    let memory_attribution_observation =
+        crate::memory_projection_runtime::attribution::CompletionMemoryAttributionObservation::from_runtime(
+            runtime,
+            epoch_lease.epoch(),
+            &terminal_metadata,
+        );
     let terminal_commit = cancellation.commit_terminal_result_with(epoch_lease, || {
         let mut store = state
             .store
@@ -586,16 +592,19 @@ pub(crate) fn finalize_agent_completion(
                     "Agent task completed",
                     metadata_with_context(terminal_metadata, run_context),
                 )?;
+                if let Err(error) =
+                    crate::memory_projection_runtime::attribution::append_project_memory_attribution(
+                        store,
+                        &runtime.task_id,
+                        run_context,
+                        epoch_lease.epoch(),
+                        &memory_attribution_observation,
+                    )
+                {
+                    eprintln!("project memory attribution unavailable: {error}");
+                }
                 delete_persisted_agent_runtime_snapshot(store, session_id)
                     .map_err(agent_storage::StorageError::new)?;
-                if let Err(error) = record_project_memory_observed_use(
-                    store,
-                    &runtime.task_id,
-                    run_context,
-                    &final_answer,
-                ) {
-                    eprintln!("project memory utilization unavailable: {error}");
-                }
                 agent_state_for_session(store, None, session_id)
             },
         )

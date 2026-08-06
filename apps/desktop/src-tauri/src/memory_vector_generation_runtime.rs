@@ -118,12 +118,16 @@ pub(crate) fn memory_vector_projection_sha256(ledger: &MemoryLedger) -> String {
 }
 
 pub(crate) fn memory_recall_projection_sha256(ledger: &MemoryLedger) -> String {
+    let now_ms = crate::runtime_values::current_time_millis();
     let mut records = ledger
         .records
         .iter()
         .map(|record| {
+            let utility_sha256 = serde_json::to_vec(&record.utility)
+                .map(|encoded| sha256_hex(&encoded))
+                .unwrap_or_default();
             format!(
-                "{}:{}:{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{}",
                 record.id,
                 record.fingerprint,
                 record.importance,
@@ -131,6 +135,9 @@ pub(crate) fn memory_recall_projection_sha256(ledger: &MemoryLedger) -> String {
                 ledger.record_is_active_for_recall(record),
                 ledger.is_pinned(&record.id),
                 record.superseded_by.as_deref().unwrap_or_default(),
+                utility_sha256,
+                record.utility.disposition_for_at(record, now_ms),
+                record.utility.has_active_attribution_for_at(record, now_ms),
             )
         })
         .collect::<Vec<_>>();

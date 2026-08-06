@@ -33,6 +33,14 @@ use orchestrator::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod memory_evaluation_constraint;
+pub(crate) use memory_evaluation_constraint::AgentMemoryEvaluationConstraint;
+#[cfg(feature = "realworld-eval")]
+pub(crate) use memory_evaluation_constraint::{
+    AGENT_MEMORY_EVALUATION_CONSTRAINT_KEY, EFFECTIVE_MEMORY_POLICY_KEY,
+    ROUTED_MEMORY_POLICY_KEY,
+};
+
 fn append_single_model_policy_guidance(history: &mut Vec<Message>, policy: &OrchestrationPolicy) {
     if *policy != OrchestrationPolicy::PlanExecuteReview {
         return;
@@ -209,6 +217,8 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "prompt_profile_source",
         "memory_ids",
         "memory_selected_count",
+        "routed_memory_policy",
+        "effective_memory_policy",
     ] {
         run_context.remove(key);
     }
@@ -345,6 +355,13 @@ pub(crate) fn prepare_agent_execution_replay(
             }
             Err(error) => return Err(runtime_preparation_error(&run_context, error.message())),
         };
+        let memory_constraint = AgentMemoryEvaluationConstraint::from_context(&run_context)
+            .map_err(|error| runtime_preparation_error(&run_context, error))?;
+        let effective_knowledge_decision = (!memory_constraint.is_native())
+            .then(|| memory_constraint.apply_after_routing(&mut run_context, &plan.decision));
+        let knowledge_decision = effective_knowledge_decision
+            .as_ref()
+            .unwrap_or(&plan.decision);
 
         let prepared_knowledge = match prepare_run_knowledge_contexts(
             state,
@@ -352,7 +369,7 @@ pub(crate) fn prepare_agent_execution_replay(
             &run_context,
             workspace_root,
             config,
-            &plan.decision,
+            knowledge_decision,
             cancellation,
             preparation_epoch,
         ) {

@@ -10,6 +10,7 @@ use tauri::Manager;
 
 mod execution;
 mod http_fixture;
+mod memory_receipts;
 mod receipts;
 mod runtime;
 mod setup;
@@ -21,10 +22,13 @@ mod verification;
 
 use execution::{execute_case, CaseExecutionInput};
 use http_fixture::HttpFixtureReceipt;
+use memory_receipts::{
+    validate_memory_effect_suite, MemoryEffectCaseContract, MemoryEvaluationReceipt,
+};
 use receipts::{ModelReceipt, ResolvedBudgetReceipt, StrategyReceipt};
 use setup::{activate_evaluation_data_root, build_evaluation_app, SetupFailure};
 use tool_receipts::ToolAttemptReceipt;
-use treatments::{expected_treatments, raw_schema, Treatment};
+use treatments::{expected_treatments, raw_schema, Treatment, MEMORY_EFFECT_SUITE_SCHEMA};
 use verification::{case_input_sha256, PostconditionReceipt};
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +62,8 @@ struct RealworldCase {
     files: Vec<FixtureFile>,
     permission_policy: PermissionPolicy,
     verification: VerificationContract,
+    #[serde(default)]
+    memory_effect: Option<MemoryEffectCaseContract>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +85,8 @@ struct VerificationContract {
     direct_output_contains: Vec<String>,
     #[serde(default)]
     output_contains: Vec<String>,
+    #[serde(default)]
+    output_not_contains: Vec<String>,
     #[serde(default)]
     json_files: Vec<JsonFileCheck>,
     #[serde(default)]
@@ -185,6 +193,7 @@ struct RawRun {
     fixture_receipt: Option<HttpFixtureReceipt>,
     tool_receipts: Vec<ToolAttemptReceipt>,
     memory_records_after_seed: Option<usize>,
+    memory_seed_sha256: Option<String>,
     input_sha256: String,
     output_sha256: String,
     output: String,
@@ -193,6 +202,7 @@ struct RawRun {
     setup_failure: Option<SetupFailure>,
     resolved_budget: ResolvedBudgetReceipt,
     strategy_receipt: Option<StrategyReceipt>,
+    memory_evaluation_receipt: Option<MemoryEvaluationReceipt>,
     model_receipts: Vec<ModelReceipt>,
     metrics: RuntimeMetrics,
     verification: VerificationResult,
@@ -241,6 +251,7 @@ struct EventMetrics {
     tool_invalid: usize,
     resolved_budget: Option<ResolvedBudgetReceipt>,
     strategy_receipt: Option<StrategyReceipt>,
+    memory_evaluation_receipt: Option<MemoryEvaluationReceipt>,
     model_receipts: Vec<ModelReceipt>,
     evidence_errors: Vec<String>,
 }
@@ -562,16 +573,20 @@ fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
             (false, None) => {}
         }
     }
-    let required = BTreeSet::from([
-        "coding",
-        "browser",
-        "file",
-        "long_horizon",
-        "rag_memory",
-        "permission_safety",
-    ]);
-    if !required.is_subset(&categories) {
-        return Err("suite is missing a required real-world category".to_string());
+    if suite.schema == MEMORY_EFFECT_SUITE_SCHEMA {
+        validate_memory_effect_suite(suite)?;
+    } else {
+        let required = BTreeSet::from([
+            "coding",
+            "browser",
+            "file",
+            "long_horizon",
+            "rag_memory",
+            "permission_safety",
+        ]);
+        if !required.is_subset(&categories) {
+            return Err("suite is missing a required real-world category".to_string());
+        }
     }
     Ok(())
 }
@@ -790,6 +805,7 @@ fn interrupted_run(
         fixture_receipt: None,
         tool_receipts: Vec::new(),
         memory_records_after_seed: None,
+        memory_seed_sha256: None,
         input_sha256: case_input_sha256(case),
         output_sha256: sha256_hex(&[]),
         output: String::new(),
@@ -798,6 +814,7 @@ fn interrupted_run(
         setup_failure: None,
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
+        memory_evaluation_receipt: None,
         model_receipts: Vec::new(),
         metrics: RuntimeMetrics::default(),
         verification: VerificationResult {
@@ -830,6 +847,7 @@ fn failed_run(
         fixture_receipt: None,
         tool_receipts: Vec::new(),
         memory_records_after_seed: None,
+        memory_seed_sha256: None,
         input_sha256: details.input_sha256,
         output_sha256: sha256_hex(&[]),
         output: String::new(),
@@ -838,6 +856,7 @@ fn failed_run(
         setup_failure: Some(details.setup_failure),
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
+        memory_evaluation_receipt: None,
         model_receipts: Vec::new(),
         metrics: RuntimeMetrics {
             latency_ms: elapsed_ms(details.started),
