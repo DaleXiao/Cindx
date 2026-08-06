@@ -81,7 +81,7 @@ stored as a second trajectory blob.
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `agent-core` | Shared ids, logical-run/physical-attempt lineage, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
-| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, bounded cognitive projection and adaptive cursor, task-contract Goal Delta and denial/replan policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
+| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, bounded cognitive projection and adaptive cursor, task-contract Goal Delta and denial/replan policy, run control, budgets, authoritative context compilation, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, typed experience/utility receipts, and lexical/semantic recall | Workspace file indexing or product event joins |
@@ -393,6 +393,29 @@ verified current-turn requirements suppress conflicting historical
 requirements. Completed self-contained direct text-only runs still refresh
 deterministic memory state but do not spend a second model call on semantic
 curation.
+
+The existing `agent-runtime::context_governor` is also the request Context
+Compiler; there is no second transcript or fact store. Its
+`context_compiler` child owns only optional-source relevance ranking and the
+bounded no-text receipt. The governor retains token allocation, current-request
+preservation, protected-source admission, tool-round integrity, projection,
+and repair. For normal Actor and Finalizer requests the compiler ranks optional
+sources against `PreparedTaskState.effective_objective`, which accumulates the
+initial request and accepted steers, under the fixed
+`authoritative-effective-objective-v1` policy. The current request itself is
+still selected and fitted by the governor's existing hard rule rather than by
+the relevance ranker.
+
+The `cindx.context-compiler-receipt.v1` projection contains only objective and
+policy fingerprints, source counts and token ledgers, hard-invariant results,
+and bounded operation counts. It is limited to 4 KiB and carries no raw
+objective, message content, context-source content, tool input, or tool output.
+These operation counts make
+mechanism and scaling regressions attributable without introducing a
+cross-machine latency threshold. Prompt-genome `PromptContextPolicy` remains a
+workflow-harness input; it does not modify this Actor request policy and cannot
+be treated as Context Compiler learning evidence without a separate matched
+causal evaluation.
 
 ## Prompt Evolution Relationship
 

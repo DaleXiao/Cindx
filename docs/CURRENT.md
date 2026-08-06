@@ -156,6 +156,19 @@ intent, not raw objectives or target anchors. Permission and restart recovery
 rebuild runtime-only anchors from the effective objective and reject mismatched
 lineage instead of silently applying state to another task.
 
+Before Actor and Finalizer dispatch, the existing context governor compiles the
+bounded request under the fixed `authoritative-effective-objective-v1` policy.
+Only optional context relevance uses `PreparedTaskState.effective_objective`, so
+a short accepted steer such as "continue" cannot erase the initial objective
+when workspace, skill, or knowledge context is ranked. The current user request,
+protected trust and grounding sources, complete tool rounds, token budget,
+permissions, and grounding authority keep their existing hard contracts;
+under-budget request messages remain unchanged. Each projection exposes a
+bounded `cindx.context-compiler-receipt.v1` receipt with fingerprints, source
+counts, token ledgers, invariant results, and operation counts but no objective
+or source text. The receipt is capped at 4 KiB, and the scaling gate uses
+operation counts rather than wall-clock thresholds.
+
 Every Actor and Finalizer request receives at most one protected, transient
 `cindx.agent.cognitive-state.v1` overlay. `agent-runtime` derives it from the
 prepared task identity and authoritative task-contract outcome ledger. The
@@ -521,8 +534,9 @@ Therefore the current claim is:
 - The current source now has a deterministic, observable Auto
   value-of-computation admission mechanism and bounded single-conductor
   no-progress handling, plus typed denial and bounded same-epoch replan
-  contracts. V5 measured adaptive-direct but did not exercise workflow or
-  isolate those controls' causal contribution.
+  contracts. It also has an authoritative-objective Context Compiler contract,
+  but V5 did not isolate any of these controls' causal contribution or measure
+  the compiler's effect on provider-backed answer quality.
 - Pro's completion signal is descriptive rather than causal; browser terminal
   completion remains the clearest measured weakness.
 - No current provider-backed result identifies an evolved profile or proves a

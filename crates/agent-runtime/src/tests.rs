@@ -213,13 +213,15 @@ fn context_token_ledger_matches_fresh_governor_and_scales_with_changed_suffix() 
 
     let assert_parity = |state: &mut AgentLoopState, context_window_tokens| {
         let system_prompt = agent_system_prompt_with_context(&tools, None, None);
-        let expected = context_governor::govern_model_messages_with_overlays(
+        let expected = context_governor::govern_model_messages_with_overlays_for_objective(
             &state.messages,
             system_prompt,
             &overlays,
             &tools,
             context_window_tokens,
             1_024,
+            state.prepared_task_state().effective_objective(),
+            state.prepared_task_state().objective_fingerprint(),
         );
         let actual = model_request_for_turn_with_context_budget_and_overlays(
             state,
@@ -380,6 +382,177 @@ fn cached_context_governor_matches_fresh_repair_projection() {
 
     assert_eq!(actual.0.messages, expected.0);
     assert_eq!(actual.1, expected.1);
+}
+
+#[test]
+fn context_compiler_contract_gate() {
+    let tools = vec![tool("file.read", "path=<workspace-relative-path>")];
+    let optional_context = |stage: &str, content: String| Message {
+        role: MessageRole::System,
+        content,
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("collaboration_stage".to_string(), stage.to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let mut tool_call = Message {
+        role: MessageRole::Assistant,
+        content: "Inspect the current evidence".to_string(),
+        metadata: Metadata::new(),
+    };
+    tool_call.metadata.insert(
+        "raw_tool_calls_json".to_string(),
+        r#"[{"id":"context-call-1","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"README.md\"}"}}]"#.to_string(),
+    );
+    let history = vec![
+        optional_context(
+            "relevant",
+            format!(
+                "LOGIN_RELEVANT_SENTINEL 登录按钮修复 {}",
+                "relevant detail ".repeat(4_000)
+            ),
+        ),
+        optional_context(
+            "distractor-old",
+            format!(
+                "EXPORT_DISTRACTOR_SENTINEL 导出报表 {}",
+                "unrelated detail ".repeat(4_000)
+            ),
+        ),
+        optional_context(
+            "distractor-new",
+            format!(
+                "THEME_DISTRACTOR_SENTINEL 夜间主题 {}",
+                "unrelated detail ".repeat(4_000)
+            ),
+        ),
+        Message {
+            role: MessageRole::System,
+            content: "ARTIFACT_PROTECTED_SENTINEL current artifact".to_string(),
+            metadata: [("kind".to_string(), "artifact_manifest".to_string())]
+                .into_iter()
+                .collect(),
+        },
+        Message {
+            role: MessageRole::User,
+            content: "Original request".to_string(),
+            metadata: Metadata::new(),
+        },
+        tool_call,
+        Message {
+            role: MessageRole::Tool,
+            content: "verified evidence".to_string(),
+            metadata: [("tool_call_id".to_string(), "context-call-1".to_string())]
+                .into_iter()
+                .collect(),
+        },
+    ];
+    let mut state = resume_agent_loop_from_messages(
+        TaskId("context-compiler-contract".to_string()),
+        "Original request",
+        history,
+        AgentRuntimeConfig::default(),
+    );
+    append_steering_instruction(&mut state, "继续", Metadata::new());
+    let raw_objective = "RAW_EFFECTIVE_OBJECTIVE_SENTINEL 修复登录按钮";
+    let run_context = [
+        (
+            "effective_prompt_objective".to_string(),
+            raw_objective.to_string(),
+        ),
+        ("steer_epoch".to_string(), "1".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    state.replace_prepared_task_state(PreparedTaskState::from_run_context(
+        &run_context,
+        "继续",
+        prompt_completion_intent(&run_context),
+    ));
+    let objective_fingerprint = task_state_lineage::text_fingerprint(raw_objective);
+
+    let system_message = Message {
+        role: MessageRole::System,
+        content: agent_system_prompt_with_context(&tools, None, None),
+        metadata: Metadata::new(),
+    };
+    let mut expected_under_budget = vec![system_message];
+    expected_under_budget.extend(state.messages.clone());
+    let (under_budget, under_budget_report) =
+        model_request_for_turn_with_context_budget(&mut state, &tools, None, None, 128_000, 4_096);
+    assert_eq!(
+        under_budget.messages, expected_under_budget,
+        "every under-budget role, content byte, and metadata value must remain identical"
+    );
+    assert!(!under_budget_report.context_compiler.relevance_applied);
+    assert_eq!(
+        under_budget_report.context_compiler.objective_fingerprint,
+        objective_fingerprint
+    );
+    assert_eq!(
+        under_budget_report
+            .context_compiler
+            .operation_counts
+            .messages_scanned,
+        0
+    );
+
+    let (tight_request, tight_report) =
+        model_request_for_turn_with_context_budget(&mut state, &tools, None, None, 8_192, 1_024);
+    assert!(tight_report.applied);
+    assert!(tight_report.context_compiler.relevance_applied);
+    assert_eq!(
+        tight_report.context_compiler.objective_fingerprint,
+        objective_fingerprint
+    );
+    assert!(tight_request
+        .messages
+        .iter()
+        .any(|message| message.content.contains("LOGIN_RELEVANT_SENTINEL")));
+    assert!(tight_request
+        .messages
+        .iter()
+        .any(|message| message.content.contains("ARTIFACT_PROTECTED_SENTINEL")));
+    assert!(tight_request.messages.iter().any(|message| {
+        message.role == MessageRole::User && message.content.starts_with("继续")
+    }));
+    assert!(tight_report.current_request_preserved);
+    assert!(tight_report.protected_sources_satisfied);
+    assert!(tight_report.tool_round_integrity_satisfied);
+    assert!(tight_report.hard_limit_satisfied);
+
+    let receipt_json = tight_report
+        .context_compiler
+        .to_bounded_json()
+        .expect("compiler receipt is canonical and bounded");
+    assert!(tight_report.context_compiler.digest_valid());
+    assert!(receipt_json.len() <= MAX_CONTEXT_COMPILER_RECEIPT_BYTES);
+    assert!(!receipt_json.contains(raw_objective));
+    assert!(!receipt_json.contains("LOGIN_RELEVANT_SENTINEL"));
+    assert_eq!(
+        tight_request.metadata["context_compiler_schema"],
+        CONTEXT_COMPILER_RECEIPT_SCHEMA
+    );
+    assert_eq!(
+        tight_request.metadata["context_compiler_policy"],
+        CONTEXT_COMPILER_POLICY
+    );
+    assert_eq!(
+        tight_request.metadata["context_compiler_receipt_digest"],
+        tight_report.context_compiler.canonical_digest
+    );
+    assert_eq!(
+        tight_request.metadata["context_compiler_receipt_json"],
+        receipt_json
+    );
+
+    println!(
+        "{{\"schema\":\"cindx.context-compiler-contract.v1\",\"policy\":\"{}\",\"receipt_bytes\":{},\"raw_text_exposed\":false,\"under_budget_byte_identical\":true}}",
+        CONTEXT_COMPILER_POLICY,
+        receipt_json.len()
+    );
 }
 
 #[test]

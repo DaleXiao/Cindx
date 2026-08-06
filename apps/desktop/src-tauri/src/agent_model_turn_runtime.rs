@@ -17,6 +17,13 @@ fn prepared_streaming_request_once<'a>(
         .expect("prepared request slot must be set"))
 }
 
+fn insert_context_compiler_event_metadata(
+    metadata: &mut Metadata,
+    context_governor: &ContextGovernorReport,
+) {
+    context_governor.insert_metadata(metadata);
+}
+
 pub(crate) struct AgentModelTurnResponse {
     pub response: ModelResponse,
     pub request_id: String,
@@ -268,6 +275,7 @@ pub(crate) fn execute_agent_model_turn(
             metadata.insert("role".to_string(), turn_role.label().to_string());
             metadata.insert("policy".to_string(), collaboration.policy.clone());
         }
+        insert_context_compiler_event_metadata(&mut metadata, context_governor);
         append_event(
             &mut store,
             &runtime.task_id,
@@ -756,6 +764,60 @@ pub(crate) fn execute_agent_model_turn(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn model_request_started_metadata_persists_bounded_context_compiler_receipt() {
+        const RAW_SENTINEL: &str = "raw-context-sentinel-must-not-be-persisted";
+
+        let mut runtime = start_agent_loop(
+            TaskId("context-compiler-event-test".to_string()),
+            format!("Inspect {RAW_SENTINEL} and report the result"),
+            AgentRuntimeConfig { max_turns: 1 },
+        );
+        let (_request, report) =
+            model_request_for_turn_with_context_budget(&mut runtime, &[], None, None, 4_096, 512);
+        let mut metadata = Metadata::new();
+        insert_context_compiler_event_metadata(&mut metadata, &report);
+
+        assert_eq!(
+            metadata.get("context_compiler_schema").map(String::as_str),
+            Some(agent_runtime::CONTEXT_COMPILER_RECEIPT_SCHEMA)
+        );
+        assert_eq!(
+            metadata.get("context_compiler_policy").map(String::as_str),
+            Some(agent_runtime::CONTEXT_COMPILER_POLICY)
+        );
+        let receipt_json = metadata
+            .get("context_compiler_receipt_json")
+            .expect("context compiler receipt must be persisted");
+        assert!(receipt_json.len() <= agent_runtime::MAX_CONTEXT_COMPILER_RECEIPT_BYTES);
+        assert!(!receipt_json.contains(RAW_SENTINEL));
+        let receipt: serde_json::Value =
+            serde_json::from_str(receipt_json).expect("receipt must be valid JSON");
+        assert_eq!(
+            receipt.get("schema").and_then(serde_json::Value::as_str),
+            Some(agent_runtime::CONTEXT_COMPILER_RECEIPT_SCHEMA)
+        );
+        assert_eq!(
+            receipt.get("policy").and_then(serde_json::Value::as_str),
+            Some(agent_runtime::CONTEXT_COMPILER_POLICY)
+        );
+
+        let digest = metadata
+            .get("context_compiler_receipt_digest")
+            .expect("context compiler receipt digest must be persisted");
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+
+        let mut repeated = Metadata::new();
+        insert_context_compiler_event_metadata(&mut repeated, &report);
+        assert_eq!(
+            repeated.get("context_compiler_receipt_digest"),
+            Some(digest)
+        );
+    }
 
     struct CountingPreparedProvider {
         prepares: AtomicUsize,

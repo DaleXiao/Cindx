@@ -8,18 +8,21 @@ does not claim Fugu Ultra equivalence.
 
 - `quick`: documentation, version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, the typed collaboration execution
-  contract, the Causal Router v2 contract and scaling bound, Evaluation v2 foundation, the
+  contract, the Causal Router v2 contract and scaling bound, the authoritative
+  Context Compiler contract and operation-count bound, Evaluation v2
+  foundation, the
   120-case arena schema/evidence-ingestion contract, the Agent Real-World V5
   measurement contract, the 18-cell memory-effect evidence contract, the exact
   managed-process session contract, memory attribution, and frontend state
   behavior.
 - `control-plane`: documentation and deterministic agent contracts, including
   typed collaboration execution, the Agent Real-World V5 measurement, and
-  memory-effect and managed-process session contracts,
+  memory-effect, authoritative Context Compiler, and managed-process session
+  contracts,
   plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
-  graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
-  diagnostics.
+  authoritative Context Compiler operation counts, graph/request reuse, frontend
+  streaming, conductor health, and 20k-chunk RAG diagnostics.
 - `paired-performance`: the stable Session, context, and RAG P95 diagnostics. CI
   applies one current manifest to base and head sequentially on the same runner
   before applying the versioned policy. Sub-microsecond conductor routing remains a
@@ -28,7 +31,8 @@ does not claim Fugu Ultra equivalence.
   runtime snapshots, prompt-learning outbox delta projection, shared graph
   parsing, prepared image/request reuse, retry reuse, and linear frontend
   streaming Markdown work, plus the bounded Agent cognitive-loop projection and
-  adaptive cursor and the Causal Router v2 two-action/indexed-evidence receipt.
+  adaptive cursor, the Causal Router v2 two-action/indexed-evidence receipt, and
+  the Context Compiler's candidate-proportional operation bound.
   It uses operation counts and identity invariants and never cross-machine wall-clock thresholds.
 - `full`: all shipping deterministic gates, including the Agent Real-World V5
   measurement and managed-process session contracts, sidecars, frontend
@@ -138,6 +142,17 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   lookup, scans no history rows after index construction, evaluates at most two
   actions, and keeps its receipt within 4 KiB. These are routing-control
   contracts, not provider-backed quality or intelligence evidence.
+- The exact `context-compiler-contract` gate requires one
+  `cindx.context-compiler-contract.v1` marker. It proves that optional context is
+  ranked against the prepared effective objective while the current request,
+  protected sources, and complete tool rounds retain hard-invariant authority;
+  its `cindx.context-compiler-receipt.v1` projection contains no raw source or
+  objective text and stays within 4 KiB. The exact
+  `context-compiler-scaling` gate requires one
+  `cindx.context-compiler-scaling.v1` marker and bounds candidate scans, term
+  indexing, and membership checks using deterministic operation counts rather
+  than wall-clock duration. These are request-compilation control and resource
+  contracts, not provider-backed answer-quality, GEPA, or intelligence evidence.
 - Exact workspace file-plane tests cover stale, ambiguous, racing, locked, and
   failed-publication patches; permission and receipt preservation; degraded
   output-history capture; read hashes and batch partial/offset behavior;

@@ -38,6 +38,8 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "context-compiler-contract",
+      "context-compiler-scaling",
       "causal-router-v2-scaling",
       "agent-collaboration-contract",
       "agent-goal-progress-contract",
@@ -61,6 +63,8 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "context-compiler-contract",
+      "context-compiler-scaling",
       "causal-router-v2-scaling",
       "agent-collaboration-contract",
       "agent-goal-progress-contract",
@@ -75,6 +79,7 @@
     "performance": [
       "performance-comparator-contract",
       "agent-cognitive-loop-scaling",
+      "context-compiler-scaling",
       "causal-router-v2-scaling",
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
@@ -94,6 +99,7 @@
     ],
     "shipping-performance": [
       "agent-cognitive-loop-scaling",
+      "context-compiler-scaling",
       "causal-router-v2-scaling",
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
@@ -123,6 +129,8 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "context-compiler-contract",
+      "context-compiler-scaling",
       "causal-router-v2-scaling",
       "agent-collaboration-contract",
       "agent-goal-progress-contract",
@@ -389,6 +397,44 @@
       "required_output": [
         "test result: ok. 1 passed; 0 failed",
         "cindx.agent-cognitive-loop-scaling.v1"
+      ]
+    },
+    {
+      "id": "context-compiler-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-runtime",
+        "tests::context_compiler_contract_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.context-compiler-contract.v1"
+      ]
+    },
+    {
+      "id": "context-compiler-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-runtime",
+        "context_compiler::tests::operation_counts_scale_with_candidates_not_wall_clock",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.context-compiler-scaling.v1"
       ]
     },
     {
