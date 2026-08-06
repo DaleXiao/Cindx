@@ -308,10 +308,10 @@ claim of provider-backed intelligence or strict constant memory.
 
 The latest provider-backed raw schema binds the actual strategy/profile identity
 and provider response receipts for runs that reach evidence collection. No
-frozen learned artifact was supplied to the current matrix, so it remains
-`FRESH-SEED-ONLY` and cannot attribute an outcome to GEPA, transfer, or
-self-distillation. Deterministic tests prove the transfer boundary, evidence
-isolation, promotion gates, snapshot lineage, canonical event projection,
+frozen learned artifact was supplied to the current matrix, so learned-profile
+and distillation are `NOT_EXERCISED` and no outcome can be attributed to GEPA,
+transfer, or self-distillation. Deterministic tests prove the transfer boundary,
+evidence isolation, promotion gates, snapshot lineage, canonical event projection,
 project-isolated scheduling, mutation anti-memorization boundary, paired
 high-information reflection selection, and absolute holdout non-regression
 gates, but there is still no provider-backed matched evidence that an identified
@@ -335,41 +335,36 @@ claim machinery only; they do not establish intelligence uplift.
 
 V5 preserves V4's six frozen cases, three repeats, isolated browser fixture,
 typed current-logical-run tool receipts, exact target and artifact binding, and
-visible permission-denial requirement. The completed V4 `0.2.9` matrix remains
-historical evidence for its exact revision: it is a `VALID_BASELINE`, but two
-Fast continuation receipts fail closed and broad orchestration uplift remains
-`NO-GO`.
+visible permission-denial requirement. The completed V5 `0.2.11` matrix is the
+current provider-backed baseline. V4 `0.2.9` remains historical evidence for
+its exact revision.
 
 ## Current Evidence Boundary
 
 The latest provider-backed Agent baseline is
-[Cindx Agent Real-World V4 0.2.9](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md),
-captured on source commit `7905405551f3decd38746c45218790cb9a04be37`.
-It retained all 72 position-balanced cells across Direct, Fast, Auto, and Pro,
-with zero setup failures and zero safety violations. The publication contract
-marks it `VALID_BASELINE`; the independent broad orchestration-uplift decision
-is `NO-GO`.
+[Cindx Agent Real-World V5 0.2.11](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md),
+captured on source commit `3765d23042dcafaeb721accc0460f149e1ea5ade`.
+It retained all 72 position-balanced cells across Oracle Reference, Grounded
+Direct, Auto, and Pro, with complete provider and strategy evidence, zero setup
+failures, zero timeouts, and zero safety violations. The publication contract
+marks it `VALID_BASELINE`.
 
-Agent Real-World V5 is the current source protocol but has not yet replaced this
-provider-backed baseline. Until a complete V5 matrix is retained, its new
-mechanism classifications are a deterministic evaluation contract only.
-
-- Direct, Fast, Auto, and Pro scored `100.0%`, `83.3%`, `100.0%`, and `100.0%`
-  quality, with `100.0%`, `77.8%`, `83.3%`, and `94.4%` completion.
-- Relative to Fast, Auto and Pro each gained three quality-pass runs and
-  completed one and three additional runs, respectively. Their median-latency
-  ratios were `2.03` and `1.94`, while total-token ratios were `0.90` and
-  `0.80`; all were within their preregistered limits.
-- Fast failed the RAG/memory answer check in all three repeats; Auto and Pro
-  passed all three after successful setup.
-- Browser quality passed in every treatment, but terminal completion remained
-  weak: Fast completed `0/3`, Auto `1/3`, and Pro `2/3`.
+- All four treatments scored `100.0%` quality. Completion was `100.0%`,
+  `83.3%`, `83.3%`, and `88.9%`, respectively.
+- Against iso-budget Grounded Direct, Auto had zero quality and completion
+  delta, `5,989 ms` lower median latency, and `1.8%` more total tokens. Because
+  no matched pair improved quality, adaptive-direct is `NEUTRAL`.
+- No Auto run exercised workflow collaboration, so workflow is
+  `NOT_EXERCISED`; it is not silently merged into the adaptive-direct result.
+- Pro completed one more matched run and had `4,722 ms` lower median latency
+  than Grounded Direct, but is descriptive because its native budget differs.
+- Six Grounded Direct and Auto browser runs failed terminal completion
+  symmetrically. Pro retained one browser failure and one long-horizon failure;
+  all eight failures remain in the denominator.
 - All product treatments completed all denied-mutation runs with the required
   visible permission-denied explanation.
-- In one failed Fast long-horizon run and one completed Fast RAG run, the
-  collector classified continuation tool events as outside the current logical
-  Agent run. Those evidence errors make the shared receipt gate fail closed;
-  neither cell was rerun.
+- No frozen learned profile was executed, so learned-profile and Pro-to-Auto
+  distillation are `NOT_EXERCISED`.
 
 The `0.1.98` V2 baseline, earlier
 [13A repair calibration](evaluations/CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md),
@@ -384,16 +379,15 @@ Therefore the current claim is:
 
 - The control plane, local memory contract, permission boundary, and
   deterministic quality gates have substantial automated coverage.
-- Auto and Pro show a real fresh-seed RAG/memory and completion signal in this
-  small matrix, but the shared receipt gate prevents a broad uplift claim.
+- Auto preserves the Grounded Direct quality and completion baseline while
+  reducing median latency, but it shows no matched quality uplift.
 - The current source now has a deterministic, observable Auto
   value-of-computation admission mechanism and bounded single-conductor
   no-progress handling, plus typed denial and bounded same-epoch replan
-  contracts. V4 measured their combined shipping path, but did not isolate
-  their causal contribution.
-- Pro is individually eligible against Fast in V4, but the matrix-wide receipt
-  failure prevents promotion; browser completion remains the clearest measured
-  weakness.
+  contracts. V5 measured adaptive-direct but did not exercise workflow or
+  isolate those controls' causal contribution.
+- Pro's completion signal is descriptive rather than causal; browser terminal
+  completion remains the clearest measured weakness.
 - No current provider-backed result identifies an evolved profile or proves a
   GEPA, transfer, or self-distillation gain.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
