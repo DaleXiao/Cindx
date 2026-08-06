@@ -5,6 +5,7 @@ use agent_core::{
 
 use crate::meta_invoke::ToolInvokeMeta;
 use crate::parse_input;
+use crate::tool_contract_v2::FILE_READ_RESULT_SCHEMA;
 
 pub(crate) fn file_read(
     invocation: &ToolInvocation,
@@ -26,7 +27,7 @@ pub(crate) fn file_read(
     let path = structured.get("path")?.as_str()?;
     let returned_bytes = structured.get("returned_bytes")?.as_u64()?;
     let total_bytes = structured.get("total_bytes")?.as_u64()?;
-    if structured.get("schema")?.as_str()? != "cindx.file-read-result.v1"
+    if structured.get("schema")?.as_str()? != FILE_READ_RESULT_SCHEMA
         || path != requested_path
         || structured.get("offset_bytes")?.as_u64()? != 0
         || structured.get("truncated")?.as_bool()?

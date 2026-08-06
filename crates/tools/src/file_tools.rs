@@ -1,7 +1,9 @@
-use super::tool_contract_v2::{file_read_observation, file_read_spec};
+use super::tool_contract_v2::{file_read_observation, file_read_spec, FILE_READ_RESULT_SCHEMA};
+use super::workspace_file::{sha256_bytes, sha256_file_bounded};
 use super::{
-    builtin_tool_spec, parse_bounded_usize_input, parse_input, permission_request, required_input,
-    resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result, Tool, ToolError,
+    builtin_tool_spec, input_value_is_true, parse_bounded_usize_input, parse_input,
+    permission_request, required_input, resolve_workspace_path, resolve_workspace_read_path,
+    stable_hash, tool_result, Tool, ToolError,
 };
 use agent_core::{
     Metadata, PermissionRequest, PermissionRisk, PostconditionVerifierKind, ToolEffectSemantics,
@@ -15,6 +17,7 @@ use std::path::{Component, Path, PathBuf};
 const DEFAULT_FILE_READ_BYTES: usize = 128 * 1024;
 const MAX_FILE_READ_BYTES: usize = 256 * 1024;
 const MODEL_FILE_READ_BYTES: usize = 5 * 1024;
+const MAX_FILE_HASH_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct ReadFileTool {
     workspace_root: PathBuf,
@@ -58,6 +61,9 @@ impl Tool for ReadFileTool {
             1,
             MAX_FILE_READ_BYTES,
         )?;
+        let include_sha256 = input
+            .get("include_sha256")
+            .is_some_and(|value| input_value_is_true(value));
         let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
         let resolved = resolve_workspace_read_path(&self.workspace_root, &resolved)?;
         reject_sensitive_read_path(&self.workspace_root, &resolved)?;
@@ -92,6 +98,15 @@ impl Tool for ReadFileTool {
         let model_returned_bytes = model_end;
         let model_next_offset = offset.saturating_add(model_returned_bytes as u64);
         let model_evidence = String::from_utf8_lossy(&bytes[..model_end]).to_string();
+        let page_sha256 = sha256_bytes(&bytes);
+        let sha256 = if offset == 0 && !truncated && returned_bytes as u64 == total_bytes {
+            Some(page_sha256.clone())
+        } else if include_sha256 {
+            sha256_file_bounded(&resolved, MAX_FILE_HASH_BYTES)
+                .map_err(|error| ToolError::new(format!("failed to hash file: {error}")))?
+        } else {
+            None
+        };
         let mut output = String::from_utf8_lossy(&bytes).to_string();
         if truncated {
             if !output.ends_with('\n') {
@@ -108,15 +123,21 @@ impl Tool for ReadFileTool {
         metadata.insert("returned_bytes".to_string(), returned_bytes.to_string());
         metadata.insert("next_offset_bytes".to_string(), next_offset.to_string());
         metadata.insert("truncated".to_string(), truncated.to_string());
+        metadata.insert("page_sha256".to_string(), page_sha256.clone());
+        if let Some(sha256) = sha256.as_ref() {
+            metadata.insert("sha256".to_string(), sha256.clone());
+        }
 
         let structured_output = serde_json::json!({
-            "schema": "cindx.file-read-result.v1",
+            "schema": FILE_READ_RESULT_SCHEMA,
             "path": path,
             "offset_bytes": offset,
             "returned_bytes": returned_bytes,
             "next_offset_bytes": next_offset,
             "total_bytes": total_bytes,
             "truncated": truncated,
+            "page_sha256": page_sha256,
+            "sha256": sha256,
         });
         let mut result = tool_result(
             invocation.id,
@@ -131,6 +152,13 @@ impl Tool for ReadFileTool {
             model_returned_bytes,
             model_next_offset,
             total_bytes,
+            (
+                structured_output["page_sha256"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                structured_output["sha256"].as_str().map(str::to_string),
+            ),
             model_evidence,
         ));
         Ok(result)
@@ -164,74 +192,6 @@ fn utf8_sequence_width(first: u8) -> usize {
         0xe0..=0xef => 3,
         0xf0..=0xf4 => 4,
         _ => 1,
-    }
-}
-
-pub struct ListDirectoryTool {
-    workspace_root: PathBuf,
-}
-
-impl ListDirectoryTool {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-impl Tool for ListDirectoryTool {
-    fn spec(&self) -> ToolSpec {
-        builtin_tool_spec(
-            "file.list",
-            "List files and directories inside the workspace.",
-            ToolRisk::ReadOnly,
-            "path=<optional workspace-relative-path>",
-        )
-    }
-
-    fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        None
-    }
-
-    fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {
-        let input = parse_input(&invocation.input_json);
-        let path = input
-            .get("path")
-            .cloned()
-            .unwrap_or_else(|| ".".to_string());
-        let resolved = resolve_workspace_path(&self.workspace_root, &path)?;
-        let resolved = resolve_workspace_read_path(&self.workspace_root, &resolved)?;
-        let mut rows = Vec::new();
-        let entries = fs::read_dir(&resolved)
-            .map_err(|error| ToolError::new(format!("failed to list directory: {error}")))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|error| {
-                ToolError::new(format!("failed to read directory entry: {error}"))
-            })?;
-            let metadata = entry
-                .metadata()
-                .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
-            let kind = if metadata.is_dir() { "dir" } else { "file" };
-            rows.push(format!(
-                "{}\t{}\t{}",
-                kind,
-                metadata.len(),
-                entry.file_name().to_string_lossy()
-            ));
-        }
-        rows.sort();
-
-        let mut metadata = Metadata::new();
-        metadata.insert("path".to_string(), path);
-        metadata.insert("entries".to_string(), rows.len().to_string());
-
-        Ok(tool_result(
-            invocation.id,
-            ToolOutcomeStatus::Succeeded,
-            rows.join("\n"),
-            metadata,
-        ))
     }
 }
 

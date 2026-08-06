@@ -1,13 +1,12 @@
-use super::{bounded_model_text, model_observation, tool_result, ToolError};
+use super::{bounded_model_text, model_observation, ToolError};
 use agent_core::{
-    Metadata, ToolCallId, ToolEffectSemantics, ToolObservationV2, ToolOutcomeStatus, ToolResult,
-    ToolRisk, ToolSpec,
+    Metadata, ToolEffectSemantics, ToolObservationV2, ToolResult, ToolRisk, ToolSpec,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const MODEL_SEARCH_EVIDENCE_CHARS: usize = 5_200;
 const MODEL_SHELL_EVIDENCE_CHARS: usize = 5_200;
+pub(crate) const FILE_READ_RESULT_SCHEMA: &str = "cindx.file-read-result.v2";
 
 pub(crate) fn file_read_spec(default_bytes: usize, max_bytes: usize) -> ToolSpec {
     ToolSpec::builtin(
@@ -20,7 +19,8 @@ pub(crate) fn file_read_spec(default_bytes: usize, max_bytes: usize) -> ToolSpec
             "properties": {
                 "path": { "type": "string", "minLength": 1, "description": "Workspace-relative file path." },
                 "offset_bytes": { "type": "integer", "minimum": 0, "default": 0, "description": "UTF-8 byte offset to start reading." },
-                "max_bytes": { "type": "integer", "minimum": 1, "maximum": max_bytes, "default": default_bytes, "description": "Maximum source bytes to read." }
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": max_bytes, "default": default_bytes, "description": "Maximum source bytes to read." },
+                "include_sha256": { "type": "boolean", "default": false, "description": "When true, hash the complete file when it is no larger than 8 MiB. Complete first-page reads include this hash without an extra scan." }
             },
             "required": ["path"],
             "additionalProperties": false
@@ -31,15 +31,17 @@ pub(crate) fn file_read_spec(default_bytes: usize, max_bytes: usize) -> ToolSpec
         serde_json::json!({
             "type": "object",
             "properties": {
-                "schema": { "const": "cindx.file-read-result.v1" },
+                "schema": { "const": FILE_READ_RESULT_SCHEMA },
                 "path": { "type": "string" },
                 "offset_bytes": { "type": "integer", "minimum": 0 },
                 "returned_bytes": { "type": "integer", "minimum": 0 },
                 "next_offset_bytes": { "type": "integer", "minimum": 0 },
                 "total_bytes": { "type": "integer", "minimum": 0 },
-                "truncated": { "type": "boolean" }
+                "truncated": { "type": "boolean" },
+                "page_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
             },
-            "required": ["schema", "path", "offset_bytes", "returned_bytes", "next_offset_bytes", "total_bytes", "truncated"],
+            "required": ["schema", "path", "offset_bytes", "returned_bytes", "next_offset_bytes", "total_bytes", "truncated", "page_sha256", "sha256"],
             "additionalProperties": false
         })
         .to_string(),
@@ -52,8 +54,10 @@ pub(crate) fn file_read_observation(
     returned_bytes: usize,
     next_offset_bytes: u64,
     total_bytes: u64,
+    hashes: (String, Option<String>),
     evidence: String,
 ) -> ToolObservationV2 {
+    let (page_sha256, sha256) = hashes;
     let truncated = next_offset_bytes < total_bytes;
     let facts = [
         ("path".to_string(), path.to_string()),
@@ -67,6 +71,8 @@ pub(crate) fn file_read_observation(
         ("truncated".to_string(), truncated.to_string()),
     ]
     .into_iter()
+    .chain([("page_sha256".to_string(), page_sha256)])
+    .chain(sha256.map(|sha256| ("sha256".to_string(), sha256)))
     .collect();
     model_observation(
         "file.read",
@@ -80,163 +86,6 @@ pub(crate) fn file_read_observation(
             )
         }),
     )
-}
-
-#[derive(Default)]
-pub(crate) struct SearchCoverage {
-    pub(crate) skipped_hidden_entries: usize,
-    pub(crate) skipped_symlinks: usize,
-    pub(crate) unreadable_files: usize,
-    pub(crate) truncated_files: usize,
-}
-
-pub(crate) fn file_search_spec() -> ToolSpec {
-    ToolSpec::builtin(
-        "file.search",
-        "file",
-        "Search visible, non-symlink UTF-8 files inside the workspace for a literal query. Each file is scanned up to 8 MiB.",
-        ToolRisk::ReadOnly,
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "minLength": 1, "description": "Literal text to find." },
-                "path": { "type": "string", "default": ".", "description": "Optional workspace-relative file or directory." },
-                "max_results": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
-            },
-            "required": ["query"],
-            "additionalProperties": false
-        })
-        .to_string(),
-    )
-    .with_output_schema(
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "schema": { "const": "cindx.file-search-result.v1" },
-                "query": { "type": "string" },
-                "path": { "type": "string" },
-                "matches": { "type": "integer", "minimum": 0 },
-                "result_limit_reached": { "type": "boolean" },
-                "complete": { "type": "boolean" },
-                "skipped_hidden_entries": { "type": "integer", "minimum": 0 },
-                "skipped_symlinks": { "type": "integer", "minimum": 0 },
-                "unreadable_files": { "type": "integer", "minimum": 0 },
-                "truncated_files": { "type": "integer", "minimum": 0 }
-            },
-            "required": ["schema", "query", "path", "matches", "result_limit_reached", "complete", "skipped_hidden_entries", "skipped_symlinks", "unreadable_files", "truncated_files"],
-            "additionalProperties": false
-        })
-        .to_string(),
-    )
-}
-
-pub(crate) fn file_search_result(
-    invocation_id: ToolCallId,
-    query: String,
-    path: String,
-    results: Vec<String>,
-    max_results: usize,
-    coverage: SearchCoverage,
-    cancelled: bool,
-) -> ToolResult {
-    let result_limit_reached = results.len() >= max_results;
-    let complete = !cancelled
-        && !result_limit_reached
-        && coverage.unreadable_files == 0
-        && coverage.truncated_files == 0;
-    let output = if cancelled {
-        "File search cancelled.".to_string()
-    } else {
-        results.join("\n")
-    };
-    let (evidence, evidence_truncated) = bounded_model_text(&output, MODEL_SEARCH_EVIDENCE_CHARS);
-    let metadata = [
-        ("query".to_string(), query.clone()),
-        ("path".to_string(), path.clone()),
-        ("matches".to_string(), results.len().to_string()),
-        (
-            "result_limit_reached".to_string(),
-            result_limit_reached.to_string(),
-        ),
-        ("complete".to_string(), complete.to_string()),
-        (
-            "skipped_hidden_entries".to_string(),
-            coverage.skipped_hidden_entries.to_string(),
-        ),
-        (
-            "skipped_symlinks".to_string(),
-            coverage.skipped_symlinks.to_string(),
-        ),
-        (
-            "unreadable_files".to_string(),
-            coverage.unreadable_files.to_string(),
-        ),
-        (
-            "truncated_files".to_string(),
-            coverage.truncated_files.to_string(),
-        ),
-    ]
-    .into_iter()
-    .collect::<Metadata>();
-    let structured_output = serde_json::json!({
-        "schema": "cindx.file-search-result.v1",
-        "query": query,
-        "path": path,
-        "matches": results.len(),
-        "result_limit_reached": result_limit_reached,
-        "complete": complete,
-        "skipped_hidden_entries": coverage.skipped_hidden_entries,
-        "skipped_symlinks": coverage.skipped_symlinks,
-        "unreadable_files": coverage.unreadable_files,
-        "truncated_files": coverage.truncated_files,
-    });
-    let facts = object_string_facts(&structured_output);
-    let needs_narrower_search = result_limit_reached
-        || evidence_truncated
-        || coverage.unreadable_files > 0
-        || coverage.truncated_files > 0;
-    let next_action = if cancelled {
-        Some(
-            "Retry only if the search is still required, preferably with a narrower path or query."
-                .to_string(),
-        )
-    } else if needs_narrower_search {
-        Some(
-            "Narrow the path or literal query before searching again; this call did not expose every possible match."
-                .to_string(),
-        )
-    } else {
-        None
-    };
-    let mut result = tool_result(
-        invocation_id,
-        if cancelled {
-            ToolOutcomeStatus::Cancelled
-        } else {
-            ToolOutcomeStatus::Succeeded
-        },
-        output,
-        metadata,
-    );
-    result.structured_output_json = Some(structured_output.to_string());
-    result.model_observation = Some(model_observation(
-        "file.search",
-        if cancelled {
-            "File search was cancelled.".to_string()
-        } else if results.is_empty() {
-            "No literal matches were found in the searched scope.".to_string()
-        } else {
-            format!(
-                "Found {} literal matches in the searched scope.",
-                results.len()
-            )
-        },
-        evidence,
-        complete && !evidence_truncated,
-        facts,
-        next_action,
-    ));
-    result
 }
 
 pub(crate) fn shell_run_spec(default_timeout: u64, max_timeout: u64) -> ToolSpec {
@@ -528,9 +377,9 @@ pub(crate) fn validate_browser_extract_target(
     if input
         .get("name")
         .is_some_and(|value| !value.trim().is_empty())
-        && !input
+        && input
             .get("role")
-            .is_some_and(|value| !value.trim().is_empty())
+            .is_none_or(|value| value.trim().is_empty())
     {
         return Err(ToolError::new(
             "browser.extract_text name requires an accessible role",

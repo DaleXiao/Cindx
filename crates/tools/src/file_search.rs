@@ -1,22 +1,40 @@
-use super::tool_contract_v2::{file_search_result, file_search_spec, SearchCoverage};
-use super::{
-    file_tools::{is_sensitive_workspace_path, reject_sensitive_read_path},
-    parse_bounded_usize_input, parse_input, required_input, resolve_workspace_path,
-    resolve_workspace_read_path, Tool, ToolError, ToolExecutionControl,
-};
+mod file_search_candidate;
+mod file_search_cursor;
+mod file_search_input;
+mod file_search_scan;
+mod file_search_traversal;
+mod file_search_types;
+
+#[cfg(test)]
+mod file_search_tests;
+
+use std::fs;
+use std::path::PathBuf;
+
 use agent_core::{
     Metadata, PermissionRequest, ToolExecutionConcurrency, ToolInvocation, ToolOutcomeStatus,
     ToolResult, ToolSpec,
 };
-use std::fs;
-use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
 
-const SEARCH_FILE_SCAN_MAX_BYTES: u64 = 8 * 1024 * 1024;
-const SEARCH_MATCH_PREVIEW_CHARS: usize = 512;
-const SEARCH_CANCEL_POLL_LINES: usize = 128;
-const SEARCH_CANCEL_POLL_DIRECTORY_ENTRIES: usize = 32;
-const SEARCH_CANCEL_POLL_BYTES: usize = 64 * 1024;
+use self::file_search_cursor::{candidate_snapshot_hash, cursor_start, option_binding_hash};
+use self::file_search_input::parse_search_input;
+use self::file_search_scan::{
+    planned_read_bytes, read_candidate, search_contents, SearchScanRequest,
+};
+use self::file_search_traversal::discover_candidates;
+use self::file_search_types::SearchPosition;
+use super::file_query_contract_v3::{
+    decode_search_cursor, encode_search_cursor, file_search_result, file_search_spec,
+    SearchCoverage,
+};
+use super::{
+    file_tools::reject_sensitive_read_path, resolve_workspace_path, resolve_workspace_read_path,
+    Tool, ToolError, ToolExecutionControl,
+};
+
+const SEARCH_TOTAL_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const SEARCH_MAX_SCANNED_FILES: usize = 1_024;
+
 pub struct SearchFilesTool {
     workspace_root: PathBuf,
 }
@@ -41,36 +59,110 @@ impl SearchFilesTool {
                 Metadata::new(),
             ));
         }
-        let input = parse_input(&invocation.input_json);
-        let query = required_input(&input, "query")?;
-        let path = input
-            .get("path")
-            .cloned()
-            .unwrap_or_else(|| ".".to_string());
-        let max_results = parse_bounded_usize_input(&input, "max_results", 50, 1, 200)?;
-        let root = resolve_workspace_path(&self.workspace_root, &path)?;
+        let parsed = parse_search_input(&invocation.input_json)?;
+        let options = parsed.options;
+        let root = resolve_workspace_path(&self.workspace_root, &options.path)?;
         let root = resolve_workspace_read_path(&self.workspace_root, &root)?;
         reject_sensitive_read_path(&self.workspace_root, &root)?;
-        let mut results = Vec::new();
+        let workspace = fs::canonicalize(&self.workspace_root)
+            .map_err(|error| ToolError::new(format!("failed to resolve workspace: {error}")))?;
         let mut coverage = SearchCoverage::default();
-        search_directory(
-            &self.workspace_root,
+        let candidates = discover_candidates(
+            &workspace,
             &root,
-            &query,
-            max_results,
-            &mut results,
+            parsed.path_pattern.as_ref(),
+            options.case_sensitive,
             &mut coverage,
             should_cancel,
         )?;
+        let snapshot_hash = candidate_snapshot_hash(&candidates, &coverage);
+        let option_hash = option_binding_hash(&workspace, &options);
+        let cursor = parsed
+            .cursor
+            .as_deref()
+            .map(|encoded| decode_search_cursor(encoded, option_hash, snapshot_hash))
+            .transpose()?;
+        let (mut candidate_index, mut position) = cursor_start(&candidates, cursor.as_ref())?;
+        let mut matches = Vec::new();
+        let mut next_position = None;
+        let lookahead_limit = options.max_results.saturating_add(1);
 
+        while candidate_index < candidates.len() && !should_cancel() {
+            let candidate = &candidates[candidate_index];
+            if coverage.scanned_files >= SEARCH_MAX_SCANNED_FILES {
+                coverage.file_limit_reached = true;
+                next_position = Some((candidate.relative.clone(), position));
+                break;
+            }
+            let planned_bytes = planned_read_bytes(candidate, position, options.context_lines);
+            if coverage.scanned_bytes.saturating_add(planned_bytes) > SEARCH_TOTAL_SCAN_MAX_BYTES {
+                coverage.byte_limit_reached = true;
+                next_position = Some((candidate.relative.clone(), position));
+                break;
+            }
+            let Some(contents) =
+                read_candidate(candidate, position, options.context_lines, &mut coverage)?
+            else {
+                candidate_index += 1;
+                position = SearchPosition::default();
+                continue;
+            };
+            let remaining_results = lookahead_limit.saturating_sub(matches.len());
+            let cancelled_during_scan = search_contents(
+                candidate,
+                &contents,
+                &parsed.matcher,
+                &mut matches,
+                SearchScanRequest {
+                    position,
+                    context_lines: options.context_lines,
+                    remaining_results,
+                    should_cancel,
+                },
+            );
+            if cancelled_during_scan {
+                break;
+            }
+            if matches.len() >= lookahead_limit {
+                break;
+            }
+            candidate_index += 1;
+            position = SearchPosition::default();
+        }
+        let cancelled = should_cancel();
+        let lookahead = if matches.len() > options.max_results {
+            matches.pop()
+        } else {
+            None
+        };
+        let next_cursor = if cancelled {
+            None
+        } else if let Some(next_match) = lookahead {
+            Some(encode_search_cursor(
+                option_hash,
+                snapshot_hash,
+                &next_match.path,
+                next_match.line,
+                next_match.byte_offset,
+            ))
+        } else {
+            next_position.map(|(path, position)| {
+                encode_search_cursor(
+                    option_hash,
+                    snapshot_hash,
+                    &path,
+                    position.line,
+                    position.byte,
+                )
+            })
+        };
         Ok(file_search_result(
             invocation.id,
-            query,
-            path,
-            results,
-            max_results,
+            options,
+            matches,
             coverage,
-            should_cancel(),
+            next_cursor,
+            cancelled,
         ))
     }
 }
@@ -95,148 +187,4 @@ impl Tool for SearchFilesTool {
     ) -> Result<ToolResult, ToolError> {
         self.execute_search(invocation, &|| control.should_cancel())
     }
-}
-
-fn search_directory(
-    workspace_root: &Path,
-    directory: &Path,
-    query: &str,
-    max_results: usize,
-    results: &mut Vec<String>,
-    coverage: &mut SearchCoverage,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<(), ToolError> {
-    if results.len() >= max_results || should_cancel() {
-        return Ok(());
-    }
-
-    let metadata = fs::metadata(directory)
-        .map_err(|error| ToolError::new(format!("failed to read search path: {error}")))?;
-    if metadata.is_file() {
-        search_file(
-            workspace_root,
-            directory,
-            query,
-            max_results,
-            results,
-            coverage,
-            metadata.len(),
-            should_cancel,
-        )?;
-        return Ok(());
-    }
-
-    let entries = fs::read_dir(directory)
-        .map_err(|error| ToolError::new(format!("failed to search directory: {error}")))?;
-    for (entry_index, entry) in entries.enumerate() {
-        if results.len() >= max_results
-            || (entry_index.is_multiple_of(SEARCH_CANCEL_POLL_DIRECTORY_ENTRIES) && should_cancel())
-        {
-            break;
-        }
-        let entry = entry
-            .map_err(|error| ToolError::new(format!("failed to read directory entry: {error}")))?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        if file_name.to_string_lossy().starts_with('.') {
-            coverage.skipped_hidden_entries = coverage.skipped_hidden_entries.saturating_add(1);
-            continue;
-        }
-        let file_type = entry
-            .file_type()
-            .map_err(|error| ToolError::new(format!("failed to read file type: {error}")))?;
-        if file_type.is_symlink() {
-            coverage.skipped_symlinks = coverage.skipped_symlinks.saturating_add(1);
-            continue;
-        }
-        let metadata = entry
-            .metadata()
-            .map_err(|error| ToolError::new(format!("failed to read metadata: {error}")))?;
-        if metadata.is_dir() {
-            search_directory(
-                workspace_root,
-                &path,
-                query,
-                max_results,
-                results,
-                coverage,
-                should_cancel,
-            )?;
-        } else if metadata.is_file() {
-            search_file(
-                workspace_root,
-                &path,
-                query,
-                max_results,
-                results,
-                coverage,
-                metadata.len(),
-                should_cancel,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-fn search_file(
-    workspace_root: &Path,
-    path: &Path,
-    query: &str,
-    max_results: usize,
-    results: &mut Vec<String>,
-    coverage: &mut SearchCoverage,
-    file_size: u64,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<(), ToolError> {
-    if results.len() >= max_results || should_cancel() {
-        return Ok(());
-    }
-    if is_sensitive_workspace_path(workspace_root, path) {
-        return Ok(());
-    }
-    let Ok(file) = fs::File::open(path) else {
-        coverage.unreadable_files = coverage.unreadable_files.saturating_add(1);
-        return Ok(());
-    };
-    if file_size > SEARCH_FILE_SCAN_MAX_BYTES {
-        coverage.truncated_files = coverage.truncated_files.saturating_add(1);
-    }
-    let relative = path.strip_prefix(workspace_root).unwrap_or(path);
-    let mut reader = BufReader::new(file.take(SEARCH_FILE_SCAN_MAX_BYTES));
-    let mut line = String::new();
-    let mut index = 0usize;
-    let mut bytes_since_cancel_poll = 0usize;
-    loop {
-        let poll_cancellation = index.is_multiple_of(SEARCH_CANCEL_POLL_LINES)
-            || bytes_since_cancel_poll >= SEARCH_CANCEL_POLL_BYTES;
-        if results.len() >= max_results || (poll_cancellation && should_cancel()) {
-            break;
-        }
-        if poll_cancellation {
-            bytes_since_cancel_poll = 0;
-        }
-        line.clear();
-        let read = match reader.read_line(&mut line) {
-            Ok(read) => read,
-            Err(_) => {
-                coverage.unreadable_files = coverage.unreadable_files.saturating_add(1);
-                break;
-            }
-        };
-        if read == 0 {
-            break;
-        }
-        bytes_since_cancel_poll = bytes_since_cancel_poll.saturating_add(read);
-        index += 1;
-        if line.contains(query) {
-            let preview: String = line
-                .trim()
-                .chars()
-                .take(SEARCH_MATCH_PREVIEW_CHARS)
-                .collect();
-            results.push(format!("{}:{}:{}", relative.display(), index, preview));
-        }
-    }
-    Ok(())
 }

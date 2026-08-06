@@ -15,6 +15,9 @@ use agent_core::{
 mod browser_session_retirement;
 mod desktop_control;
 mod file_batch;
+mod file_list;
+mod file_patch;
+mod file_query_contract_v3;
 mod file_search;
 mod file_tools;
 mod image_generation;
@@ -29,6 +32,7 @@ mod stream_capture;
 mod tool_contract_v2;
 mod tool_support;
 mod web_search;
+mod workspace_file;
 
 pub use browser_session_retirement::retire_browser_session;
 #[cfg(test)]
@@ -38,8 +42,10 @@ use desktop_control::{
 };
 pub use desktop_control::{BrowserTool, ComputerTool};
 pub use file_batch::ReadFilesTool;
+pub use file_list::ListDirectoryTool;
+pub use file_patch::PatchFileTool;
 pub use file_search::SearchFilesTool;
-pub use file_tools::{ListDirectoryTool, ReadFileTool, WriteFileTool};
+pub use file_tools::{ReadFileTool, WriteFileTool};
 pub use image_generation::ImageGenerationTool;
 pub use private_file::write_private_file_atomically;
 pub use shell::ShellRunTool;
@@ -242,6 +248,7 @@ impl ToolRegistry {
         registry.register(Box::new(ReadFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(ListDirectoryTool::new(workspace_root.clone())));
         registry.register(Box::new(SearchFilesTool::new(workspace_root.clone())));
+        registry.register(Box::new(PatchFileTool::new(workspace_root.clone())));
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(ShellRunTool::new(workspace_root.clone())));
         registry.register(Box::new(WebSearchTool::new(web_search_config)));
@@ -696,6 +703,7 @@ mod tests {
         let specs = registry.specs();
 
         assert!(specs.iter().any(|spec| spec.name == "file.read"));
+        assert!(specs.iter().any(|spec| spec.name == "file.patch"));
         assert!(specs.iter().any(|spec| spec.name == "file.write"));
         assert!(specs.iter().any(|spec| spec.name == "shell.run"));
         assert!(specs.iter().any(|spec| spec.name == "web.search"));
@@ -762,6 +770,7 @@ mod tests {
         }
         for name in [
             "file.list",
+            "file.patch",
             "file.write",
             "shell.run",
             "web.search",
@@ -1240,7 +1249,7 @@ mod tests {
 
         assert_eq!(
             output["outputSchema"]["properties"]["schema"]["const"],
-            "cindx.file-read-result.v1"
+            "cindx.file-read-result.v2"
         );
     }
 
@@ -1339,6 +1348,66 @@ mod tests {
             second.metadata.get("next_offset_bytes").map(String::as_str),
             Some("6")
         );
+    }
+
+    #[test]
+    fn file_read_exposes_a_complete_base_hash_without_changing_raw_output() {
+        let root = temp_workspace();
+        fs::write(root.join("base.txt"), "complete base").expect("hash fixture should be written");
+        let result = ReadFileTool::new(root)
+            .execute(invocation(
+                "file.read",
+                encode_input(&[("path", "base.txt")]),
+            ))
+            .expect("complete read should succeed");
+        let structured: serde_json::Value = serde_json::from_str(
+            result
+                .structured_output_json
+                .as_deref()
+                .expect("file.read should expose structured output"),
+        )
+        .expect("file.read output should be valid JSON");
+        let expected = workspace_file::sha256_bytes(b"complete base");
+
+        assert_eq!(result.output, "complete base");
+        assert_eq!(structured["page_sha256"], expected);
+        assert_eq!(structured["sha256"], expected);
+        assert_eq!(result.metadata.get("sha256"), Some(&expected));
+    }
+
+    #[test]
+    fn file_read_hashes_the_whole_bounded_file_only_when_requested() {
+        let root = temp_workspace();
+        fs::write(root.join("base.txt"), "complete base").expect("hash fixture should be written");
+        let reader = ReadFileTool::new(root);
+        let default_page = reader
+            .execute(invocation(
+                "file.read",
+                encode_input(&[("path", "base.txt"), ("max_bytes", "4")]),
+            ))
+            .expect("default partial read should succeed");
+        let requested_page = reader
+            .execute(invocation(
+                "file.read",
+                encode_input(&[
+                    ("path", "base.txt"),
+                    ("max_bytes", "4"),
+                    ("include_sha256", "true"),
+                ]),
+            ))
+            .expect("hashed partial read should succeed");
+        let default_structured: serde_json::Value =
+            serde_json::from_str(default_page.structured_output_json.as_deref().unwrap()).unwrap();
+        let requested_structured: serde_json::Value =
+            serde_json::from_str(requested_page.structured_output_json.as_deref().unwrap())
+                .unwrap();
+
+        assert!(default_structured["sha256"].is_null());
+        assert_eq!(
+            requested_structured["sha256"],
+            workspace_file::sha256_bytes(b"complete base")
+        );
+        assert_eq!(default_page.output, requested_page.output);
     }
 
     #[test]

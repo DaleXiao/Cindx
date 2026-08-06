@@ -4,8 +4,8 @@ use agent_core::{
 };
 use agent_runtime::{
     decode_persisted_tool_artifacts, decode_persisted_tool_model_observation,
-    recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,
-    tool_execution_scope_matches, ToolEffectRecoveryPolicy, TOOL_EFFECT_VERIFIER_METADATA_KEY,
+    recovery_source_scope_matches, tool_effect_recovery_policy, tool_execution_scope_matches,
+    ToolEffectRecoveryPolicy, TOOL_EFFECT_VERIFIER_METADATA_KEY,
 };
 pub(super) use agent_runtime::{
     finalize_tool_result, tool_input_fingerprint, tool_invocation_context,
@@ -14,8 +14,10 @@ pub(super) use agent_runtime::{
 use agent_storage::{SqliteStore, StorageError};
 use std::{
     fs,
+    io::Read,
     path::{Component, Path},
 };
+use sha2::{Digest, Sha256};
 use tools::ToolError;
 
 pub(super) fn failed_tool_result(invocation_id: ToolCallId, error: ToolError) -> ToolResult {
@@ -38,22 +40,23 @@ pub(super) fn completed_tool_result(
         return Ok(Some(result));
     }
 
-    if tool_call_started_without_terminal_result(&events, invocation) {
-        return Ok(match tool_effect_recovery_policy(invocation) {
+    if let Some(started) = interrupted_tool_call_started_event(&events, invocation) {
+        let recovery_invocation = invocation_with_recorded_effect_contract(invocation, started);
+        return Ok(match tool_effect_recovery_policy(&recovery_invocation) {
             ToolEffectRecoveryPolicy::SafeToRetry => None,
             ToolEffectRecoveryPolicy::VerifyBeforeRetry
-                if deterministic_effect_is_still_applied(invocation, workspace_root) =>
+                if deterministic_effect_is_still_applied(&recovery_invocation, workspace_root) =>
             {
-                Some(verified_interrupted_effect_result(invocation))
+                Some(verified_interrupted_effect_result(&recovery_invocation))
             }
             ToolEffectRecoveryPolicy::VerifyBeforeRetry
             | ToolEffectRecoveryPolicy::NeverRetryUnknown => {
-                Some(unknown_interrupted_effect_result(invocation))
+                Some(unknown_interrupted_effect_result(&recovery_invocation))
             }
         });
     }
 
-    if !supports_recovery_effect_replay(invocation) {
+    if !has_recovery_effect_replay_lineage(invocation) {
         return Ok(None);
     }
     let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
@@ -126,6 +129,7 @@ fn completed_recovery_effect_from_events(
 ) -> Option<ToolResult> {
     let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
     events.iter().rev().find_map(|event| {
+        let recorded_invocation = invocation_with_recorded_effect_contract(invocation, event);
         if event.kind != EventKind::ToolCallFinished
             || event.metadata.get("tool").map(String::as_str) != Some(invocation.tool_name.as_str())
             || event
@@ -134,7 +138,9 @@ fn completed_recovery_effect_from_events(
                 .map(String::as_str)
                 != Some(fingerprint.as_str())
             || !recovery_source_scope_matches(&event.metadata, invocation)
-            || !deterministic_effect_is_still_applied(invocation, workspace_root)
+            || tool_effect_recovery_policy(&recorded_invocation)
+                != ToolEffectRecoveryPolicy::VerifyBeforeRetry
+            || !deterministic_effect_is_still_applied(&recorded_invocation, workspace_root)
         {
             return None;
         }
@@ -145,6 +151,17 @@ fn completed_recovery_effect_from_events(
             .insert("effect_ledger_replay".to_string(), "true".to_string());
         Some(result)
     })
+}
+
+fn has_recovery_effect_replay_lineage(invocation: &ToolInvocation) -> bool {
+    invocation
+        .metadata
+        .get("source_agent_run_id")
+        .is_some_and(|value| !value.trim().is_empty())
+        && invocation
+            .metadata
+            .get("recovery_resume_key")
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn deterministic_effect_is_still_applied(
@@ -160,8 +177,54 @@ fn deterministic_effect_is_still_applied(
         Some("workspace_file_content_v1") => {
             workspace_file_content_matches(invocation, workspace_root)
         }
+        Some(verifier) => verifier
+            .strip_prefix("workspace_file_sha256_v1:")
+            .is_some_and(|expected| {
+                workspace_file_sha256_matches(invocation, workspace_root, expected)
+            }),
         _ => false,
     }
+}
+
+fn workspace_file_sha256_matches(
+    invocation: &ToolInvocation,
+    workspace_root: &Path,
+    expected_sha256: &str,
+) -> bool {
+    if expected_sha256.len() != 64
+        || !expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    let Some(path) = workspace_file_effect_path(invocation, "file.patch") else {
+        return false;
+    };
+    let Some(candidate) = canonical_workspace_file(workspace_root, &path) else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(&candidate) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() > 8 * 1024 * 1024 {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(candidate) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let Ok(read) = file.read(&mut buffer) else {
+            return false;
+        };
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    format!("{:x}", hasher.finalize()).eq_ignore_ascii_case(expected_sha256)
 }
 
 fn workspace_file_content_matches(invocation: &ToolInvocation, workspace_root: &Path) -> bool {
@@ -213,10 +276,40 @@ fn workspace_file_content_matches(invocation: &ToolInvocation, workspace_root: &
         && fs::read(canonical_candidate).is_ok_and(|bytes| bytes.as_slice() == content.as_bytes())
 }
 
-fn tool_call_started_without_terminal_result(
-    events: &[Event],
+fn workspace_file_effect_path(invocation: &ToolInvocation, expected_tool: &str) -> Option<String> {
+    let input = serde_json::from_str::<serde_json::Value>(&invocation.input_json).ok()?;
+    let effect_input = if invocation.tool_name == "tool.invoke" {
+        (input.get("name")?.as_str()? == expected_tool)
+            .then_some(input.get("arguments")?.as_object()?)?
+    } else {
+        (invocation.tool_name == expected_tool).then_some(input.as_object()?)?
+    };
+    effect_input.get("path")?.as_str().map(str::to_string)
+}
+
+fn canonical_workspace_file(workspace_root: &Path, path: &str) -> Option<std::path::PathBuf> {
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let canonical_root = fs::canonicalize(workspace_root).ok()?;
+    let canonical_candidate = fs::canonicalize(workspace_root.join(relative)).ok()?;
+    canonical_candidate
+        .starts_with(&canonical_root)
+        .then_some(canonical_candidate)
+}
+
+fn interrupted_tool_call_started_event<'a>(
+    events: &'a [Event],
     invocation: &ToolInvocation,
-) -> bool {
+) -> Option<&'a Event> {
     let fingerprint = tool_input_fingerprint(&invocation.tool_name, &invocation.input_json);
     let matches = |event: &Event| {
         event.metadata.get("tool").map(String::as_str) == Some(invocation.tool_name.as_str())
@@ -228,12 +321,37 @@ fn tool_call_started_without_terminal_result(
                 == Some(fingerprint.as_str())
             && tool_execution_scope_matches(&event.metadata, invocation)
     };
+    if events
+        .iter()
+        .any(|event| event.kind == EventKind::ToolCallFinished && matches(event))
+    {
+        return None;
+    }
     events
         .iter()
-        .any(|event| event.kind == EventKind::ToolCallStarted && matches(event))
-        && !events
-            .iter()
-            .any(|event| event.kind == EventKind::ToolCallFinished && matches(event))
+        .rev()
+        .find(|event| event.kind == EventKind::ToolCallStarted && matches(event))
+}
+
+fn invocation_with_recorded_effect_contract(
+    invocation: &ToolInvocation,
+    started: &Event,
+) -> ToolInvocation {
+    let mut recovered = invocation.clone();
+    let keys = [
+        agent_runtime::TOOL_RISK_METADATA_KEY,
+        agent_runtime::TOOL_EFFECT_SEMANTICS_METADATA_KEY,
+        TOOL_EFFECT_VERIFIER_METADATA_KEY,
+    ];
+    if keys.iter().any(|key| started.metadata.contains_key(*key)) {
+        for key in keys {
+            recovered.metadata.remove(key);
+            if let Some(value) = started.metadata.get(key) {
+                recovered.metadata.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    recovered
 }
 
 fn verified_interrupted_effect_result(invocation: &ToolInvocation) -> ToolResult {
@@ -690,6 +808,89 @@ mod tests {
     }
 
     #[test]
+    fn recovery_effect_ledger_uses_the_source_patch_verifier() {
+        let root = temporary_workspace("patch-effect-ledger");
+        fs::write(root.join("a.txt"), "after").expect("applied patch state should exist");
+        let input = r#"{"path":"a.txt","expected_base_sha256":"0000000000000000000000000000000000000000000000000000000000000000","replacement":"after","anchor":"before"}"#;
+        let mut original = ToolInvocation {
+            id: ToolCallId("call-patch-source".to_string()),
+            task_id: TaskId("task-patch-ledger".to_string()),
+            tool_name: "file.patch".to_string(),
+            input_json: input.to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata: [
+                ("project_id".to_string(), "project-1".to_string()),
+                ("session_id".to_string(), "session-1".to_string()),
+                ("agent_run_id".to_string(), "run-source".to_string()),
+                (
+                    agent_runtime::TOOL_RISK_METADATA_KEY.to_string(),
+                    "writes_workspace".to_string(),
+                ),
+                (
+                    agent_runtime::TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+                    "verifiable".to_string(),
+                ),
+                (
+                    agent_runtime::TOOL_EFFECT_VERIFIER_METADATA_KEY.to_string(),
+                    format!("workspace_file_sha256_v1:{:x}", Sha256::digest(b"after")),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut result = ToolResult::text(
+            original.id.clone(),
+            ToolOutcomeStatus::Succeeded,
+            "patched",
+            Metadata::new(),
+        );
+        let fingerprint = tool_input_fingerprint(&original.tool_name, &original.input_json);
+        finalize_tool_result(
+            &mut result,
+            &original.id,
+            &fingerprint,
+            Duration::from_millis(12),
+        );
+        let event = finished_event(&original, &result);
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        store
+            .append(event)
+            .expect("source finished event should persist");
+
+        original.id = ToolCallId("call-patch-recovered".to_string());
+        original
+            .metadata
+            .insert("agent_run_id".to_string(), "run-new".to_string());
+        original.metadata.insert(
+            "source_agent_run_id".to_string(),
+            "run-source".to_string(),
+        );
+        original
+            .metadata
+            .insert("recovery_resume_key".to_string(), "resume-1".to_string());
+        original.metadata.insert(
+            agent_runtime::TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+            "non_idempotent".to_string(),
+        );
+        original
+            .metadata
+            .remove(agent_runtime::TOOL_EFFECT_VERIFIER_METADATA_KEY);
+
+        let recovered = completed_tool_result(&store, &original, &root)
+            .expect("effect-ledger lookup should succeed")
+            .expect("source after hash should verify the applied patch");
+        assert_eq!(recovered.status, ToolOutcomeStatus::Succeeded);
+        assert_eq!(
+            recovered
+                .metadata
+                .get("effect_ledger_replay")
+                .map(String::as_str),
+            Some("true")
+        );
+        fs::remove_dir_all(root).expect("temporary workspace should be removed");
+    }
+
+    #[test]
     fn deferred_file_write_verification_reads_the_target_arguments() {
         let root = temporary_workspace("meta-effect-ledger");
         fs::write(root.join("a.txt"), "written").expect("effect should exist");
@@ -703,6 +904,26 @@ mod tests {
             r#"{"name":"shell.run","arguments":{"path":"a.txt","content":"written"}}"#,
         );
         assert!(!deterministic_effect_is_still_applied(&wrong_target, &root));
+
+        let after_sha256 = format!("{:x}", Sha256::digest(b"written"));
+        let mut deferred_patch = recovery_meta_file_write_invocation(
+            r#"{"name":"file.patch","arguments":{"path":"a.txt","expected_base_sha256":"ignored-by-recovery","replacement":"written","anchor":"old"}}"#,
+        );
+        deferred_patch.metadata.insert(
+            agent_runtime::TOOL_EFFECT_VERIFIER_METADATA_KEY.to_string(),
+            format!("workspace_file_sha256_v1:{after_sha256}"),
+        );
+        assert!(deterministic_effect_is_still_applied(
+            &deferred_patch,
+            &root
+        ));
+
+        deferred_patch.input_json = r#"{"name":"shell.run","arguments":{"path":"a.txt"}}"#
+            .to_string();
+        assert!(!deterministic_effect_is_still_applied(
+            &deferred_patch,
+            &root
+        ));
         fs::remove_dir_all(root).expect("temporary workspace should be removed");
     }
 
@@ -738,7 +959,7 @@ mod tests {
             "logical_agent_run_id".to_string(),
             "logical-run".to_string(),
         );
-        assert!(!supports_recovery_effect_replay(&recovered));
+        assert!(!agent_runtime::supports_recovery_effect_replay(&recovered));
         recovered.metadata.insert(
             "source_agent_run_id".to_string(),
             "different-source".to_string(),
@@ -798,6 +1019,75 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_patch_uses_the_recorded_after_hash_contract() {
+        let root = temporary_workspace("patch-interrupted");
+        fs::write(root.join("a.txt"), "after").expect("applied patch state should exist");
+        let input = r#"{"path":"a.txt","expected_base_sha256":"0000000000000000000000000000000000000000000000000000000000000000","replacement":"after","anchor":"before"}"#;
+        let mut invocation = ToolInvocation {
+            id: ToolCallId("call-patch".to_string()),
+            task_id: TaskId("task-patch".to_string()),
+            tool_name: "file.patch".to_string(),
+            input_json: input.to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata: [
+                ("project_id".to_string(), "project-1".to_string()),
+                ("session_id".to_string(), "session-1".to_string()),
+                ("agent_run_id".to_string(), "run-1".to_string()),
+                (
+                    agent_runtime::TOOL_RISK_METADATA_KEY.to_string(),
+                    "writes_workspace".to_string(),
+                ),
+                (
+                    agent_runtime::TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+                    "non_idempotent".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut recorded = invocation.clone();
+        recorded.metadata.insert(
+            agent_runtime::TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+            "verifiable".to_string(),
+        );
+        recorded.metadata.insert(
+            agent_runtime::TOOL_EFFECT_VERIFIER_METADATA_KEY.to_string(),
+            format!("workspace_file_sha256_v1:{:x}", Sha256::digest(b"after")),
+        );
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        store
+            .append(started_event(&recorded))
+            .expect("started event should persist");
+
+        let recovered = completed_tool_result(&store, &invocation, &root)
+            .expect("recovery lookup should succeed")
+            .expect("recorded after hash should verify the applied patch");
+        assert_eq!(recovered.status, ToolOutcomeStatus::Succeeded);
+        assert_eq!(
+            recovered
+                .metadata
+                .get("effect_replay_mode")
+                .map(String::as_str),
+            Some("verified_interrupted_effect")
+        );
+
+        fs::write(root.join("a.txt"), "different").expect("state should change");
+        invocation.metadata.insert(
+            agent_runtime::TOOL_EFFECT_SEMANTICS_METADATA_KEY.to_string(),
+            "verifiable".to_string(),
+        );
+        let blocked = completed_tool_result(&store, &invocation, &root)
+            .expect("recovery lookup should succeed")
+            .expect("mismatched state should fail closed");
+        assert_eq!(blocked.status, ToolOutcomeStatus::Failed);
+        assert_eq!(
+            blocked.failure.as_ref().map(|failure| failure.code.as_str()),
+            Some("tool_effect_outcome_unknown")
+        );
+        fs::remove_dir_all(root).expect("temporary workspace should be removed");
+    }
+
+    #[test]
     fn interrupted_external_effect_is_not_implicitly_repeated() {
         let mut invocation = invocation(r#"{"command":"send"}"#);
         invocation.tool_name = "browser.click".to_string();
@@ -806,10 +1096,11 @@ mod tests {
             "uses_network".to_string(),
         );
 
-        assert!(tool_call_started_without_terminal_result(
+        assert!(interrupted_tool_call_started_event(
             &[started_event(&invocation)],
             &invocation
-        ));
+        )
+        .is_some());
         let result = unknown_interrupted_effect_result(&invocation);
         assert_eq!(result.status, ToolOutcomeStatus::Failed);
         assert_eq!(
@@ -838,9 +1129,10 @@ mod tests {
             tool_effect_recovery_policy(&invocation),
             ToolEffectRecoveryPolicy::SafeToRetry
         );
-        assert!(tool_call_started_without_terminal_result(
+        assert!(interrupted_tool_call_started_event(
             &[started_event(&invocation)],
             &invocation
-        ));
+        )
+        .is_some());
     }
 }

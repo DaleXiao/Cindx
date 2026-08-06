@@ -475,13 +475,16 @@ fn tool_result_line(event: &Event) -> String {
 
 fn file_change_line(event: &Event) -> Option<String> {
     let tool = first_metadata_value(event, &["tool", "tool_name"])?;
-    if tool != "file.write" {
+    if !matches!(tool, "file.write" | "file.patch") {
         return None;
     }
 
     let path = first_metadata_value(event, &["result_path", "path"]).unwrap_or("<unknown path>");
     let bytes = first_metadata_value(event, &["result_bytes", "bytes"]).unwrap_or("unknown");
-    Some(format!("wrote {path} ({bytes} bytes)"))
+    Some(match tool {
+        "file.patch" => format!("patched {path} ({bytes} bytes)"),
+        _ => format!("wrote {path} ({bytes} bytes)"),
+    })
 }
 
 fn command_line(event: &Event) -> Option<String> {
