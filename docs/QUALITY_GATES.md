@@ -234,7 +234,8 @@ node --test scripts/agent-memory-effect-contract.test.mjs
 
 Only a clean exact-revision `--execute` run, followed by publication of
 sanitized evidence, may classify memory as `IMPROVED`, `NEUTRAL`, `REGRESSED`,
-`NOT_EXERCISED`, or `INVALID_EVIDENCE`. V1 remains frozen and invalid because
+`NOT_EXERCISED`, or `INVALID_EVIDENCE`. The current suite is
+`benchmarks/agent/memory-effect-v2.json`; V1 remains frozen and invalid because
 one cell used a permissionless read-only skill tool outside its allowlist. V2
 keeps the same cases and matched design but adds that observed `skill.search`
 tool to the frozen read-only allowlist. Both matrices fix the same compatible

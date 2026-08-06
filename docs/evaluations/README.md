@@ -97,6 +97,16 @@ revision and is no longer the current product decision.
 
 ## Current Targeted Causal Evidence
 
+- [Cindx Memory-effect V2 0.2.19](CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.md)
+  is the current 18-cell provider-backed matched memory-on/off matrix on source
+  commit `cd647030092971c84b7fc4dc6274285bec12b528`. All 9 pairs were
+  evaluable: memory improved all 6 required-memory pairs, while all 3
+  recalled-decoy controls passed in both arms. The scoped decision is
+  `IMPROVED` for durable-memory utility under the frozen matched direct harness
+  only; it does not replace V5 or establish Auto, GEPA, distillation, or
+  frontier uplift.
+- [Sanitized Memory-effect V2 machine-readable result](CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.json)
+
 - [Cindx Memory-effect V1 0.2.19](CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md)
   is an 18-cell provider-backed matched memory-on/off matrix on source commit
   `1abdd6849e4a99c7b30f7f7aa2123efbbdb0d51a`. One required memory-off cell

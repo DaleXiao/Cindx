@@ -432,7 +432,19 @@ high-information reflection selection, and absolute holdout non-regression
 gates, but there is still no provider-backed matched evidence that an identified
 evolved profile improves external product quality.
 
-A separate targeted [Memory-effect V1 provider matrix](evaluations/CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md)
+A targeted [Memory-effect V2 provider matrix](evaluations/CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.md)
+on source commit `cd647030092971c84b7fc4dc6274285bec12b528` retained all
+18 cells and classified all 9 matched pairs as evaluable. Memory-on passed 9/9
+cells; memory-off passed the 3/3 irrelevant-memory controls but none of the 6
+memory-required cells. Both required cases therefore improved in all 6 pairs,
+while all recalled-decoy controls passed in both arms, with zero safety
+violations, evidence errors, confounds, or setup failures. This is
+provider-backed causal evidence for durable-memory utility under the frozen
+matched direct harness only. It does not evaluate native Auto routing, workflow
+collaboration, GEPA, or distillation and does not change the broader V5
+orchestration conclusion.
+
+The preceding [Memory-effect V1 provider matrix](evaluations/CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md)
 on source commit `1abdd6849e4a99c7b30f7f7aa2123efbbdb0d51a` retained all
 18 cells, but one required memory-off cell invoked `skill.search` outside the
 frozen evaluation allowlist. The fail-closed decision is therefore
