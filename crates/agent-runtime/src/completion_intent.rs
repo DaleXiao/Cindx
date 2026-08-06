@@ -14,10 +14,19 @@ pub enum PromptToolRequirement {
     Effects,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PromptEffectAuthority {
+    Forbidden,
+    #[default]
+    Allowed,
+    Required,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PromptCompletionIntent {
     pub evidence_scopes: BTreeSet<PromptEvidenceScope>,
     pub tool_requirement: PromptToolRequirement,
+    pub effect_authority: PromptEffectAuthority,
     pub target_anchors: BTreeSet<EvidenceTargetAnchor>,
 }
 
@@ -57,6 +66,13 @@ pub fn prompt_completion_intent(run_context: &Metadata) -> PromptCompletionInten
     } else {
         PromptToolRequirement::ReadOnly
     };
+    let effect_authority = if effects_required {
+        PromptEffectAuthority::Required
+    } else if explicitly_forbids_all_effects(&objective) {
+        PromptEffectAuthority::Forbidden
+    } else {
+        PromptEffectAuthority::Allowed
+    };
     let target_anchors = if tool_requirement != PromptToolRequirement::None {
         candidate_target_anchors
             .into_iter()
@@ -69,6 +85,7 @@ pub fn prompt_completion_intent(run_context: &Metadata) -> PromptCompletionInten
     PromptCompletionIntent {
         evidence_scopes,
         tool_requirement,
+        effect_authority,
         target_anchors,
     }
 }
@@ -350,6 +367,13 @@ fn effect_explicitly_forbidden(value: &str) -> bool {
     contains_any(
         value,
         "do not change|do not modify|do not edit|do not fix|don't change|don't modify|without changing|without modifying|no code changes|read only|read-only|不要改|不要修改|不要修复|先不要改|别改|不改代码|无需修改|只读",
+    )
+}
+
+fn explicitly_forbids_all_effects(value: &str) -> bool {
+    contains_any(
+        value,
+        "do not change anything|do not modify anything|do not edit anything|do not fix anything|don't change anything|don't modify anything|without changing anything|without modifying anything|no code changes|read only|read-only|不要改任何|不要修改任何|不要修复任何|先不要改代码|不改代码|只读",
     )
 }
 

@@ -98,6 +98,8 @@ fn candidates() -> Vec<ModelCandidate> {
             role: ModelRole::Executor,
             supports_tools: true,
             supports_vision: false,
+            tools_capability_source: ModelCapabilitySource::Configured,
+            vision_capability_source: ModelCapabilitySource::Configured,
             cost_tier: 1,
             latency_tier: 1,
         },
@@ -106,6 +108,8 @@ fn candidates() -> Vec<ModelCandidate> {
             role: ModelRole::Executor,
             supports_tools: true,
             supports_vision: true,
+            tools_capability_source: ModelCapabilitySource::Configured,
+            vision_capability_source: ModelCapabilitySource::Configured,
             cost_tier: 4,
             latency_tier: 3,
         },
@@ -616,6 +620,8 @@ fn search_teacher_prefers_reliable_efficient_topology() {
     let telemetry = vec![
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: fast_plan.clone(),
             succeeded: true,
@@ -640,6 +646,8 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: fast_plan.clone(),
             succeeded: true,
@@ -664,6 +672,8 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: fast_plan.clone(),
             succeeded: true,
@@ -688,6 +698,8 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: fast_plan,
             succeeded: true,
@@ -712,6 +724,8 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: slow_plan.clone(),
             succeeded: false,
@@ -734,6 +748,8 @@ fn search_teacher_prefers_reliable_efficient_topology() {
         },
         WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: slow_plan,
             succeeded: true,
@@ -778,6 +794,8 @@ fn search_teacher_withholds_under_evidenced_topology() {
     let telemetry = (0..3)
         .map(|_| WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: plan.clone(),
             succeeded: true,
@@ -813,6 +831,8 @@ fn search_teacher_ignores_unmeasured_workflow_completions() {
     let telemetry = (0..8)
         .map(|_| WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: String::new(),
             plan: plan.clone(),
             succeeded: true,
@@ -846,6 +866,8 @@ fn matched_collaboration_teacher_preserves_direct_team_pairing() {
         .enumerate()
         .map(|(index, uplift)| WorkflowExecutionTelemetry {
             task_class: TaskClass::Research,
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: "research-shape".to_string(),
             plan: plan.clone(),
             succeeded: true,
@@ -893,6 +915,53 @@ fn matched_collaboration_teacher_preserves_direct_team_pairing() {
     assert!(MatchedCollaborationEvidenceTeacher::train(&[inconsistent])
         .calibrated_evidence()
         .is_empty());
+}
+
+#[test]
+fn matched_collaboration_teacher_keeps_context_action_cohorts_separate() {
+    let plan = workflow_plan("context-action-evidence", false);
+    let mut telemetry = Vec::new();
+    for (context, uplift) in [("a".repeat(64), 500), ("b".repeat(64), -500)] {
+        for _ in 0..4 {
+            telemetry.push(WorkflowExecutionTelemetry {
+                task_class: TaskClass::Research,
+                pre_decision_context_fingerprint: context.clone(),
+                route_action_id: "c".repeat(64),
+                routing_signature: "legacy-shape".to_string(),
+                plan: plan.clone(),
+                succeeded: true,
+                quality_score: Some(0.8),
+                learning_evidence: test_quality_learning_evidence(
+                    0.8,
+                    true,
+                    LearningAttribution::Workflow,
+                ),
+                latency_ms: 2_000,
+                total_tokens: 2_000,
+                tool_calls: 0,
+                successful_tools_by_step: BTreeMap::new(),
+                fallback_used: false,
+                paired_team_score_bps: Some((8_000i32 + uplift) as u16),
+                paired_anchor_score_bps: Some(8_000),
+                paired_uplift_bps: Some(uplift as i16),
+                selected_anchor: uplift < 0,
+                anchor_latency_ms: Some(1_000),
+            });
+        }
+    }
+
+    let teacher = MatchedCollaborationEvidenceTeacher::train(&telemetry);
+
+    assert_eq!(teacher.calibrated_evidence().len(), 2);
+    let (first, lookups) = teacher.match_context_action(
+        &TaskClass::Research,
+        "pro",
+        &"a".repeat(64),
+        &"c".repeat(64),
+        "legacy-shape",
+    );
+    assert_eq!(lookups, 1);
+    assert_eq!(first.unwrap().average_uplift_bps, 500);
 }
 
 #[test]
@@ -2000,6 +2069,8 @@ fn auto_router_selects_models_by_task_role() {
             role: ModelRole::Planner,
             supports_tools: true,
             supports_vision: true,
+            tools_capability_source: ModelCapabilitySource::Configured,
+            vision_capability_source: ModelCapabilitySource::Configured,
             cost_tier: 3,
             latency_tier: 2,
         },
@@ -2008,6 +2079,8 @@ fn auto_router_selects_models_by_task_role() {
             role: ModelRole::Executor,
             supports_tools: true,
             supports_vision: true,
+            tools_capability_source: ModelCapabilitySource::Configured,
+            vision_capability_source: ModelCapabilitySource::Configured,
             cost_tier: 2,
             latency_tier: 1,
         },
@@ -2016,6 +2089,8 @@ fn auto_router_selects_models_by_task_role() {
             role: ModelRole::Reviewer,
             supports_tools: true,
             supports_vision: true,
+            tools_capability_source: ModelCapabilitySource::Configured,
+            vision_capability_source: ModelCapabilitySource::Configured,
             cost_tier: 4,
             latency_tier: 3,
         },

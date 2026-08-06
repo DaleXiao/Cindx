@@ -1,10 +1,16 @@
+#[path = "agent_strategy_causal_route.rs"]
+mod causal_route;
 #[path = "agent_strategy_context.rs"]
 mod context;
 #[path = "agent_strategy_preparation.rs"]
 mod preparation;
+#[path = "agent_strategy_recording.rs"]
+mod recording;
 #[path = "agent_strategy_requirements.rs"]
 mod requirements;
 
+#[cfg(test)]
+pub(crate) use self::causal_route::causal_route_event_metadata;
 #[cfg(test)]
 pub(crate) use self::preparation::should_evaluate_strategy_profile;
 pub(crate) use self::preparation::{
@@ -27,15 +33,14 @@ use crate::collaboration_service::{collaboration_recent_context, truncate_for_co
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::conductor_health_runtime;
 use crate::configuration_models::ProviderConfig;
-use crate::event_persistence::append_event;
-use crate::project_session_persistence::metadata_with_context;
+use crate::routing_learning_runtime::learning_budget_fingerprint;
 use crate::workflow_routing_runtime::{
-    append_router_decision_event, conductor_historical_evidence, model_candidates_for_config,
+    conductor_historical_evidence, model_candidates_for_config,
 };
-use agent_core::{EventKind, Message, Metadata, TaskId};
+use agent_core::{Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
-    AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
+    prompt_genome_sha256, AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
     AgentRunDecisionHarness, AgentRunDecisionRequest, ConductorExecutionContract,
     ConductorPromptGenome, ModelCandidate, RoutingContext, RoutingDecision,
 };
@@ -76,6 +81,9 @@ struct PlannedRunFinalizeInput {
     attempted_conductor_models: Vec<String>,
     selected_conductor_model: Option<String>,
     route_requirements: AgentRouteRequirements,
+    budget_fingerprint: Option<String>,
+    recent_context: String,
+    prompt_profile_sha256: String,
 }
 
 pub(crate) fn plan_agent_run(
@@ -109,10 +117,14 @@ pub(crate) fn plan_agent_run(
         .entry("effective_prompt_objective".to_string())
         .or_insert(default_effective_objective);
     let candidates = model_candidates_for_config(config);
+    let budget_fingerprint = learning_budget_fingerprint(run_context);
     let allowed_models = unique_configured_models(&candidates);
     let preferred_fallback_model = preferred_fallback_model(config, effort, &allowed_models);
     let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context)
         .map_err(CollaborationStageError::Failed)?;
+    let prompt_profile_sha256 =
+        prompt_genome_sha256(&profile).map_err(CollaborationStageError::Failed)?;
+    let recent_context = collaboration_recent_context(history);
 
     if !effort.uses_conductor() {
         conductor_health_runtime::record_conductor_fast_bypass(run_context);
@@ -138,6 +150,9 @@ pub(crate) fn plan_agent_run(
                 attempted_conductor_models: Vec::new(),
                 selected_conductor_model: None,
                 route_requirements,
+                budget_fingerprint,
+                recent_context: recent_context.clone(),
+                prompt_profile_sha256: prompt_profile_sha256.clone(),
             },
         )
         .map_err(CollaborationStageError::Failed)?;
@@ -146,7 +161,7 @@ pub(crate) fn plan_agent_run(
             .apply_to_context(run_context)
             .map_err(CollaborationStageError::Failed)?;
         run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
-        record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
+        recording::record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
             .map_err(CollaborationStageError::Failed)?;
         return Ok(planned);
     }
@@ -170,7 +185,7 @@ pub(crate) fn plan_agent_run(
         conductor_historical_evidence(state, &allowed_models).unwrap_or_default();
     let base_request = AgentRunDecisionRequest {
         objective: prompt.to_string(),
-        recent_context: collaboration_recent_context(history),
+        recent_context: recent_context.clone(),
         effort: effort.label().to_string(),
         conductor_model: conductor_models
             .first()
@@ -185,6 +200,8 @@ pub(crate) fn plan_agent_run(
         route_requirements,
         execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
             .to_string(),
+        budget_fingerprint: budget_fingerprint.clone(),
+        prompt_profile_sha256: prompt_profile_sha256.clone(),
     };
     let decision_id = format!(
         "{}-run-decision",
@@ -283,6 +300,9 @@ pub(crate) fn plan_agent_run(
             attempted_conductor_models,
             selected_conductor_model,
             route_requirements,
+            budget_fingerprint,
+            recent_context,
+            prompt_profile_sha256,
         },
     )
     .map_err(CollaborationStageError::Failed)?;
@@ -291,7 +311,7 @@ pub(crate) fn plan_agent_run(
         .apply_to_context(run_context)
         .map_err(CollaborationStageError::Failed)?;
     run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
-    record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
+    recording::record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
         .map_err(CollaborationStageError::Failed)?;
     Ok(planned)
 }
@@ -302,7 +322,7 @@ fn finalize_planned_run(
     input: PlannedRunFinalizeInput,
 ) -> Result<PlannedAgentRun, String> {
     let PlannedRunFinalizeInput {
-        decision,
+        mut decision,
         source,
         attempts,
         prompt_genome,
@@ -311,12 +331,27 @@ fn finalize_planned_run(
         attempted_conductor_models,
         selected_conductor_model,
         route_requirements,
+        budget_fingerprint,
+        recent_context,
+        prompt_profile_sha256,
     } = input;
-    let decision = requirements::apply_and_validate_route_requirements(
+    decision = requirements::apply_and_validate_route_requirements(
         decision,
         degradation_reason.is_some(),
         &candidates,
         route_requirements,
+    )?;
+    causal_route::finalize_causal_route(
+        prompt,
+        &recent_context,
+        effort,
+        route_requirements,
+        &candidates,
+        budget_fingerprint,
+        prompt_profile_sha256,
+        source,
+        degradation_reason.is_some(),
+        &mut decision,
     )?;
     let routing_context = decision.routing_context(prompt, candidates);
     let routing_decision = decision.routing_decision();
@@ -335,82 +370,4 @@ fn finalize_planned_run(
         selected_conductor_model,
         route_requirements,
     })
-}
-
-fn record_planned_agent_run(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    planned: &PlannedAgentRun,
-    profile_source: &str,
-) -> Result<(), String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_router_decision_event(
-        &mut store,
-        task_id,
-        run_context,
-        &planned.routing_context,
-        &planned.routing_decision,
-        0,
-    )
-    .map_err(|error| error.to_string())?;
-    append_event(
-        &mut store,
-        task_id,
-        EventKind::TaskStatusChanged,
-        "Agent run decision selected",
-        metadata_with_context(
-            [
-                (
-                    "decision_source".to_string(),
-                    planned.source.label().to_string(),
-                ),
-                (
-                    "decision_attempts".to_string(),
-                    planned.attempts.to_string(),
-                ),
-                (
-                    "conductor_models_attempted".to_string(),
-                    planned.attempted_conductor_models.join(","),
-                ),
-                (
-                    "conductor_selected_model".to_string(),
-                    planned.selected_conductor_model.clone().unwrap_or_default(),
-                ),
-                (
-                    "decision".to_string(),
-                    serde_json::to_string(&planned.decision).unwrap_or_default(),
-                ),
-                (
-                    "prompt_profile".to_string(),
-                    planned.prompt_genome.id.clone(),
-                ),
-                ("profile_source".to_string(), profile_source.to_string()),
-                (
-                    "conductor_degraded".to_string(),
-                    planned.degradation_reason.is_some().to_string(),
-                ),
-                (
-                    "conductor_failure".to_string(),
-                    planned
-                        .degradation_reason
-                        .as_deref()
-                        .map(|reason| truncate_for_collaboration(reason, 1_200))
-                        .unwrap_or_default(),
-                ),
-                (
-                    "decision_rationale".to_string(),
-                    truncate_for_collaboration(&planned.decision.rationale, 1_200),
-                ),
-            ]
-            .into_iter()
-            .chain(requirements::route_decision_metadata(planned))
-            .collect(),
-            run_context,
-        ),
-    )
-    .map_err(|error| error.to_string())
 }

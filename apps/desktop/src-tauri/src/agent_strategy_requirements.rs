@@ -116,6 +116,14 @@ pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
             "route_image_input_required".to_string(),
             planned.route_requirements.image_input_required.to_string(),
         ),
+        (
+            "route_effect_authority".to_string(),
+            planned
+                .route_requirements
+                .effect_authority
+                .label()
+                .to_string(),
+        ),
     ]
     .into_iter()
     .collect::<Metadata>();

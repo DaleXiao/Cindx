@@ -52,7 +52,7 @@ pub use adaptive_loop::{AdaptiveLoopCursor, AdaptiveLoopDisposition};
 pub use anytime_parallel::{AnytimeQuorumExecution, AnytimeQuorumPolicy};
 pub use completion_intent::{
     prompt_completion_intent, prompt_evidence_target_anchors, prompt_replaces_prior_objective,
-    PromptCompletionIntent, PromptToolRequirement,
+    PromptCompletionIntent, PromptEffectAuthority, PromptToolRequirement,
 };
 pub use context_engine::{
     context_prompt_reserve, estimate_context_tokens, estimate_message_tokens, estimate_text_tokens,

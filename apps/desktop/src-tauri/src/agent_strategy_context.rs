@@ -44,6 +44,7 @@ impl PlannedAgentRun {
             "routing_signature".to_string(),
             self.decision.learning_signature(),
         );
+        super::causal_route::apply_causal_route_to_context(&self.decision, run_context)?;
         run_context.insert("agent_effort".to_string(), self.policy.label().to_string());
         run_context.insert(
             "requested_policy".to_string(),

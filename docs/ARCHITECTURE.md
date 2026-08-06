@@ -43,7 +43,8 @@ run_agent_task
        -> plan_agent_run
             Fast: direct decision
             Auto/Pro: conductor -> validated AgentRunDecision
-            Auto workflow candidate: portable value-of-computation admission
+            all modes: Causal Router v2 candidate/counterfactual receipt
+            Auto/Pro workflow candidate: conservative causal-value admission
        -> recall memory + retrieve workspace evidence
        -> select skills and tools
        -> optional bounded workflow/task graph
@@ -264,10 +265,13 @@ branch quorum, estimated steps, expected uplift, confidence, and stop policy.
 `AgentRouteRequirements` is the smaller authoritative input boundary. It is
 re-derived for every prepared steer epoch from completion intent, image
 generation, and the active user image input. The decision harness verifies that
-the conductor did not lower its tool or vision floor and that the selected
-configured model declares the required capabilities. Fast retains its default
-model choice and fails clearly when it is incompatible; Auto and Pro select a
-compatible configured fallback before making conductor calls.
+the conductor did not lower its tool or vision floor, did not exceed the prompt's
+effect authority, and selected a configured model declaring the required
+capabilities. Explicit no-change language sets `Forbidden`, an explicit effect
+sets `Required`, and ambiguous intent remains `Allowed` behind the existing
+permission gate. Fast retains its default model choice and fails clearly when it
+is incompatible; Auto and Pro select a compatible configured fallback before
+making conductor calls.
 
 Completion intent classifies compound imperative steps outside quoted or fenced
 material without treating dots in workspace filenames or URLs as sentence
@@ -281,14 +285,33 @@ for whether those segments require effects.
 
 - Fast constructs a direct decision without a conductor call.
 - Auto and Pro ask configured conductor candidates for this schema.
-- After validation, Auto workflow candidates pass the portable orchestrator
-  value-of-computation policy. The policy uses the conductor's semantic
-  independent-contribution contract rather than re-routing through prompt
-  keywords, and combines predicted benefit, confidence, exact-shape matched
-  evidence, compute units, and serial-interaction risk. Rejection collapses only
-  workflow coordination fields; model, tools, vision, risk, retrieval, and
-  memory remain intact. Candidate and selected tiers, verdict, value, cost, and
-  evidence support are recorded in route metadata.
+- After validation, Causal Router v2 freezes a pre-decision feature snapshot from
+  digests of the actual objective, bounded recent context and prompt profile,
+  plus runtime task demand, route requirements, model capability sources, model
+  pool, and run budget. It evaluates at most the workflow candidate and its
+  strongest direct counterfactual. Each action identity binds the model, tool,
+  vision, risk, retrieval, memory, verification, quorum, parallelism, step and
+  stop policy actually executed. Admission requires structural independent demand and a
+  non-negative conservative lower value after coordination, critical-path
+  latency, and uncertainty. Browser/computer or effectful work remains serial
+  unless a high-stakes read-only independent verification exception applies.
+- Exact context-and-action matched evidence may reduce the conservative benefit;
+  legacy action-only evidence is labeled separately and cannot increase it.
+  Ranked top-eight evidence is only prompt context. Router admission uses at most
+  one exact and one explicit-legacy index lookup, performs no linear history-row
+  scan after index construction, evaluates at most two actions, and serializes a
+  receipt no larger than 4 KiB. It assigns no propensity to the deterministic
+  policy.
+- Rejection collapses only workflow coordination fields; model, tools, vision,
+  risk, retrieval, and memory remain intact. Fast, degraded fallback, and the
+  evaluation-only Grounded Direct constraint reconcile through the same receipt.
+  The full receipt is persisted once on `Agent run decision selected`; bounded
+  fingerprints, selected/candidate tiers, reason, policy, and receipt digest are
+  copied to run context for later matched utility attribution.
+- Desktop ownership remains narrow: `agent_strategy_runtime.rs` sequences
+  planning, `agent_strategy_causal_route.rs` reconciles and projects the receipt,
+  and `agent_strategy_recording.rs` owns the two decision events. The portable
+  policy and receipt schema remain in the `orchestrator` crate.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
   dependency order and runnable/resumable/degraded/exhausted states.

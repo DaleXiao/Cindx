@@ -13,16 +13,25 @@ only the revision recorded in each report.
   shared interactive agent loop.
 - **Auto** asks the configured conductor for a typed `AgentRunDecision`, with a
   maximum requested parallelism of two. The decision may remain direct or
-  select a bounded workflow. A workflow candidate then passes a runtime
-  value-of-computation check over confidence-weighted predicted benefit,
-  same-shape matched evidence, independent contribution/synthesis/verification
-  cost, and serial-interaction risk. A rejected candidate becomes direct or
-  grounded-direct without another conductor call while preserving its selected
-  model, tools, vision, risk, retrieval, and memory. Runtime-derived tool and
-  image-input requirements remain hard postconditions on both the decision and
-  selected model; neither the conductor nor calibration can downgrade them.
+  select a bounded workflow. Every candidate then passes Causal Router v2,
+  which freezes a pre-decision task/capability/budget fingerprint and compares
+  the candidate with its direct or grounded-direct counterfactual using explicit
+  independent demand, capability provenance, evidence, model/coordination cost,
+  critical-path latency, and uncertainty. Only evidence matching both that
+  context and candidate action may adjust predicted benefit; legacy same-action
+  evidence can veto but cannot manufacture positive value. A rejected candidate
+  becomes direct or grounded-direct without another conductor call while
+  preserving its selected model, tools, vision, risk, retrieval, and memory.
 - **Pro** uses the same decision contract with a maximum requested parallelism
-  of three and a larger workflow budget.
+  of three and a larger workflow budget. It passes the same Router v2 contract
+  with Pro's cost/latency policy; a low-value Pro workflow also downshifts
+  without a repair call.
+- Runtime-derived tool and image-input requirements remain hard postconditions
+  on the decision and selected model. Effect authority is independent and
+  tri-state: explicit no-change language forbids effects, an explicit effect
+  requires them, and otherwise the existing permission-gated effect path remains
+  allowed. Neither calibration nor a degraded fallback can weaken these
+  constraints.
 - An invalid conductor response receives bounded repair. Exhausted conductor
   attempts produce an explicit capability-compatible degraded fallback rather
   than an unvalidated workflow. Strong matched direct-anchor evidence
@@ -60,10 +69,17 @@ A new run currently follows this sequence:
 4. Session history is bounded and projected for the current objective.
 5. The active objective, completion intent, current image input, and image
    generation requirement form typed route requirements. Fast chooses a direct
-   decision; Auto and Pro request a conductor decision. Auto alone applies the
-   value-of-computation admission policy after schema and capability validation.
-   Both paths fail clearly when the selected configured model cannot satisfy
-   required tools or vision.
+   decision; Auto and Pro request a conductor decision. All three paths receive
+   a bounded `cindx.causal-route.v2` receipt after schema, capability, and final
+   execution-constraint validation. Its pre-decision identity binds digests of
+   the actual objective, recent context, prompt profile, requirements, model
+   pool, and budget; action identity binds the complete executable route policy.
+   The receipt records candidate, selected and counterfactual actions,
+   conservative value components, capability provenance, reason, and operation
+   counts without model chain-of-thought. Full receipts
+   live only on the decision event; run context carries stable join keys and a
+   digest. Both paths fail clearly when the selected configured model cannot
+   satisfy required tools or vision.
    Compound execution instructions retain filenames and URLs while detecting
    later mutation steps. Local report fields such as `sources` inherit explicit
    workspace provenance instead of creating a web obligation; an objective

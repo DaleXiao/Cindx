@@ -38,8 +38,28 @@ pub struct ModelCandidate {
     pub role: ModelRole,
     pub supports_tools: bool,
     pub supports_vision: bool,
+    pub tools_capability_source: ModelCapabilitySource,
+    pub vision_capability_source: ModelCapabilitySource,
     pub cost_tier: u8,
     pub latency_tier: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapabilitySource {
+    ProviderCatalog,
+    Configured,
+    CompatibilityAssumption,
+}
+
+impl ModelCapabilitySource {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ProviderCatalog => "provider_catalog",
+            Self::Configured => "configured",
+            Self::CompatibilityAssumption => "compatibility_assumption",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

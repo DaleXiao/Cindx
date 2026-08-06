@@ -37,6 +37,7 @@ mod tests {
         PromptCompletionIntent {
             evidence_scopes: [PromptEvidenceScope::Workspace].into_iter().collect(),
             tool_requirement: PromptToolRequirement::ReadOnly,
+            effect_authority: Default::default(),
             target_anchors: Default::default(),
         }
     }

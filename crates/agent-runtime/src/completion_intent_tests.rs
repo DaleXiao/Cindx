@@ -255,6 +255,40 @@ fn advisory_and_read_only_language_never_invents_an_effect() {
 }
 
 #[test]
+fn effect_authority_distinguishes_explicit_read_only_from_ambiguous_intent() {
+    for objective in [
+        "Review this repository; do not modify anything",
+        "先不要改代码，只检查这个项目",
+    ] {
+        assert_eq!(
+            prompt_completion_intent(&run_context(objective)).effect_authority,
+            PromptEffectAuthority::Forbidden,
+            "explicit read-only instruction should close effect authority: {objective}"
+        );
+    }
+    for objective in [
+        "Why is this test failing in this app?",
+        "Explain Rust ownership",
+    ] {
+        assert_eq!(
+            prompt_completion_intent(&run_context(objective)).effect_authority,
+            PromptEffectAuthority::Allowed,
+            "ambiguous or tool-free intent should preserve permission-gated effects: {objective}"
+        );
+    }
+    for objective in [
+        "Fix the bug and run tests",
+        "Fix the backend crash; do not modify the UI or unrelated files",
+    ] {
+        assert_eq!(
+            prompt_completion_intent(&run_context(objective)).effect_authority,
+            PromptEffectAuthority::Required,
+            "an explicit effect must outrank a local scope restriction: {objective}"
+        );
+    }
+}
+
+#[test]
 fn steer_replacement_clears_effects_but_additive_guidance_retains_them() {
     let mut additive = run_context(
         "Initial request:\nFix the crash in this app\n\nAccepted steering 1:\nFocus on the Settings path",

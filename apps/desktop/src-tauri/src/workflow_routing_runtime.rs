@@ -43,7 +43,13 @@ pub(crate) fn workflow_prior_for_run(
 pub(crate) fn conductor_historical_evidence(
     state: &tauri::State<'_, AppState>,
     allowed_models: &[String],
-) -> Result<(String, Vec<MatchedCollaborationEvidence>), String> {
+) -> Result<
+    (
+        String,
+        std::sync::Arc<MatchedCollaborationEvidenceTeacher>,
+    ),
+    String,
+> {
     let (routing_telemetry, workflow_telemetry) = {
         let mut store = state
             .store
@@ -61,13 +67,11 @@ pub(crate) fn conductor_historical_evidence(
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let matched_teacher = MatchedCollaborationEvidenceTeacher::train(&workflow_telemetry);
-    let matched_evidence = matched_teacher
+    let matched = matched_teacher
         .calibrated_evidence()
         .iter()
-        .take(8)
-        .cloned()
-        .collect::<Vec<_>>();
-    let matched = matched_evidence.iter().map(|evidence| evidence.prompt_hint());
+        .take(CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS)
+        .map(|evidence| evidence.prompt_hint());
     let routes = LearnedModelRouter::train(&routing_telemetry)
         .calibrated_evidence()
         .into_iter()
@@ -94,7 +98,7 @@ pub(crate) fn conductor_historical_evidence(
             )
         });
     let evidence = matched.chain(routes).collect::<Vec<_>>();
-    Ok((evidence.join("\n"), matched_evidence))
+    Ok((evidence.join("\n"), std::sync::Arc::new(matched_teacher)))
 }
 
 pub(crate) fn parse_task_class_label(value: &str) -> Option<TaskClass> {
@@ -139,15 +143,26 @@ pub(crate) fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelC
     ]
     .into_iter()
     .map(|(role, name, cost_tier, latency_tier)| {
-        let supports_vision = provider_model_supports_vision(&config.provider_id, &name)
-            .unwrap_or_else(|| model_supports_vision_content(&name));
-        let supports_tools =
-            provider_model_supports_tools(&config.provider_id, &name).unwrap_or(true);
+        let catalog_vision = provider_model_supports_vision(&config.provider_id, &name);
+        let catalog_tools = provider_model_supports_tools(&config.provider_id, &name);
+        let supports_vision =
+            catalog_vision.unwrap_or_else(|| model_supports_vision_content(&name));
+        let supports_tools = catalog_tools.unwrap_or(true);
         ModelCandidate {
             name,
             role,
             supports_tools,
             supports_vision,
+            tools_capability_source: if catalog_tools.is_some() {
+                ModelCapabilitySource::ProviderCatalog
+            } else {
+                ModelCapabilitySource::CompatibilityAssumption
+            },
+            vision_capability_source: if catalog_vision.is_some() {
+                ModelCapabilitySource::ProviderCatalog
+            } else {
+                ModelCapabilitySource::CompatibilityAssumption
+            },
             cost_tier,
             latency_tier,
         }
