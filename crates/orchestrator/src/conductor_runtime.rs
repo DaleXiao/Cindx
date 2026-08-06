@@ -106,6 +106,8 @@ impl ConductorHarness {
                 "- role is a short lowercase domain label such as mathematician, evidence_researcher, critic, or integrator; do not use it as an execution permission.\n",
                 "- output_kind must be exactly analysis, evidence, verification, or synthesis. The final step must use synthesis.\n",
                 "- tool_policy must be exactly none, read_only_evidence, or read_only_exploration. Never request effectful tools here.\n",
+                "- Use output_kind=evidence only when the step must gather direct runtime facts; it requires at least one successful substantive read. Use analysis for reasoning-only work.\n",
+                "- A synthesis step must use tool_policy=none; it integrates only explicitly authorized work products and evidence ledgers.\n",
                 "- Preserve listed order: access may reference only earlier step ids.\n",
                 "- The task contract requires {required_contributions} independent contribution(s). This is the only minimum branch count. The evolved profile controls preferences and upper bounds; it must not force decorative agents when the task requires zero or one branch.\n",
                 "- The direct baseline selected by the run conductor is {primary_model}. Preserve it as the default worker unless another configured model has a better role fit or supported prior.\n",
@@ -114,6 +116,7 @@ impl ConductorHarness {
                 "- Keep workers isolated and expose an earlier result only through access.\n",
                 "{branch_role_constraint}\n",
                 "- A verification step must directly access every independent root branch it audits.\n",
+                "- A verification step must return the typed CINDX_VERIFICATION receipt requested by its worker contract; prose alone is never a passed verification.\n",
                 "- Every branch must reach the final synthesis step; retain dissenting or failed branches.\n",
                 "- Use exact model strings from the worker pool. The Conductor model is not implicitly a worker.\n",
                 "- Do not include markdown fences, commentary, tool calls, or a user-facing answer.\n\n",
@@ -392,6 +395,11 @@ impl ConductorHarness {
                 step.contract.output_kind = WorkflowOutputKind::Synthesis;
             }
             step.contract.input_steps = step.access.clone();
+            if step.contract.output_kind == WorkflowOutputKind::Evidence
+                && step.tool_policy != WorkflowToolPolicy::None
+            {
+                step.contract.completion.minimum_direct_evidence_items = 1;
+            }
         }
         plan.validate(&self.request.worker_models)?;
         if self.request.execution_contract.verification_required {
@@ -477,13 +485,7 @@ impl ConductorHarness {
         }
         let distinct_branch_subtasks = independent_branches
             .iter()
-            .map(|step| {
-                step.subtask
-                    .split_whitespace()
-                    .flat_map(str::chars)
-                    .flat_map(char::to_lowercase)
-                    .collect::<String>()
-            })
+            .map(|step| workflow_contribution_key(&step.subtask))
             .collect::<BTreeSet<_>>()
             .len();
         if independent_branches.len() >= 2 && distinct_branch_subtasks < independent_branches.len()

@@ -55,6 +55,7 @@ pub const MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5;
 pub const MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3;
 pub const WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1";
 pub const WORKFLOW_CHECKPOINT_SCHEMA: &str = "cindx.workflow.checkpoint.v1";
+pub const WORKFLOW_VERIFICATION_RECEIPT_SCHEMA: &str = "cindx.workflow-verification.v1";
 pub const CONDUCTOR_MAX_ATTEMPTS: usize = 2;
 const ADAPTIVE_WORKER_SHARED_MEMORY_MAX_CHARS: usize = 24_000;
 const ADAPTIVE_WORKER_DEPENDENCY_MAX_CHARS: usize = 16_000;

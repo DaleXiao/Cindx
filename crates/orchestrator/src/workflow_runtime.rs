@@ -92,6 +92,8 @@ pub struct WorkflowCompletionCriteria {
     pub require_resolved_inputs: bool,
     #[serde(default)]
     pub minimum_evidence_items: usize,
+    #[serde(default)]
+    pub minimum_direct_evidence_items: usize,
 }
 
 impl Default for WorkflowCompletionCriteria {
@@ -100,6 +102,7 @@ impl Default for WorkflowCompletionCriteria {
             require_non_empty_output: true,
             require_resolved_inputs: true,
             minimum_evidence_items: 0,
+            minimum_direct_evidence_items: 0,
         }
     }
 }
@@ -148,12 +151,17 @@ pub struct WorkflowPlanStep {
 
 impl WorkflowPlanStep {
     pub fn independent_contribution_key(&self) -> String {
-        self.subtask
-            .split_whitespace()
-            .flat_map(str::chars)
-            .flat_map(char::to_lowercase)
-            .collect()
+        workflow_contribution_key(&self.subtask)
     }
+}
+
+pub fn workflow_contribution_key(subtask: &str) -> String {
+    subtask
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,15 +229,19 @@ impl WorkflowPlanIr {
                 ),
             })
             .collect::<Vec<_>>();
-        if !steps.iter().any(|step| {
-            matches!(
-                step.contract.output_kind,
-                WorkflowOutputKind::Synthesis | WorkflowOutputKind::Verification
-            )
-        }) {
+        if !steps
+            .iter()
+            .any(|step| step.contract.output_kind == WorkflowOutputKind::Synthesis)
+        {
             if let Some(delivery) = steps.last_mut() {
                 delivery.contract.output_kind = WorkflowOutputKind::Synthesis;
             }
+        }
+        for synthesis in steps
+            .iter_mut()
+            .filter(|step| step.contract.output_kind == WorkflowOutputKind::Synthesis)
+        {
+            synthesis.tool_policy = WorkflowToolPolicy::None;
         }
         Self {
             schema: WORKFLOW_IR_SCHEMA.to_string(),
@@ -309,6 +321,14 @@ impl WorkflowPlanIr {
                     step.id
                 ));
             }
+            if step.contract.output_kind == WorkflowOutputKind::Synthesis
+                && step.tool_policy != WorkflowToolPolicy::None
+            {
+                return Err(format!(
+                    "workflow synthesis step {} cannot execute tools",
+                    step.id
+                ));
+            }
         }
         if self
             .steps
@@ -361,8 +381,178 @@ pub enum WorkflowStepStatus {
 pub enum WorkflowVerificationState {
     #[default]
     NotRequired,
+    Inconclusive,
     Passed,
     Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorkflowEvidenceSummary {
+    #[serde(default)]
+    pub total_items: usize,
+    #[serde(default)]
+    pub direct_items: usize,
+    #[serde(default)]
+    pub item_ids_by_source: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl WorkflowEvidenceSummary {
+    pub fn from_items(
+        items: impl IntoIterator<Item = (String, String)>,
+        direct_step_id: &str,
+    ) -> Self {
+        let mut item_ids_by_source = BTreeMap::<String, BTreeSet<String>>::new();
+        for (source, item_id) in items {
+            let source = source.trim();
+            let item_id = item_id.trim();
+            if source.is_empty() || item_id.is_empty() {
+                continue;
+            }
+            item_ids_by_source
+                .entry(source.to_string())
+                .or_default()
+                .insert(item_id.to_string());
+        }
+        let total_items = item_ids_by_source.values().map(BTreeSet::len).sum();
+        let direct_items = item_ids_by_source
+            .get(direct_step_id)
+            .map(BTreeSet::len)
+            .unwrap_or_default();
+        Self {
+            total_items,
+            direct_items,
+            item_ids_by_source,
+        }
+    }
+
+    fn validate_for_step(
+        &self,
+        step_id: &str,
+        input_steps: &[String],
+        serialized_item_count: usize,
+    ) -> Result<(), String> {
+        let allowed_sources = input_steps
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(step_id))
+            .collect::<BTreeSet<_>>();
+        if self.total_items != serialized_item_count
+            || self.total_items
+                != self
+                    .item_ids_by_source
+                    .values()
+                    .map(BTreeSet::len)
+                    .sum::<usize>()
+            || self.direct_items
+                != self
+                    .item_ids_by_source
+                    .get(step_id)
+                    .map(BTreeSet::len)
+                    .unwrap_or_default()
+            || self
+                .item_ids_by_source
+                .keys()
+                .any(|source| !allowed_sources.contains(source.as_str()))
+        {
+            return Err(format!(
+                "workflow step {step_id} supplied an inconsistent evidence summary"
+            ));
+        }
+        Ok(())
+    }
+
+    fn item_exists(&self, item_id: &str) -> bool {
+        self.item_ids_by_source
+            .values()
+            .any(|items| items.contains(item_id))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowVerificationVerdict {
+    Passed,
+    NeedsRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowVerificationReceipt {
+    pub schema: String,
+    pub verdict: WorkflowVerificationVerdict,
+    #[serde(default)]
+    pub reviewed_steps: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub unresolved: Vec<String>,
+}
+
+impl WorkflowVerificationReceipt {
+    pub fn from_worker_output(output: &str) -> Option<Self> {
+        const MARKER: &str = "CINDX_VERIFICATION:";
+        let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+        let receipt_line = lines.next_back()?.trim();
+        if lines.any(|line| line.trim().starts_with(MARKER)) {
+            return None;
+        }
+        let payload = receipt_line.strip_prefix(MARKER)?.trim();
+        serde_json::from_str(payload).ok()
+    }
+
+    fn validate(
+        &self,
+        input_steps: &[String],
+        evidence: &WorkflowEvidenceSummary,
+    ) -> Result<(), String> {
+        if self.schema != WORKFLOW_VERIFICATION_RECEIPT_SCHEMA {
+            return Err("workflow verification receipt schema is unsupported".to_string());
+        }
+        let expected_steps = input_steps
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let reviewed_steps = self
+            .reviewed_steps
+            .iter()
+            .map(|step| step.trim())
+            .filter(|step| !step.is_empty())
+            .collect::<BTreeSet<_>>();
+        if reviewed_steps.len() != self.reviewed_steps.len() || reviewed_steps != expected_steps {
+            return Err(
+                "workflow verification receipt does not cover every input step".to_string(),
+            );
+        }
+        let evidence_refs = self
+            .evidence_refs
+            .iter()
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        if evidence_refs.len() != self.evidence_refs.len()
+            || evidence_refs.iter().any(|item| !evidence.item_exists(item))
+        {
+            return Err("workflow verification receipt cites unknown evidence".to_string());
+        }
+        for input_step in input_steps {
+            if let Some(items) = evidence.item_ids_by_source.get(input_step) {
+                if !items.is_empty() && items.is_disjoint(&evidence_refs) {
+                    return Err(format!(
+                        "workflow verification receipt cites no evidence from input step {input_step}"
+                    ));
+                }
+            }
+        }
+        if self.verdict == WorkflowVerificationVerdict::Passed
+            && self.unresolved.iter().any(|item| !item.trim().is_empty())
+        {
+            return Err(
+                "a passing workflow verification receipt cannot retain unresolved findings"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -376,7 +566,13 @@ pub struct WorkflowStepSemanticState {
     #[serde(default)]
     pub evidence_count: usize,
     #[serde(default)]
+    pub direct_evidence_count: usize,
+    #[serde(default)]
+    pub evidence_item_ids_by_source: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
     pub verification: WorkflowVerificationState,
+    #[serde(default)]
+    pub verification_receipt: Option<WorkflowVerificationReceipt>,
     #[serde(default)]
     pub completion_satisfied: bool,
     #[serde(default)]
@@ -448,6 +644,25 @@ pub struct WorkflowExecutionCheckpoint {
 }
 
 impl WorkflowExecutionCheckpoint {
+    pub fn workflow_verification_satisfied(&self, required: bool) -> bool {
+        let verification_steps = self
+            .plan
+            .steps
+            .iter()
+            .filter(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
+            .collect::<Vec<_>>();
+        if verification_steps.is_empty() {
+            return !required;
+        }
+        verification_steps.iter().all(|plan_step| {
+            self.steps.get(&plan_step.id).is_some_and(|step| {
+                step.status == WorkflowStepStatus::Completed
+                    && step.semantic.completion_satisfied
+                    && step.semantic.verification == WorkflowVerificationState::Passed
+            })
+        })
+    }
+
     pub fn new(resume_key: impl Into<String>, plan: WorkflowPlanIr, now_ms: u64) -> Self {
         let steps = plan
             .steps
@@ -600,11 +815,48 @@ impl WorkflowExecutionCheckpoint {
         evidence_json: String,
         now_ms: u64,
     ) -> Result<(), String> {
+        self.complete_step_inner(step_id, model, output, evidence_json, None, None, now_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_step_with_evidence(
+        &mut self,
+        step_id: &str,
+        model: &str,
+        output: String,
+        evidence_json: String,
+        evidence: WorkflowEvidenceSummary,
+        verification_receipt: Option<WorkflowVerificationReceipt>,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        self.complete_step_inner(
+            step_id,
+            model,
+            output,
+            evidence_json,
+            Some(evidence),
+            verification_receipt,
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_step_inner(
+        &mut self,
+        step_id: &str,
+        model: &str,
+        output: String,
+        evidence_json: String,
+        evidence_summary: Option<WorkflowEvidenceSummary>,
+        verification_receipt: Option<WorkflowVerificationReceipt>,
+        now_ms: u64,
+    ) -> Result<(), String> {
         let plan_step = self
             .plan
             .steps
             .iter()
             .find(|step| step.id == step_id)
+            .cloned()
             .ok_or_else(|| format!("workflow plan is missing step: {step_id}"))?;
         let output = output.trim().to_string();
         if plan_step.contract.completion.require_non_empty_output && output.is_empty() {
@@ -638,26 +890,66 @@ impl WorkflowExecutionCheckpoint {
         } else {
             BTreeMap::new()
         };
-        let evidence_count = serde_json::from_str::<serde_json::Value>(&evidence_json)
+        let serialized_evidence_count = serde_json::from_str::<serde_json::Value>(&evidence_json)
             .ok()
             .and_then(|value| value.as_array().map(Vec::len))
             .unwrap_or_default();
-        if evidence_count < plan_step.contract.completion.minimum_evidence_items {
+        let evidence = if let Some(evidence) = evidence_summary {
+            evidence.validate_for_step(
+                step_id,
+                &plan_step.contract.input_steps,
+                serialized_evidence_count,
+            )?;
+            evidence
+        } else {
+            WorkflowEvidenceSummary {
+                total_items: serialized_evidence_count,
+                ..WorkflowEvidenceSummary::default()
+            }
+        };
+        if evidence.total_items < plan_step.contract.completion.minimum_evidence_items {
             return Err(format!(
-                "workflow step {step_id} produced {evidence_count} evidence items but requires {}",
-                plan_step.contract.completion.minimum_evidence_items
+                "workflow step {step_id} produced {} evidence items but requires {}",
+                evidence.total_items, plan_step.contract.completion.minimum_evidence_items
             ));
         }
+        if evidence.direct_items < plan_step.contract.completion.minimum_direct_evidence_items {
+            return Err(format!(
+                "workflow step {step_id} produced {} direct evidence items but requires {}",
+                evidence.direct_items, plan_step.contract.completion.minimum_direct_evidence_items
+            ));
+        }
+        let (verification, verification_receipt) = if plan_step.contract.output_kind
+            == WorkflowOutputKind::Verification
+        {
+            match verification_receipt {
+                Some(receipt)
+                    if receipt
+                        .validate(&plan_step.contract.input_steps, &evidence)
+                        .is_ok() =>
+                {
+                    let verification = match &receipt.verdict {
+                        WorkflowVerificationVerdict::Passed => WorkflowVerificationState::Passed,
+                        WorkflowVerificationVerdict::NeedsRevision => {
+                            WorkflowVerificationState::Degraded
+                        }
+                    };
+                    (verification, Some(receipt))
+                }
+                _ => (WorkflowVerificationState::Inconclusive, None),
+            }
+        } else {
+            (WorkflowVerificationState::NotRequired, None)
+        };
         let semantic = WorkflowStepSemanticState {
             input_digests,
             output_digest: workflow_output_digest(&output),
             output_kind: plan_step.contract.output_kind.clone(),
-            evidence_count,
-            verification: if plan_step.contract.output_kind == WorkflowOutputKind::Verification {
-                WorkflowVerificationState::Passed
-            } else {
-                WorkflowVerificationState::NotRequired
-            },
+            evidence_count: evidence.total_items,
+            direct_evidence_count: evidence.direct_items,
+            evidence_item_ids_by_source: evidence.item_ids_by_source,
+            verification,
+            verification_receipt,
             completion_satisfied: true,
             completed_at_ms: Some(now_ms),
         };
@@ -669,7 +961,7 @@ impl WorkflowExecutionCheckpoint {
         step.attempts = step.attempts.max(1);
         step.model = model.to_string();
         step.output = Some(output);
-        step.evidence_count = evidence_count;
+        step.evidence_count = semantic.evidence_count;
         step.evidence_json = evidence_json;
         step.semantic = semantic;
         step.error = None;
@@ -942,11 +1234,29 @@ impl WorkflowExecutionCheckpoint {
                 step.semantic
                     .completed_at_ms
                     .get_or_insert(step.updated_at_ms);
-                if plan_step.contract.output_kind == WorkflowOutputKind::Verification
-                    && step.status == WorkflowStepStatus::Completed
-                    && step.semantic.verification == WorkflowVerificationState::NotRequired
-                {
-                    step.semantic.verification = WorkflowVerificationState::Passed;
+                if plan_step.contract.output_kind == WorkflowOutputKind::Verification {
+                    let evidence = WorkflowEvidenceSummary {
+                        total_items: step.semantic.evidence_count,
+                        direct_items: step.semantic.direct_evidence_count,
+                        item_ids_by_source: step.semantic.evidence_item_ids_by_source.clone(),
+                    };
+                    step.semantic.verification = match step.semantic.verification_receipt.as_ref() {
+                        Some(receipt)
+                            if receipt
+                                .validate(&plan_step.contract.input_steps, &evidence)
+                                .is_ok() =>
+                        {
+                            match &receipt.verdict {
+                                WorkflowVerificationVerdict::Passed => {
+                                    WorkflowVerificationState::Passed
+                                }
+                                WorkflowVerificationVerdict::NeedsRevision => {
+                                    WorkflowVerificationState::Degraded
+                                }
+                            }
+                        }
+                        _ => WorkflowVerificationState::Inconclusive,
+                    };
                 }
             }
         }

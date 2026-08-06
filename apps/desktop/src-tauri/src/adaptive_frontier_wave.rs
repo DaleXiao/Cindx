@@ -262,7 +262,8 @@ pub(super) fn execute_adaptive_wave(
             let model = spec.model.clone();
             let role = adaptive_model_role(&spec.role, &spec.output_kind);
             let prompt = spec.prompt.clone();
-            let allow_tools = spec.tool_policy != WorkflowToolPolicy::None;
+            let worker_access =
+                CollaborationWorkerAccess::new(spec.step_id.clone(), spec.tool_policy.clone());
             let max_model_turns = spec.max_model_turns;
             let max_tool_calls = spec.max_tool_calls;
             let max_output_tokens = spec.max_output_tokens;
@@ -279,7 +280,7 @@ pub(super) fn execute_adaptive_wave(
                     role,
                     model,
                     prompt,
-                    allow_tools,
+                    worker_access,
                     max_model_turns,
                     max_tool_calls,
                     max_output_tokens,

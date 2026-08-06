@@ -88,7 +88,7 @@ pub(super) fn start_adaptive_anchor(
             anchor_role,
             anchor_spec.model.clone(),
             anchor_spec.prompt.clone(),
-            false,
+            CollaborationWorkerAccess::none(anchor_spec.step_id.clone()),
             anchor_spec.max_model_turns,
             anchor_spec.max_tool_calls,
             anchor_spec.max_output_tokens,
@@ -165,6 +165,7 @@ fn spawn_direct_anchor(
     let stage = anchor_spec.stage.clone();
     let model = anchor_spec.model.clone();
     let prompt = anchor_spec.prompt.clone();
+    let evidence_source = anchor_spec.step_id.clone();
     let max_model_turns = anchor_spec.max_model_turns;
     let max_tool_calls = anchor_spec.max_tool_calls;
     let max_output_tokens = anchor_spec.max_output_tokens;
@@ -184,7 +185,7 @@ fn spawn_direct_anchor(
                     ModelRole::Executor,
                     model,
                     prompt,
-                    false,
+                    CollaborationWorkerAccess::none(evidence_source),
                     max_model_turns,
                     max_tool_calls,
                     max_output_tokens,

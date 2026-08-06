@@ -62,6 +62,17 @@ pub(super) fn finalize_adaptive_collaboration(
         workflow_checkpoint,
     } = context;
 
+    let workflow_verification_satisfied = workflow_checkpoint
+        .workflow_verification_satisfied(anytime_controller.snapshot().config.verification_required);
+    if enforce_candidate_verification_gate(
+        anytime_controller,
+        &final_step_id,
+        workflow_verification_satisfied,
+    )? {
+        persist_anytime_controller(workflow_checkpoint, anytime_controller)?;
+    }
+    let final_candidate_verified = quality_gate.passed && workflow_verification_satisfied;
+
     let pairwise_comparison = direct_anchor_output.and_then(|anchor_output| {
         match compare_team_guidance_with_anchor(
             state,
@@ -109,8 +120,8 @@ pub(super) fn finalize_adaptive_collaboration(
             &final_step_id,
             AnytimeVerdict {
                 quality_bps: (quality_gate.score.clamp(0.0, 1.0) * 10_000.0).round() as u16,
-                confidence_bps: if quality_gate.passed { 8_000 } else { 5_000 },
-                constraint_coverage_bps: if quality_gate.passed { 8_500 } else { 6_000 },
+                confidence_bps: if final_candidate_verified { 8_000 } else { 5_000 },
+                constraint_coverage_bps: if final_candidate_verified { 8_500 } else { 6_000 },
                 evidence_count,
                 safety_violations: quality_gate.safety_violations.saturating_add(
                     pairwise_comparison
@@ -118,7 +129,7 @@ pub(super) fn finalize_adaptive_collaboration(
                         .map_or(0, |comparison| comparison.team_safety_violations),
                 ),
                 deliverable: !final_output.trim().is_empty(),
-                verified: quality_gate.passed,
+                verified: final_candidate_verified,
                 anchor_uplift_bps: pairwise_comparison
                     .as_ref()
                     .map(|comparison| comparison.team_uplift_bps),
@@ -134,13 +145,13 @@ pub(super) fn finalize_adaptive_collaboration(
             run_context_steer_epoch(run_context),
             "anytime_workflow_final",
             &final_output,
-            if quality_gate.passed {
+            if final_candidate_verified {
                 ResultQuality::Verified
             } else {
                 ResultQuality::Grounded
             },
             evidence_count,
-            quality_gate.passed,
+            final_candidate_verified,
             false,
         );
     }

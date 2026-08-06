@@ -229,6 +229,24 @@ fn adaptive_worker_prompt_parts(
     shared_memory: &str,
     outputs: &BTreeMap<String, String>,
 ) -> Option<String> {
+    let verification_receipt_contract =
+        (contract.output_kind == WorkflowOutputKind::Verification).then(|| {
+            format!(
+                " End with exactly one single-line receipt using this shape: CINDX_VERIFICATION: {{\"schema\":\"{}\",\"verdict\":\"passed|needs_revision\",\"reviewed_steps\":{},\"evidence_refs\":[\"step_id::tool_call_id\"],\"unresolved\":[]}}. Cite only ref values present in authorized evidence ledgers; use an empty evidence_refs array when no tool evidence exists.",
+                WORKFLOW_VERIFICATION_RECEIPT_SCHEMA,
+                serde_json::to_string(&step.access).unwrap_or_else(|_| "[]".to_string())
+            )
+        });
+    let direct_evidence_contract = (contract
+        .completion
+        .minimum_direct_evidence_items
+        > 0)
+        .then(|| {
+            format!(
+                " This step must produce at least {} successful substantive tool evidence item(s) itself; inherited evidence does not satisfy that requirement.",
+                contract.completion.minimum_direct_evidence_items
+            )
+        });
     let (role_instruction, output_contract) = match contract.output_kind {
         WorkflowOutputKind::Verification => (
             "Audit supplied work against evidence, identify disagreements, and state exact corrections without inventing a new unsupported solution.",
@@ -253,6 +271,11 @@ fn adaptive_worker_prompt_parts(
         ),
         },
     };
+    let output_contract = format!(
+        "{output_contract}{}{}",
+        direct_evidence_contract.as_deref().unwrap_or_default(),
+        verification_receipt_contract.as_deref().unwrap_or_default()
+    );
     let bounded_shared_memory = if shared_memory.trim().is_empty() {
         "(none)".to_string()
     } else {

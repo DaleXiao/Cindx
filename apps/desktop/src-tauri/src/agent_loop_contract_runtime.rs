@@ -253,6 +253,22 @@ pub(crate) fn apply_run_task_contract_with_completion_intent(
             }
         }
     }
+    if let Some(collaboration) = collaboration {
+        for receipt in collaboration.grounding_receipts.iter().filter(|receipt| {
+            receipt.steer_epoch == prompt_contract_epoch
+                && receipt.collaboration_id == collaboration.id
+                && !receipt.request.trim().is_empty()
+                && !receipt.observation.trim().is_empty()
+        }) {
+            AgentKernel::new(runtime, tools).record_prompt_tool_evidence_observation_at(
+                prompt_contract_epoch,
+                &receipt.tool_name,
+                &receipt.tool_name,
+                &receipt.request,
+                &receipt.observation,
+            );
+        }
+    }
     for (requirement_id, source, receipt, observation) in persisted_collaboration_receipts(
         &runtime.messages,
         prompt_contract_epoch,
@@ -492,7 +508,7 @@ fn persisted_collaboration_receipts(
             credited.insert(requirement_id.clone());
             receipts.push((
                 requirement_id.clone(),
-                format!("collaboration:{collaboration_id}"),
+                tool.to_string(),
                 format!(
                     "schema={};tool={tool}",
                     crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA

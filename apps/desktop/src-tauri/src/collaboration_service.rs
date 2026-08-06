@@ -69,6 +69,7 @@ pub(crate) struct CollaborationGroundingReceipt {
     pub(crate) source_step: String,
     pub(crate) tool_call_id: String,
     pub(crate) tool_name: String,
+    pub(crate) request: String,
     pub(crate) input_fingerprint: String,
     pub(crate) observation: String,
 }
@@ -137,6 +138,10 @@ fn grounding_receipts_from_evidence(
             collaboration_id: evidence.collaboration_id,
             source_step: evidence.source_step,
             tool_call_id: evidence.tool_call_id,
+            request: truncate_for_collaboration(
+                &evidence.request,
+                COLLABORATION_EVIDENCE_REQUEST_MAX_CHARS,
+            ),
             input_fingerprint: agent_runtime::tool_input_fingerprint(
                 &evidence.tool_name,
                 &evidence.request,
@@ -261,7 +266,7 @@ fn checkpoint_step_evidence_candidate(
 ) -> AgentEvidenceCandidate {
     let verified = step.status == WorkflowStepStatus::Completed
         && step.semantic.completion_satisfied
-        && step.semantic.verification != WorkflowVerificationState::Degraded;
+        && step.semantic.verification == WorkflowVerificationState::Passed;
     AgentEvidenceCandidate::new(id, role, step.status.as_str(), output)
         .with_evidence_count(step.semantic.evidence_count.max(step.evidence_count))
         .verified(verified)
@@ -285,6 +290,28 @@ pub(crate) struct AdaptiveCollaborationSpec {
     pub(crate) max_model_turns: usize,
     pub(crate) max_tool_calls: usize,
     pub(crate) max_output_tokens: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CollaborationWorkerAccess {
+    pub(crate) evidence_source: String,
+    pub(crate) tool_policy: WorkflowToolPolicy,
+}
+
+impl CollaborationWorkerAccess {
+    pub(crate) fn new(
+        evidence_source: impl Into<String>,
+        tool_policy: WorkflowToolPolicy,
+    ) -> Self {
+        Self {
+            evidence_source: evidence_source.into(),
+            tool_policy,
+        }
+    }
+
+    pub(crate) fn none(evidence_source: impl Into<String>) -> Self {
+        Self::new(evidence_source, WorkflowToolPolicy::None)
+    }
 }
 
 #[derive(Debug)]
@@ -669,7 +696,8 @@ pub(crate) fn collaboration_step_result(
     }
     for entry in evidence.iter().take(12) {
         output.push_str(&format!(
-            "- source={} call={} tool={} status={}\n{}\n",
+            "- ref={} source={} call={} tool={} status={}\n{}\n",
+            collaboration_evidence_ref(entry),
             entry.source_step,
             entry.tool_call_id,
             entry.tool_name,
@@ -684,6 +712,10 @@ pub(crate) fn collaboration_step_result(
         ));
     }
     output
+}
+
+pub(crate) fn collaboration_evidence_ref(evidence: &CollaborationEvidence) -> String {
+    format!("{}::{}", evidence.source_step, evidence.tool_call_id)
 }
 
 pub(crate) fn collaboration_recovery_evidence(evidence: &[CollaborationEvidence]) -> String {
@@ -713,10 +745,44 @@ pub(crate) fn collaboration_recovery_evidence(evidence: &[CollaborationEvidence]
 }
 
 pub(crate) fn merge_collaboration_evidence(
+    step_id: &str,
     dependencies: &[String],
     evidence_by_step: &BTreeMap<String, Vec<CollaborationEvidence>>,
     own_evidence: &[CollaborationEvidence],
+    expected_collaboration_id: &str,
+    expected_steer_epoch: u64,
 ) -> Vec<CollaborationEvidence> {
+    let project = |entry: &CollaborationEvidence, source_step: &str| {
+        (entry.evidence_schema == COLLABORATION_TOOL_EVIDENCE_SCHEMA
+            && entry.steer_epoch == Some(expected_steer_epoch)
+            && entry.collaboration_id == expected_collaboration_id
+            && entry.status == "succeeded"
+            && !entry.tool_call_id.trim().is_empty()
+            && !entry.tool_name.trim().is_empty()
+            && !entry.request.trim().is_empty()
+            && !entry.output.trim().is_empty()
+            && !matches!(
+                entry.tool_name.as_str(),
+                "file.list" | "browser.tabs" | "tool.search" | "tool.inspect"
+            ))
+        .then(|| {
+            let mut projected = entry.clone();
+            projected.source_step = source_step.to_string();
+            projected.request = truncate_for_collaboration(
+                &projected.request,
+                COLLABORATION_EVIDENCE_REQUEST_MAX_CHARS,
+            );
+            projected.output = truncate_for_collaboration(
+                &projected.output,
+                COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS,
+            );
+            projected
+        })
+    };
+    let own_evidence = own_evidence
+        .iter()
+        .filter_map(|entry| project(entry, step_id))
+        .collect::<Vec<_>>();
     let own_evidence_count = own_evidence
         .len()
         .min(COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES);
@@ -724,12 +790,16 @@ pub(crate) fn merge_collaboration_evidence(
         COLLABORATION_SHARED_EVIDENCE_MAX_ENTRIES.saturating_sub(own_evidence_count);
     let mut merged = dependencies
         .iter()
-        .filter_map(|dependency| evidence_by_step.get(dependency))
-        .flatten()
+        .flat_map(|dependency| {
+            evidence_by_step
+                .get(dependency)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| project(entry, dependency))
+        })
         .take(inherited_limit)
-        .cloned()
         .collect::<Vec<_>>();
-    merged.extend(own_evidence.iter().take(own_evidence_count).cloned());
+    merged.extend(own_evidence.into_iter().take(own_evidence_count));
     let mut seen = BTreeSet::new();
     merged.retain(|entry| {
         seen.insert((
@@ -738,12 +808,6 @@ pub(crate) fn merge_collaboration_evidence(
             entry.tool_name.clone(),
         ))
     });
-    for entry in &mut merged {
-        entry.request =
-            truncate_for_collaboration(&entry.request, COLLABORATION_EVIDENCE_REQUEST_MAX_CHARS);
-        entry.output =
-            truncate_for_collaboration(&entry.output, COLLABORATION_EVIDENCE_OUTPUT_MAX_CHARS);
-    }
     merged
 }
 

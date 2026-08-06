@@ -73,8 +73,19 @@ A new run currently follows this sequence:
    in parallel; graph walk expands from selected seeds.
 7. A workflow decision can run a bounded task graph and inject its grounded
    handoff into the interactive loop. Contributions must represent different
-   work, while model reuse or diversity is selected dynamically from capability
-   fit and supported evidence. A direct decision skips collaboration.
+   work after case, punctuation, and whitespace normalization, while preserving
+   word order so directionally different assignments remain distinct. Model
+   reuse or diversity is selected dynamically from capability fit and supported
+   evidence. `ReadOnlyEvidence` exposes only substantive statically read-only
+   tools; `ReadOnlyExploration` may additionally expose bounded discovery tools;
+   `None` exposes no tools. Analysis and verification follow their validated
+   policy, while synthesis is always tool-free. Tool effects remain exclusive to the
+   foreground executor and its normal permission path. Only successful,
+   substantive, current-epoch receipts from the current collaboration enter a
+   downstream step, and their original request must satisfy the active target
+   anchor. A verification step becomes `Passed` only from a typed receipt that
+   reviews every input and cites the corresponding admitted evidence; prose-only
+   verification is `Inconclusive`. A direct decision skips collaboration.
 8. `agent-application` owns the only run/reprepare driver. Each prepared epoch
    uses `AgentKernel` for Actor model turns, admitted tool batches, typed
    Verifier observations, contract checks, and terminal delivery. Tool exposure is focused by the

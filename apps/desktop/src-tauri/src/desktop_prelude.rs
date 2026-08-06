@@ -40,7 +40,7 @@ pub(crate) use agent_runtime::{
     record_tool_outcome_with_risk, AgentRuntimeConfig, WorkerTurnPhase, WorkerTurnPolicy,
 };
 pub(crate) use agent_runtime::{
-    bounded_max_output_tokens, evidence_worker_tools,
+    bounded_max_output_tokens, evidence_worker_tools, substantive_evidence_worker_tools,
     observation_from_agent_tool_result, observation_from_tool_result,
     resume_agent_loop_from_messages, sanitize_assistant_content, start_agent_loop,
     start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentFailureClass, AgentKernel,
@@ -107,8 +107,9 @@ pub(crate) use orchestrator::{
     RoutingDecision, RoutingOutcome, RoutingTelemetry,
     RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap, UpliftGateDecision,
     UpliftGateInput, WorkflowBudget, WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry,
-    WorkflowOutputKind, WorkflowPlanIr, WorkflowSearchTeacher, WorkflowStepStatus,
-    WorkflowToolPolicy, WorkflowTopologyPrior, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    WorkflowEvidenceSummary, WorkflowOutputKind, WorkflowPlanIr, WorkflowSearchTeacher,
+    WorkflowStepStatus, WorkflowToolPolicy, WorkflowTopologyPrior, WorkflowVerificationReceipt,
+    WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
     AGENT_EVALUATION_TRACE_SCHEMA, CONDUCTOR_MAX_ATTEMPTS, DIRECT_ANCHOR_CANDIDATE_ID,
     MAX_ADAPTIVE_WORKFLOW_AGENTS, WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
     PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
@@ -135,12 +136,14 @@ pub(crate) use crate::agent_resource_snapshot::AgentResourceCheckpoint;
 pub(crate) use crate::collaboration_service::{
     adaptive_model_role, adaptive_stage_metadata, build_collaboration_arbiter_prompt,
     build_collaboration_candidate_prompt, collaboration_agent_budget,
-    collaboration_context_for_genome, collaboration_fallback_models, collaboration_recent_context,
+    collaboration_context_for_genome, collaboration_evidence_ref, collaboration_fallback_models,
+    collaboration_recent_context,
     collaboration_recovery_evidence, collaboration_step_result,
     effective_workflow_model_turn_budget, effective_workflow_step_attempt_budget,
     merge_collaboration_evidence, rebind_checkpoint_grounding_provenance,
     truncate_for_collaboration, AdaptiveCollaborationOutcome, AdaptiveCollaborationSpec,
     AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
+    CollaborationWorkerAccess,
     COLLABORATION_STEER_INTERRUPTED, WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
 };
 pub(crate) use crate::parallel_execution::{

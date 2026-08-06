@@ -96,6 +96,14 @@ pub(crate) fn run_collaboration_candidates(
             let model = spec.model.clone();
             let prompt = spec.prompt.clone();
             let cancellation = cancellation.clone();
+            let worker_access = CollaborationWorkerAccess::new(
+                stage.clone(),
+                if allow_tools {
+                    WorkflowToolPolicy::ReadOnlyExploration
+                } else {
+                    WorkflowToolPolicy::None
+                },
+            );
             Box::new(move |branch_cancellation| {
                 complete_collaboration_worker_with_tools(
                     app,
@@ -108,7 +116,7 @@ pub(crate) fn run_collaboration_candidates(
                     ModelRole::Planner,
                     model,
                     prompt,
-                    allow_tools,
+                    worker_access,
                     max_model_turns,
                     max_tool_calls,
                     COLLABORATION_MAX_OUTPUT_TOKENS,

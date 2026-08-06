@@ -36,6 +36,7 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "agent-collaboration-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -53,6 +54,7 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "agent-collaboration-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -107,6 +109,7 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "agent-collaboration-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -322,6 +325,25 @@
       "required_output": [
         "test result: ok. 1 passed; 0 failed",
         "cindx.agent-cognitive-loop-scaling.v1"
+      ]
+    },
+    {
+      "id": "agent-collaboration-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "tests::agent_collaboration_contract_tests::agent_collaboration_contract_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.agent-collaboration-contract.v1"
       ]
     },
     {

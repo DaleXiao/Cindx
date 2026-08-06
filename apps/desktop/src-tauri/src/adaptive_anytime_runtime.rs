@@ -445,6 +445,7 @@ pub(super) fn start_direct_anchor_verifier(
     let stage = spec.stage.clone();
     let model = spec.model.clone();
     let prompt = spec.prompt.clone();
+    let evidence_source = spec.step_id.clone();
     let max_model_turns = spec.max_model_turns;
     let max_tool_calls = spec.max_tool_calls;
     let max_output_tokens = spec.max_output_tokens;
@@ -464,7 +465,7 @@ pub(super) fn start_direct_anchor_verifier(
                     ModelRole::Reviewer,
                     model,
                     prompt,
-                    false,
+                    CollaborationWorkerAccess::none(evidence_source),
                     max_model_turns,
                     max_tool_calls,
                     max_output_tokens,
