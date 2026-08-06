@@ -1,4 +1,16 @@
 use std::io::Read;
+use std::path::PathBuf;
+
+#[derive(Default)]
+pub(crate) struct BoundedStreamCapture {
+    pub(crate) preview: Vec<u8>,
+    pub(crate) total_bytes: u64,
+    pub(crate) artifact_bytes: u64,
+    pub(crate) preview_truncated: bool,
+    pub(crate) artifact_truncated: bool,
+    pub(crate) artifact_path: Option<PathBuf>,
+    pub(crate) artifact_error: Option<String>,
+}
 
 #[derive(Default)]
 pub(crate) struct LimitedStreamCapture {

@@ -4,8 +4,9 @@ use super::{
     resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result, Tool, ToolError,
 };
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRisk, ToolEffectSemantics, ToolExecutionConcurrency,
-    ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    Metadata, PermissionRequest, PermissionRisk, PostconditionVerifierKind, ToolEffectSemantics,
+    ToolExecutionConcurrency, ToolInvocation, ToolOutcomeStatus, ToolPostconditionEvidence,
+    ToolResult, ToolRisk, ToolSpec,
 };
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -30,11 +31,20 @@ impl ReadFileTool {
 impl Tool for ReadFileTool {
     fn spec(&self) -> ToolSpec {
         file_read_spec(DEFAULT_FILE_READ_BYTES, MAX_FILE_READ_BYTES)
+            .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceExactReadbackV1)
             .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
         None
+    }
+
+    fn postcondition_evidence(
+        &self,
+        invocation: &ToolInvocation,
+        result: &ToolResult,
+    ) -> Option<ToolPostconditionEvidence> {
+        crate::postcondition_evidence::file_read(invocation, result)
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {

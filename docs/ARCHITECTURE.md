@@ -157,6 +157,19 @@ selection, and model-stream retry/progress policy are portable
 `agent-runtime` responsibilities. The desktop loop supplies catalog and product
 state, then executes the resulting provider and tool side effects.
 
+The foreground execution path has three explicit responsibilities. The Actor
+owns model/tool iteration and its turn budget. Verifier authority belongs to the
+typed post-commit tool-observation transition, not to model prose. A tools-disabled
+Finalizer owns only terminal-reserve delivery and does not advance Actor turns.
+The desktop precomputes a current-epoch grounded fallback before dispatch; an
+empty, malformed, tool-calling, or unavailable Finalizer either returns that
+byte-identical candidate after receipt revalidation or fails closed without
+starting another Actor turn.
+`agent_finalizer_runtime` owns fallback and receipt policy; its
+`terminal_runtime` child owns the desktop-only instruction persistence, provider
+dispatch, stream reset, and terminal handoff, keeping the Actor loop independent
+of Finalizer integration details.
+
 `task_contract/goal_delta` compares bounded contract state before and after a
 committed tool observation. It admits only first satisfaction of an active
 obligation, first target-bound grounding, or verification of a workspace or
@@ -167,6 +180,17 @@ failure status cannot mint budget credit. Existing provider/tool activity
 timestamps and generic checkpoints remain liveness or diagnostic signals rather
 than a second semantic-progress authority; only Goal Delta credit extends a run
 segment.
+
+`task_contract/postcondition_receipt` binds a verified postcondition to its
+steer/contract epochs, typed surface, action and observation sequences, verifier
+source, and digests. Receipts are bounded, retain no raw arguments or output, and
+are accepted only when bounded contract evidence still contains the matching
+action and observation. Workspace target digests are scoped to the logical run
+and contract epoch; persisted legacy witnesses remain recoverable but cannot
+mint typed authority. Checkpoint decode validates bindings, receipts, epochs, and
+evidence references before restore. Desktop completion quality derives its
+compatibility flag from this receipt; an unbound boolean cannot claim
+verification.
 
 `task_contract/denial` owns the other side of that transition. It records only
 bounded typed denial facts tied to the active prepared-contract epoch, projects a
@@ -189,6 +213,14 @@ Desktop code does not own another loop, retry budget, or semantic replan policy.
 Within run control, `control_steer_commit` owns durable steer-batch commit and
 the bounded base segment opened for an actually applied objective. It does not
 admit Goal Delta credit; that remains isolated in `control_goal_delta`.
+
+`agent_terminal_commit_runtime` is the durable terminal serialization boundary.
+It hashes task, session, physical run, and steer epoch into one terminal identity
+and uses an immediate SQLite transaction for both success and failure. Replay
+returns the existing terminal state; malformed, nonterminal, duplicate, or
+partially written identities fail and roll back. The in-memory terminal lease
+still arbitrates live steer/cancel races, while SQLite provides restart-safe
+exactly-once persistence.
 
 The validated conductor decision also supplies execution intent. The desktop
 composition root converts its task class, tool requirement, and vision flag into

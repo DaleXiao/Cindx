@@ -105,6 +105,13 @@
             },
             invocation: invocation(id, tool_name),
             risk: ToolRisk::ReadOnly,
+            effect_spec: ToolSpec::builtin(
+                tool_name,
+                "test",
+                "fake test tool",
+                ToolRisk::ReadOnly,
+                r#"{"type":"object","properties":{}}"#,
+            ),
             input_fingerprint: format!("fingerprint-{id}"),
         }
     }

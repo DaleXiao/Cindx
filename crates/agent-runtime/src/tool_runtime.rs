@@ -1,5 +1,7 @@
+use crate::task_contract::PostconditionTargetWitness;
 use agent_core::{
-    Metadata, ToolArtifact, ToolFailure, ToolInvocation, ToolObservationV2, ToolOutcomeStatus,
+    agent_run_id, logical_agent_run_id, Metadata, PostconditionVerifierKind, ToolArtifact,
+    ToolFailure, ToolInvocation, ToolObservationV2, ToolOutcomeStatus, ToolPostconditionEvidence,
     ToolResult, ToolRisk, ToolSpec, TOOL_OBSERVATION_V2_SCHEMA,
 };
 use serde::{Deserialize, Serialize};
@@ -14,8 +16,12 @@ pub const TOOL_EFFECT_SEMANTICS_METADATA_KEY: &str = "tool_effect_semantics";
 pub const TOOL_EFFECT_VERIFIER_METADATA_KEY: &str = "tool_effect_verifier";
 pub const TOOL_MODEL_OBSERVATION_METADATA_KEY: &str = "model_observation";
 pub const TOOL_EFFECT_WITNESS_METADATA_KEY: &str = "tool_effect_witness";
-pub const TOOL_EFFECT_WITNESS_SCHEMA: &str = "cindx.tool-effect-witness.v1";
+pub const TOOL_EFFECT_WITNESS_SCHEMA: &str = "cindx.tool-effect-witness.v2";
 pub const MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES: usize = 4_096;
+
+const LEGACY_TOOL_EFFECT_WITNESS_SCHEMA: &str = "cindx.tool-effect-witness.v1";
+const PERSISTED_POSTCONDITION_EVIDENCE_SCHEMA: &str =
+    "cindx.persisted-tool-postcondition-evidence.v1";
 
 const MAX_EFFECT_WITNESS_TARGETS: usize = 8;
 const MAX_EFFECT_WITNESS_PATH_COMPONENTS: usize = 8;
@@ -41,6 +47,32 @@ pub struct PersistedToolEffectWitness {
     kind: PersistedToolEffectKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     target_tokens: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    postcondition_target_witness: Option<PostconditionTargetWitness>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    typed_postcondition_binding: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    postcondition_evidence: Option<PersistedToolPostconditionEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedToolPostconditionEvidence {
+    schema: String,
+    tool_name: String,
+    input_fingerprint: String,
+    verifier_kind: String,
+    scope_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_witness: Option<PostconditionTargetWitness>,
+    evidence_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReplayedToolPostconditionEvidence {
+    pub(crate) kind: PostconditionVerifierKind,
+    pub(crate) scope_digest: String,
+    pub(crate) target_witness: Option<PostconditionTargetWitness>,
 }
 
 impl PersistedToolEffectWitness {
@@ -84,13 +116,92 @@ impl PersistedToolEffectWitness {
         } else {
             Vec::new()
         };
+        let postcondition_target_witness = matches!(
+            kind,
+            PersistedToolEffectKind::WorkspaceMutation
+                | PersistedToolEffectKind::WorkspaceObservation
+        )
+        .then(|| PostconditionTargetWitness::capture(input_json, lineage_scope))
+        .flatten();
+        let typed_postcondition_binding = !matches!(
+            kind,
+            PersistedToolEffectKind::WorkspaceMutation
+                | PersistedToolEffectKind::WorkspaceObservation
+        ) || postcondition_target_witness.is_some();
         let witness = Self {
             schema: TOOL_EFFECT_WITNESS_SCHEMA.to_string(),
             tool_name: tool_name.to_string(),
             input_fingerprint: tool_input_fingerprint(tool_name, input_json),
             kind,
             target_tokens,
+            postcondition_target_witness,
+            typed_postcondition_binding,
+            postcondition_evidence: None,
         };
+        witness.is_valid().then_some(witness)
+    }
+
+    pub fn capture_with_postcondition_evidence(
+        tool_name: &str,
+        input_json: &str,
+        risk: Option<&ToolRisk>,
+        lineage_scope: &str,
+        tool_spec: Option<&ToolSpec>,
+        evidence: Option<&ToolPostconditionEvidence>,
+    ) -> Option<Self> {
+        let (Some(tool_spec), Some(evidence)) = (tool_spec, evidence) else {
+            return Self::capture(tool_name, input_json, risk, lineage_scope);
+        };
+        let trusted_capability = tool_spec.name == tool_name
+            && tool_spec.validate().is_ok()
+            && tool_spec.postcondition_verifiers.contains(&evidence.kind);
+        let mut witness =
+            Self::capture(tool_name, input_json, risk, lineage_scope).or_else(|| {
+                (trusted_capability
+                    && evidence.kind == PostconditionVerifierKind::WorkspaceQualityCheckV1
+                    && matches!(risk, Some(ToolRisk::ExecutesProcess)))
+                .then(|| Self {
+                    schema: TOOL_EFFECT_WITNESS_SCHEMA.to_string(),
+                    tool_name: tool_name.to_string(),
+                    input_fingerprint: tool_input_fingerprint(tool_name, input_json),
+                    kind: PersistedToolEffectKind::ProcessVerification,
+                    target_tokens: Vec::new(),
+                    postcondition_target_witness: None,
+                    typed_postcondition_binding: true,
+                    postcondition_evidence: None,
+                })
+                .filter(Self::is_valid)
+            })?;
+        if !trusted_capability {
+            return Some(witness);
+        }
+        let target_witness = match evidence.kind {
+            PostconditionVerifierKind::WorkspaceExactReadbackV1
+                if witness.kind == PersistedToolEffectKind::WorkspaceObservation =>
+            {
+                let target = PostconditionTargetWitness::capture(
+                    &evidence.target_input_json,
+                    lineage_scope,
+                )?;
+                Some(
+                    (witness.postcondition_target_witness.as_ref() == Some(&target))
+                        .then_some(target)?,
+                )
+            }
+            PostconditionVerifierKind::WorkspaceQualityCheckV1
+                if witness.kind == PersistedToolEffectKind::ProcessVerification =>
+            {
+                None
+            }
+            _ => return Some(witness),
+        };
+        witness.postcondition_evidence = PersistedToolPostconditionEvidence::new(
+            tool_name,
+            &witness.input_fingerprint,
+            evidence.kind,
+            lineage_scope,
+            target_witness,
+        );
         witness.is_valid().then_some(witness)
     }
 
@@ -106,7 +217,15 @@ impl PersistedToolEffectWitness {
         if encoded.len() > MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES {
             return None;
         }
-        let witness = serde_json::from_str::<Self>(encoded).ok()?;
+        let mut witness = serde_json::from_str::<Self>(encoded).ok()?;
+        if witness.schema == LEGACY_TOOL_EFFECT_WITNESS_SCHEMA {
+            // v1 never carried a scoped postcondition witness. It remains
+            // useful for conservative effect replay but cannot mint v2
+            // verification authority.
+            witness.postcondition_target_witness = None;
+            witness.typed_postcondition_binding = false;
+            witness.postcondition_evidence = None;
+        }
         witness.is_valid().then_some(witness)
     }
 
@@ -137,6 +256,59 @@ impl PersistedToolEffectWitness {
             | PersistedToolEffectKind::ComputerObservation => "{}".to_string(),
         };
         Some(input)
+    }
+
+    pub(crate) fn postcondition_target_witness_for(
+        &self,
+        tool_name: &str,
+        input_fingerprint: &str,
+        registered_risk: Option<&ToolRisk>,
+    ) -> Option<&PostconditionTargetWitness> {
+        (self.is_valid()
+            && self.tool_name == tool_name
+            && self.input_fingerprint == input_fingerprint
+            && self.matches_tool_and_risk(tool_name, registered_risk))
+        .then_some(self.postcondition_target_witness.as_ref())
+        .flatten()
+    }
+
+    pub(crate) fn supports_typed_postcondition_binding_for(
+        &self,
+        tool_name: &str,
+        input_fingerprint: &str,
+        registered_risk: Option<&ToolRisk>,
+    ) -> bool {
+        self.typed_postcondition_binding
+            && self.is_valid()
+            && self.tool_name == tool_name
+            && self.input_fingerprint == input_fingerprint
+            && self.matches_tool_and_risk(tool_name, registered_risk)
+    }
+
+    pub(crate) fn postcondition_evidence_for(
+        &self,
+        tool_name: &str,
+        input_fingerprint: &str,
+        registered_risk: Option<&ToolRisk>,
+        tool_spec: Option<&ToolSpec>,
+    ) -> Option<ReplayedToolPostconditionEvidence> {
+        let persisted = self.postcondition_evidence.as_ref()?;
+        let tool_spec = tool_spec?;
+        let kind = persisted.verifier_kind()?;
+        (self.is_valid()
+            && self.tool_name == tool_name
+            && self.input_fingerprint == input_fingerprint
+            && self.matches_tool_and_risk(tool_name, registered_risk)
+            && persisted.tool_name == tool_name
+            && persisted.input_fingerprint == input_fingerprint
+            && tool_spec.name == tool_name
+            && tool_spec.validate().is_ok()
+            && tool_spec.postcondition_verifiers.contains(&kind))
+        .then(|| ReplayedToolPostconditionEvidence {
+            kind,
+            scope_digest: persisted.scope_digest.clone(),
+            target_witness: persisted.target_witness.clone(),
+        })
     }
 
     fn matches_tool_and_risk(&self, tool_name: &str, risk: Option<&ToolRisk>) -> bool {
@@ -182,7 +354,9 @@ impl PersistedToolEffectWitness {
     }
 
     fn is_valid(&self) -> bool {
-        if self.schema != TOOL_EFFECT_WITNESS_SCHEMA
+        let current_schema = self.schema == TOOL_EFFECT_WITNESS_SCHEMA;
+        let legacy_schema = self.schema == LEGACY_TOOL_EFFECT_WITNESS_SCHEMA;
+        if (!current_schema && !legacy_schema)
             || self.tool_name.trim().is_empty()
             || self.tool_name.len() > 128
             || self.input_fingerprint.len() != 64
@@ -198,15 +372,142 @@ impl PersistedToolEffectWitness {
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit() || byte == b'/')
             })
+            || self
+                .postcondition_target_witness
+                .as_ref()
+                .is_some_and(|witness| !witness.contract_is_valid())
+            || self
+                .postcondition_evidence
+                .as_ref()
+                .is_some_and(|evidence| !evidence.contract_is_valid())
+        {
+            return false;
+        }
+        if legacy_schema
+            && (self.typed_postcondition_binding
+                || self.postcondition_target_witness.is_some()
+                || self.postcondition_evidence.is_some())
+        {
+            return false;
+        }
+        if self
+            .postcondition_evidence
+            .as_ref()
+            .is_some_and(|evidence| match evidence.verifier_kind() {
+                Some(PostconditionVerifierKind::WorkspaceExactReadbackV1) => {
+                    self.kind != PersistedToolEffectKind::WorkspaceObservation
+                        || evidence.target_witness.as_ref()
+                            != self.postcondition_target_witness.as_ref()
+                }
+                Some(PostconditionVerifierKind::WorkspaceQualityCheckV1) => {
+                    self.kind != PersistedToolEffectKind::ProcessVerification
+                        || evidence.target_witness.is_some()
+                }
+                None => true,
+            })
         {
             return false;
         }
         match self.kind {
             PersistedToolEffectKind::WorkspaceMutation => true,
             PersistedToolEffectKind::WorkspaceObservation => !self.target_tokens.is_empty(),
-            _ => self.target_tokens.is_empty(),
+            _ => self.target_tokens.is_empty() && self.postcondition_target_witness.is_none(),
         }
     }
+}
+
+impl PersistedToolPostconditionEvidence {
+    fn new(
+        tool_name: &str,
+        input_fingerprint: &str,
+        kind: PostconditionVerifierKind,
+        lineage_scope: &str,
+        target_witness: Option<PostconditionTargetWitness>,
+    ) -> Option<Self> {
+        let mut evidence = Self {
+            schema: PERSISTED_POSTCONDITION_EVIDENCE_SCHEMA.to_string(),
+            tool_name: tool_name.to_string(),
+            input_fingerprint: input_fingerprint.to_string(),
+            verifier_kind: kind.label().to_string(),
+            scope_digest: PostconditionTargetWitness::scope_digest_for(lineage_scope)?,
+            target_witness,
+            evidence_digest: String::new(),
+        };
+        evidence.evidence_digest = evidence.expected_digest()?;
+        evidence.contract_is_valid().then_some(evidence)
+    }
+
+    fn verifier_kind(&self) -> Option<PostconditionVerifierKind> {
+        match self.verifier_kind.as_str() {
+            "workspace_exact_readback_v1" => {
+                Some(PostconditionVerifierKind::WorkspaceExactReadbackV1)
+            }
+            "workspace_quality_check_v1" => {
+                Some(PostconditionVerifierKind::WorkspaceQualityCheckV1)
+            }
+            _ => None,
+        }
+    }
+
+    fn contract_is_valid(&self) -> bool {
+        self.schema == PERSISTED_POSTCONDITION_EVIDENCE_SCHEMA
+            && !self.tool_name.trim().is_empty()
+            && self.tool_name.len() <= 128
+            && is_sha256_digest(&self.input_fingerprint)
+            && is_sha256_digest(&self.scope_digest)
+            && self.target_witness.as_ref().is_none_or(|target| {
+                target.contract_is_valid() && target.same_scope_digest(&self.scope_digest)
+            })
+            && match self.verifier_kind() {
+                Some(PostconditionVerifierKind::WorkspaceExactReadbackV1) => {
+                    self.target_witness.is_some()
+                }
+                Some(PostconditionVerifierKind::WorkspaceQualityCheckV1) => {
+                    self.target_witness.is_none()
+                }
+                None => false,
+            }
+            && is_sha256_digest(&self.evidence_digest)
+            && self
+                .expected_digest()
+                .is_some_and(|digest| digest == self.evidence_digest)
+    }
+
+    fn expected_digest(&self) -> Option<String> {
+        let encoded = serde_json::to_vec(&(
+            &self.schema,
+            &self.tool_name,
+            &self.input_fingerprint,
+            &self.verifier_kind,
+            &self.scope_digest,
+            &self.target_witness,
+        ))
+        .ok()?;
+        let mut digest = Sha256::new();
+        digest.update(encoded);
+        Some(format!("{:x}", digest.finalize()))
+    }
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Returns the stable, non-persisted scope used to pseudonymize postcondition
+/// targets. Continuations keep the logical run id while unrelated runs receive
+/// distinct target digests.
+pub fn postcondition_lineage_scope(run_context: &Metadata) -> Option<String> {
+    let run_id = logical_agent_run_id(run_context).or_else(|| agent_run_id(run_context))?;
+    let contract_epoch = run_context
+        .get("prompt_contract_epoch")
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            run_context
+                .get("steer_epoch")
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .unwrap_or_default();
+    Some(format!("{run_id}:{contract_epoch}"))
 }
 
 fn redacted_effect_targets(input_json: &str, lineage_scope: &str) -> Vec<String> {
@@ -215,6 +516,10 @@ fn redacted_effect_targets(input_json: &str, lineage_scope: &str) -> Vec<String>
         .filter_map(|target| redacted_effect_target(&target, lineage_scope))
         .take(MAX_EFFECT_WITNESS_TARGETS)
         .collect()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn structured_effect_targets(input_json: &str) -> BTreeSet<String> {
@@ -246,7 +551,16 @@ fn collect_effect_targets(
             if key.is_some_and(|key| {
                 matches!(
                     key.to_ascii_lowercase().as_str(),
-                    "path" | "file" | "file_path" | "output" | "output_path" | "directory"
+                    "path"
+                        | "paths"
+                        | "file"
+                        | "files"
+                        | "file_path"
+                        | "file_paths"
+                        | "output"
+                        | "output_path"
+                        | "directory"
+                        | "directories"
                 )
             }) =>
         {
@@ -797,6 +1111,114 @@ mod tests {
             PersistedToolEffectWitness::decode(&encoded_write),
             Some(write)
         );
+
+        let unrelated_run = PersistedToolEffectWitness::capture(
+            "file.write",
+            write_input,
+            Some(&ToolRisk::WritesWorkspace),
+            "run-b:4",
+        )
+        .expect("same target in an unrelated run still has a bounded witness");
+        assert_ne!(
+            unrelated_run.encode(),
+            Some(encoded_write),
+            "target pseudonyms must not correlate across logical runs"
+        );
+    }
+
+    #[test]
+    fn persisted_postcondition_evidence_is_signed_redacted_and_fail_closed() {
+        let input = r#"{ "path": "private/super-secret/goal.md", "offset": 0 }"#;
+        let spec = ToolSpec::builtin(
+            "file.read",
+            "file",
+            "read",
+            ToolRisk::ReadOnly,
+            r#"{"type":"object"}"#,
+        )
+        .with_effect_semantics(ToolEffectSemantics::ReadOnly)
+        .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceExactReadbackV1);
+        let evidence = ToolPostconditionEvidence {
+            kind: PostconditionVerifierKind::WorkspaceExactReadbackV1,
+            target_input_json: r#"{"path":"private/super-secret/goal.md"}"#.to_string(),
+        };
+        let witness = PersistedToolEffectWitness::capture_with_postcondition_evidence(
+            "file.read",
+            input,
+            Some(&ToolRisk::ReadOnly),
+            "logical-run:4",
+            Some(&spec),
+            Some(&evidence),
+        )
+        .expect("trusted readback evidence should produce a bounded witness");
+        let fingerprint = tool_input_fingerprint("file.read", input);
+        assert!(witness
+            .postcondition_evidence_for(
+                "file.read",
+                &fingerprint,
+                Some(&ToolRisk::ReadOnly),
+                Some(&spec),
+            )
+            .is_some());
+
+        let encoded = witness.encode().expect("typed witness encodes");
+        for secret in ["private", "super-secret", "goal.md"] {
+            assert!(!encoded.contains(secret));
+        }
+        let mut tampered =
+            serde_json::from_str::<serde_json::Value>(&encoded).expect("witness is JSON");
+        tampered["postconditionEvidence"]["verifierKind"] =
+            serde_json::Value::String("workspace_quality_check_v1".to_string());
+        assert!(PersistedToolEffectWitness::decode(&tampered.to_string()).is_none());
+
+        let unsigned = PersistedToolEffectWitness::capture(
+            "file.read",
+            input,
+            Some(&ToolRisk::ReadOnly),
+            "logical-run:4",
+        )
+        .expect("an unsigned effect witness remains recoverable");
+        assert!(unsigned
+            .postcondition_evidence_for(
+                "file.read",
+                &fingerprint,
+                Some(&ToolRisk::ReadOnly),
+                Some(&spec),
+            )
+            .is_none());
+
+        let shell_input = r#"{"command":"cargo clippy","cwd":"."}"#;
+        let shell_spec = ToolSpec::builtin(
+            "shell.run",
+            "shell",
+            "run",
+            ToolRisk::ExecutesProcess,
+            r#"{"type":"object"}"#,
+        )
+        .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceQualityCheckV1);
+        let shell_evidence = ToolPostconditionEvidence {
+            kind: PostconditionVerifierKind::WorkspaceQualityCheckV1,
+            target_input_json: r#"{"path":"."}"#.to_string(),
+        };
+        let shell_witness = PersistedToolEffectWitness::capture_with_postcondition_evidence(
+            "shell.run",
+            shell_input,
+            Some(&ToolRisk::ExecutesProcess),
+            "logical-run:4",
+            Some(&shell_spec),
+            Some(&shell_evidence),
+        )
+        .expect("trusted workspace-wide quality evidence should remain recoverable");
+        assert!(shell_witness
+            .postcondition_evidence_for(
+                "shell.run",
+                &tool_input_fingerprint("shell.run", shell_input),
+                Some(&ToolRisk::ExecutesProcess),
+                Some(&shell_spec),
+            )
+            .is_some());
+        let encoded_shell = shell_witness.encode().expect("shell witness encodes");
+        assert!(!encoded_shell.contains("cargo clippy"));
     }
 
     #[test]
@@ -855,6 +1277,72 @@ mod tests {
                 Some(&ToolRisk::UsesNetwork),
             )
             .is_none());
+
+        let write_input = r#"{"path":"legacy.md","content":"old"}"#;
+        let current = PersistedToolEffectWitness::capture(
+            "file.write",
+            write_input,
+            Some(&ToolRisk::WritesWorkspace),
+            "run-a:4",
+        )
+        .and_then(|witness| witness.encode())
+        .expect("current workspace witness encodes");
+        let mut legacy =
+            serde_json::from_str::<serde_json::Value>(&current).expect("witness is JSON");
+        legacy["schema"] = serde_json::Value::String(LEGACY_TOOL_EFFECT_WITNESS_SCHEMA.to_string());
+        legacy
+            .as_object_mut()
+            .expect("witness is an object")
+            .remove("postconditionTargetWitness");
+        legacy
+            .as_object_mut()
+            .expect("witness is an object")
+            .remove("typedPostconditionBinding");
+        let legacy = PersistedToolEffectWitness::decode(&legacy.to_string())
+            .expect("v1 remains recoverable for conservative effect replay");
+        assert!(!legacy.supports_typed_postcondition_binding_for(
+            "file.write",
+            &tool_input_fingerprint("file.write", write_input),
+            Some(&ToolRisk::WritesWorkspace),
+        ));
+    }
+
+    #[test]
+    fn postcondition_scope_uses_logical_run_and_contract_epoch() {
+        let logical = [
+            ("agent_run_id".to_string(), "physical-b".to_string()),
+            ("logical_agent_run_id".to_string(), "logical-a".to_string()),
+            ("prompt_contract_epoch".to_string(), "7".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            postcondition_lineage_scope(&logical).as_deref(),
+            Some("logical-a:7")
+        );
+
+        let physical = [
+            ("agent_run_id".to_string(), "physical-b".to_string()),
+            ("steer_epoch".to_string(), "8".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            postcondition_lineage_scope(&physical).as_deref(),
+            Some("physical-b:8")
+        );
+        let invalid_contract = [
+            ("agent_run_id".to_string(), "physical-c".to_string()),
+            ("prompt_contract_epoch".to_string(), "invalid".to_string()),
+            ("steer_epoch".to_string(), "9".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            postcondition_lineage_scope(&invalid_contract).as_deref(),
+            Some("physical-c:9")
+        );
+        assert!(postcondition_lineage_scope(&Metadata::new()).is_none());
     }
 
     #[test]

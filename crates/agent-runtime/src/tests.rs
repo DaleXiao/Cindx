@@ -424,6 +424,9 @@ fn collaboration_workers_only_receive_read_only_evidence_tools() {
             "Read a file",
             ToolRisk::ReadOnly,
             r#"{"type":"object"}"#,
+        )
+        .with_postcondition_verifier(
+            agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
         ),
         ToolSpec::builtin(
             "file.write",
@@ -998,6 +1001,9 @@ fn completion_gate_requests_post_mutation_verification_once() {
             "Read a file",
             ToolRisk::ReadOnly,
             r#"{"type":"object"}"#,
+        )
+        .with_postcondition_verifier(
+            agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
         ),
         ToolSpec::builtin(
             "file.write",

@@ -40,7 +40,7 @@ pub(crate) use agent_runtime::{
     record_tool_outcome_with_risk, AgentRuntimeConfig, WorkerTurnPhase, WorkerTurnPolicy,
 };
 pub(crate) use agent_runtime::{
-    bounded_max_output_tokens, ensure_terminal_commit_instruction, evidence_worker_tools,
+    bounded_max_output_tokens, evidence_worker_tools,
     observation_from_agent_tool_result, observation_from_tool_result,
     resume_agent_loop_from_messages, sanitize_assistant_content, start_agent_loop,
     start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentFailureClass, AgentKernel,

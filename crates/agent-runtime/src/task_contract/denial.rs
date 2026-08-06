@@ -302,11 +302,21 @@ impl AgentTaskContract {
         if self.evidence.len() <= MAX_CONTRACT_EVIDENCE {
             return;
         }
-        let pinned = self
+        let mut pinned = self
             .action_denials
             .iter()
             .map(|denial| denial.evidence_sequence)
             .collect::<BTreeSet<_>>();
+        pinned.extend(
+            self.postcondition_bindings
+                .values()
+                .map(|binding| binding.action_sequence),
+        );
+        pinned.extend(
+            self.postcondition_verification_receipts
+                .iter()
+                .flat_map(|receipt| [receipt.action_sequence, receipt.observation_sequence]),
+        );
         let mut remaining = self.evidence.len() - MAX_CONTRACT_EVIDENCE;
         self.evidence.retain(|evidence| {
             if remaining > 0 && !pinned.contains(&evidence.sequence) {

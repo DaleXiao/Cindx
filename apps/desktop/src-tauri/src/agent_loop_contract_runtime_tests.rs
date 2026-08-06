@@ -1,6 +1,8 @@
 use super::*;
 use crate::collaboration_service::CollaborationGroundingReceipt;
-use agent_core::{TaskId, ToolCallId, ToolEffectSemantics};
+use agent_core::{
+    PostconditionVerifierKind, TaskId, ToolCallId, ToolEffectSemantics, ToolPostconditionEvidence,
+};
 use agent_runtime::{start_agent_loop, AgentRuntimeConfig};
 
 fn read_tool(name: &str, risk: ToolRisk) -> ToolSpec {
@@ -388,8 +390,10 @@ fn conductor_effect_and_browser_evidence_are_both_required_for_the_current_epoch
 
 #[test]
 fn explicit_software_change_infers_effect_and_postcondition_without_conductor_metadata() {
+    const POSTCONDITION_SCOPE: &str = "contract-test:inferred-effect:5";
     let tools = vec![
-        read_tool("file.read", ToolRisk::ReadOnly),
+        read_tool("file.read", ToolRisk::ReadOnly)
+            .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceExactReadbackV1),
         ToolSpec::builtin(
             "file.write",
             "file",
@@ -397,7 +401,9 @@ fn explicit_software_change_infers_effect_and_postcondition_without_conductor_me
             ToolRisk::WritesWorkspace,
             r#"{"type":"object"}"#,
         )
-        .with_effect_semantics(ToolEffectSemantics::Idempotent),
+        .with_effect_semantics(ToolEffectSemantics::Verifiable {
+            verifier: "workspace_file_content_v1".to_string(),
+        }),
     ];
     let context = run_context("Fix the Settings crash in this app", 5);
     let mut runtime = start_agent_loop(
@@ -426,28 +432,42 @@ fn explicit_software_change_infers_effect_and_postcondition_without_conductor_me
         .expect("read evidence alone is not an effect");
     assert!(effect_gate.content.contains("prompt_effect"));
 
-    AgentKernel::new(&mut runtime, &tools).apply_tool_observation(
-        &agent_runtime::AgentToolRequest {
-            call_id: ToolCallId("write-settings".to_string()),
-            tool_name: "file.write".to_string(),
-            input: r#"{"path":"src/settings.rs"}"#.to_string(),
-        },
-        &ToolOutcomeStatus::Succeeded,
-        Some(&ToolRisk::WritesWorkspace),
-        "tool=file.write\nstatus=succeeded\noutput=updated",
-    );
+    AgentKernel::new(&mut runtime, &tools)
+        .with_postcondition_scope(Some(POSTCONDITION_SCOPE))
+        .apply_tool_observation(
+            &agent_runtime::AgentToolRequest {
+                call_id: ToolCallId("write-settings".to_string()),
+                tool_name: "file.write".to_string(),
+                input: r#"{"path":"src/settings.rs"}"#.to_string(),
+            },
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+            "tool=file.write\nstatus=succeeded\noutput=updated",
+        );
     assert!(AgentKernel::new(&mut runtime, &tools)
         .completion_gate_for_task()
         .expect("postcondition gate evaluates")
         .is_some());
-    apply_observation(
-        &mut runtime,
-        &tools,
-        "file.read",
-        r#"{"path":"src/settings.rs"}"#,
-        ToolOutcomeStatus::Succeeded,
-        "tool=file.read\nstatus=succeeded\noutput=updated source",
-    );
+    let readback_input = r#"{"path":"src/settings.rs"}"#;
+    let readback_evidence = ToolPostconditionEvidence {
+        kind: PostconditionVerifierKind::WorkspaceExactReadbackV1,
+        target_input_json: readback_input.to_string(),
+    };
+    AgentKernel::new(&mut runtime, &tools)
+        .with_postcondition_scope(Some(POSTCONDITION_SCOPE))
+        .apply_tool_observation_transition_with_contract(
+            &agent_runtime::AgentToolRequest {
+                call_id: ToolCallId("read-settings-after-write".to_string()),
+                tool_name: "file.read".to_string(),
+                input: readback_input.to_string(),
+            },
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            Some(&tools[0]),
+            Some(&readback_evidence),
+            "tool=file.read\nstatus=succeeded\noutput=updated source",
+            None,
+        );
     assert_eq!(
         AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
         Ok(None)

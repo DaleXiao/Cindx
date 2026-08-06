@@ -940,10 +940,13 @@ const toolsModuleBudgets = new Map([
   ["file_tools.rs", 540],
   ["image_generation.rs", 280],
   ["lib.rs", 720],
+  ["meta_invoke.rs", 110],
   ["meta_tools.rs", 240],
+  ["postcondition_evidence.rs", 60],
   ["private_file.rs", 80],
   ["process_control.rs", 30],
   ["shell.rs", 950],
+  ["shell_postcondition.rs", 200],
   ["stream_capture.rs", 60],
   ["tool_contract_v2.rs", 650],
   ["tool_support.rs", 360],
@@ -4083,8 +4086,9 @@ assert(
   appSource.includes("onStreamDone={handleAgentStreamDone}") &&
     sessionThreadSource.includes("onStreamDone: (sessionId: string) => boolean | Promise<boolean>") &&
     modelStreamSubscriptionSource.includes("finishAndSynchronize") &&
-    rustLib.includes("let completed_state = match terminal_commit") &&
-    rustLib.includes("RunTerminalCommit::Committed(state) => state") &&
+    rustLib.includes("let (completed_state, inserted_terminal) = match terminal_commit") &&
+    rustLib.includes("RunTerminalCommit::Committed(persisted) =>") &&
+    rustLib.includes("(persisted.state, persisted.inserted)") &&
     rustLib.includes(
       'emit_agent_stream_delta(app, &delivery_request_id, session_id, "", true, false, None);'
     ) &&

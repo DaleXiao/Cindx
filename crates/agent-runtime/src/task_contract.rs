@@ -11,6 +11,9 @@ mod denial;
 mod goal_delta;
 mod grounded_completion;
 mod outcome_ledger;
+mod postcondition_receipt;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use denial::{
     AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,
@@ -33,6 +36,14 @@ pub use outcome_ledger::{
     OutcomeSatisfaction, OutcomeScope, OutcomeTerminal, OutcomeTerminalObservation,
     OutcomeTruncation, OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
     OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
+};
+
+pub(crate) use postcondition_receipt::PostconditionTargetWitness;
+use postcondition_receipt::{PostconditionActionBinding, PostconditionBindingKey};
+pub use postcondition_receipt::{
+    PostconditionVerificationReceipt, MAX_POSTCONDITION_VERIFICATION_RECEIPT_BYTES,
+    POSTCONDITION_VERIFICATION_DIGEST_METADATA_KEY, POSTCONDITION_VERIFICATION_METADATA_KEY,
+    POSTCONDITION_VERIFICATION_SCHEMA,
 };
 
 const MAX_CONTRACT_EVIDENCE: usize = 128;
@@ -207,6 +218,10 @@ pub struct AgentTaskContract {
     action_denials: Vec<AgentActionDenial>,
     #[serde(default)]
     action_denial_replan_used: bool,
+    #[serde(default)]
+    postcondition_bindings: BTreeMap<PostconditionBindingKey, PostconditionActionBinding>,
+    #[serde(default)]
+    postcondition_verification_receipts: Vec<PostconditionVerificationReceipt>,
 }
 
 impl AgentTaskContract {
@@ -819,6 +834,17 @@ impl AgentTaskContract {
         status: &ToolOutcomeStatus,
         risk: Option<&ToolRisk>,
     ) {
+        self.record_tool_outcome_internal(tool_name, input_json, status, risk, None);
+    }
+
+    fn record_tool_outcome_internal(
+        &mut self,
+        tool_name: &str,
+        input_json: &str,
+        status: &ToolOutcomeStatus,
+        risk: Option<&ToolRisk>,
+        verification_authorized: Option<bool>,
+    ) {
         if !matches!(status, ToolOutcomeStatus::Succeeded) {
             return;
         }
@@ -877,13 +903,18 @@ impl AgentTaskContract {
             let verified = self
                 .pending_interactions
                 .get(&surface)
-                .is_some_and(|action| interaction_observation_verifies(action, tool_name));
+                .is_some_and(|action| interaction_observation_verifies(action, tool_name))
+                && verification_authorized.unwrap_or(true);
             if verified {
                 self.pending_interactions.remove(&surface);
                 self.gate_attempts.remove("interaction_verification");
             }
             self.record_evidence(
-                ContractEvidenceKind::InteractionObservation,
+                if verification_authorized.is_some() && !verified {
+                    ContractEvidenceKind::OtherTool
+                } else {
+                    ContractEvidenceKind::InteractionObservation
+                },
                 tool_name,
                 input_json,
             );
@@ -899,7 +930,9 @@ impl AgentTaskContract {
             }
             Some(ToolRisk::ReadOnly) => {
                 let verifies_mutation = self.mutation_epoch > self.verified_mutation_epoch
-                    && verification_targets_match(&self.mutation_targets, input_json);
+                    && verification_authorized.unwrap_or_else(|| {
+                        verification_targets_match(&self.mutation_targets, input_json)
+                    });
                 if verifies_mutation {
                     self.verified_mutation_epoch = self.mutation_epoch;
                     self.gate_attempts.remove("workspace_verification");
@@ -917,6 +950,8 @@ impl AgentTaskContract {
             Some(ToolRisk::ExecutesProcess) => {
                 let verifies_mutation = self.mutation_epoch > self.verified_mutation_epoch
                     && process_input_looks_like_verification(input_json);
+                let verifies_mutation =
+                    verifies_mutation && verification_authorized.unwrap_or(true);
                 if verifies_mutation {
                     self.verified_mutation_epoch = self.mutation_epoch;
                     self.gate_attempts.remove("workspace_verification");
@@ -1229,7 +1264,16 @@ fn collect_targets(value: &serde_json::Value, key: Option<&str>, targets: &mut B
             if key.is_some_and(|key| {
                 matches!(
                     key.to_ascii_lowercase().as_str(),
-                    "path" | "file" | "file_path" | "output" | "output_path" | "directory"
+                    "path"
+                        | "paths"
+                        | "file"
+                        | "files"
+                        | "file_path"
+                        | "file_paths"
+                        | "output"
+                        | "output_path"
+                        | "directory"
+                        | "directories"
                 )
             }) =>
         {
@@ -1367,7 +1411,7 @@ fn process_input_looks_like_verification(input_json: &str) -> bool {
 }
 
 fn tool_can_verify_workspace_change(tool: &ToolSpec) -> bool {
-    matches!(tool.risk, ToolRisk::ReadOnly | ToolRisk::ExecutesProcess)
+    !tool.postcondition_verifiers.is_empty()
 }
 
 #[cfg(test)]
@@ -1375,7 +1419,21 @@ mod tests {
     use super::*;
 
     fn tool(name: &str, risk: ToolRisk) -> ToolSpec {
-        ToolSpec::builtin(name, "test", "test", risk, r#"{"type":"object"}"#)
+        let spec = ToolSpec::builtin(name, "test", "test", risk.clone(), r#"{"type":"object"}"#);
+        match risk {
+            ToolRisk::ReadOnly => spec.with_postcondition_verifier(
+                agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
+            ),
+            ToolRisk::ExecutesProcess => spec.with_postcondition_verifier(
+                agent_core::PostconditionVerifierKind::WorkspaceQualityCheckV1,
+            ),
+            ToolRisk::WritesWorkspace | ToolRisk::Destructive => {
+                spec.with_effect_semantics(agent_core::ToolEffectSemantics::Verifiable {
+                    verifier: "workspace_file_content_v1".to_string(),
+                })
+            }
+            _ => spec,
+        }
     }
 
     #[test]

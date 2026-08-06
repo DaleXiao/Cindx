@@ -2199,6 +2199,49 @@ fn stage_exhaustion_is_local_and_preserves_terminal_reserve() {
 }
 
 #[test]
+fn actor_calls_preserve_finalizer_reserve_and_stage_usage_is_independent() {
+    let mut budget = test_budget();
+    budget.initial_model_calls = 5;
+    budget.max_model_calls = 5;
+    budget.terminal_model_call_reserve = 2;
+    let control = AgentRunControl::with_budget(budget);
+
+    for stage in ["actor_1", "actor_2", "actor_3"] {
+        control
+            .begin_stage_model_call(stage, RunStageClass::Actor)
+            .expect("actor call should use only the nonterminal allocation");
+        control.finish_model_call();
+    }
+    assert_eq!(
+        control.begin_stage_model_call("actor_4", RunStageClass::Actor),
+        Err(RunStopReason::StageBudgetExhausted)
+    );
+
+    for stage in ["finalizer_1", "finalizer_2"] {
+        control
+            .begin_stage_model_call(stage, RunStageClass::Finalizer)
+            .expect("finalizer should retain its complete reserve");
+        control.finish_model_call();
+    }
+
+    let usage = control.progress().stage_usage;
+    assert_eq!(
+        usage
+            .get(&RunStageClass::Actor)
+            .map(|usage| usage.model_calls),
+        Some(3)
+    );
+    assert_eq!(
+        usage
+            .get(&RunStageClass::Finalizer)
+            .map(|usage| usage.model_calls),
+        Some(2)
+    );
+    assert_eq!(control.progress().model_calls, 5);
+    assert_eq!(control.stop_reason(), None);
+}
+
+#[test]
 fn internal_terminal_stages_cannot_consume_final_user_delivery_calls() {
     let mut budget = test_budget();
     budget.initial_model_calls = 6;

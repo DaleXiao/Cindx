@@ -24,14 +24,98 @@ pub(crate) struct AgentModelTurnResponse {
     pub epoch_lease: agent_runtime::RunEpochLease,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentModelTurnRole {
+    Actor,
+    Finalizer,
+}
+
+pub(crate) struct AgentModelTurnPlan<'a> {
+    role: AgentModelTurnRole,
+    tools: &'a [ToolSpec],
+    request: ModelRequest,
+}
+
+impl<'a> AgentModelTurnPlan<'a> {
+    pub(crate) fn actor(tools: &'a [ToolSpec], request: ModelRequest) -> Self {
+        Self {
+            role: AgentModelTurnRole::Actor,
+            tools,
+            request,
+        }
+    }
+
+    pub(crate) fn finalizer(mut request: ModelRequest) -> Self {
+        request.tools.clear();
+        Self {
+            role: AgentModelTurnRole::Finalizer,
+            tools: &[],
+            request,
+        }
+    }
+
+    fn into_parts(self) -> (AgentModelTurnRole, &'a [ToolSpec], ModelRequest) {
+        (self.role, self.tools, self.request)
+    }
+}
+
+impl AgentModelTurnRole {
+    fn stage_class(self) -> RunStageClass {
+        match self {
+            Self::Actor => RunStageClass::Actor,
+            Self::Finalizer => RunStageClass::Finalizer,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Actor => "actor",
+            Self::Finalizer => "finalizer",
+        }
+    }
+
+    fn is_finalizer(self) -> bool {
+        self == Self::Finalizer
+    }
+}
+
+pub(crate) struct AgentModelTurnUnavailable {
+    pub failure: AgentFailure,
+    pub request_id: String,
+    pub streamed_output: bool,
+    pub epoch_lease: agent_runtime::RunEpochLease,
+}
+
 pub(crate) enum AgentModelTurnOutcome {
     Response(AgentModelTurnResponse),
+    Unavailable(AgentModelTurnUnavailable),
+    HandoffToFinalizer,
     RestartAfterSteer,
     Finished(Box<AgentState>),
 }
 
 fn finished_agent_turn(state: AgentState) -> AgentModelTurnOutcome {
     AgentModelTurnOutcome::Finished(Box::new(state))
+}
+
+fn stage_budget_exhaustion_outcome(
+    turn_role: AgentModelTurnRole,
+    request_id: String,
+    epoch_lease: agent_runtime::RunEpochLease,
+    message: impl Into<String>,
+) -> AgentModelTurnOutcome {
+    if turn_role == AgentModelTurnRole::Actor {
+        return AgentModelTurnOutcome::HandoffToFinalizer;
+    }
+    AgentModelTurnOutcome::Unavailable(AgentModelTurnUnavailable {
+        failure: AgentFailure::from_stop_reason(
+            RunStopReason::StageBudgetExhausted,
+            message.into(),
+        ),
+        request_id,
+        streamed_output: false,
+        epoch_lease,
+    })
 }
 
 fn stop_parent_run_for_model_call_failure(cancellation: &AgentRunControl, reason: RunStopReason) {
@@ -50,11 +134,10 @@ pub(crate) fn execute_agent_model_turn(
     cancellation: &Arc<AgentRunControl>,
     provider: &dyn StreamingModelProvider,
     agent_model: &str,
-    tools: &[ToolSpec],
-    request: ModelRequest,
     context_governor: &ContextGovernorReport,
-    terminal_commit: bool,
+    turn_plan: AgentModelTurnPlan<'_>,
 ) -> Result<AgentModelTurnOutcome, String> {
+    let (turn_role, tools, request) = turn_plan.into_parts();
     let session_id = run_context.get("session_id").map(String::as_str);
     let epoch_lease = match cancellation.execution_epoch_lease() {
         agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
@@ -84,18 +167,23 @@ pub(crate) fn execute_agent_model_turn(
             ));
         }
     };
-    let model_call = if collaboration.is_some() || terminal_commit {
-        cancellation.begin_stage_model_call_at(
-            epoch_lease.epoch(),
-            "executor",
-            RunStageClass::Finalizer,
-        )
-    } else {
-        cancellation.begin_model_call_at(epoch_lease.epoch(), "executor")
-    };
+    let request_id = unique_id("agent-model");
+    let model_call = cancellation.begin_stage_model_call_at(
+        epoch_lease.epoch(),
+        turn_role.label(),
+        turn_role.stage_class(),
+    );
     match model_call {
         Ok(Some(_)) => {}
         Ok(None) => return Ok(AgentModelTurnOutcome::RestartAfterSteer),
+        Err(reason) if reason == RunStopReason::StageBudgetExhausted => {
+            return Ok(stage_budget_exhaustion_outcome(
+                turn_role,
+                request_id,
+                epoch_lease,
+                format!("Finalizer model call unavailable: {}", reason.code()),
+            ));
+        }
         Err(reason) => {
             stop_parent_run_for_model_call_failure(cancellation, reason);
             return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
@@ -127,7 +215,6 @@ pub(crate) fn execute_agent_model_turn(
         return Ok(AgentModelTurnOutcome::RestartAfterSteer);
     }
 
-    let request_id = unique_id("agent-model");
     let started_at_ms = current_time_millis();
     {
         let mut store = state
@@ -167,14 +254,18 @@ pub(crate) fn execute_agent_model_turn(
                 "context_omitted_messages".to_string(),
                 context_governor.omitted_messages.to_string(),
             ),
-            ("terminal_commit".to_string(), terminal_commit.to_string()),
+            (
+                "terminal_commit".to_string(),
+                turn_role.is_finalizer().to_string(),
+            ),
+            ("execution_role".to_string(), turn_role.label().to_string()),
         ]
         .into_iter()
         .collect::<Metadata>();
         if let Some(collaboration) = collaboration {
             metadata.insert("collaboration_id".to_string(), collaboration.id.clone());
-            metadata.insert("stage".to_string(), "executor".to_string());
-            metadata.insert("role".to_string(), "executor".to_string());
+            metadata.insert("stage".to_string(), turn_role.label().to_string());
+            metadata.insert("role".to_string(), turn_role.label().to_string());
             metadata.insert("policy".to_string(), collaboration.policy.clone());
         }
         append_event(
@@ -187,17 +278,13 @@ pub(crate) fn execute_agent_model_turn(
         .map_err(|error| error.to_string())?;
     }
 
-    let visible_stream = collaboration.is_none();
+    let visible_stream = collaboration.is_none() || turn_role.is_finalizer();
     let mut streamed_output = false;
     let mut partial_stream = String::new();
     let mut stream_progress = ModelStreamProgress::new();
     let mut first_delta_at_ms = None;
     let mut transport_attempt = 0usize;
-    let resource_stage = if collaboration.is_some() || terminal_commit {
-        RunStageClass::Finalizer
-    } else {
-        RunStageClass::Other
-    };
+    let resource_stage = turn_role.stage_class();
     let mut prepared_request = None;
     let mut response = loop {
         transport_attempt += 1;
@@ -214,6 +301,15 @@ pub(crate) fn execute_agent_model_turn(
             Ok(None) => {
                 cancellation.finish_model_call_at(epoch_lease.epoch());
                 return Ok(AgentModelTurnOutcome::RestartAfterSteer);
+            }
+            Err(reason) if reason == RunStopReason::StageBudgetExhausted => {
+                cancellation.finish_model_call_at(epoch_lease.epoch());
+                return Ok(stage_budget_exhaustion_outcome(
+                    turn_role,
+                    request_id,
+                    epoch_lease,
+                    "Finalizer resource reserve unavailable",
+                ));
             }
             Err(_) => {
                 cancellation.finish_model_call_at(epoch_lease.epoch());
@@ -236,9 +332,22 @@ pub(crate) fn execute_agent_model_turn(
         ) {
             let _ = model_attempt.settle_unknown();
             cancellation.finish_model_call_at(epoch_lease.epoch());
-            return Err(format!(
-                "agent resource checkpoint failed before provider dispatch: {error}"
-            ));
+            let message =
+                format!("agent resource checkpoint failed before provider dispatch: {error}");
+            if turn_role.is_finalizer() {
+                return Ok(AgentModelTurnOutcome::Unavailable(
+                    AgentModelTurnUnavailable {
+                        failure: AgentFailure::internal(
+                            "finalizer_resource_checkpoint_failed",
+                            message,
+                        ),
+                        request_id,
+                        streamed_output: false,
+                        epoch_lease,
+                    },
+                ));
+            }
+            return Err(message);
         }
         let mut on_delta = |delta: &str| {
             if !delta.is_empty() {
@@ -248,7 +357,7 @@ pub(crate) fn execute_agent_model_turn(
                     cancellation,
                     epoch_lease.epoch(),
                     "model_stream",
-                    "executor",
+                    turn_role.label(),
                     &partial_stream,
                 );
             }
@@ -393,6 +502,17 @@ pub(crate) fn execute_agent_model_turn(
                     error.class.label(),
                     &error.message,
                 );
+                let failure = AgentFailure::from_model_error(&error);
+                if turn_role.is_finalizer() {
+                    return Ok(AgentModelTurnOutcome::Unavailable(
+                        AgentModelTurnUnavailable {
+                            failure,
+                            request_id,
+                            streamed_output,
+                            epoch_lease,
+                        },
+                    ));
+                }
                 if let Some(reason) = exhausted_model_transport_error_stop_reason(&error) {
                     cancellation.request_stop(reason);
                     return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
@@ -406,7 +526,6 @@ pub(crate) fn execute_agent_model_turn(
                         cancellation,
                     )?));
                 }
-                let failure = AgentFailure::from_model_error(&error);
                 return match commit_agent_failure_terminal(
                     state,
                     runtime,
@@ -459,28 +578,30 @@ pub(crate) fn execute_agent_model_turn(
         }
         return Ok(AgentModelTurnOutcome::RestartAfterSteer);
     }
-    match cancellation.record_agent_turn_at(epoch_lease.epoch(), "executor") {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            if visible_stream && streamed_output {
-                emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+    if turn_role == AgentModelTurnRole::Actor {
+        match cancellation.record_agent_turn_at(epoch_lease.epoch(), turn_role.label()) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if visible_stream && streamed_output {
+                    emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+                }
+                return Ok(AgentModelTurnOutcome::RestartAfterSteer);
             }
-            return Ok(AgentModelTurnOutcome::RestartAfterSteer);
-        }
-        Err(_) => {
-            if !partial_stream.trim().is_empty() {
-                cancellation.record_partial_output_at(epoch_lease.epoch(), &partial_stream);
+            Err(_) => {
+                if !partial_stream.trim().is_empty() {
+                    cancellation.record_partial_output_at(epoch_lease.epoch(), &partial_stream);
+                }
+                return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
+                    app,
+                    state,
+                    workspace_root,
+                    runtime,
+                    prompt,
+                    run_context,
+                    collaboration,
+                    cancellation,
+                )?));
             }
-            return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                app,
-                state,
-                workspace_root,
-                runtime,
-                prompt,
-                run_context,
-                collaboration,
-                cancellation,
-            )?));
         }
     }
 
@@ -498,11 +619,12 @@ pub(crate) fn execute_agent_model_turn(
         cancellation.record_observation_at(
             epoch_lease.epoch(),
             "model_result",
-            "executor",
+            turn_role.label(),
             &evidence,
         );
     }
     if collaboration.is_some()
+        && turn_role == AgentModelTurnRole::Actor
         && response.tool_calls.is_empty()
         && !response.message.content.trim().is_empty()
     {
@@ -510,10 +632,10 @@ pub(crate) fn execute_agent_model_turn(
             .message
             .metadata
             .insert("internal".to_string(), "true".to_string());
-        response.message.metadata.insert(
-            "collaboration_stage".to_string(),
-            "executor_draft".to_string(),
-        );
+        response
+            .message
+            .metadata
+            .insert("collaboration_stage".to_string(), "actor_draft".to_string());
     }
     let latency_ms = current_time_millis().saturating_sub(started_at_ms);
     let output_length = response.message.content.len();
@@ -608,8 +730,8 @@ pub(crate) fn execute_agent_model_turn(
         }
         if let Some(collaboration) = collaboration {
             metadata.insert("collaboration_id".to_string(), collaboration.id.clone());
-            metadata.insert("stage".to_string(), "executor".to_string());
-            metadata.insert("role".to_string(), "executor".to_string());
+            metadata.insert("stage".to_string(), turn_role.label().to_string());
+            metadata.insert("role".to_string(), turn_role.label().to_string());
             metadata.insert("policy".to_string(), collaboration.policy.clone());
         }
         append_event(
@@ -751,24 +873,76 @@ mod tests {
     }
 
     #[test]
-    fn finalizer_stage_exhaustion_becomes_a_recoverable_run_stop() {
+    fn finalizer_stage_exhaustion_preserves_the_parent_for_grounded_fallback() {
         let control = AgentRunControl::new("fast");
         let finalizer_calls = control.budget().finalizer_model_call_reserve();
         for _ in 0..finalizer_calls {
             control
-                .begin_stage_model_call("executor", RunStageClass::Finalizer)
+                .begin_stage_model_call("finalizer", RunStageClass::Finalizer)
                 .expect("reserved finalizer call should start");
             control.finish_model_call();
         }
         let reason = control
-            .begin_stage_model_call("executor", RunStageClass::Finalizer)
+            .begin_stage_model_call("finalizer", RunStageClass::Finalizer)
             .expect_err("finalizer stage should be bounded");
 
-        stop_parent_run_for_model_call_failure(&control, reason);
+        assert_eq!(reason, RunStopReason::StageBudgetExhausted);
+        assert_eq!(control.stop_reason(), None);
+    }
 
-        assert_eq!(
-            control.stop_reason(),
-            Some(RunStopReason::StageBudgetExhausted)
+    #[test]
+    fn actor_stage_exhaustion_hands_off_without_stopping_the_run() {
+        let control = AgentRunControl::new("fast");
+        let lease = match control.execution_epoch_lease() {
+            agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
+            outcome => panic!("execution lease unavailable: {outcome:?}"),
+        };
+
+        assert!(matches!(
+            stage_budget_exhaustion_outcome(
+                AgentModelTurnRole::Actor,
+                "actor-request".to_string(),
+                lease,
+                "actor reserve reached",
+            ),
+            AgentModelTurnOutcome::HandoffToFinalizer
+        ));
+        assert_eq!(control.stop_reason(), None);
+
+        let AgentModelTurnOutcome::Unavailable(unavailable) =
+            stage_budget_exhaustion_outcome(
+                AgentModelTurnRole::Finalizer,
+                "finalizer-request".to_string(),
+                lease,
+                "finalizer reserve unavailable",
+            )
+        else {
+            panic!("Finalizer exhaustion must enter grounded fallback resolution");
+        };
+        assert_eq!(unavailable.failure.code, "stage_budget_exhausted");
+        assert_eq!(unavailable.request_id, "finalizer-request");
+    }
+
+    #[test]
+    fn finalizer_plan_cannot_dispatch_or_report_tools() {
+        let tool = ToolSpec::builtin(
+            "test.read",
+            "test",
+            "test read",
+            ToolRisk::ReadOnly,
+            r#"{"type":"object","properties":{}}"#,
         );
+        let request = ModelRequest {
+            role: ModelRole::Summarizer,
+            messages: Vec::new(),
+            tools: vec![tool],
+            mode: ModelCallMode::Streaming,
+            metadata: Metadata::new(),
+        };
+
+        let (role, tools, request) = AgentModelTurnPlan::finalizer(request).into_parts();
+        assert_eq!(role, AgentModelTurnRole::Finalizer);
+        assert!(tools.is_empty());
+        assert!(request.tools.is_empty());
     }
 }

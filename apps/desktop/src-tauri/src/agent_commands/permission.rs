@@ -63,6 +63,8 @@ fn permission_tool_observation_metadata(
     status: &ToolOutcomeStatus,
     tool_input: &str,
     risk: Option<&ToolRisk>,
+    effect_spec: Option<&ToolSpec>,
+    postcondition_evidence: Option<&agent_core::ToolPostconditionEvidence>,
     run_context: &Metadata,
 ) -> Metadata {
     let input_fingerprint = agent_runtime::tool_input_fingerprint(tool_name, tool_input);
@@ -122,21 +124,18 @@ fn permission_tool_observation_metadata(
         metadata.insert("evidence_target_witness".to_string(), witness);
     }
     if matches!(status, ToolOutcomeStatus::Succeeded) {
-        let lineage_scope = format!(
-            "{}:{}",
-            run_context
-                .get("agent_run_id")
-                .map(String::as_str)
-                .unwrap_or_default(),
-            permission_prompt_contract_epoch(run_context),
-        );
-        if let Some(witness) = agent_runtime::PersistedToolEffectWitness::capture(
-            tool_name,
-            tool_input,
-            risk,
-            &lineage_scope,
-        )
-        .and_then(|witness| witness.encode())
+        if let Some(witness) = agent_runtime::postcondition_lineage_scope(run_context)
+            .and_then(|lineage_scope| {
+                agent_runtime::PersistedToolEffectWitness::capture_with_postcondition_evidence(
+                    tool_name,
+                    tool_input,
+                    risk,
+                    &lineage_scope,
+                    effect_spec,
+                    postcondition_evidence,
+                )
+            })
+            .and_then(|witness| witness.encode())
         {
             metadata.insert(
                 agent_runtime::TOOL_EFFECT_WITNESS_METADATA_KEY.to_string(),
@@ -1138,6 +1137,8 @@ pub(crate) fn resolve_agent_permission_request(
             &status,
             &tool_input,
             None,
+            None,
+            None,
             run_context,
         );
         store
@@ -1159,6 +1160,8 @@ pub(crate) fn resolve_agent_permission_request(
             tool_name,
             input_json: tool_input,
             risk: None,
+            effect_spec: None,
+            postcondition_evidence: None,
             status,
             observation,
             image_paths: Vec::new(),
@@ -1172,7 +1175,15 @@ pub(crate) fn resolve_agent_permission_request(
         })
         .map_err(|error| error.to_string())?;
 
-    let (observation, status, image_paths, message_metadata, risk) = if matches!(
+    let (
+        observation,
+        status,
+        image_paths,
+        message_metadata,
+        risk,
+        effect_spec,
+        postcondition_evidence,
+    ) = if matches!(
         decision,
         PermissionDecision::AllowOnce | PermissionDecision::AllowForSession
     ) {
@@ -1186,8 +1197,11 @@ pub(crate) fn resolve_agent_permission_request(
         };
         drop(store);
         let registry = tool_registry_for_state(state, root)?;
-        let risk = registry.get(&tool_name).map(|tool| tool.spec().risk);
-        let (observation, status, image_paths) =
+        let registered_tool = registry.get(&tool_name);
+        let risk = registered_tool.map(|tool| tool.spec().risk);
+        let effect_spec = registered_tool.map(|tool| tool.effect_spec(&invocation));
+        let verification_invocation = invocation.clone();
+        let (observation, status, image_paths, postcondition_evidence) =
             match execute_agent_tool_invocation_for_objective_epoch(
                 state,
                 &registry,
@@ -1197,11 +1211,17 @@ pub(crate) fn resolve_agent_permission_request(
                 cancellation,
                 run_context_steer_epoch(run_context),
             )? {
-                AgentToolInvocationOutcome::Completed(result) => (
-                    observation_from_agent_tool_result(&tool_name, &result),
-                    result.status.clone(),
-                    tool_result_image_paths(&result),
-                ),
+                AgentToolInvocationOutcome::Completed(result) => {
+                    let postcondition_evidence = registered_tool.and_then(|tool| {
+                        tool.postcondition_evidence(&verification_invocation, &result)
+                    });
+                    (
+                        observation_from_agent_tool_result(&tool_name, &result),
+                        result.status.clone(),
+                        tool_result_image_paths(&result),
+                        postcondition_evidence,
+                    )
+                }
                 AgentToolInvocationOutcome::RestartAfterSteer => (
                     observation_from_tool_result(
                         &tool_name,
@@ -1210,6 +1230,7 @@ pub(crate) fn resolve_agent_permission_request(
                     ),
                     ToolOutcomeStatus::Cancelled,
                     Vec::new(),
+                    None,
                 ),
             };
         let mut store = state
@@ -1223,6 +1244,8 @@ pub(crate) fn resolve_agent_permission_request(
             &status,
             &tool_input,
             risk.as_ref(),
+            effect_spec.as_ref(),
+            postcondition_evidence.as_ref(),
             run_context,
         );
         append_message_event_with_metadata(
@@ -1242,7 +1265,15 @@ pub(crate) fn resolve_agent_permission_request(
                 run_context,
             )?;
         }
-        (observation, status, image_paths, message_metadata, risk)
+        (
+            observation,
+            status,
+            image_paths,
+            message_metadata,
+            risk,
+            effect_spec,
+            postcondition_evidence,
+        )
     } else {
         unreachable!("deny decisions return after their atomic persistence transaction")
     };
@@ -1251,6 +1282,8 @@ pub(crate) fn resolve_agent_permission_request(
         tool_name,
         input_json: tool_input,
         risk,
+        effect_spec,
+        postcondition_evidence,
         status,
         observation,
         image_paths,
@@ -1404,6 +1437,8 @@ mod tests {
                 tool_name,
                 &status,
                 r#"{"secret":"super-secret"}"#,
+                None,
+                None,
                 None,
                 run_context,
             ),
@@ -2033,9 +2068,8 @@ mod tests {
         assert_eq!(screenshot_evidence.len(), 2);
         assert!(screenshot_evidence.contains(&agent_runtime::ContractEvidenceKind::Grounding));
         assert!(
-            screenshot_evidence
-                .contains(&agent_runtime::ContractEvidenceKind::InteractionObservation),
-            "unexpected screenshot evidence: {screenshot_evidence:?}"
+            screenshot_evidence.contains(&agent_runtime::ContractEvidenceKind::OtherTool),
+            "a recovered observation without a bound interaction must fail closed: {screenshot_evidence:?}"
         );
         let shell_denial_evidence = recovered_ledger
             .evidence
@@ -2165,13 +2199,20 @@ mod tests {
                 "Write a file",
                 ToolRisk::WritesWorkspace,
                 r#"{"type":"object"}"#,
-            ),
+            )
+            .with_effect_semantics(agent_core::ToolEffectSemantics::Verifiable {
+                verifier: "workspace_file_content_v1".to_string(),
+            }),
             ToolSpec::builtin(
                 "file.read",
                 "file",
                 "Read a file",
                 ToolRisk::ReadOnly,
                 r#"{"type":"object"}"#,
+            )
+            .with_effect_semantics(agent_core::ToolEffectSemantics::ReadOnly)
+            .with_postcondition_verifier(
+                agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
             ),
         ];
         let mut original = start_agent_loop(
@@ -2189,6 +2230,13 @@ mod tests {
         let read_input = format!(r#"{{"path":"{target}"}}"#);
         let permission_observation =
             |permission_id: &str, call_id: &str, tool_name: &str, input: &str, risk: &ToolRisk| {
+                let effect_spec = tools.iter().find(|spec| spec.name == tool_name);
+                let postcondition_evidence = (tool_name == "file.read").then(|| {
+                    agent_core::ToolPostconditionEvidence {
+                        kind: agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
+                        target_input_json: input.to_string(),
+                    }
+                });
                 message(
                     MessageRole::Tool,
                     "tool completed with bounded evidence",
@@ -2199,6 +2247,8 @@ mod tests {
                         &ToolOutcomeStatus::Succeeded,
                         input,
                         Some(risk),
+                        effect_spec,
+                        postcondition_evidence.as_ref(),
                         &run_context,
                     ),
                 )
@@ -2401,6 +2451,8 @@ mod tests {
             "shell.run",
             &ToolOutcomeStatus::Denied,
             r#"{"command":"touch protected"}"#,
+            None,
+            None,
             None,
             &run_context,
         );

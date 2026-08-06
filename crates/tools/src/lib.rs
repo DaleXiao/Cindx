@@ -10,7 +10,7 @@ use std::{
 
 use agent_core::{
     Metadata, PermissionRequest, ToolEffectSemantics, ToolInvocation, ToolOutcomeStatus,
-    ToolResult, ToolRisk, ToolSpec,
+    ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
 };
 mod browser_session_retirement;
 mod desktop_control;
@@ -18,10 +18,13 @@ mod file_batch;
 mod file_search;
 mod file_tools;
 mod image_generation;
+mod meta_invoke;
 mod meta_tools;
+mod postcondition_evidence;
 mod private_file;
 mod process_control;
 mod shell;
+mod shell_postcondition;
 mod stream_capture;
 mod tool_contract_v2;
 mod tool_support;
@@ -43,7 +46,8 @@ pub use shell::ShellRunTool;
 pub use tool_support::{encode_input, parse_input};
 pub use web_search::WebSearchTool;
 
-use meta_tools::{ToolInspectMeta, ToolInvokeMeta, ToolSearchMeta};
+use meta_invoke::ToolInvokeMeta;
+use meta_tools::{ToolInspectMeta, ToolSearchMeta};
 pub(crate) use tool_support::{
     bounded_model_text, builtin_tool_spec, current_time_millis, input_value_is_true, json_field,
     model_observation, parse_bounded_usize_input, permission_request, required_input, required_url,
@@ -52,7 +56,8 @@ pub(crate) use tool_support::{
 
 #[cfg(test)]
 use agent_core::{
-    PermissionRequestId, PermissionRisk, TaskId, ToolCallId, ToolExecutionConcurrency,
+    PermissionRequestId, PermissionRisk, PostconditionVerifierKind, TaskId, ToolCallId,
+    ToolExecutionConcurrency,
 };
 #[cfg(test)]
 use image_generation::image_output_path;
@@ -118,6 +123,14 @@ pub trait Tool: Send + Sync {
 
     fn effect_spec(&self, _invocation: &ToolInvocation) -> ToolSpec {
         self.spec()
+    }
+
+    fn postcondition_evidence(
+        &self,
+        _invocation: &ToolInvocation,
+        _result: &ToolResult,
+    ) -> Option<ToolPostconditionEvidence> {
+        None
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest>;
@@ -702,6 +715,18 @@ mod tests {
         assert!(specs
             .iter()
             .all(|spec| spec.validate_input_schema().is_ok()));
+        assert!(specs
+            .iter()
+            .find(|spec| spec.name == "file.read")
+            .is_some_and(|spec| spec
+                .postcondition_verifiers
+                .contains(&PostconditionVerifierKind::WorkspaceExactReadbackV1)));
+        assert!(specs
+            .iter()
+            .find(|spec| spec.name == "shell.run")
+            .is_some_and(|spec| spec
+                .postcondition_verifiers
+                .contains(&PostconditionVerifierKind::WorkspaceQualityCheckV1)));
 
         for (name, integer_field) in [
             ("file.read", "offset_bytes"),
@@ -1024,6 +1049,39 @@ mod tests {
     }
 
     #[test]
+    fn meta_invoke_delegates_trusted_postcondition_evidence_to_its_target() {
+        let root = temp_workspace();
+        fs::write(root.join("note.txt"), "verified").expect("fixture should be written");
+        let mut registry = ToolRegistry::with_workspace_tools(root);
+        registry.install_meta_tools();
+        let meta = registry.get("tool.invoke").expect("meta tool registered");
+        let request = invocation(
+            "tool.invoke",
+            serde_json::json!({
+                "name": "file.read",
+                "arguments": { "path": "note.txt" }
+            })
+            .to_string(),
+        );
+        let result = meta
+            .execute(request.clone())
+            .expect("delegated read should succeed");
+        let evidence = meta
+            .postcondition_evidence(&request, &result)
+            .expect("meta tool should delegate evidence to the real target");
+
+        assert_eq!(
+            evidence.kind,
+            PostconditionVerifierKind::WorkspaceExactReadbackV1
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&evidence.target_input_json)
+                .expect("evidence target should be JSON"),
+            serde_json::json!({ "path": "note.txt" })
+        );
+    }
+
+    #[test]
     fn meta_invoke_delegates_cooperative_cancellation_to_its_target() {
         let root = temp_workspace();
         fs::write(root.join("note.txt"), "needle\n").expect("fixture should be written");
@@ -1088,6 +1146,81 @@ mod tests {
         assert_eq!(read.output, "hello workspace\nline two");
         assert!(listed.output.contains("today.txt"));
         assert!(searched.output.contains("notes/today.txt:1"));
+    }
+
+    #[test]
+    fn only_complete_file_readback_produces_exact_postcondition_evidence() {
+        let root = temp_workspace();
+        fs::write(root.join("note.txt"), "complete evidence").expect("fixture should be written");
+        let reader = ReadFileTool::new(root);
+        let complete_request = invocation(
+            "file.read",
+            serde_json::json!({ "path": "note.txt" }).to_string(),
+        );
+        let complete_result = reader
+            .execute(complete_request.clone())
+            .expect("complete read should succeed");
+        let evidence = reader
+            .postcondition_evidence(&complete_request, &complete_result)
+            .expect("complete exact readback should produce evidence");
+        assert_eq!(
+            evidence.kind,
+            PostconditionVerifierKind::WorkspaceExactReadbackV1
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&evidence.target_input_json)
+                .expect("evidence target should be JSON"),
+            serde_json::json!({ "path": "note.txt" })
+        );
+
+        let partial_request = invocation(
+            "file.read",
+            serde_json::json!({ "path": "note.txt", "max_bytes": 4 }).to_string(),
+        );
+        let partial_result = reader
+            .execute(partial_request.clone())
+            .expect("partial read should succeed");
+        assert!(reader
+            .postcondition_evidence(&partial_request, &partial_result)
+            .is_none());
+    }
+
+    #[test]
+    fn other_read_tools_do_not_claim_exact_readback_evidence() {
+        let root = temp_workspace();
+        fs::write(root.join("note.txt"), "needle").expect("fixture should be written");
+        let lister = ListDirectoryTool::new(root.clone());
+        let list_request = invocation("file.list", serde_json::json!({ "path": "." }).to_string());
+        let list_result = lister
+            .execute(list_request.clone())
+            .expect("list should succeed");
+        assert!(lister
+            .postcondition_evidence(&list_request, &list_result)
+            .is_none());
+
+        let searcher = SearchFilesTool::new(root.clone());
+        let search_request = invocation(
+            "file.search",
+            serde_json::json!({ "path": ".", "query": "needle" }).to_string(),
+        );
+        let search_result = searcher
+            .execute(search_request.clone())
+            .expect("search should succeed");
+        assert!(searcher
+            .postcondition_evidence(&search_request, &search_result)
+            .is_none());
+
+        let batch_reader = ReadFilesTool::new(root);
+        let batch_request = invocation(
+            "file.read_many",
+            serde_json::json!({ "paths": ["note.txt"] }).to_string(),
+        );
+        let batch_result = batch_reader
+            .execute(batch_request.clone())
+            .expect("batch read should succeed");
+        assert!(batch_reader
+            .postcondition_evidence(&batch_request, &batch_result)
+            .is_none());
     }
 
     #[test]

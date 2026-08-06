@@ -182,32 +182,42 @@ pub(super) fn commit_agent_tool_observation(
     call: &AgentToolRequest,
     status: &ToolOutcomeStatus,
     risk: Option<&ToolRisk>,
+    effect_spec: Option<&ToolSpec>,
+    postcondition_evidence: Option<&agent_core::ToolPostconditionEvidence>,
     observation: &str,
     denial: Option<&agent_runtime::AgentActionDenialFeedback>,
     image_paths: &[String],
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
 ) -> Result<agent_runtime::RunExecutionStepCommit<Option<agent_runtime::AgentGoalDelta>>, String> {
+    let postcondition_scope = agent_runtime::postcondition_lineage_scope(run_context);
     cancellation.commit_execution_step_with(epoch_lease, || {
         let mut transaction = AgentLoopAppendTransaction::begin(runtime);
         let previous_message_count = transaction.original_message_count();
         let goal_delta = transaction.with_append_only_mutation(|next_runtime| {
-            let verified_interactions_before = next_runtime.verified_interactions;
-            let goal_delta = AgentKernel::new(next_runtime, tools)
-                .apply_tool_observation_with_denial(call, status, risk, observation, denial);
-            let postcondition_verified =
-                next_runtime.verified_interactions > verified_interactions_before;
+            let transition = AgentKernel::new(next_runtime, tools)
+                .with_postcondition_scope(postcondition_scope.as_deref())
+                .apply_tool_observation_transition_with_contract(
+                    call,
+                    status,
+                    risk,
+                    effect_spec,
+                    postcondition_evidence,
+                    observation,
+                    denial,
+                );
             crate::agent_result_evidence::annotate_latest_tool_observation(
                 next_runtime,
                 tools,
                 call,
+                effect_spec,
                 status,
                 risk,
                 epoch_lease.epoch(),
-                postcondition_verified,
-                goal_delta.as_ref(),
+                transition.postcondition_verification.as_ref(),
+                transition.goal_delta.as_ref(),
             );
             append_visual_reference_message(next_runtime, &call.tool_name, image_paths);
-            goal_delta
+            transition.goal_delta
         });
         let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
             transaction.state(),
@@ -375,12 +385,12 @@ fn execute_agent_tool_batch_serial(
                 .or_insert_with(|| value.clone());
         }
         let tool = registry.get(&call.tool_name);
-        if let Some(tool) = tool {
-            let effect_spec = tool.effect_spec(&invocation);
-            agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);
+        let effect_spec = tool.map(|tool| tool.effect_spec(&invocation));
+        if let Some(effect_spec) = effect_spec.as_ref() {
+            agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, effect_spec);
         }
         let permission_request = tool.and_then(|tool| tool.permission_request(&invocation));
-        let tool_risk = tool.map(|tool| tool.spec().risk.clone());
+        let tool_risk = effect_spec.as_ref().map(|spec| spec.risk.clone());
         let mut store = state
             .store
             .lock()
@@ -431,6 +441,8 @@ fn execute_agent_tool_batch_serial(
                     &call,
                     &ToolOutcomeStatus::Denied,
                     tool_risk.as_ref(),
+                    effect_spec.as_ref(),
+                    None,
                     &observation,
                     Some(&denial),
                     &[],
@@ -494,6 +506,8 @@ fn execute_agent_tool_batch_serial(
                 &call,
                 &ToolOutcomeStatus::Denied,
                 tool_risk.as_ref(),
+                effect_spec.as_ref(),
+                None,
                 &observation,
                 Some(&denial),
                 &[],
@@ -516,7 +530,7 @@ fn execute_agent_tool_batch_serial(
             continue;
         }
 
-        let Some(_tool) = tool else {
+        let Some(tool) = tool else {
             let denial = agent_runtime::AgentActionDenialFeedback::capability_unavailable(
                 "tool_capability_unavailable",
             );
@@ -548,6 +562,8 @@ fn execute_agent_tool_batch_serial(
                 tools,
                 &call,
                 &ToolOutcomeStatus::Denied,
+                None,
+                None,
                 None,
                 &observation,
                 Some(&denial),
@@ -591,6 +607,7 @@ fn execute_agent_tool_batch_serial(
         }
 
         let tool_name = invocation.tool_name.clone();
+        let verification_invocation = invocation.clone();
         drop(store);
         let result = if let Some(result) = completed_result {
             result
@@ -622,6 +639,8 @@ fn execute_agent_tool_batch_serial(
                 }
             }
         };
+        let postcondition_evidence =
+            tool.postcondition_evidence(&verification_invocation, &result);
         let observation = observation_from_agent_tool_result(&tool_name, &result);
         let image_paths = tool_result_image_paths(&result);
         let commit = commit_agent_tool_observation(
@@ -634,6 +653,8 @@ fn execute_agent_tool_batch_serial(
             &call,
             &result.status,
             Some(&tool_risk),
+            effect_spec.as_ref(),
+            postcondition_evidence.as_ref(),
             &observation,
             None,
             &image_paths,

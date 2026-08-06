@@ -2,16 +2,16 @@ use crate::{
     advance_with_model_response, append_internal_instruction, append_steering_instruction,
     append_tool_observation, model_request_for_turn_with_context_budget,
     model_request_for_turn_with_context_budget_and_overlays,
-    record_persisted_tool_outcome_with_risk, record_tool_outcome_with_risk,
+    record_persisted_tool_outcome_with_risk, record_tool_outcome_transition_with_risk,
     repeated_tool_failure_count, tool_input_fingerprint, tool_invocation_from_request,
     AgentActionDenialFeedback, AgentActionRecovery, AgentAdvance, AgentLoopState,
     AgentTaskStateSnapshot, AgentToolRequest, AgentTurnBudgetExhausted, ContextGovernorReport,
     ContextInvariantViolation, GroundedCompletionReceipt, OutcomeClaimDecision,
-    WorkspaceVerificationPolicy,
+    PostconditionVerificationReceipt, WorkspaceVerificationPolicy,
 };
 use agent_core::{
-    Message, MessageRole, Metadata, ToolCallId, ToolInvocation, ToolOutcomeStatus, ToolRisk,
-    ToolSpec,
+    Message, MessageRole, Metadata, ToolCallId, ToolInvocation, ToolOutcomeStatus,
+    ToolPostconditionEvidence, ToolRisk, ToolSpec,
 };
 use model_provider::{ModelRequest, ModelResponse};
 
@@ -41,6 +41,12 @@ pub struct PreparedAgentTurn {
     pub request: ModelRequest,
     pub context: ContextGovernorReport,
     pub visible_contract_evidence_sequences: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentToolObservationTransition {
+    pub goal_delta: Option<crate::AgentGoalDelta>,
+    pub postcondition_verification: Option<PostconditionVerificationReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,11 +96,24 @@ impl From<ContextInvariantViolation> for AgentTurnPreparationError {
 pub struct AgentKernel<'state, 'tools> {
     state: &'state mut AgentLoopState,
     tools: &'tools [ToolSpec],
+    postcondition_scope: Option<String>,
 }
 
 impl<'state, 'tools> AgentKernel<'state, 'tools> {
     pub fn new(state: &'state mut AgentLoopState, tools: &'tools [ToolSpec]) -> Self {
-        Self { state, tools }
+        Self {
+            state,
+            tools,
+            postcondition_scope: None,
+        }
+    }
+
+    pub fn with_postcondition_scope(mut self, scope: Option<&str>) -> Self {
+        self.postcondition_scope = scope
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_string);
+        self
     }
 
     pub fn state(&self) -> &AgentLoopState {
@@ -123,6 +142,28 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             contract_context,
             context_window_tokens,
             max_output_tokens,
+            true,
+        )
+    }
+
+    /// Prepares the terminal, tool-free delivery turn without consuming or
+    /// depending on the Actor turn counter. The caller still owns the bounded
+    /// Finalizer model/resource budget.
+    pub fn prepare_finalizer_turn(
+        &mut self,
+        user_instructions: Option<&str>,
+        runtime_context: Option<&str>,
+        context_window_tokens: u64,
+        max_output_tokens: u64,
+    ) -> Result<PreparedAgentTurn, AgentTurnPreparationError> {
+        let contract_context = self.state.task_contract.model_context_for_task(self.tools);
+        self.prepare_model_turn_with_context(
+            user_instructions,
+            runtime_context,
+            contract_context,
+            context_window_tokens,
+            max_output_tokens,
+            false,
         )
     }
 
@@ -144,6 +185,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             contract_context,
             context_window_tokens,
             max_output_tokens,
+            true,
         )
     }
 
@@ -154,8 +196,11 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         contract_context: Option<String>,
         context_window_tokens: u64,
         max_output_tokens: u64,
+        enforce_actor_turn_budget: bool,
     ) -> Result<PreparedAgentTurn, AgentTurnPreparationError> {
-        crate::turn_budget::ensure_model_turn_available(self.state)?;
+        if enforce_actor_turn_budget {
+            crate::turn_budget::ensure_model_turn_available(self.state)?;
+        }
         let has_grounding_evidence = self.state.task_contract.has_prompt_evidence();
         let steer_epoch = self.state.task_contract.prompt_evidence_epoch();
         let required_evidence = self
@@ -506,7 +551,18 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         risk: Option<&ToolRisk>,
         observation: &str,
     ) -> Option<crate::AgentGoalDelta> {
-        self.apply_tool_observation_with_denial(request, status, risk, observation, None)
+        self.apply_tool_observation_transition(request, status, risk, observation)
+            .goal_delta
+    }
+
+    pub fn apply_tool_observation_transition(
+        &mut self,
+        request: &AgentToolRequest,
+        status: &ToolOutcomeStatus,
+        risk: Option<&ToolRisk>,
+        observation: &str,
+    ) -> AgentToolObservationTransition {
+        self.apply_tool_observation_transition_with_denial(request, status, risk, observation, None)
     }
 
     pub fn apply_tool_observation_with_denial(
@@ -517,6 +573,51 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         observation: &str,
         denial: Option<&AgentActionDenialFeedback>,
     ) -> Option<crate::AgentGoalDelta> {
+        self.apply_tool_observation_transition_with_denial(
+            request,
+            status,
+            risk,
+            observation,
+            denial,
+        )
+        .goal_delta
+    }
+
+    pub fn apply_tool_observation_transition_with_denial(
+        &mut self,
+        request: &AgentToolRequest,
+        status: &ToolOutcomeStatus,
+        risk: Option<&ToolRisk>,
+        observation: &str,
+        denial: Option<&AgentActionDenialFeedback>,
+    ) -> AgentToolObservationTransition {
+        let registered_spec = self
+            .tools
+            .iter()
+            .find(|spec| spec.name == request.tool_name)
+            .cloned();
+        self.apply_tool_observation_transition_with_contract(
+            request,
+            status,
+            risk,
+            registered_spec.as_ref(),
+            None,
+            observation,
+            denial,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_tool_observation_transition_with_contract(
+        &mut self,
+        request: &AgentToolRequest,
+        status: &ToolOutcomeStatus,
+        risk: Option<&ToolRisk>,
+        effect_spec: Option<&ToolSpec>,
+        postcondition_evidence: Option<&ToolPostconditionEvidence>,
+        observation: &str,
+        denial: Option<&AgentActionDenialFeedback>,
+    ) -> AgentToolObservationTransition {
         let goal_progress = self.state.task_contract.goal_progress_state();
         let evidence_watermark = self
             .state
@@ -536,7 +637,17 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 denial.unwrap_or(&fallback),
             );
         }
-        record_tool_outcome_with_risk(self.state, &request.tool_name, &request.input, status, risk);
+        let postcondition_verification = record_tool_outcome_transition_with_risk(
+            self.state,
+            &request.tool_name,
+            &request.input,
+            status,
+            risk,
+            effect_spec,
+            postcondition_evidence,
+            observation,
+            self.postcondition_scope.as_deref(),
+        );
         if matches!(status, ToolOutcomeStatus::Succeeded) {
             let evidence_tool =
                 deferred_tool_name(request).unwrap_or_else(|| request.tool_name.clone());
@@ -564,7 +675,10 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             &mut self.state.messages,
             &new_evidence,
         );
-        self.state.task_contract.goal_delta_since(&goal_progress)
+        AgentToolObservationTransition {
+            goal_delta: self.state.task_contract.goal_delta_since(&goal_progress),
+            postcondition_verification,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -626,13 +740,28 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         }
         let effect_replay = effect_witness
             .and_then(|witness| witness.replay_for(tool_name, input_fingerprint, risk));
-        record_persisted_tool_outcome_with_risk(
+        let postcondition_target_witness = effect_witness.and_then(|witness| {
+            witness.postcondition_target_witness_for(tool_name, input_fingerprint, risk)
+        });
+        let allow_action_binding = effect_witness.is_some_and(|witness| {
+            witness.supports_typed_postcondition_binding_for(tool_name, input_fingerprint, risk)
+        });
+        let tool_spec = self.tools.iter().find(|spec| spec.name == tool_name);
+        let persisted_tool_evidence = effect_witness.and_then(|witness| {
+            witness.postcondition_evidence_for(tool_name, input_fingerprint, risk, tool_spec)
+        });
+        let _ = record_persisted_tool_outcome_with_risk(
             self.state,
             tool_name,
             input_fingerprint,
             effect_replay.as_deref(),
+            postcondition_target_witness,
+            allow_action_binding,
             status,
             risk,
+            tool_spec,
+            persisted_tool_evidence.as_ref(),
+            observation,
         );
         if matches!(status, ToolOutcomeStatus::Succeeded) {
             let evidence_epoch = self.state.task_contract.prompt_evidence_epoch();
@@ -882,9 +1011,13 @@ fn merged_runtime_context(
 }
 
 #[cfg(test)]
+#[path = "kernel/postcondition_receipt_tests.rs"]
+mod postcondition_receipt_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{start_agent_loop, AgentRuntimeConfig};
+    use crate::{record_tool_outcome_with_risk, start_agent_loop, AgentRuntimeConfig};
     use agent_core::{Message, MessageRole, TaskId, ToolCallId};
 
     fn read_tool() -> ToolSpec {
@@ -894,6 +1027,9 @@ mod tests {
             "Read a file",
             ToolRisk::ReadOnly,
             r#"{"type":"object"}"#,
+        )
+        .with_postcondition_verifier(
+            agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
         )
     }
 
@@ -925,6 +1061,26 @@ mod tests {
         assert_eq!(prepared.request.tools, tools);
         assert_eq!(prepared.request.metadata["agent_turn"], "0");
         assert_eq!(state.turn, 0);
+    }
+
+    #[test]
+    fn finalizer_preparation_is_toolless_and_independent_of_actor_turn_budget() {
+        let mut state = start_agent_loop(
+            TaskId("finalizer-turn-budget".to_string()),
+            "deliver the grounded result",
+            AgentRuntimeConfig { max_turns: 1 },
+        );
+        state.turn = state.max_turns;
+        assert!(matches!(
+            AgentKernel::new(&mut state, &[]).prepare_model_turn(None, None, 8_192, 1_024),
+            Err(AgentTurnPreparationError::Budget(_))
+        ));
+
+        let prepared = AgentKernel::new(&mut state, &[])
+            .prepare_finalizer_turn(None, None, 8_192, 1_024)
+            .expect("finalizer must not consume the Actor turn budget");
+        assert!(prepared.request.tools.is_empty());
+        assert_eq!(state.turn, state.max_turns);
     }
 
     #[test]

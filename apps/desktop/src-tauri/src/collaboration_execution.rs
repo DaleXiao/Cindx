@@ -255,7 +255,7 @@ pub(crate) fn synthesize_agent_answer(
         &runtime.task_id,
         run_context,
         &collaboration.id,
-        "synthesizer",
+        "finalizer",
         ModelRole::Summarizer,
         &config.model_for_role(&ModelRole::Summarizer),
         synthesis_prompt,

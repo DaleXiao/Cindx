@@ -608,18 +608,17 @@ mod tests {
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
         for index in 0..10 {
-            contract.record_tool_outcome(
+            crate::task_contract::test_support::record_workspace_mutation(
+                &mut contract,
                 "file.write",
                 &format!(r#"{{"path":"src/file-{index}.rs"}}"#),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::WritesWorkspace),
             );
-            contract.record_tool_outcome(
+            crate::task_contract::test_support::record_quality_verification(
+                &mut contract,
                 "process.run",
                 r#"{"command":"cargo test"}"#,
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::ExecutesProcess),
-            );
+            )
+            .expect("trusted quality check should verify the mutation");
         }
         let ledger = contract.outcome_ledger_shadow(0);
         assert!(ledger.truncation.postconditions > 0);
@@ -719,22 +718,21 @@ mod tests {
         contract.merge_workspace_verification_policy(
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
-        contract.record_tool_outcome(
+        crate::task_contract::test_support::record_workspace_mutation(
+            &mut contract,
             "file.write",
             r#"{"path":"src/lib.rs"}"#,
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::WritesWorkspace),
         );
         assert!(matches!(
             contract.grounded_completion_receipt(0, 1, "done", &[]),
             Err(GroundedCompletionIssue::PendingPostconditions(_))
         ));
-        contract.record_tool_outcome(
+        crate::task_contract::test_support::record_quality_verification(
+            &mut contract,
             "process.run",
             r#"{"command":"cargo test"}"#,
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::ExecutesProcess),
-        );
+        )
+        .expect("trusted quality check should verify the mutation");
         let sequences = contract
             .evidence()
             .iter()

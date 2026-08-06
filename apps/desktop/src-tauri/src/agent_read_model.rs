@@ -300,24 +300,61 @@ fn persist_agent_error_terminalization_with(
     store: &mut SqliteStore,
     run_context: &Metadata,
     message: &str,
-    mut terminal_metadata: Metadata,
+    terminal_metadata: Metadata,
     delete_snapshots: impl FnOnce(&mut SqliteStore, Option<&str>) -> Result<(), StorageError>,
 ) -> Result<AgentState, String> {
-    let session_id = run_context.get("session_id").map(String::as_str);
-    terminal_metadata.insert("error".to_string(), message.to_string());
     store
         .with_immediate_transaction(|store| {
-            append_event(
+            persist_agent_error_terminalization_in_transaction_with(
                 store,
                 &phase16_task_id(),
-                EventKind::Error,
-                "Agent task failed",
-                metadata_with_context(terminal_metadata, run_context),
-            )?;
-            delete_snapshots(store, session_id)?;
-            agent_state_for_session(store, Some(message.to_string()), session_id)
+                run_context,
+                message,
+                terminal_metadata,
+                delete_snapshots,
+            )
         })
         .map_err(|error| error.to_string())
+}
+
+pub(crate) fn persist_agent_error_terminalization_in_transaction(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    message: &str,
+    terminal_metadata: Metadata,
+) -> Result<AgentState, StorageError> {
+    persist_agent_error_terminalization_in_transaction_with(
+        store,
+        task_id,
+        run_context,
+        message,
+        terminal_metadata,
+        |store, session_id| {
+            delete_persisted_agent_runtime_snapshot(store, session_id).map_err(StorageError::new)
+        },
+    )
+}
+
+fn persist_agent_error_terminalization_in_transaction_with(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    message: &str,
+    mut terminal_metadata: Metadata,
+    delete_snapshots: impl FnOnce(&mut SqliteStore, Option<&str>) -> Result<(), StorageError>,
+) -> Result<AgentState, StorageError> {
+    let session_id = run_context.get("session_id").map(String::as_str);
+    terminal_metadata.insert("error".to_string(), message.to_string());
+    append_event(
+        store,
+        task_id,
+        EventKind::Error,
+        "Agent task failed",
+        metadata_with_context(terminal_metadata, run_context),
+    )?;
+    delete_snapshots(store, session_id)?;
+    agent_state_for_session(store, Some(message.to_string()), session_id)
 }
 
 pub(crate) fn latest_agent_prompt_from_active_events(active_events: &[Event]) -> Option<String> {

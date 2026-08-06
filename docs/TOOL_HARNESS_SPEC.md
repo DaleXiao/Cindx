@@ -165,6 +165,44 @@ interactive, collaboration-worker, or evaluation-worker tool observation can
 extend its run segment only through the post-commit
 `cindx.agent.goal-delta.v1` receipt.
 
+Postcondition verification additionally emits a bounded
+`cindx.postcondition-verification-receipt.v1` receipt. It binds the active
+steer/contract epochs, postcondition kind, action and observation sequences,
+verifier source, and digests without copying raw arguments or output. Completion
+quality revalidates that receipt against bounded contract evidence; the legacy
+boolean metadata is derived compatibility state and carries no authority alone.
+
+Verifier authority is a closed tool capability, not a tool name, risk label, or
+model-provided string. `file.read` signs exact readback only after its structured
+result proves an offset-zero, complete, untruncated read of the requested path.
+`shell.run` signs a workspace-wide quality check only after a structured zero
+exit from a conservative check/test/build/lint command with no shell indirection
+or compound syntax. Listing, searching, partial reads, `echo`, dynamic shell,
+and third-party read-only tools carry no authority by default. Multi-target
+mutations require cumulative exact coverage of every target, unless one trusted
+workspace-wide quality check covers the set.
+
+Persisted workspace target witnesses contain only logical-run and contract-epoch
+scoped digests. A witness from another run, another contract epoch, legacy v1,
+or an untyped recovered action fails closed. The full task checkpoint is capped
+at 1 MiB before decode and validates every retained binding and receipt against
+its bounded evidence before state restoration.
+
+## Execution roles and final delivery
+
+- Actor calls own model/tool iteration and consume the ordinary run and Actor
+  stage budgets while preserving the terminal reserve.
+- Verifier authority is the typed post-commit observation transition. Model text
+  cannot mint a verification receipt.
+- Finalizer requests expose zero tools, use only the Finalizer stage reserve, and
+  do not consume an Actor turn or tool/step budget.
+- Before a Finalizer call, the runtime freezes a grounded current-epoch fallback.
+  Empty, malformed, unavailable, or tool-calling output returns that exact
+  candidate after receipt revalidation; without one, delivery fails closed and
+  never retries through the Actor.
+- Success and failure terminalization share one durable identity per task,
+  session, physical run, and steer epoch. Replay cannot append a second terminal.
+
 ## Exposure
 
 Small catalogs are sent to the model directly. When the automatic tool pool is

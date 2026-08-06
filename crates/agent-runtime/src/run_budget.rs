@@ -5,6 +5,7 @@ pub const PHYSICAL_MODEL_ATTEMPTS_PER_LOGICAL_CALL: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RunStageClass {
+    Actor,
     Conductor,
     Candidate,
     Worker,
@@ -24,6 +25,8 @@ impl RunStageClass {
             || label.contains("deliver_to_user")
         {
             Self::Finalizer
+        } else if label.contains("actor") {
+            Self::Actor
         } else if label.contains("repair") || label.contains("recover") || label.contains("retry") {
             Self::Repair
         } else if label.contains("conductor") || label.contains("planner") {
@@ -215,6 +218,7 @@ impl RunBudget {
 
     pub fn stage_budget(self, class: RunStageClass) -> RunStageBudget {
         let (max_model_calls, duration_divisor) = match class {
+            RunStageClass::Actor => (self.max_model_calls, 1),
             RunStageClass::Conductor => (self.max_repair_attempts.saturating_add(1), 5),
             RunStageClass::Candidate => (self.max_model_calls.saturating_div(3).max(2), 2),
             RunStageClass::Worker => (self.max_model_calls.saturating_div(2).max(2), 1),
@@ -265,6 +269,10 @@ mod tests {
     #[test]
     fn labels_distinguish_internal_synthesis_from_user_delivery() {
         assert_eq!(
+            RunStageClass::from_label("foreground_actor"),
+            RunStageClass::Actor
+        );
+        assert_eq!(
             RunStageClass::from_label("terminal_executor"),
             RunStageClass::Finalizer
         );
@@ -272,6 +280,34 @@ mod tests {
             RunStageClass::from_label("final_synthesis"),
             RunStageClass::Synthesizer
         );
+    }
+
+    #[test]
+    fn actor_uses_the_main_loop_budget_and_preserves_terminal_resources() {
+        for effort in ["fast", "auto", "pro"] {
+            let budget = RunBudget::for_effort(effort);
+            assert_eq!(
+                budget.stage_budget(RunStageClass::Actor),
+                budget.stage_budget(RunStageClass::Other)
+            );
+            assert!(!budget.stage_budget(RunStageClass::Actor).terminal);
+            assert_eq!(
+                budget.protected_model_call_reserve(RunStageClass::Actor),
+                budget.terminal_model_call_reserve
+            );
+            assert_eq!(
+                budget.protected_time_reserve(RunStageClass::Actor),
+                budget.terminal_time_reserve
+            );
+            assert_eq!(
+                budget.protected_token_reserve(RunStageClass::Actor),
+                budget.terminal_token_reserve
+            );
+            assert_eq!(
+                budget.protected_physical_model_attempt_reserve(RunStageClass::Actor),
+                budget.terminal_physical_model_attempt_reserve
+            );
+        }
     }
 
     #[test]
