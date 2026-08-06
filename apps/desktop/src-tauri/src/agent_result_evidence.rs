@@ -1,5 +1,7 @@
 use agent_core::{Event, MessageRole, Metadata, ToolOutcomeStatus, ToolRisk, ToolSource, ToolSpec};
-use agent_runtime::{AgentGoalDelta, AgentLoopState, AgentToolRequest, ContractEvidenceKind};
+use agent_runtime::{
+    AgentGoalDelta, AgentLoopState, AgentToolRequest, PostconditionVerificationReceipt,
+};
 use orchestrator::{
     IndependentQualitySource, LearningAttribution, LearningEvidenceV1, LearningTermination,
     LearningUsageCompleteness,
@@ -20,23 +22,32 @@ pub(crate) fn annotate_latest_tool_observation(
     runtime: &mut AgentLoopState,
     tools: &[ToolSpec],
     call: &AgentToolRequest,
+    effect_spec: Option<&ToolSpec>,
     status: &ToolOutcomeStatus,
     risk: Option<&ToolRisk>,
     steer_epoch: u64,
-    postcondition_verified: bool,
+    postcondition_verification: Option<&PostconditionVerificationReceipt>,
     goal_delta: Option<&AgentGoalDelta>,
 ) {
-    let source = tools
-        .iter()
-        .find(|tool| tool.name == call.tool_name)
+    let effective_tool_name = effect_spec
+        .map(|spec| spec.name.as_str())
+        .unwrap_or(&call.tool_name);
+    let source = effect_spec
+        .or_else(|| tools.iter().find(|tool| tool.name == effective_tool_name))
         .map(|tool| tool_source_label(&tool.source))
         .unwrap_or("unknown");
     let contract_evidence_sequence = runtime
         .task_contract
         .evidence()
         .last()
-        .filter(|evidence| evidence.source == call.tool_name)
+        .filter(|evidence| evidence.source == effective_tool_name)
         .map(|evidence| evidence.sequence.to_string());
+    let contract_epoch = runtime.prepared_task_state().contract_epoch();
+    let verified_receipt = postcondition_verification.filter(|receipt| {
+        runtime
+            .task_contract
+            .verify_postcondition_receipt(receipt, steer_epoch, contract_epoch)
+    });
     let Some(message) = runtime
         .messages
         .last_mut()
@@ -53,7 +64,7 @@ pub(crate) fn annotate_latest_tool_observation(
             "tool_evidence_provenance".to_string(),
             TOOL_EVIDENCE_PROVENANCE.to_string(),
         ),
-        ("tool_name".to_string(), call.tool_name.clone()),
+        ("tool_name".to_string(), effective_tool_name.to_string()),
         (
             "tool_status".to_string(),
             tool_status_label(status).to_string(),
@@ -64,11 +75,13 @@ pub(crate) fn annotate_latest_tool_observation(
             risk.map(tool_risk_label).unwrap_or("unknown").to_string(),
         ),
         ("steer_epoch".to_string(), steer_epoch.to_string()),
-        (
-            "postcondition_verified".to_string(),
-            postcondition_verified.to_string(),
-        ),
+        ("postcondition_verified".to_string(), "false".to_string()),
     ]);
+    if verified_receipt.is_some_and(|receipt| receipt.insert_metadata(&mut message.metadata)) {
+        message
+            .metadata
+            .insert("postcondition_verified".to_string(), "true".to_string());
+    }
     if let Some(sequence) = contract_evidence_sequence {
         message
             .metadata
@@ -103,11 +116,16 @@ pub(crate) fn completion_tool_evidence(
                     .parse::<u64>()
                     .ok()?,
             );
-            let postcondition_verified = message
-                .metadata
-                .get("postcondition_verified")
-                .is_some_and(|value| value == "true");
-            Some((key, postcondition_verified))
+            let receipt = PostconditionVerificationReceipt::from_metadata(&message.metadata)
+                .filter(|receipt| receipt.observation_sequence == key.1)
+                .filter(|receipt| {
+                    runtime.task_contract.verify_postcondition_receipt(
+                        receipt,
+                        steer_epoch,
+                        runtime.prepared_task_state().contract_epoch(),
+                    )
+                });
+            Some((key, receipt))
         })
         .collect::<BTreeMap<_, _>>();
     if successful_evidence.is_empty() {
@@ -122,20 +140,9 @@ pub(crate) fn completion_tool_evidence(
             successful_evidence.contains_key(&(evidence.source.clone(), evidence.sequence))
         })
         .collect::<Vec<_>>();
-    let verified_postcondition_count = trusted_contract_evidence
-        .iter()
-        .filter(|evidence| match evidence.kind {
-            ContractEvidenceKind::Verification => {
-                runtime.successful_mutations() > 0 && runtime.verified_after_last_mutation()
-            }
-            ContractEvidenceKind::InteractionObservation => {
-                successful_evidence
-                    .get(&(evidence.source.clone(), evidence.sequence))
-                    .copied()
-                    == Some(true)
-            }
-            _ => false,
-        })
+    let verified_postcondition_count = successful_evidence
+        .values()
+        .filter(|receipt| receipt.is_some())
         .count();
 
     CompletionToolEvidence {
@@ -336,7 +343,10 @@ fn tool_risk_label(risk: &ToolRisk) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{EventId, EventKind, Message, Metadata, TaskId};
+    use agent_core::{
+        EventId, EventKind, Message, Metadata, PostconditionVerifierKind, TaskId,
+        ToolEffectSemantics, ToolPostconditionEvidence,
+    };
     use agent_runtime::{AgentRunControl, ModelAttemptUsage, ModelUsageSource, RunStageClass};
     use orchestrator::LearningDisposition;
 
@@ -416,42 +426,134 @@ mod tests {
     }
 
     #[test]
+    fn deferred_tool_annotation_uses_the_dynamic_target_identity() {
+        let mut runtime = runtime_with_messages("inspect", Vec::new());
+        agent_runtime::record_tool_outcome_with_risk(
+            &mut runtime,
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+        );
+        runtime.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "tool=tool.invoke\nstatus=succeeded".to_string(),
+            metadata: Metadata::new(),
+        });
+        let call = AgentToolRequest {
+            call_id: agent_core::ToolCallId("deferred-read".to_string()),
+            tool_name: "tool.invoke".to_string(),
+            input: r#"{"name":"file.read","arguments":{"path":"README.md"}}"#.to_string(),
+        };
+        let target_spec = ToolSpec::builtin(
+            "file.read",
+            "file",
+            "Read a file",
+            ToolRisk::ReadOnly,
+            r#"{"type":"object"}"#,
+        );
+        annotate_latest_tool_observation(
+            &mut runtime,
+            std::slice::from_ref(&target_spec),
+            &call,
+            Some(&target_spec),
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            0,
+            None,
+            None,
+        );
+
+        let metadata = &runtime.messages.last().expect("tool message exists").metadata;
+        assert_eq!(metadata.get("tool_name").map(String::as_str), Some("file.read"));
+        assert_eq!(
+            metadata.get("contract_evidence_sequence").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
     fn matching_runtime_postcondition_is_verified() {
         let mut runtime = runtime_with_messages("change and test", Vec::new());
-        agent_runtime::record_tool_outcome_with_risk(
-            &mut runtime,
+        let write_spec = ToolSpec::builtin(
             "file.write",
-            r#"{"path":"src/lib.rs"}"#,
+            "file",
+            "Write a file",
+            ToolRisk::WritesWorkspace,
+            r#"{"type":"object"}"#,
+        )
+        .with_effect_semantics(ToolEffectSemantics::Verifiable {
+            verifier: "workspace_file_content_v1".to_string(),
+        });
+        let process_spec = ToolSpec::builtin(
+            "shell.run",
+            "process",
+            "Run a process",
+            ToolRisk::ExecutesProcess,
+            r#"{"type":"object"}"#,
+        )
+        .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceQualityCheckV1);
+        let tools = vec![write_spec.clone(), process_spec.clone()];
+        let write = AgentToolRequest {
+            call_id: agent_core::ToolCallId("write".to_string()),
+            tool_name: "file.write".to_string(),
+            input: r#"{"path":"src/lib.rs"}"#.to_string(),
+        };
+        let write_transition = agent_runtime::AgentKernel::new(&mut runtime, &tools)
+            .with_postcondition_scope(Some("test-run:0"))
+            .apply_tool_observation_transition_with_contract(
+                &write,
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::WritesWorkspace),
+                Some(&write_spec),
+                None,
+                "updated src/lib.rs",
+                None,
+            );
+        annotate_latest_tool_observation(
+            &mut runtime,
+            &tools,
+            &write,
+            Some(&write_spec),
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::WritesWorkspace),
+            0,
+            write_transition.postcondition_verification.as_ref(),
+            write_transition.goal_delta.as_ref(),
         );
-        agent_runtime::record_tool_outcome_with_risk(
+        let verify = AgentToolRequest {
+            call_id: agent_core::ToolCallId("verify".to_string()),
+            tool_name: "shell.run".to_string(),
+            input: r#"{"command":"cargo test"}"#.to_string(),
+        };
+        let postcondition_evidence = ToolPostconditionEvidence {
+            kind: PostconditionVerifierKind::WorkspaceQualityCheckV1,
+            target_input_json: r#"{"path":"."}"#.to_string(),
+        };
+        let verify_transition = agent_runtime::AgentKernel::new(&mut runtime, &tools)
+            .with_postcondition_scope(Some("test-run:0"))
+            .apply_tool_observation_transition_with_contract(
+                &verify,
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::ExecutesProcess),
+                Some(&process_spec),
+                Some(&postcondition_evidence),
+                "all tests passed",
+                None,
+            );
+        annotate_latest_tool_observation(
             &mut runtime,
-            "process.run",
-            r#"{"command":"cargo test"}"#,
+            &tools,
+            &verify,
+            Some(&process_spec),
             &ToolOutcomeStatus::Succeeded,
             Some(&ToolRisk::ExecutesProcess),
+            0,
+            verify_transition.postcondition_verification.as_ref(),
+            verify_transition.goal_delta.as_ref(),
         );
-        runtime.messages.push(tool_message([
-            ("tool_evidence_schema", TOOL_EVIDENCE_SCHEMA),
-            ("tool_evidence_provenance", TOOL_EVIDENCE_PROVENANCE),
-            ("tool_status", "succeeded"),
-            ("steer_epoch", "5"),
-            ("tool_name", "file.write"),
-            ("tool_source", "built_in"),
-            ("contract_evidence_sequence", "1"),
-        ]));
-        runtime.messages.push(tool_message([
-            ("tool_evidence_schema", TOOL_EVIDENCE_SCHEMA),
-            ("tool_evidence_provenance", TOOL_EVIDENCE_PROVENANCE),
-            ("tool_status", "succeeded"),
-            ("steer_epoch", "5"),
-            ("tool_name", "process.run"),
-            ("tool_source", "built_in"),
-            ("contract_evidence_sequence", "2"),
-        ]));
 
-        let evidence = completion_tool_evidence(&runtime, 5);
+        let evidence = completion_tool_evidence(&runtime, 0);
         assert_eq!(evidence.grounded_count, 2);
         assert_eq!(evidence.verified_postcondition_count, 1);
     }
@@ -489,7 +591,7 @@ mod tests {
             ("tool_name", "browser.capture"),
             ("tool_source", "built_in"),
             ("contract_evidence_sequence", "3"),
-            ("postcondition_verified", "false"),
+            ("postcondition_verified", "true"),
         ]));
 
         let evidence = completion_tool_evidence(&runtime, 2);

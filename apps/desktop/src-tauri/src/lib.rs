@@ -20,6 +20,7 @@ mod agent_conductor_runtime;
 mod agent_conductor_scheduler;
 mod agent_execution_constraint;
 mod agent_failure_terminal_runtime;
+mod agent_finalizer_runtime;
 mod agent_grounded_response_runtime;
 mod agent_loop_runtime;
 mod agent_model_turn_runtime;
@@ -38,6 +39,7 @@ mod agent_runtime_snapshot;
 mod agent_runtime_snapshot_cursor;
 mod agent_steer_runtime;
 mod agent_strategy_runtime;
+mod agent_terminal_commit_runtime;
 mod agent_tool_runtime;
 mod app_bootstrap;
 mod app_state;
@@ -231,7 +233,6 @@ use agent_resource_snapshot::*;
 use agent_runtime_snapshot::*;
 use session_context_service::*;
 use session_title_service::*;
-
 #[cfg(test)]
 mod external_effect_eval_tests;
 #[cfg(test)]

@@ -17,7 +17,6 @@ pub(crate) const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_TOTAL_BYTES: usize = 50 * 1024 * 1024;
 pub(crate) const AGENT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 pub(crate) const MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS: usize = 4;
-pub(crate) const AGENT_MODEL_RECOVERY_WINDOW_SECONDS: u64 = 60;
 pub(crate) const COLLABORATION_MAX_OUTPUT_TOKENS: u64 = 4_096;
 pub(crate) const ADAPTIVE_QUALITY_PASS_SCORE: f32 = 0.72;
 pub(crate) const ADAPTIVE_EVIDENCE_REPAIR_ATTEMPTS: usize = 1;

@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, fmt};
 
 pub const AGENT_TASK_STATE_SCHEMA: &str = "cindx.agent.task-state.v2";
 pub const AGENT_TASK_STATE_SCHEMA_V1: &str = "cindx.agent.task-state.v1";
+pub const MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentTaskStateSnapshot {
@@ -196,12 +197,23 @@ impl AgentTaskStateSnapshot {
     }
 
     pub fn to_json(&self) -> Result<String, AgentTaskStateError> {
-        serde_json::to_string(self).map_err(|error| {
+        let encoded = serde_json::to_string(self).map_err(|error| {
             AgentTaskStateError::new(format!("failed to encode agent task checkpoint: {error}"))
-        })
+        })?;
+        if encoded.len() > MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES {
+            return Err(AgentTaskStateError::new(format!(
+                "agent task checkpoint exceeds the {MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES}-byte serialized size limit"
+            )));
+        }
+        Ok(encoded)
     }
 
     pub fn from_json(encoded: &str) -> Result<Self, AgentTaskStateError> {
+        if encoded.len() > MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES {
+            return Err(AgentTaskStateError::new(format!(
+                "agent task checkpoint exceeds the {MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES}-byte serialized size limit"
+            )));
+        }
         let snapshot = serde_json::from_str::<Self>(encoded).map_err(|error| {
             AgentTaskStateError::new(format!("failed to decode agent task checkpoint: {error}"))
         })?;
@@ -252,6 +264,18 @@ impl AgentTaskStateSnapshot {
             .map_err(|error| {
                 AgentTaskStateError::new(format!(
                     "agent task checkpoint contains invalid outcome state: {error}"
+                ))
+            })?;
+        let (steer_epoch, contract_epoch) = self
+            .prepared_task_state
+            .as_ref()
+            .map(|prepared| (prepared.steer_epoch, prepared.contract_epoch))
+            .unwrap_or((0, 0));
+        self.task_contract
+            .validate_persisted_postcondition_state(steer_epoch, contract_epoch)
+            .map_err(|error| {
+                AgentTaskStateError::new(format!(
+                    "agent task checkpoint contains invalid postcondition state: {error}"
                 ))
             })?;
         Ok(())
@@ -320,6 +344,7 @@ mod tests {
         let encoded = AgentTaskStateSnapshot::capture(&state)
             .to_json()
             .expect("checkpoint encodes");
+        assert!(encoded.len() <= MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES);
         assert!(!encoded.contains(claim_sentinel));
         let snapshot = AgentTaskStateSnapshot::from_json(&encoded).expect("checkpoint decodes");
         let restored = snapshot
@@ -327,6 +352,30 @@ mod tests {
             .expect("matching transcript restores");
 
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn serialized_snapshot_limit_rejects_oversized_encode_and_precedes_decode() {
+        let state = start_agent_loop(
+            TaskId("snapshot-size-limit".to_string()),
+            "validate checkpoint size",
+            AgentRuntimeConfig::default(),
+        );
+        let mut oversized = AgentTaskStateSnapshot::capture(&state);
+        oversized.task_id = "x".repeat(MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES);
+
+        let encode_error = oversized
+            .to_json()
+            .expect_err("oversized checkpoint must not encode");
+        assert!(encode_error.to_string().contains("serialized size limit"));
+
+        let invalid_oversized_json = "x".repeat(MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES + 1);
+        let decode_error = AgentTaskStateSnapshot::from_json(&invalid_oversized_json)
+            .expect_err("oversized input must be rejected before decoding");
+        assert!(decode_error.to_string().contains("serialized size limit"));
+        assert!(!decode_error
+            .to_string()
+            .contains("failed to decode agent task checkpoint"));
     }
 
     #[test]
@@ -531,6 +580,7 @@ mod tests {
         value["taskContract"] =
             serde_json::to_value(AgentTaskContract::default()).expect("default contract encodes");
         let encoded = serde_json::to_string(&value).expect("v1 fixture encodes");
+        assert!(encoded.len() <= MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES);
 
         let snapshot = AgentTaskStateSnapshot::from_json(&encoded).expect("v1 decoder accepts");
         snapshot

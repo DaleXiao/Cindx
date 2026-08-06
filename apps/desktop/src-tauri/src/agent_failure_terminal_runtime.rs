@@ -1,7 +1,10 @@
 use crate::{
     agent_loop_runtime::pause_agent_loop_for_control_stop,
     agent_query_commands::emit_agent_stream_delta,
-    agent_read_model::{agent_state_for_session, agent_state_with_error_metadata_in_context},
+    agent_read_model::{
+        agent_state_for_session, persist_agent_error_terminalization_in_transaction,
+    },
+    agent_terminal_commit_runtime::persist_agent_terminal_once,
     app_state::AppState,
     collaboration_service::AgentCollaboration,
     suspended_run_runtime::clear_suspended_agent_run_for_context,
@@ -100,21 +103,38 @@ pub(crate) fn commit_agent_failure_terminal(
 
     let session_id = run_context.get("session_id").map(String::as_str);
     let terminal_commit = cancellation.commit_terminal_result_with(epoch_lease, || {
-        clear_suspended_agent_run_for_context(state, run_context)?;
-        agent_state_with_error_metadata_in_context(
-            state,
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        persist_agent_terminal_once(
+            &mut store,
+            &runtime.task_id,
             run_context,
-            display_message,
-            terminal_metadata,
+            epoch_lease.epoch(),
+            |store, terminal_identity| {
+                let mut terminal_metadata = terminal_metadata;
+                terminal_metadata.extend(terminal_identity.metadata());
+                persist_agent_error_terminalization_in_transaction(
+                    store,
+                    &runtime.task_id,
+                    run_context,
+                    &display_message,
+                    terminal_metadata,
+                )
+            },
         )
+        .map_err(|error| error.to_string())
     })?;
     match terminal_commit {
-        RunTerminalCommit::Committed(agent_state) => {
-            Ok(AgentFailureTerminalOutcome::Committed(agent_state))
+        RunTerminalCommit::Committed(persisted) => {
+            clear_suspended_agent_run_for_context(state, run_context)?;
+            Ok(AgentFailureTerminalOutcome::Committed(persisted.state))
         }
         RunTerminalCommit::RestartAfterSteer => Ok(AgentFailureTerminalOutcome::RestartAfterSteer),
         RunTerminalCommit::Stopped(_) => Ok(AgentFailureTerminalOutcome::Stopped),
         RunTerminalCommit::AlreadyCommitted => {
+            clear_suspended_agent_run_for_context(state, run_context)?;
             let store = state
                 .store
                 .lock()

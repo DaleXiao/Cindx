@@ -10,6 +10,7 @@ struct PreparedParallelToolCall {
     call: AgentToolRequest,
     invocation: ToolInvocation,
     risk: ToolRisk,
+    effect_spec: ToolSpec,
     input_fingerprint: String,
 }
 
@@ -21,7 +22,6 @@ struct ParallelToolCandidate {
 
 struct ParallelToolContract {
     effect_spec: ToolSpec,
-    declared_risk: ToolRisk,
 }
 
 struct ParallelToolBodyResult {
@@ -93,7 +93,6 @@ fn parallel_tool_batch_contracts<'a>(
             }
             Some(ParallelToolContract {
                 effect_spec,
-                declared_risk: tool.spec().risk,
             })
         })
         .collect()
@@ -157,7 +156,8 @@ fn prepare_parallel_tool_batch(
             PreparedParallelToolCall {
                 call: candidate.call,
                 invocation,
-                risk: contract.declared_risk,
+                risk: contract.effect_spec.risk.clone(),
+                effect_spec: contract.effect_spec,
                 input_fingerprint: candidate.input_fingerprint,
             }
         })
@@ -389,6 +389,9 @@ fn execute_prepared_parallel_tool_batch(
     }
 
     for (item, result) in prepared.iter().zip(results) {
+        let postcondition_evidence = registry
+            .get(&item.invocation.tool_name)
+            .and_then(|tool| tool.postcondition_evidence(&item.invocation, &result));
         let observation =
             observation_from_agent_tool_result(&item.invocation.tool_name, &result);
         let image_paths = tool_result_image_paths(&result);
@@ -402,6 +405,8 @@ fn execute_prepared_parallel_tool_batch(
             &item.call,
             &result.status,
             Some(&item.risk),
+            Some(&item.effect_spec),
+            postcondition_evidence.as_ref(),
             &observation,
             None,
             &image_paths,

@@ -76,8 +76,8 @@ A new run currently follows this sequence:
    work, while model reuse or diversity is selected dynamically from capability
    fit and supported evidence. A direct decision skips collaboration.
 8. `agent-application` owns the only run/reprepare driver. Each prepared epoch
-   uses `AgentKernel` for model turns, admitted tool batches, observations,
-   contract checks, and terminal delivery. Tool exposure is focused by the
+   uses `AgentKernel` for Actor model turns, admitted tool batches, typed
+   Verifier observations, contract checks, and terminal delivery. Tool exposure is focused by the
    validated conductor decision, and prompt-scoped capability and evidence
    obligations are bound to that epoch. Normal execution and permission recovery
    use the same planning path. After the matching runtime transition commits and
@@ -106,12 +106,19 @@ A new run currently follows this sequence:
 9. `first_verified` can stop early only for a genuinely verified deliverable.
    At terminal reserve the strongest usable result may still be returned, but
    its failed verification obligations remain explicit degradation rather than
-   native success. A later unverified synthesis cannot replace a stronger
+   native success. A tools-disabled Finalizer owns terminal-reserve delivery; it
+   does not advance Actor turns or consume Actor tool or step budget. Empty,
+   invalid, unavailable, or tool-calling Finalizer output falls back to the exact
+   precomputed grounded candidate for the active epoch, or fails closed without
+   re-entering the Actor. A later unverified synthesis cannot replace a stronger
    verified result. The stream completion event belongs to the same request
    stream that delivered the selected text.
 10. The completion transaction persists the result, artifacts, lifecycle state,
-   learning evidence, and cleanup. Semantic memory refresh and prompt evolution
-   are background work.
+   learning evidence, and cleanup under one physical-run and steer-epoch terminal
+   identity. Success and failure replay the existing terminal event; a new
+   transaction must create exactly one matching terminal event or roll back.
+   Semantic memory refresh and prompt evolution are background work and run only
+   after a newly inserted successful terminal.
 
 Within an active epoch, `PreparedTaskState` is the typed source for the effective
 objective, steer/contract epochs, and completion intent; `AgentTaskContract`

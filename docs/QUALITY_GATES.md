@@ -104,6 +104,12 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   size independent of raw tool output. Target binding and desktop recovery are
   covered by their separate contract tests rather than inferred from this exact
   filter.
+- The execution-role contracts keep Actor and Finalizer stage usage independent,
+  expose no tools or Actor turn to Finalizer delivery, bind postcondition quality
+  to a typed action/observation receipt, return only a revalidated byte-identical
+  grounded fallback, and commit one durable success or failure terminal across
+  replay. These deterministic checks establish control semantics, not
+  provider-backed answer-quality uplift.
 - The typed denial gate keeps permission, policy, capability, and repeated-action
   refusals distinct from ordinary failure and success. It proves one bounded
   same-epoch replan, exact-call suppression before permission, epoch isolation,

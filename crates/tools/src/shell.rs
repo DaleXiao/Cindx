@@ -8,13 +8,15 @@ use std::time::{Duration, Instant};
 
 use agent_core::{
     Metadata, PermissionRequest, PermissionRisk, ToolArtifact, ToolFailure, ToolInvocation,
-    ToolOutcomeStatus, ToolResult, ToolSpec,
+    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolSpec,
 };
 
 use crate::process_control::terminate_process_group;
+use crate::shell_postcondition::{quality_check, tool_spec, workspace_scope};
+use crate::stream_capture::BoundedStreamCapture;
 use crate::tool_contract_v2::{
-    parse_shell_timeout, shell_contract, shell_result_metadata, shell_run_spec,
-    workspace_relative_artifact, ShellContractInput, ShellResultMetadataInput,
+    parse_shell_timeout, shell_contract, shell_result_metadata, workspace_relative_artifact,
+    ShellContractInput, ShellResultMetadataInput,
 };
 use crate::{
     parse_input, permission_request, required_input, resolve_workspace_path,
@@ -80,35 +82,17 @@ struct ShellCommandOutput {
     cancelled: bool,
 }
 
-#[derive(Default)]
-struct BoundedStreamCapture {
-    preview: Vec<u8>,
-    total_bytes: u64,
-    artifact_bytes: u64,
-    preview_truncated: bool,
-    artifact_truncated: bool,
-    artifact_path: Option<PathBuf>,
-    artifact_error: Option<String>,
-}
-
 impl ShellRunTool {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
         }
     }
-
-    fn permission_scope(&self, cwd: &str) -> String {
-        resolve_workspace_path(&self.workspace_root, cwd)
-            .and_then(|path| resolve_workspace_read_path(&self.workspace_root, &path))
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| cwd.to_string())
-    }
 }
 
 impl Tool for ShellRunTool {
     fn spec(&self) -> ToolSpec {
-        shell_run_spec(DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS)
+        tool_spec(DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS)
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
@@ -147,9 +131,17 @@ impl Tool for ShellRunTool {
             } else {
                 "Run a local process in the selected workspace."
             },
-            &self.permission_scope(&cwd),
+            &workspace_scope(&self.workspace_root, &cwd),
             metadata,
         ))
+    }
+
+    fn postcondition_evidence(
+        &self,
+        invocation: &ToolInvocation,
+        result: &ToolResult,
+    ) -> Option<ToolPostconditionEvidence> {
+        quality_check(&self.workspace_root, invocation, result)
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<ToolResult, ToolError> {

@@ -1,10 +1,53 @@
 use super::*;
+use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
 use crate::suspended_run_runtime::clear_suspended_agent_run_for_context;
 
 pub(crate) enum AgentCompletionOutcome {
     Completed(AgentState),
     RestartAfterSteer,
     Paused(AgentState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentCompletionDelivery {
+    Actor,
+    Finalizer {
+        already_persisted: bool,
+        used_fallback: bool,
+    },
+}
+
+impl AgentCompletionDelivery {
+    fn is_finalizer(self) -> bool {
+        matches!(self, Self::Finalizer { .. })
+    }
+
+    fn already_persisted(self) -> bool {
+        matches!(
+            self,
+            Self::Finalizer {
+                already_persisted: true,
+                ..
+            }
+        )
+    }
+
+    fn used_fallback(self) -> bool {
+        matches!(
+            self,
+            Self::Finalizer {
+                used_fallback: true,
+                ..
+            }
+        )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Actor => "actor",
+            Self::Finalizer { .. } => "finalizer",
+        }
+    }
 }
 
 fn terminal_selection_overrides(
@@ -70,6 +113,7 @@ pub(crate) fn finalize_agent_completion(
     request_id: &str,
     session_id: Option<&str>,
     streamed_output: bool,
+    delivery: AgentCompletionDelivery,
     answer: String,
     mut grounded_completion_receipt: agent_runtime::GroundedCompletionReceipt,
     epoch_lease: agent_runtime::RunEpochLease,
@@ -90,25 +134,28 @@ pub(crate) fn finalize_agent_completion(
             &answer,
             &receipt_sequences,
         )
-        .map_err(|issue| format!("executor receipt validation failed: {issue:?}"))?;
+        .map_err(|issue| format!("{} receipt validation failed: {issue:?}", delivery.label()))?;
     let (completion_evidence, routing_learning_eligible) = completion_learning_signal(runtime);
     let tool_evidence =
         crate::agent_result_evidence::completion_tool_evidence(runtime, epoch_lease.epoch());
-    let executor_quality = grounded_completion_quality(grounded_completion_receipt.basis);
+    let candidate_quality = grounded_completion_quality(grounded_completion_receipt.basis);
     cancellation.record_best_known_result_at(
         epoch_lease.epoch(),
-        "executor",
+        delivery.label(),
         &answer,
-        executor_quality,
+        candidate_quality,
         grounded_completion_receipt.visible_evidence_sequences.len(),
         grounded_completion_receipt.basis
             == agent_runtime::GroundedCompletionBasis::PostconditionVerified,
         true,
     );
 
-    let (mut final_answer, synthesized, delivery_request_id) = if let Some(collaboration) =
-        collaboration
-    {
+    let (mut final_answer, synthesized, delivery_request_id) = if delivery.is_finalizer() {
+        if !streamed_output && !answer.trim().is_empty() {
+            emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
+        }
+        (answer.clone(), false, request_id.to_string())
+    } else if let Some(collaboration) = collaboration {
         let synthesis_objective = effective_agent_objective(run_context, prompt);
         match synthesize_agent_answer(
             app,
@@ -195,8 +242,10 @@ pub(crate) fn finalize_agent_completion(
         (answer.clone(), false, request_id.to_string())
     };
 
-    let terminal_result_stage = if synthesized {
-        "synthesizer"
+    let terminal_result_stage = if delivery.used_fallback() {
+        "finalizer_fallback"
+    } else if delivery.is_finalizer() || synthesized {
+        "finalizer"
     } else if grounded_completion_receipt.basis
         == agent_runtime::GroundedCompletionBasis::ConstraintObserved
     {
@@ -224,7 +273,8 @@ pub(crate) fn finalize_agent_completion(
         terminal_result_verified,
         true,
     );
-    let exact_content_required = synthesized
+    let exact_content_required = delivery.is_finalizer()
+        || synthesized
         || grounded_completion_receipt.basis
             != agent_runtime::GroundedCompletionBasis::SelfContained;
     let terminal_selection = cancellation.best_known_result().filter(|candidate| {
@@ -232,7 +282,9 @@ pub(crate) fn finalize_agent_completion(
     });
     let terminal_selection_override =
         terminal_selection_overrides(terminal_selection.as_ref(), &final_answer);
-    let persist_selected_terminal_message = synthesized || terminal_selection_override;
+    let persist_selected_terminal_message = synthesized
+        || terminal_selection_override
+        || (delivery.is_finalizer() && !delivery.already_persisted());
     if let Some(selected) = terminal_selection
         .as_ref()
         .filter(|_| terminal_selection_override)
@@ -296,6 +348,8 @@ pub(crate) fn finalize_agent_completion(
                     "model".to_string(),
                     if terminal_selection_override {
                         "result-frontier".to_string()
+                    } else if delivery.used_fallback() {
+                        "grounded-fallback".to_string()
                     } else {
                         config.model_for_role(&ModelRole::Summarizer)
                     },
@@ -307,6 +361,14 @@ pub(crate) fn finalize_agent_completion(
                 (
                     "terminal_selection_override".to_string(),
                     terminal_selection_override.to_string(),
+                ),
+                (
+                    "completion_delivery".to_string(),
+                    delivery.label().to_string(),
+                ),
+                (
+                    "finalizer_fallback".to_string(),
+                    delivery.used_fallback().to_string(),
                 ),
             ]
             .into_iter()
@@ -329,6 +391,14 @@ pub(crate) fn finalize_agent_completion(
         (
             "collaboration_synthesized".to_string(),
             synthesized.to_string(),
+        ),
+        (
+            "completion_delivery".to_string(),
+            delivery.label().to_string(),
+        ),
+        (
+            "finalizer_fallback".to_string(),
+            delivery.used_fallback().to_string(),
         ),
         (
             "terminal_selected_stage".to_string(),
@@ -450,8 +520,12 @@ pub(crate) fn finalize_agent_completion(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        store
-            .with_immediate_transaction(|store| {
+        persist_agent_terminal_once(
+            &mut store,
+            &runtime.task_id,
+            run_context,
+            epoch_lease.epoch(),
+            |store, terminal_identity| {
                 if let Some(message_metadata) = selected_terminal_message_metadata {
                     append_message_event_with_metadata(
                         store,
@@ -481,6 +555,7 @@ pub(crate) fn finalize_agent_completion(
                         })
                 });
                 let mut terminal_metadata = terminal_metadata;
+                terminal_metadata.extend(terminal_identity.metadata());
                 let learning_tool_evidence = crate::agent_result_evidence::CompletionToolEvidence {
                     grounded_count: grounded_completion_receipt.visible_evidence_sequences.len(),
                     verified_postcondition_count: usize::from(
@@ -522,11 +597,14 @@ pub(crate) fn finalize_agent_completion(
                     eprintln!("project memory utilization unavailable: {error}");
                 }
                 agent_state_for_session(store, None, session_id)
-            })
-            .map_err(|error| error.to_string())
+            },
+        )
+        .map_err(|error| error.to_string())
     })?;
-    let completed_state = match terminal_commit {
-        agent_runtime::RunTerminalCommit::Committed(state) => state,
+    let (completed_state, inserted_terminal) = match terminal_commit {
+        agent_runtime::RunTerminalCommit::Committed(persisted) => {
+            (persisted.state, persisted.inserted)
+        }
         agent_runtime::RunTerminalCommit::RestartAfterSteer => {
             emit_agent_stream_delta(app, &delivery_request_id, session_id, "", false, true, None);
             return Ok(AgentCompletionOutcome::RestartAfterSteer);
@@ -550,19 +628,25 @@ pub(crate) fn finalize_agent_completion(
                 .store
                 .lock()
                 .map_err(|error| format!("store lock poisoned: {error}"))?;
-            agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?
+            (
+                agent_state_for_session(&store, None, session_id)
+                    .map_err(|error| error.to_string())?,
+                false,
+            )
         }
     };
     if let Err(error) = clear_suspended_agent_run_for_context(state, run_context) {
         eprintln!("completed agent suspended-run cleanup unavailable: {error}");
     }
     emit_agent_stream_delta(app, &delivery_request_id, session_id, "", true, false, None);
-    crate::semantic_memory_worker::schedule_semantic_memory_refresh(
-        app.clone(),
-        workspace_root.to_path_buf(),
-        config.clone(),
-        run_context.clone(),
-    );
+    if inserted_terminal {
+        crate::semantic_memory_worker::schedule_semantic_memory_refresh(
+            app.clone(),
+            workspace_root.to_path_buf(),
+            config.clone(),
+            run_context.clone(),
+        );
+    }
     Ok(AgentCompletionOutcome::Completed(completed_state))
 }
 

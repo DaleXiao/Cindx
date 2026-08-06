@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod event_contract;
 mod permission_policy;
@@ -155,6 +155,27 @@ pub enum ToolEffectSemantics {
     NonIdempotent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PostconditionVerifierKind {
+    WorkspaceExactReadbackV1,
+    WorkspaceQualityCheckV1,
+}
+
+impl PostconditionVerifierKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::WorkspaceExactReadbackV1 => "workspace_exact_readback_v1",
+            Self::WorkspaceQualityCheckV1 => "workspace_quality_check_v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPostconditionEvidence {
+    pub kind: PostconditionVerifierKind,
+    pub target_input_json: String,
+}
+
 impl ToolEffectSemantics {
     pub fn conservative_default(risk: &ToolRisk) -> Self {
         if matches!(risk, ToolRisk::ReadOnly) {
@@ -200,6 +221,7 @@ pub struct ToolSpec {
     pub output_schema_json: Option<String>,
     pub effect_semantics: ToolEffectSemantics,
     pub execution_concurrency: ToolExecutionConcurrency,
+    pub postcondition_verifiers: BTreeSet<PostconditionVerifierKind>,
 }
 
 impl ToolSpec {
@@ -224,6 +246,7 @@ impl ToolSpec {
             output_schema_json: None,
             effect_semantics,
             execution_concurrency: ToolExecutionConcurrency::default(),
+            postcondition_verifiers: BTreeSet::new(),
         }
     }
 
@@ -237,6 +260,11 @@ impl ToolSpec {
         execution_concurrency: ToolExecutionConcurrency,
     ) -> Self {
         self.execution_concurrency = execution_concurrency;
+        self
+    }
+
+    pub fn with_postcondition_verifier(mut self, verifier: PostconditionVerifierKind) -> Self {
+        self.postcondition_verifiers.insert(verifier);
         self
     }
 
@@ -277,6 +305,27 @@ impl ToolSpec {
 
     pub fn validate(&self) -> Result<(), String> {
         self.validate_input_schema()?;
+        if self
+            .postcondition_verifiers
+            .contains(&PostconditionVerifierKind::WorkspaceExactReadbackV1)
+            && (!matches!(self.risk, ToolRisk::ReadOnly)
+                || !matches!(self.effect_semantics, ToolEffectSemantics::ReadOnly))
+        {
+            return Err(format!(
+                "tool {} may verify exact readback only with read-only risk and effect semantics",
+                self.name
+            ));
+        }
+        if self
+            .postcondition_verifiers
+            .contains(&PostconditionVerifierKind::WorkspaceQualityCheckV1)
+            && !matches!(self.risk, ToolRisk::ExecutesProcess)
+        {
+            return Err(format!(
+                "tool {} may verify quality checks only when it executes a process",
+                self.name
+            ));
+        }
         if matches!(
             self.execution_concurrency,
             ToolExecutionConcurrency::IndependentRead
@@ -481,5 +530,42 @@ mod tests {
             .validate()
             .expect_err("non-read-only effects must remain serialized");
         assert!(effect_error.contains("read-only risk and effect semantics"));
+    }
+
+    #[test]
+    fn postcondition_verifier_kinds_are_closed_and_labeled() {
+        assert_eq!(
+            PostconditionVerifierKind::WorkspaceExactReadbackV1.label(),
+            "workspace_exact_readback_v1"
+        );
+        assert_eq!(
+            PostconditionVerifierKind::WorkspaceQualityCheckV1.label(),
+            "workspace_quality_check_v1"
+        );
+        assert!(spec(ToolRisk::ReadOnly).postcondition_verifiers.is_empty());
+    }
+
+    #[test]
+    fn postcondition_verifier_capabilities_must_match_tool_risk() {
+        assert!(spec(ToolRisk::ReadOnly)
+            .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceExactReadbackV1)
+            .validate()
+            .is_ok());
+        assert!(spec(ToolRisk::ExecutesProcess)
+            .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceQualityCheckV1)
+            .validate()
+            .is_ok());
+
+        let readback_error = spec(ToolRisk::WritesWorkspace)
+            .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceExactReadbackV1)
+            .validate()
+            .expect_err("write tools cannot claim exact readback evidence");
+        assert!(readback_error.contains("exact readback"));
+
+        let quality_error = spec(ToolRisk::ReadOnly)
+            .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceQualityCheckV1)
+            .validate()
+            .expect_err("read-only tools cannot claim process quality evidence");
+        assert!(quality_error.contains("quality checks"));
     }
 }

@@ -261,7 +261,21 @@ mod tests {
     use std::time::Duration;
 
     fn tool(name: &str, risk: ToolRisk) -> ToolSpec {
-        ToolSpec::builtin(name, "test", name, risk, r#"{"type":"object"}"#)
+        let spec = ToolSpec::builtin(name, "test", name, risk.clone(), r#"{"type":"object"}"#);
+        match risk {
+            ToolRisk::ReadOnly => spec.with_postcondition_verifier(
+                agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
+            ),
+            ToolRisk::ExecutesProcess => spec.with_postcondition_verifier(
+                agent_core::PostconditionVerifierKind::WorkspaceQualityCheckV1,
+            ),
+            ToolRisk::WritesWorkspace | ToolRisk::Destructive => {
+                spec.with_effect_semantics(agent_core::ToolEffectSemantics::Verifiable {
+                    verifier: "workspace_file_content_v1".to_string(),
+                })
+            }
+            _ => spec,
+        }
     }
 
     fn request(id: &str, tool_name: &str, input: &str) -> AgentToolRequest {
@@ -270,6 +284,44 @@ mod tests {
             tool_name: tool_name.to_string(),
             input: input.to_string(),
         }
+    }
+
+    fn trusted_workspace_observation(
+        runtime: &mut crate::AgentLoopState,
+        tools: &[ToolSpec],
+        request: &AgentToolRequest,
+        risk: ToolRisk,
+        observation: &str,
+    ) -> Option<AgentGoalDelta> {
+        let spec = tools
+            .iter()
+            .find(|spec| spec.name == request.tool_name)
+            .expect("test tool spec exists");
+        let evidence = match risk {
+            ToolRisk::ReadOnly => Some(agent_core::ToolPostconditionEvidence {
+                kind: agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
+                target_input_json: request.input.clone(),
+            }),
+            ToolRisk::ExecutesProcess => Some(agent_core::ToolPostconditionEvidence {
+                kind: agent_core::PostconditionVerifierKind::WorkspaceQualityCheckV1,
+                target_input_json: r#"{"path":"."}"#.to_string(),
+            }),
+            _ => None,
+        };
+        AgentKernel::new(runtime, tools)
+            .with_postcondition_scope(Some(
+                crate::task_contract::test_support::POSTCONDITION_SCOPE,
+            ))
+            .apply_tool_observation_transition_with_contract(
+                request,
+                &ToolOutcomeStatus::Succeeded,
+                Some(&risk),
+                Some(spec),
+                evidence.as_ref(),
+                observation,
+                None,
+            )
+            .goal_delta
     }
 
     fn test_budget() -> RunBudget {
@@ -430,56 +482,59 @@ mod tests {
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
         assert_eq!(
-            AgentKernel::new(&mut mutation, &tools).apply_tool_observation(
+            trusted_workspace_observation(
+                &mut mutation,
+                &tools,
                 &request("write", "file.write", r#"{"path":"src/lib.rs"}"#),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::WritesWorkspace),
+                ToolRisk::WritesWorkspace,
                 "written",
             ),
             None,
             "an unverified mutation is not budget credit"
         );
         assert_eq!(
-            AgentKernel::new(&mut mutation, &tools).apply_tool_observation(
+            trusted_workspace_observation(
+                &mut mutation,
+                &tools,
                 &request("read-miss", "file.read", r#"{"path":"README.md"}"#),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::ReadOnly),
+                ToolRisk::ReadOnly,
                 "unrelated read",
             ),
             None
         );
-        let verified = AgentKernel::new(&mut mutation, &tools)
-            .apply_tool_observation(
-                &request("verify", "process.run", r#"{"command":"cargo test"}"#),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::ExecutesProcess),
-                "tests passed",
-            )
-            .expect("matching verification should advance the postcondition");
+        let verified = trusted_workspace_observation(
+            &mut mutation,
+            &tools,
+            &request("verify", "process.run", r#"{"command":"cargo test"}"#),
+            ToolRisk::ExecutesProcess,
+            "tests passed",
+        )
+        .expect("matching verification should advance the postcondition");
         assert_eq!(verified.kinds(), &[AgentGoalDeltaKind::WorkspaceVerified]);
         let mutation_control = AgentRunControl::with_budget(test_budget());
         assert!(mutation_control.record_goal_delta_at(0, &verified));
         assert_eq!(
-            AgentKernel::new(&mut mutation, &tools).apply_tool_observation(
+            trusted_workspace_observation(
+                &mut mutation,
+                &tools,
                 &request("write-repeat", "file.write", r#"{"path":"src/lib.rs"}"#),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::WritesWorkspace),
+                ToolRisk::WritesWorkspace,
                 "written again",
             ),
             None
         );
-        let repeated_verification = AgentKernel::new(&mut mutation, &tools)
-            .apply_tool_observation(
-                &request(
-                    "verify-repeat",
-                    "process.run",
-                    r#"{"command":"cargo test"}"#,
-                ),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::ExecutesProcess),
-                "tests passed again",
-            )
-            .expect("the repeated pair still closes its current postcondition");
+        let repeated_verification = trusted_workspace_observation(
+            &mut mutation,
+            &tools,
+            &request(
+                "verify-repeat",
+                "process.run",
+                r#"{"command":"cargo test"}"#,
+            ),
+            ToolRisk::ExecutesProcess,
+            "tests passed again",
+        )
+        .expect("the repeated pair still closes its current postcondition");
         assert_eq!(repeated_verification.fingerprint(), verified.fingerprint());
         assert!(!mutation_control.record_goal_delta_at(0, &repeated_verification));
 
@@ -492,41 +547,43 @@ mod tests {
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
         combined.task_contract.require_tool_success("file.read");
-        AgentKernel::new(&mut combined, &tools).apply_tool_observation(
+        trusted_workspace_observation(
+            &mut combined,
+            &tools,
             &request("combined-write-1", "file.write", r#"{"path":"src/lib.rs"}"#),
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::WritesWorkspace),
+            ToolRisk::WritesWorkspace,
             "written",
         );
-        let workspace_only = AgentKernel::new(&mut combined, &tools)
-            .apply_tool_observation(
-                &request(
-                    "combined-verify-1",
-                    "process.run",
-                    r#"{"command":"cargo test"}"#,
-                ),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::ExecutesProcess),
-                "tests passed",
-            )
-            .expect("the first verification should close the workspace postcondition");
+        let workspace_only = trusted_workspace_observation(
+            &mut combined,
+            &tools,
+            &request(
+                "combined-verify-1",
+                "process.run",
+                r#"{"command":"cargo test"}"#,
+            ),
+            ToolRisk::ExecutesProcess,
+            "tests passed",
+        )
+        .expect("the first verification should close the workspace postcondition");
         let combined_control = AgentRunControl::with_budget(test_budget());
         assert!(combined_control.record_goal_delta_at(0, &workspace_only));
 
-        AgentKernel::new(&mut combined, &tools).apply_tool_observation(
+        trusted_workspace_observation(
+            &mut combined,
+            &tools,
             &request("combined-write-2", "file.write", r#"{"path":"src/lib.rs"}"#),
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::WritesWorkspace),
+            ToolRisk::WritesWorkspace,
             "written again",
         );
-        let obligation_and_workspace = AgentKernel::new(&mut combined, &tools)
-            .apply_tool_observation(
-                &request("combined-verify-2", "file.read", r#"{"path":"src/lib.rs"}"#),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::ReadOnly),
-                "verified content",
-            )
-            .expect("the same transition should retain both new constituents");
+        let obligation_and_workspace = trusted_workspace_observation(
+            &mut combined,
+            &tools,
+            &request("combined-verify-2", "file.read", r#"{"path":"src/lib.rs"}"#),
+            ToolRisk::ReadOnly,
+            "verified content",
+        )
+        .expect("the same transition should retain both new constituents");
         assert_eq!(
             obligation_and_workspace.kinds(),
             &[
@@ -540,20 +597,21 @@ mod tests {
             "the new obligation constituent must not be hidden by the repeated workspace receipt"
         );
 
-        AgentKernel::new(&mut combined, &tools).apply_tool_observation(
+        trusted_workspace_observation(
+            &mut combined,
+            &tools,
             &request("combined-write-3", "file.write", r#"{"path":"src/lib.rs"}"#),
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::WritesWorkspace),
+            ToolRisk::WritesWorkspace,
             "written once more",
         );
-        let repeated_workspace = AgentKernel::new(&mut combined, &tools)
-            .apply_tool_observation(
-                &request("combined-verify-3", "file.read", r#"{"path":"src/lib.rs"}"#),
-                &ToolOutcomeStatus::Succeeded,
-                Some(&ToolRisk::ReadOnly),
-                "verified again",
-            )
-            .expect("the repeated pair still closes its current postcondition");
+        let repeated_workspace = trusted_workspace_observation(
+            &mut combined,
+            &tools,
+            &request("combined-verify-3", "file.read", r#"{"path":"src/lib.rs"}"#),
+            ToolRisk::ReadOnly,
+            "verified again",
+        )
+        .expect("the repeated pair still closes its current postcondition");
         assert_eq!(
             repeated_workspace.fingerprint(),
             workspace_only.fingerprint()

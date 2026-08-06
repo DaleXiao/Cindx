@@ -129,6 +129,8 @@ pub(crate) struct ResolvedToolObservation {
     pub(crate) tool_name: String,
     pub(crate) input_json: String,
     pub(crate) risk: Option<ToolRisk>,
+    pub(crate) effect_spec: Option<agent_core::ToolSpec>,
+    pub(crate) postcondition_evidence: Option<agent_core::ToolPostconditionEvidence>,
     pub(crate) status: ToolOutcomeStatus,
     pub(crate) observation: String,
     pub(crate) image_paths: Vec<String>,

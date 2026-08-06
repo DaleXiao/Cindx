@@ -1,13 +1,19 @@
 use crate::desktop_prelude::*;
 use crate::{
-    agent_completion_runtime::{finalize_agent_completion, AgentCompletionOutcome},
+    agent_completion_runtime::{
+        finalize_agent_completion, AgentCompletionDelivery, AgentCompletionOutcome,
+    },
     agent_failure_terminal_runtime::{resolve_loop_failure, AgentFailureLoopOutcome},
+    agent_finalizer_runtime::terminal_runtime::{
+        execute_terminal_finalizer, TerminalFinalizerContext, TerminalFinalizerOutcome,
+    },
     agent_grounded_response_runtime::{
         advance_grounded_model_response, should_reset_rejected_completion_stream,
         GroundedModelResponse,
     },
     agent_model_turn_runtime::{
-        execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnResponse,
+        execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnPlan,
+        AgentModelTurnResponse,
     },
     agent_query_commands::{
         append_agent_progress_event, emit_agent_stream_delta,
@@ -103,7 +109,8 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
     mut run_context: Metadata,
     collaboration: Option<&AgentCollaboration>,
     cancellation: &Arc<AgentRunControl>,
-    provider: &dyn StreamingModelProvider,
+    actor_provider: &dyn StreamingModelProvider,
+    finalizer_provider: &dyn StreamingModelProvider,
     agent_model: &str,
 ) -> Result<AgentLoopExecutionOutcome, String> {
     let session_id_owned = run_context.get("session_id").cloned();
@@ -125,6 +132,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
     let mut snapshot_cursor = AgentRuntimeSnapshotCursor::rebuild(&runtime, &run_context);
     let mut runtime_context = agent_runtime_context_for_run(&run_context);
     let mut active_collaboration = collaboration;
+    let mut actor_requested_finalizer = false;
 
     'agent_loop: loop {
         match apply_pending_agent_steers_with_cursor(
@@ -175,18 +183,39 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         }
         let max_output_tokens =
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
-        let terminal_commit = matches!(
-            cancellation.continuation_directive(),
-            RunContinuationDirective::CommitTerminalResult
-        );
+        let terminal_commit = actor_requested_finalizer
+            || matches!(
+                cancellation.continuation_directive(),
+                RunContinuationDirective::CommitTerminalResult
+            );
         if terminal_commit {
-            let epoch_lease = match cancellation.execution_epoch_lease() {
-                agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
-                agent_runtime::RunEpochLeaseOutcome::RestartAfterSteer => {
+            actor_requested_finalizer = false;
+            match execute_terminal_finalizer(
+                &mut runtime,
+                TerminalFinalizerContext {
+                    app,
+                    state,
+                    config,
+                    workspace_root,
+                    prompt: &prompt,
+                    run_context: &run_context,
+                    collaboration: active_collaboration,
+                    cancellation,
+                    provider: finalizer_provider,
+                    agent_model,
+                    runtime_context: runtime_context.as_deref(),
+                    max_output_tokens,
+                    snapshot_cursor: &mut snapshot_cursor,
+                },
+            )? {
+                TerminalFinalizerOutcome::Finished(agent_state) => {
+                    return Ok(AgentLoopExecutionOutcome::Finished(agent_state));
+                }
+                TerminalFinalizerOutcome::RestartAfterSteer => {
                     active_collaboration = None;
                     continue 'agent_loop;
                 }
-                agent_runtime::RunEpochLeaseOutcome::Stopped(_) => {
+                TerminalFinalizerOutcome::Pause => {
                     return pause_agent_loop_for_control_stop(
                         app,
                         state,
@@ -198,76 +227,6 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                         cancellation,
                     )
                     .map(AgentLoopExecutionOutcome::Finished);
-                }
-                agent_runtime::RunEpochLeaseOutcome::TerminalCommitted => {
-                    let store = state
-                        .store
-                        .lock()
-                        .map_err(|error| format!("store lock poisoned: {error}"))?;
-                    return agent_state_for_session(&store, None, session_id)
-                        .map(AgentLoopExecutionOutcome::Finished)
-                        .map_err(|error| error.to_string());
-                }
-            };
-            let instruction_commit =
-                cancellation.commit_execution_step_with(epoch_lease, || {
-                    let mut transaction = AgentLoopAppendTransaction::begin(&mut runtime);
-                    let previous_message_count = transaction.original_message_count();
-                    let instruction_added =
-                        transaction.with_append_only_mutation(ensure_terminal_commit_instruction);
-                    if instruction_added {
-                        let (prepared_snapshot, next_cursor) = snapshot_cursor
-                            .prepare_after_append(
-                                transaction.state(),
-                                previous_message_count,
-                                &run_context,
-                            );
-                        let mut store = state
-                            .store
-                            .lock()
-                            .map_err(|error| format!("store lock poisoned: {error}"))?;
-                        persist_runtime_append_and_snapshot(
-                            &mut store,
-                            transaction.state(),
-                            previous_message_count,
-                            &run_context,
-                            &prepared_snapshot,
-                        )?;
-                        drop(store);
-                        transaction.commit();
-                        snapshot_cursor = next_cursor;
-                    } else {
-                        transaction.commit();
-                    }
-                    Ok::<_, String>(())
-                })?;
-            match instruction_commit {
-                agent_runtime::RunExecutionStepCommit::Committed(()) => {}
-                agent_runtime::RunExecutionStepCommit::RestartAfterSteer => {
-                    active_collaboration = None;
-                    continue 'agent_loop;
-                }
-                agent_runtime::RunExecutionStepCommit::Stopped(_) => {
-                    return pause_agent_loop_for_control_stop(
-                        app,
-                        state,
-                        workspace_root,
-                        &runtime,
-                        &prompt,
-                        &run_context,
-                        active_collaboration,
-                        cancellation,
-                    )
-                    .map(AgentLoopExecutionOutcome::Finished);
-                }
-                agent_runtime::RunExecutionStepCommit::TerminalCommitted => {
-                    let store = state
-                        .store
-                        .lock()
-                        .map_err(|error| format!("store lock poisoned: {error}"))?;
-                    return agent_state_for_session(&store, None, session_id)
-                        .map(AgentLoopExecutionOutcome::Finished)
-                        .map_err(|error| error.to_string());
                 }
             }
         }
@@ -319,12 +278,10 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             &run_context,
             active_collaboration,
             cancellation,
-            provider,
+            actor_provider,
             agent_model,
-            &tools,
-            request,
             &context_governor,
-            terminal_commit,
+            AgentModelTurnPlan::actor(&tools, request),
         )?;
         let AgentModelTurnResponse {
             response,
@@ -333,6 +290,13 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             epoch_lease,
         } = match model_turn {
             AgentModelTurnOutcome::Response(response) => response,
+            AgentModelTurnOutcome::Unavailable(_) => {
+                return Err("actor model turn unexpectedly entered finalizer fallback".to_string())
+            }
+            AgentModelTurnOutcome::HandoffToFinalizer => {
+                actor_requested_finalizer = true;
+                continue 'agent_loop;
+            }
             AgentModelTurnOutcome::RestartAfterSteer => {
                 active_collaboration = None;
                 continue 'agent_loop;
@@ -449,6 +413,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     &request_id,
                     session_id,
                     streamed_output,
+                    AgentCompletionDelivery::Actor,
                     answer,
                     grounded_completion_receipt,
                     epoch_lease,

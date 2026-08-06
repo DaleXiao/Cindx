@@ -187,9 +187,14 @@ pub(crate) fn append_observations_to_suspended_run(
         return Ok(());
     };
     let objective_epoch = run_context_steer_epoch(&suspended.run_context);
+    let postcondition_scope = agent_runtime::postcondition_lineage_scope(&suspended.run_context);
     let mut goal_deltas = Vec::new();
     for resolved in observations {
-        let goal_delta = apply_resolved_tool_observation(&mut suspended.runtime, resolved);
+        let goal_delta = apply_resolved_tool_observation(
+            &mut suspended.runtime,
+            resolved,
+            postcondition_scope.as_deref(),
+        );
         goal_deltas.extend(goal_delta);
         if let Some(message) = suspended
             .runtime
@@ -237,6 +242,7 @@ fn staged_control_snapshot_with_goal_deltas(
 fn apply_resolved_tool_observation(
     runtime: &mut agent_runtime::AgentLoopState,
     resolved: &ResolvedToolObservation,
+    postcondition_scope: Option<&str>,
 ) -> Option<AgentGoalDelta> {
     let request = agent_runtime::AgentToolRequest {
         call_id: resolved.call_id.clone(),
@@ -245,13 +251,23 @@ fn apply_resolved_tool_observation(
     };
     let denial = matches!(resolved.status, agent_core::ToolOutcomeStatus::Denied)
         .then(agent_runtime::AgentActionDenialFeedback::user_permission);
-    AgentKernel::new(runtime, &[]).apply_tool_observation_with_denial(
-        &request,
-        &resolved.status,
-        resolved.risk.as_ref(),
-        &resolved.observation,
-        denial.as_ref(),
-    )
+    let tools = resolved
+        .effect_spec
+        .as_ref()
+        .map(std::slice::from_ref)
+        .unwrap_or_default();
+    AgentKernel::new(runtime, tools)
+        .with_postcondition_scope(postcondition_scope)
+        .apply_tool_observation_transition_with_contract(
+            &request,
+            &resolved.status,
+            resolved.risk.as_ref(),
+            resolved.effect_spec.as_ref(),
+            resolved.postcondition_evidence.as_ref(),
+            &resolved.observation,
+            denial.as_ref(),
+        )
+        .goal_delta
 }
 
 #[cfg(test)]
@@ -274,6 +290,8 @@ mod tests {
             tool_name: tool_name.to_string(),
             input_json: input_json.to_string(),
             risk: Some(risk),
+            effect_spec: None,
+            postcondition_evidence: None,
             status: ToolOutcomeStatus::Succeeded,
             observation: "succeeded".to_string(),
             image_paths: Vec::new(),
@@ -281,7 +299,7 @@ mod tests {
         }
     }
 
-    fn custom_workspace_verification_delta() -> AgentGoalDelta {
+    fn trusted_workspace_verification_delta() -> AgentGoalDelta {
         let mut runtime = start_agent_loop(
             TaskId("permission-risk".to_string()),
             "change and verify",
@@ -290,17 +308,29 @@ mod tests {
         runtime.task_contract.merge_workspace_verification_policy(
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
-        assert!(apply_resolved_tool_observation(
-            &mut runtime,
-            &resolved(
-                "write",
-                "mcp.custom_write",
-                r#"{"path":"src/lib.rs"}"#,
-                ToolRisk::WritesWorkspace,
-            ),
+        let write_spec = agent_core::ToolSpec::builtin(
+            "file.write",
+            "file",
+            "Write a file",
+            ToolRisk::WritesWorkspace,
+            r#"{"type":"object"}"#,
         )
-        .is_none());
-        apply_resolved_tool_observation(
+        .with_effect_semantics(agent_core::ToolEffectSemantics::Verifiable {
+            verifier: "workspace_file_content_v1".to_string(),
+        });
+        let mut write = resolved(
+            "write",
+            "file.write",
+            r#"{"path":"src/lib.rs"}"#,
+            ToolRisk::WritesWorkspace,
+        );
+        write.effect_spec = Some(write_spec);
+        assert!(
+            apply_resolved_tool_observation(&mut runtime, &write, Some("permission-risk:0"),)
+                .is_none()
+        );
+
+        assert!(apply_resolved_tool_observation(
             &mut runtime,
             &resolved(
                 "verify",
@@ -308,19 +338,45 @@ mod tests {
                 r#"{"command":"cargo test"}"#,
                 ToolRisk::ExecutesProcess,
             ),
+            Some("permission-risk:0"),
         )
-        .expect("the real custom-tool risks should verify the workspace mutation")
+        .is_none());
+        assert!(
+            !runtime.task_contract.latest_mutation_verified(),
+            "custom risk labels must not mint verifier authority"
+        );
+
+        let read_input = r#"{"path":"src/lib.rs"}"#;
+        let read_spec = agent_core::ToolSpec::builtin(
+            "file.read",
+            "file",
+            "Read a file",
+            ToolRisk::ReadOnly,
+            r#"{"type":"object"}"#,
+        )
+        .with_effect_semantics(agent_core::ToolEffectSemantics::ReadOnly)
+        .with_postcondition_verifier(
+            agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
+        );
+        let mut read = resolved("read", "file.read", read_input, ToolRisk::ReadOnly);
+        read.effect_spec = Some(read_spec);
+        read.postcondition_evidence = Some(agent_core::ToolPostconditionEvidence {
+            kind: agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
+            target_input_json: read_input.to_string(),
+        });
+        apply_resolved_tool_observation(&mut runtime, &read, Some("permission-risk:0"))
+            .expect("the trusted exact-readback evidence should verify the workspace mutation")
     }
 
     #[test]
     fn same_process_permission_replay_uses_the_resolved_tool_risk() {
-        let delta = custom_workspace_verification_delta();
+        let delta = trusted_workspace_verification_delta();
         assert_eq!(delta.kinds(), &[AgentGoalDeltaKind::WorkspaceVerified]);
     }
 
     #[test]
     fn suspended_snapshot_records_goal_delta_without_an_active_control() {
-        let delta = custom_workspace_verification_delta();
+        let delta = trusted_workspace_verification_delta();
         let base = AgentRunControl::new("auto").snapshot();
         let staged = staged_control_snapshot_with_goal_deltas(base, 0, &[delta.clone()]);
         let restored = AgentRunControl::from_snapshot(staged);
@@ -349,7 +405,7 @@ mod tests {
         observation.status = ToolOutcomeStatus::Denied;
         observation.observation = "The user denied this tool call.".to_string();
 
-        assert!(apply_resolved_tool_observation(&mut runtime, &observation).is_none());
+        assert!(apply_resolved_tool_observation(&mut runtime, &observation, None).is_none());
         let ledger = runtime.task_contract.outcome_ledger_shadow(3);
         assert_eq!(ledger.obligations.len(), 1);
         assert_eq!(

@@ -1,6 +1,7 @@
 use agent_core::{
     Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation,
-    ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec, TOOL_OBSERVATION_V2_SCHEMA,
+    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
+    TOOL_OBSERVATION_V2_SCHEMA,
 };
 use model_provider::{
     tool_function_name, ModelCallMode, ModelRequest, ModelResponse, ModelResponseDisposition,
@@ -82,8 +83,9 @@ pub use grounding_tools::{
     pin_evidence_scope_tools, pin_prompt_evidence_tools, tool_matches_evidence_scope,
 };
 pub use kernel::{
-    AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind, AgentTurnPreparationError,
-    GroundedCompletionDecision, PreparedAgentTurn,
+    AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind,
+    AgentToolObservationTransition, AgentTurnPreparationError, GroundedCompletionDecision,
+    PreparedAgentTurn,
 };
 pub use model_transport::{
     exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
@@ -117,15 +119,18 @@ pub use task_contract::{
     OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase, OutcomeLedgerShadow,
     OutcomeObligation, OutcomeObligationKind, OutcomePostcondition, OutcomePostconditionKind,
     OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope, OutcomeTerminal,
-    OutcomeTerminalObservation, OutcomeTruncation, PromptEvidenceContext,
-    WorkspaceVerificationPolicy, ACTION_DENIAL_SCHEMA, GOAL_DELTA_SCHEMA,
+    OutcomeTerminalObservation, OutcomeTruncation, PostconditionVerificationReceipt,
+    PromptEvidenceContext, WorkspaceVerificationPolicy, ACTION_DENIAL_SCHEMA, GOAL_DELTA_SCHEMA,
     GROUNDED_COMPLETION_DIGEST_METADATA_KEY, GROUNDED_COMPLETION_METADATA_KEY,
-    GROUNDED_COMPLETION_SCHEMA, OUTCOME_LEDGER_DIGEST_METADATA_KEY,
-    OUTCOME_LEDGER_MAX_METADATA_BYTES, OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
+    GROUNDED_COMPLETION_SCHEMA, MAX_POSTCONDITION_VERIFICATION_RECEIPT_BYTES,
+    OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
+    OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
+    POSTCONDITION_VERIFICATION_DIGEST_METADATA_KEY, POSTCONDITION_VERIFICATION_METADATA_KEY,
+    POSTCONDITION_VERIFICATION_SCHEMA,
 };
 pub use task_state::{
     AgentTaskStateError, AgentTaskStateSnapshot, AGENT_TASK_STATE_SCHEMA,
-    AGENT_TASK_STATE_SCHEMA_V1,
+    AGENT_TASK_STATE_SCHEMA_V1, MAX_AGENT_TASK_STATE_SNAPSHOT_BYTES,
 };
 pub use task_state_lineage::{AgentTaskStateLineage, AgentTranscriptFingerprintAccumulator};
 pub use task_state_wire::{
@@ -133,14 +138,15 @@ pub use task_state_wire::{
 };
 pub use tool_runtime::{
     apply_tool_spec_runtime_metadata, decode_persisted_tool_artifacts,
-    decode_persisted_tool_model_observation, finalize_tool_result, recovery_source_scope_matches,
-    supports_recovery_effect_replay, tool_effect_recovery_policy, tool_execution_scope_matches,
-    tool_input_fingerprint, tool_invocation_context, tool_invocation_event_metadata,
-    tool_risk_label, PersistedToolEffectKind, PersistedToolEffectWitness, ToolEffectRecoveryPolicy,
-    EFFECT_LEDGER_SCHEMA, MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES,
-    TOOL_EFFECT_SEMANTICS_METADATA_KEY, TOOL_EFFECT_VERIFIER_METADATA_KEY,
-    TOOL_EFFECT_WITNESS_METADATA_KEY, TOOL_EFFECT_WITNESS_SCHEMA,
-    TOOL_MODEL_OBSERVATION_METADATA_KEY, TOOL_RESULT_SCHEMA, TOOL_RISK_METADATA_KEY,
+    decode_persisted_tool_model_observation, finalize_tool_result, postcondition_lineage_scope,
+    recovery_source_scope_matches, supports_recovery_effect_replay, tool_effect_recovery_policy,
+    tool_execution_scope_matches, tool_input_fingerprint, tool_invocation_context,
+    tool_invocation_event_metadata, tool_risk_label, PersistedToolEffectKind,
+    PersistedToolEffectWitness, ToolEffectRecoveryPolicy, EFFECT_LEDGER_SCHEMA,
+    MAX_PERSISTED_TOOL_EFFECT_WITNESS_BYTES, TOOL_EFFECT_SEMANTICS_METADATA_KEY,
+    TOOL_EFFECT_VERIFIER_METADATA_KEY, TOOL_EFFECT_WITNESS_METADATA_KEY,
+    TOOL_EFFECT_WITNESS_SCHEMA, TOOL_MODEL_OBSERVATION_METADATA_KEY, TOOL_RESULT_SCHEMA,
+    TOOL_RISK_METADATA_KEY,
 };
 pub use turn_budget::AgentTurnBudgetExhausted;
 pub use worker_policy::{WorkerTurnPhase, WorkerTurnPolicy};
@@ -1075,6 +1081,54 @@ pub fn record_tool_outcome_with_risk(
     status: &ToolOutcomeStatus,
     risk: Option<&ToolRisk>,
 ) {
+    update_tool_failure_state(state, tool_name, input_json, status);
+    let pending_before = state.task_contract.pending_interactions().len();
+    state
+        .task_contract
+        .record_tool_outcome(tool_name, input_json, status, risk);
+    update_verified_interactions(state, pending_before);
+}
+
+pub(crate) fn record_tool_outcome_transition_with_risk(
+    state: &mut AgentLoopState,
+    tool_name: &str,
+    input_json: &str,
+    status: &ToolOutcomeStatus,
+    risk: Option<&ToolRisk>,
+    tool_spec: Option<&ToolSpec>,
+    tool_evidence: Option<&ToolPostconditionEvidence>,
+    observation: &str,
+    lineage_scope: Option<&str>,
+) -> Option<PostconditionVerificationReceipt> {
+    update_tool_failure_state(state, tool_name, input_json, status);
+    let pending_before = state.task_contract.pending_interactions().len();
+    let steer_epoch = state.prepared_task_state.steer_epoch();
+    let contract_epoch = state.prepared_task_state.contract_epoch();
+    let receipt = state.task_contract.record_tool_outcome_transition(
+        steer_epoch,
+        contract_epoch,
+        tool_name,
+        input_json,
+        status,
+        risk,
+        tool_spec,
+        tool_evidence,
+        None,
+        observation,
+        None,
+        lineage_scope,
+        true,
+    );
+    update_verified_interactions(state, pending_before);
+    receipt
+}
+
+fn update_tool_failure_state(
+    state: &mut AgentLoopState,
+    tool_name: &str,
+    input_json: &str,
+    status: &ToolOutcomeStatus,
+) {
     let signature = tool_signature(tool_name, input_json);
     let legacy_signature = legacy_tool_signature(tool_name, input_json);
     if matches!(
@@ -1091,11 +1145,9 @@ pub fn record_tool_outcome_with_risk(
         state.failed_tool_signatures.remove(&signature);
         state.failed_tool_signatures.remove(&legacy_signature);
     }
+}
 
-    let pending_before = state.task_contract.pending_interactions().len();
-    state
-        .task_contract
-        .record_tool_outcome(tool_name, input_json, status, risk);
+fn update_verified_interactions(state: &mut AgentLoopState, pending_before: usize) {
     let pending_after = state.task_contract.pending_interactions().len();
     if pending_after < pending_before {
         state.verified_interactions = state
@@ -1109,9 +1161,14 @@ fn record_persisted_tool_outcome_with_risk(
     tool_name: &str,
     input_fingerprint: &str,
     redacted_effect_input: Option<&str>,
+    postcondition_target_witness: Option<&task_contract::PostconditionTargetWitness>,
+    allow_action_binding: bool,
     status: &ToolOutcomeStatus,
     risk: Option<&ToolRisk>,
-) {
+    tool_spec: Option<&ToolSpec>,
+    persisted_tool_evidence: Option<&tool_runtime::ReplayedToolPostconditionEvidence>,
+    observation: &str,
+) -> Option<PostconditionVerificationReceipt> {
     let signature = tool_failure_signature_from_input_fingerprint(input_fingerprint);
     if matches!(
         status,
@@ -1127,15 +1184,25 @@ fn record_persisted_tool_outcome_with_risk(
     let persisted_input = redacted_effect_input
         .map(str::to_string)
         .unwrap_or_else(|| persisted_tool_input_placeholder(input_fingerprint));
-    state
-        .task_contract
-        .record_tool_outcome(tool_name, &persisted_input, status, risk);
-    let pending_after = state.task_contract.pending_interactions().len();
-    if pending_after < pending_before {
-        state.verified_interactions = state
-            .verified_interactions
-            .saturating_add(pending_before - pending_after);
-    }
+    let steer_epoch = state.prepared_task_state.steer_epoch();
+    let contract_epoch = state.prepared_task_state.contract_epoch();
+    let receipt = state.task_contract.record_tool_outcome_transition(
+        steer_epoch,
+        contract_epoch,
+        tool_name,
+        &persisted_input,
+        status,
+        risk,
+        tool_spec,
+        None,
+        persisted_tool_evidence,
+        observation,
+        postcondition_target_witness,
+        None,
+        allow_action_binding,
+    );
+    update_verified_interactions(state, pending_before);
+    receipt
 }
 
 fn persisted_tool_input_placeholder(input_fingerprint: &str) -> String {

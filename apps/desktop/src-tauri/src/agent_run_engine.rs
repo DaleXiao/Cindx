@@ -1,3 +1,6 @@
+#[path = "agent_execution_provider_runtime.rs"]
+mod execution_providers;
+
 use crate::agent_loop_runtime::{
     execute_agent_loop_epoch_with_provider, AgentLoopExecutionOutcome,
 };
@@ -7,16 +10,14 @@ use crate::agent_read_model::agent_state_with_error_in_context;
 use crate::app_state::AppState;
 use crate::collaboration_service::AgentCollaboration;
 use crate::configuration_models::{agent_model_for_run, ProviderConfig};
-use crate::runtime_constants::AGENT_MODEL_RECOVERY_WINDOW_SECONDS;
 use crate::view_models::AgentState;
 use agent_application::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, AgentRunPreparation};
-use agent_core::{Message, Metadata, ModelRole, TaskId};
-use agent_runtime::{AgentLoopState, AgentRunControl, RunStageClass};
-use model_provider::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
+use agent_core::{Message, Metadata, TaskId};
+use agent_runtime::{AgentLoopState, AgentRunControl};
+use execution_providers::build_agent_execution_providers;
 use orchestrator::AgentPolicy;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Debug)]
 pub(crate) enum AgentRunPreparationError {
@@ -120,25 +121,8 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
         prepared: Self::Prepared,
     ) -> Result<AgentRunEpoch<Self::Reprepare, Self::Output>, Self::Error> {
         let agent_model = agent_model_for_run(self.config, &prepared.run_context);
-        let provider_timeout = if prepared.collaboration.is_some() {
-            self.cancellation
-                .stage_model_call_timeout_with_recovery(
-                    RunStageClass::Finalizer,
-                    1,
-                    Duration::from_secs(AGENT_MODEL_RECOVERY_WINDOW_SECONDS),
-                )
-                .as_secs()
-                .max(1)
-        } else {
-            self.cancellation.model_call_timeout_seconds()
-        };
-        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url: self.config.base_url.clone(),
-            api_key: self.config.api_key.clone(),
-            model: agent_model.clone(),
-            embedding_model: self.config.model_for_role(&ModelRole::Embedder),
-            timeout_seconds: provider_timeout,
-        });
+        let providers =
+            build_agent_execution_providers(self.config, &agent_model, self.cancellation);
         match execute_agent_loop_epoch_with_provider(
             self.app,
             self.state,
@@ -149,7 +133,8 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
             prepared.run_context,
             prepared.collaboration.as_ref(),
             self.cancellation,
-            &provider,
+            &providers.actor,
+            &providers.finalizer,
             &agent_model,
         )? {
             AgentLoopExecutionOutcome::Finished(agent_state) => {

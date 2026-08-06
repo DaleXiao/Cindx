@@ -121,7 +121,7 @@ pub struct OutcomeClaim {
     pub available_evidence_sequences: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomePostconditionKind {
     WorkspaceMutation,
@@ -933,9 +933,16 @@ impl AgentTaskContract {
                     });
                 }
                 ContractEvidenceKind::Verification => {
-                    if let Some(index) = pending_workspace.take() {
+                    if let Some(index) = pending_workspace.filter(|index| {
+                        self.postcondition_has_authoritative_receipt(
+                            OutcomePostconditionKind::WorkspaceMutation,
+                            postconditions[*index].action_sequence,
+                            evidence.sequence,
+                        )
+                    }) {
                         postconditions[index].status = OutcomePostconditionStatus::Verified;
                         postconditions[index].observation_sequence = Some(evidence.sequence);
+                        pending_workspace = None;
                     }
                 }
                 ContractEvidenceKind::InteractionAction => {
@@ -976,6 +983,10 @@ impl AgentTaskContract {
                     if interaction_observation_verifies(
                         &postconditions[index].action_source,
                         &evidence.source,
+                    ) && self.postcondition_has_authoritative_receipt(
+                        postconditions[index].kind,
+                        postconditions[index].action_sequence,
+                        evidence.sequence,
                     ) {
                         postconditions[index].status = OutcomePostconditionStatus::Verified;
                         postconditions[index].observation_sequence = Some(evidence.sequence);
@@ -1090,7 +1101,21 @@ mod tests {
     use agent_core::{ToolOutcomeStatus, ToolRisk, ToolSpec};
 
     fn tool(name: &str, risk: ToolRisk) -> ToolSpec {
-        ToolSpec::builtin(name, "test", "test", risk, r#"{"type":"object"}"#)
+        let spec = ToolSpec::builtin(name, "test", "test", risk.clone(), r#"{"type":"object"}"#);
+        match risk {
+            ToolRisk::ReadOnly => spec.with_postcondition_verifier(
+                agent_core::PostconditionVerifierKind::WorkspaceExactReadbackV1,
+            ),
+            ToolRisk::ExecutesProcess => spec.with_postcondition_verifier(
+                agent_core::PostconditionVerifierKind::WorkspaceQualityCheckV1,
+            ),
+            ToolRisk::WritesWorkspace | ToolRisk::Destructive => {
+                spec.with_effect_semantics(agent_core::ToolEffectSemantics::Verifiable {
+                    verifier: "workspace_file_content_v1".to_string(),
+                })
+            }
+            _ => spec,
+        }
     }
 
     #[test]
@@ -1132,11 +1157,10 @@ mod tests {
         contract.merge_workspace_verification_policy(
             WorkspaceVerificationPolicy::RequiredAfterMutation,
         );
-        contract.record_tool_outcome(
+        crate::task_contract::test_support::record_workspace_mutation(
+            &mut contract,
             "file.write",
             r#"{"path":"src/lib.rs"}"#,
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::WritesWorkspace),
         );
         assert!(contract
             .completion_instruction_for_task(&tools)
@@ -1149,12 +1173,12 @@ mod tests {
             OutcomePostconditionStatus::Pending
         );
 
-        contract.record_tool_outcome(
+        crate::task_contract::test_support::record_quality_verification(
+            &mut contract,
             "process.run",
             r#"{"command":"cargo test"}"#,
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::ExecutesProcess),
-        );
+        )
+        .expect("trusted quality check should verify the mutation");
         assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
         let verified = contract.outcome_ledger_shadow(0);
         assert_eq!(
@@ -1184,11 +1208,10 @@ mod tests {
         });
         assert!(verified_terminal.contract_is_valid());
 
-        contract.record_tool_outcome(
+        crate::task_contract::test_support::record_workspace_mutation(
+            &mut contract,
             "file.write",
             r#"{"path":"src/new.rs"}"#,
-            &ToolOutcomeStatus::Succeeded,
-            Some(&ToolRisk::WritesWorkspace),
         );
         let pending_again = contract.outcome_ledger_shadow(0);
         let workspace_obligation = pending_again
@@ -1389,18 +1412,19 @@ mod tests {
             );
         }
         for index in 0..(MAX_OUTCOME_POSTCONDITIONS + 2) {
-            contract.record_tool_outcome(
+            crate::task_contract::test_support::record_interaction_transition(
+                &mut contract,
                 "browser.click",
                 &format!(r#"{{"index":{index}}}"#),
-                &ToolOutcomeStatus::Succeeded,
-                None,
+                ToolRisk::UsesNetwork,
             );
-            contract.record_tool_outcome(
+            crate::task_contract::test_support::record_interaction_transition(
+                &mut contract,
                 "browser.capture",
                 "{}",
-                &ToolOutcomeStatus::Succeeded,
-                None,
-            );
+                ToolRisk::UsesNetwork,
+            )
+            .expect("matching browser observation should mint a receipt");
         }
         let available_sequences = contract
             .evidence()
