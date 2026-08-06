@@ -12,6 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowExecutionTelemetry {
     pub task_class: TaskClass,
+    #[serde(default)]
+    pub pre_decision_context_fingerprint: String,
+    #[serde(default)]
+    pub route_action_id: String,
     pub routing_signature: String,
     pub plan: WorkflowPlanIr,
     pub succeeded: bool,
@@ -151,6 +155,8 @@ pub struct WorkflowSearchTeacher {
 pub struct MatchedCollaborationEvidence {
     pub task_class: TaskClass,
     pub effort: String,
+    pub pre_decision_context_fingerprint: String,
+    pub route_action_id: String,
     pub routing_signature: String,
     pub examples: usize,
     pub team_wins: usize,
@@ -177,9 +183,19 @@ impl MatchedCollaborationEvidence {
 
     pub fn prompt_hint(&self) -> String {
         format!(
-            "matched_direct_team class={} effort={} signature={} samples={} team_wins={} team_win_rate={:.0}% team_win_lower_confidence={:.2} below_admission_floor={} below_admission_floor_lower_confidence={:.2} average_uplift_bps={} anchor_selected={} average_team_latency_ms={} average_anchor_latency_ms={} support={}",
+            "matched_direct_team class={} effort={} context={} action={} legacy_signature={} samples={} team_wins={} team_win_rate={:.0}% team_win_lower_confidence={:.2} below_admission_floor={} below_admission_floor_lower_confidence={:.2} average_uplift_bps={} anchor_selected={} average_team_latency_ms={} average_anchor_latency_ms={} support={}",
             self.task_class.label(),
             self.effort,
+            if self.pre_decision_context_fingerprint.is_empty() {
+                "legacy"
+            } else {
+                self.pre_decision_context_fingerprint.as_str()
+            },
+            if self.route_action_id.is_empty() {
+                "legacy"
+            } else {
+                self.route_action_id.as_str()
+            },
             self.routing_signature,
             self.examples,
             self.team_wins,
@@ -202,15 +218,19 @@ impl MatchedCollaborationEvidence {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MatchedCollaborationEvidenceTeacher {
     evidence: Vec<MatchedCollaborationEvidence>,
+    exact_index: BTreeMap<(TaskClass, String, String, String), usize>,
+    legacy_index: BTreeMap<(TaskClass, String, String), usize>,
 }
 
 impl MatchedCollaborationEvidenceTeacher {
     pub fn train(telemetry: &[WorkflowExecutionTelemetry]) -> Self {
-        let mut grouped =
-            BTreeMap::<(TaskClass, String, String), MatchedEvidenceAccumulator>::new();
+        let mut grouped = BTreeMap::<
+            (TaskClass, String, String, String, String),
+            MatchedEvidenceAccumulator,
+        >::new();
         for entry in telemetry
             .iter()
             .filter(|entry| entry.has_valid_matched_comparison())
@@ -219,6 +239,8 @@ impl MatchedCollaborationEvidenceTeacher {
                 .entry((
                     entry.task_class.clone(),
                     entry.plan.effort.clone(),
+                    entry.pre_decision_context_fingerprint.clone(),
+                    entry.route_action_id.clone(),
                     entry.routing_signature.clone(),
                 ))
                 .or_default()
@@ -226,9 +248,20 @@ impl MatchedCollaborationEvidenceTeacher {
         }
         let mut evidence = grouped
             .into_iter()
-            .map(|((task_class, effort, routing_signature), accumulator)| {
-                accumulator.finish(task_class, effort, routing_signature)
-            })
+            .map(
+                |(
+                    (task_class, effort, context_fingerprint, route_action_id, routing_signature),
+                    accumulator,
+                )| {
+                    accumulator.finish(
+                        task_class,
+                        effort,
+                        context_fingerprint,
+                        route_action_id,
+                        routing_signature,
+                    )
+                },
+            )
             .collect::<Vec<_>>();
         evidence.sort_by(|left, right| {
             right
@@ -237,13 +270,89 @@ impl MatchedCollaborationEvidenceTeacher {
                 .then_with(|| right.examples.cmp(&left.examples))
                 .then_with(|| left.task_class.cmp(&right.task_class))
                 .then_with(|| left.effort.cmp(&right.effort))
+                .then_with(|| {
+                    left.pre_decision_context_fingerprint
+                        .cmp(&right.pre_decision_context_fingerprint)
+                })
+                .then_with(|| left.route_action_id.cmp(&right.route_action_id))
                 .then_with(|| left.routing_signature.cmp(&right.routing_signature))
         });
-        Self { evidence }
+        Self::from_calibrated_evidence(evidence)
+    }
+
+    pub(crate) fn from_calibrated_evidence(evidence: Vec<MatchedCollaborationEvidence>) -> Self {
+        let mut exact_index = BTreeMap::new();
+        let mut legacy_index = BTreeMap::new();
+        for (index, entry) in evidence.iter().enumerate() {
+            let effort = entry.effort.trim().to_ascii_lowercase();
+            if !entry.pre_decision_context_fingerprint.is_empty()
+                && !entry.route_action_id.is_empty()
+            {
+                exact_index.insert(
+                    (
+                        entry.task_class.clone(),
+                        effort,
+                        entry.pre_decision_context_fingerprint.clone(),
+                        entry.route_action_id.clone(),
+                    ),
+                    index,
+                );
+            } else if entry.pre_decision_context_fingerprint.is_empty()
+                && entry.route_action_id.is_empty()
+                && !entry.routing_signature.is_empty()
+            {
+                legacy_index.insert(
+                    (
+                        entry.task_class.clone(),
+                        effort,
+                        entry.routing_signature.clone(),
+                    ),
+                    index,
+                );
+            }
+        }
+        Self {
+            evidence,
+            exact_index,
+            legacy_index,
+        }
     }
 
     pub fn calibrated_evidence(&self) -> &[MatchedCollaborationEvidence] {
         &self.evidence
+    }
+
+    pub fn match_context_action(
+        &self,
+        task_class: &TaskClass,
+        effort: &str,
+        context_fingerprint: &str,
+        route_action_id: &str,
+        legacy_signature: &str,
+    ) -> (Option<&MatchedCollaborationEvidence>, usize) {
+        let effort = effort.trim().to_ascii_lowercase();
+        let mut lookups = 0usize;
+        if !context_fingerprint.is_empty() && !route_action_id.is_empty() {
+            lookups = lookups.saturating_add(1);
+            if let Some(index) = self.exact_index.get(&(
+                task_class.clone(),
+                effort.clone(),
+                context_fingerprint.to_string(),
+                route_action_id.to_string(),
+            )) {
+                return (self.evidence.get(*index), lookups);
+            }
+        }
+        if !legacy_signature.is_empty() {
+            lookups = lookups.saturating_add(1);
+            if let Some(index) =
+                self.legacy_index
+                    .get(&(task_class.clone(), effort, legacy_signature.to_string()))
+            {
+                return (self.evidence.get(*index), lookups);
+            }
+        }
+        (None, lookups)
     }
 }
 
@@ -285,12 +394,16 @@ impl MatchedEvidenceAccumulator {
         self,
         task_class: TaskClass,
         effort: String,
+        pre_decision_context_fingerprint: String,
+        route_action_id: String,
         routing_signature: String,
     ) -> MatchedCollaborationEvidence {
         let examples = self.examples.max(1);
         MatchedCollaborationEvidence {
             task_class,
             effort,
+            pre_decision_context_fingerprint,
+            route_action_id,
             routing_signature,
             examples: self.examples,
             team_wins: self.team_wins,

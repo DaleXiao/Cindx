@@ -23,11 +23,12 @@ use crate::session_context_service::prepare_session_history_context;
 use agent_core::{EventKind, Message, MessageRole, Metadata, TaskId};
 use agent_runtime::{
     prompt_completion_intent, prompt_replaces_prior_objective, AgentLoopState, AgentRunControl,
-    PromptToolRequirement, RunPreparationCommit,
+    PromptEffectAuthority, PromptToolRequirement, RunPreparationCommit,
 };
 use model_provider::MODEL_REQUEST_CANCELLED;
 use orchestrator::{
-    AgentPolicy, AgentRouteRequirements, AgentToolRequirement, OrchestrationPolicy,
+    AgentEffectAuthority, AgentPolicy, AgentRouteRequirements, AgentToolRequirement,
+    OrchestrationPolicy,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -68,19 +69,28 @@ pub(crate) fn route_requirements_for_preparation(
     messages: &[Message],
     active_user: &Message,
 ) -> AgentRouteRequirements {
-    let mut minimum_tool_requirement = match prompt_completion_intent(run_context).tool_requirement
-    {
+    let completion_intent = prompt_completion_intent(run_context);
+    let mut minimum_tool_requirement = match completion_intent.tool_requirement {
         PromptToolRequirement::None => AgentToolRequirement::None,
         PromptToolRequirement::ReadOnly => AgentToolRequirement::ReadOnly,
         PromptToolRequirement::Effects => AgentToolRequirement::Effects,
     };
-    if run_context
+    let image_generation_required = run_context
         .get("image_generation_required")
         .map(String::as_str)
-        == Some("true")
-    {
+        == Some("true");
+    if image_generation_required {
         minimum_tool_requirement = AgentToolRequirement::Effects;
     }
+    let effect_authority = if image_generation_required {
+        AgentEffectAuthority::Required
+    } else {
+        match completion_intent.effect_authority {
+            PromptEffectAuthority::Forbidden => AgentEffectAuthority::Forbidden,
+            PromptEffectAuthority::Allowed => AgentEffectAuthority::Allowed,
+            PromptEffectAuthority::Required => AgentEffectAuthority::Required,
+        }
+    };
     let message_has_images = |message: &Message| {
         message
             .metadata
@@ -106,6 +116,7 @@ pub(crate) fn route_requirements_for_preparation(
     };
     AgentRouteRequirements {
         minimum_tool_requirement,
+        effect_authority,
         image_input_required,
     }
 }
@@ -144,7 +155,7 @@ pub(crate) fn remove_stale_preparation_context(history: &mut Vec<Message>) {
     });
 }
 
-fn reset_preparation_run_context(run_context: &mut Metadata) {
+pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
     for key in [
         "prompt_objective",
         "effective_prompt_objective",
@@ -153,6 +164,15 @@ fn reset_preparation_run_context(run_context: &mut Metadata) {
         "vision_required",
         "route_minimum_tool_requirement",
         "route_image_input_required",
+        "route_effect_authority",
+        "pre_decision_context_fingerprint",
+        "route_requirements_fingerprint",
+        "causal_route_policy",
+        "causal_route_candidate",
+        "causal_route_selected",
+        "causal_route_selected_action_id",
+        "causal_route_reason",
+        "causal_route_receipt_sha256",
         "decision_calibration",
         "decision_calibration_reason",
         "candidate_route_tier",

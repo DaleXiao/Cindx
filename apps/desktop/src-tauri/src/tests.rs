@@ -7,11 +7,13 @@ use crate::agent_conductor_runtime::{conductor_call_limits, conductor_repair_rec
 use crate::agent_conductor_scheduler::{schedule_conductor_decision, ConductorDecisionOutcome};
 use crate::agent_preparation_runtime::{
     image_generation_objective_for_preparation, preparation_prompt_parts,
-    remove_stale_preparation_context, route_requirements_for_preparation,
+    remove_stale_preparation_context, reset_preparation_run_context,
+    route_requirements_for_preparation,
 };
 use crate::agent_strategy_runtime::{
-    effective_prompt_objective_for_messages, preferred_compatible_route_model,
-    should_evaluate_strategy_profile, AgentPlanningSource, PlannedAgentRun,
+    causal_route_event_metadata, effective_prompt_objective_for_messages,
+    preferred_compatible_route_model, should_evaluate_strategy_profile, AgentPlanningSource,
+    PlannedAgentRun,
 };
 use crate::collaboration_execution::collaboration_model_failure;
 use crate::collaboration_stage_runtime::{
@@ -24,10 +26,12 @@ use crate::prompt_learning_runtime::prompt_dataset_identity;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    AdaptiveWorkflow, AdaptiveWorkflowStep, AgentDecisionCalibration, AgentExecutionMode,
-    AgentRouteRequirements, AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
-    AgentVerificationPolicy, PromptDatasetCaseIdentityV1, PromptExecutionContextV1,
-    PromptTransferProvenance, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    select_causal_route_v2, AdaptiveWorkflow, AdaptiveWorkflowStep, AgentDecisionCalibration,
+    AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRunDecisionHarness,
+    AgentRunDecisionRequest, AgentToolRequirement, AgentVerificationPolicy, CausalRouteReason,
+    CausalRouteSelectionV2, ModelCapabilitySource, PromptDatasetCaseIdentityV1,
+    PromptExecutionContextV1, PromptTransferProvenance, RouteFeatureSnapshotV2,
+    CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -220,8 +224,47 @@ fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> Conductor
     })
 }
 
-fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentPolicy) -> PlannedAgentRun {
-    let routing_context = decision.routing_context("update the workspace", Vec::new());
+fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -> PlannedAgentRun {
+    let route_requirements = AgentRouteRequirements {
+        minimum_tool_requirement: decision.tool_requirement,
+        effect_authority: if decision.tool_requirement == AgentToolRequirement::Effects {
+            AgentEffectAuthority::Required
+        } else {
+            AgentEffectAuthority::Forbidden
+        },
+        image_input_required: decision.vision_required,
+    };
+    let candidates = vec![ModelCandidate {
+        name: decision.primary_model.clone(),
+        role: ModelRole::Executor,
+        supports_tools: true,
+        supports_vision: true,
+        tools_capability_source: ModelCapabilitySource::Configured,
+        vision_capability_source: ModelCapabilitySource::Configured,
+        cost_tier: 1,
+        latency_tier: 1,
+    }];
+    let snapshot = RouteFeatureSnapshotV2::from_request(
+        "update the workspace",
+        "",
+        effort.label(),
+        route_requirements,
+        &candidates,
+        None,
+        "1".repeat(64),
+    );
+    let mut receipt = match decision.causal_route.take() {
+        Some(receipt) => receipt,
+        None => select_causal_route_v2(&decision, &snapshot, &candidates, None, 0)
+            .expect("test plan should produce a causal route receipt"),
+    };
+    if receipt.selected_route != decision.route_tier() {
+        receipt
+            .reconcile_selected_route(decision.route_tier(), CausalRouteReason::ExecutionConstraint)
+            .expect("test plan receipt should reconcile to its fixture route");
+    }
+    decision.causal_route = Some(receipt);
+    let routing_context = decision.routing_context("update the workspace", candidates);
     let routing_decision = decision.routing_decision();
     let execution_contract = decision.execution_contract(effort.label());
     PlannedAgentRun {
@@ -240,7 +283,7 @@ fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentPolicy) -> Pl
         degradation_reason: None,
         attempted_conductor_models: Vec::new(),
         selected_conductor_model: None,
-        route_requirements: AgentRouteRequirements::default(),
+        route_requirements,
     }
 }
 
@@ -884,13 +927,27 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             effort: "auto".to_string(),
             conductor_model: "deterministic-test-conductor".to_string(),
             allowed_models: models.clone(),
-            model_candidates: Vec::new(),
+            model_candidates: models
+                .iter()
+                .map(|model| ModelCandidate {
+                    name: model.clone(),
+                    role: ModelRole::Executor,
+                    supports_tools: true,
+                    supports_vision: true,
+                    tools_capability_source: ModelCapabilitySource::Configured,
+                    vision_capability_source: ModelCapabilitySource::Configured,
+                    cost_tier: 1,
+                    latency_tier: 1,
+                })
+                .collect(),
             max_parallelism: 2,
             evolved_directive: String::new(),
             historical_evidence: String::new(),
-            matched_collaboration_evidence: Vec::new(),
+            matched_collaboration_evidence: Arc::new(Default::default()),
             execution_constraints: "isolated workers are read-only".to_string(),
             route_requirements: AgentRouteRequirements::default(),
+            budget_fingerprint: None,
+            prompt_profile_sha256: "1".repeat(64),
         });
         assert!(harness.planning_prompt().contains(objective));
         let response = serde_json::to_string(&expected).expect("decision should serialize");
@@ -5352,6 +5409,52 @@ fn typed_agent_policy_provenance_preserves_the_legacy_runtime_wire() {
 }
 
 #[test]
+fn causal_route_provenance_keeps_context_small_and_event_receipt_complete() {
+    let planned = test_planned_agent_run(AgentRunDecision::direct("executor"), AgentPolicy::Auto);
+    let mut context = [
+        ("agent_run_id".to_string(), "causal-route-run".to_string()),
+        ("steer_epoch".to_string(), "2".to_string()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    planned.apply_to_context(&mut context).unwrap();
+
+    let receipt = planned.decision.causal_route.as_ref().unwrap();
+    assert_eq!(
+        context
+            .get("pre_decision_context_fingerprint")
+            .map(String::as_str),
+        Some(receipt.context_fingerprint.as_str())
+    );
+    assert_eq!(
+        context.get("causal_route_receipt_sha256"),
+        Some(&receipt.digest().unwrap())
+    );
+    assert_eq!(
+        context.get("causal_route_selected_action_id"),
+        Some(&receipt.selected_action_id)
+    );
+    assert!(!context.contains_key("causal_route_receipt"));
+
+    let event_metadata = causal_route_event_metadata(&context, &planned.decision).unwrap();
+    let encoded = event_metadata.get("causal_route_receipt").unwrap();
+    assert!(encoded.len() <= CAUSAL_ROUTE_MAX_RECEIPT_BYTES);
+    let decoded = serde_json::from_str::<CausalRouteSelectionV2>(encoded).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded, *receipt);
+    assert_eq!(
+        event_metadata.get("causal_route_receipt_sha256"),
+        Some(&receipt.digest().unwrap())
+    );
+    assert_eq!(
+        event_metadata
+            .get("route_decision_id")
+            .map(String::len),
+        Some(64)
+    );
+}
+
+#[test]
 fn preparation_route_requirements_recompute_intent_and_active_images() {
     let mut run_context = [(
         "effective_prompt_objective".to_string(),
@@ -5370,6 +5473,7 @@ fn preparation_route_requirements_recompute_intent_and_active_images() {
         read_only.minimum_tool_requirement,
         AgentToolRequirement::ReadOnly
     );
+    assert_eq!(read_only.effect_authority, AgentEffectAuthority::Allowed);
     assert!(!read_only.image_input_required);
 
     active_user.metadata.insert(
@@ -5393,6 +5497,10 @@ fn preparation_route_requirements_recompute_intent_and_active_images() {
         image_generation.minimum_tool_requirement,
         AgentToolRequirement::Effects
     );
+    assert_eq!(
+        image_generation.effect_authority,
+        AgentEffectAuthority::Required
+    );
 
     run_context.insert("steer_epoch".to_string(), "1".to_string());
     run_context.insert(
@@ -5406,6 +5514,46 @@ fn preparation_route_requirements_recompute_intent_and_active_images() {
         &active_user,
     );
     assert_eq!(steered.minimum_tool_requirement, AgentToolRequirement::None);
+    assert_eq!(steered.effect_authority, AgentEffectAuthority::Allowed);
+
+    run_context.insert("steer_epoch".to_string(), "0".to_string());
+    run_context.insert(
+        "effective_prompt_objective".to_string(),
+        "Review this repository; do not modify anything".to_string(),
+    );
+    run_context.remove("prompt_objective");
+    let explicit_read_only = route_requirements_for_preparation(
+        &run_context,
+        std::slice::from_ref(&active_user),
+        &active_user,
+    );
+    assert_eq!(
+        explicit_read_only.effect_authority,
+        AgentEffectAuthority::Forbidden
+    );
+}
+
+#[test]
+fn preparation_reset_clears_causal_route_epoch_provenance() {
+    let keys = [
+        "route_effect_authority",
+        "pre_decision_context_fingerprint",
+        "route_requirements_fingerprint",
+        "causal_route_policy",
+        "causal_route_candidate",
+        "causal_route_selected",
+        "causal_route_selected_action_id",
+        "causal_route_reason",
+        "causal_route_receipt_sha256",
+    ];
+    let mut context = keys
+        .iter()
+        .map(|key| ((*key).to_string(), "stale".to_string()))
+        .collect::<Metadata>();
+
+    reset_preparation_run_context(&mut context);
+
+    assert!(keys.iter().all(|key| !context.contains_key(*key)));
 }
 
 #[test]
@@ -5614,6 +5762,8 @@ fn route_fallback_prefers_the_first_compatible_configured_model() {
             role: ModelRole::Executor,
             supports_tools: false,
             supports_vision: false,
+            tools_capability_source: ModelCapabilitySource::Configured,
+            vision_capability_source: ModelCapabilitySource::Configured,
             cost_tier: 1,
             latency_tier: 1,
         },
@@ -5622,6 +5772,8 @@ fn route_fallback_prefers_the_first_compatible_configured_model() {
             role: ModelRole::Planner,
             supports_tools: true,
             supports_vision: true,
+            tools_capability_source: ModelCapabilitySource::Configured,
+            vision_capability_source: ModelCapabilitySource::Configured,
             cost_tier: 2,
             latency_tier: 2,
         },
@@ -5629,6 +5781,7 @@ fn route_fallback_prefers_the_first_compatible_configured_model() {
     let allowed_models = vec!["text-only".to_string(), "capable".to_string()];
     let requirements = AgentRouteRequirements {
         minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+        effect_authority: AgentEffectAuthority::Forbidden,
         image_input_required: true,
     };
 
@@ -5662,11 +5815,49 @@ fn route_fallback_prefers_the_first_compatible_configured_model() {
 fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
     let route_requirements = AgentRouteRequirements {
         minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+        effect_authority: AgentEffectAuthority::Forbidden,
         image_input_required: true,
     };
-    let mut decision = route_requirements.apply_to_direct(AgentRunDecision::direct("executor"));
+    let candidates = vec![ModelCandidate {
+        name: "executor".to_string(),
+        role: ModelRole::Executor,
+        supports_tools: true,
+        supports_vision: true,
+        tools_capability_source: ModelCapabilitySource::Configured,
+        vision_capability_source: ModelCapabilitySource::Configured,
+        cost_tier: 1,
+        latency_tier: 1,
+    }];
+    let mut candidate = route_requirements.apply_to_direct(AgentRunDecision::direct("executor"));
+    candidate.execution = AgentExecutionMode::Workflow;
+    candidate.verification = AgentVerificationPolicy::Independent;
+    candidate.max_parallelism = 2;
+    candidate.min_successful_branches = 2;
+    candidate.distinct_contributions = 2;
+    candidate.estimated_steps = 3;
+    candidate.expected_uplift_bps = 2_500;
+    candidate.confidence_bps = 7_000;
+    candidate.stop_policy = ConductorStopPolicy::Quorum;
+    let snapshot = RouteFeatureSnapshotV2::from_request(
+        "update the workspace",
+        "",
+        "auto",
+        route_requirements,
+        &candidates,
+        None,
+        "1".repeat(64),
+    );
+    let mut receipt = select_causal_route_v2(&candidate, &snapshot, &candidates, None, 0)
+        .expect("workflow candidate should produce a causal route receipt");
+    let mut decision = candidate.constrained_to_grounded_direct();
     decision.calibration = Some(AgentDecisionCalibration::MatchedEvidence);
     decision.calibration_reason = Some("matched evidence rejects workflow".to_string());
+    if receipt.selected_route != decision.route_tier() {
+        receipt
+            .reconcile_selected_route(decision.route_tier(), CausalRouteReason::ExecutionConstraint)
+            .expect("calibrated direct route should be one of the recorded actions");
+    }
+    decision.causal_route = Some(receipt);
     let mut planned = test_planned_agent_run(decision, AgentPolicy::Auto);
     planned.source = AgentPlanningSource::CalibratedDirect;
     planned.route_requirements = route_requirements;

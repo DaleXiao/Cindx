@@ -29,6 +29,7 @@
       "performance-comparator-contract",
       "paired-performance-contract",
       "routing-contract",
+      "causal-router-v2-contract",
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
@@ -36,6 +37,7 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "causal-router-v2-scaling",
       "agent-collaboration-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
@@ -47,6 +49,7 @@
       "documentation-contract",
       "desktop-dto-contract",
       "routing-contract",
+      "causal-router-v2-contract",
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
@@ -54,6 +57,7 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "causal-router-v2-scaling",
       "agent-collaboration-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
@@ -65,6 +69,7 @@
     "performance": [
       "performance-comparator-contract",
       "agent-cognitive-loop-scaling",
+      "causal-router-v2-scaling",
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
       "prompt-learning-outbox-scaling",
@@ -83,6 +88,7 @@
     ],
     "shipping-performance": [
       "agent-cognitive-loop-scaling",
+      "causal-router-v2-scaling",
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
       "prompt-learning-outbox-scaling",
@@ -102,6 +108,7 @@
       "browser-sidecar",
       "computer-sidecar",
       "routing-contract",
+      "causal-router-v2-contract",
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
@@ -109,6 +116,7 @@
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
+      "causal-router-v2-scaling",
       "agent-collaboration-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
@@ -195,6 +203,44 @@
         { "path": "contract.pass_rate", "equals": 1 },
         { "path": "contract.over_orchestrated", "equals": 0 },
         { "path": "contract.under_orchestrated", "equals": 0 }
+      ]
+    },
+    {
+      "id": "causal-router-v2-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "causal_routing::tests::causal_router_v2_contract_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.causal-router-v2-contract.v1"
+      ]
+    },
+    {
+      "id": "causal-router-v2-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "orchestrator",
+        "causal_routing::tests::causal_router_v2_scaling_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.causal-router-v2-scaling.v1"
       ]
     },
     {

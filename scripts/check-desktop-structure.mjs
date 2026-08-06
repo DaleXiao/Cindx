@@ -545,6 +545,7 @@ const desktopDtoContractRustTest = read(
 );
 const shippingPerformanceGateIds = [
   "agent-cognitive-loop-scaling",
+  "causal-router-v2-scaling",
   "session-projection-scaling",
   "agent-runtime-snapshot-scaling",
   "prompt-learning-outbox-scaling",
@@ -559,6 +560,13 @@ const shippingPerformanceProofs = new Map([
     [
       "task_contract::cognitive_state::tests::compact_cognitive_state_and_adaptive_loop_scaling_contract",
       "cindx.agent-cognitive-loop-scaling.v1"
+    ]
+  ],
+  [
+    "causal-router-v2-scaling",
+    [
+      "causal_routing::tests::causal_router_v2_scaling_gate",
+      "cindx.causal-router-v2-scaling.v1"
     ]
   ],
   [

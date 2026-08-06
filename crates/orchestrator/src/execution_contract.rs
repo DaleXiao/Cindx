@@ -289,6 +289,8 @@ mod tests {
                 role: ModelRole::Executor,
                 supports_tools: true,
                 supports_vision: true,
+                tools_capability_source: crate::ModelCapabilitySource::Configured,
+                vision_capability_source: crate::ModelCapabilitySource::Configured,
                 cost_tier: 1,
                 latency_tier: 1,
             }],

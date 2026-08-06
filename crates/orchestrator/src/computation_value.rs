@@ -1,7 +1,8 @@
 use crate::{
     AgentExecutionMode, AgentRiskLevel, AgentRunDecision, AgentToolRequirement,
-    AgentVerificationPolicy, MatchedCollaborationEvidence, RoutingContext, TaskClass,
-    AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+    AgentVerificationPolicy, MatchedCollaborationEvidence, MatchedCollaborationEvidenceTeacher,
+    RoutingContext, TaskClass, AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
+    AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use agent_core::Metadata;
 
@@ -39,7 +40,8 @@ impl AgentDecisionCalibration {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentRouteTier {
     Direct,
     GroundedDirect,
@@ -104,6 +106,46 @@ impl AutoComputationAssessment {
             self.matched_examples,
         )
     }
+
+    pub fn from_causal_route(receipt: &crate::CausalRouteSelectionV2) -> Self {
+        let verdict = match receipt.reason {
+            crate::CausalRouteReason::AdmitPositiveValue
+            | crate::CausalRouteReason::CandidateDirect
+            | crate::CausalRouteReason::FastPolicy => AutoComputationVerdict::Admit,
+            crate::CausalRouteReason::BelowPredictionFloor => {
+                AutoComputationVerdict::BelowPredictionFloor
+            }
+            crate::CausalRouteReason::NoIndependentDemand => {
+                AutoComputationVerdict::NoIndependentContributions
+            }
+            crate::CausalRouteReason::SerialInteraction => {
+                AutoComputationVerdict::SerialInteraction
+            }
+            crate::CausalRouteReason::MatchedEvidenceAgainst
+            | crate::CausalRouteReason::NegativeExpectedValue
+            | crate::CausalRouteReason::NoCompatibleRoute
+            | crate::CausalRouteReason::ExecutionConstraint
+            | crate::CausalRouteReason::DegradedFallback => {
+                AutoComputationVerdict::NegativeExpectedValue
+            }
+        };
+        Self {
+            verdict,
+            confidence_weighted_benefit_bps: receipt.predicted_benefit_bps,
+            evidence_adjusted_benefit_bps: receipt.evidence_adjusted_benefit_bps,
+            required_value_bps: receipt
+                .coordination_cost_bps
+                .saturating_add(receipt.latency_cost_bps)
+                .saturating_add(receipt.uncertainty_bps),
+            net_value_bps: receipt.net_value_lower_bps,
+            estimated_compute_units: receipt
+                .actions
+                .first()
+                .map(|action| usize::from(action.projected_model_calls))
+                .unwrap_or(1),
+            matched_examples: receipt.support.matched_examples,
+        }
+    }
 }
 
 impl AgentRunDecision {
@@ -118,7 +160,9 @@ impl AgentRunDecision {
     }
 
     pub fn candidate_route_tier(&self) -> AgentRouteTier {
-        if self.calibration.is_some() || self.computation_value.is_some() {
+        if let Some(receipt) = &self.causal_route {
+            receipt.candidate_route
+        } else if self.calibration.is_some() || self.computation_value.is_some() {
             AgentRouteTier::Workflow
         } else {
             self.route_tier()
@@ -183,6 +227,22 @@ pub fn matching_collaboration_evidence<'a>(
             && entry.effort.eq_ignore_ascii_case(effort)
             && entry.routing_signature == signature
     })
+}
+
+pub fn matching_collaboration_evidence_for_context<'a>(
+    decision: &AgentRunDecision,
+    effort: &str,
+    context_fingerprint: &str,
+    route_action_id: &str,
+    evidence: &'a MatchedCollaborationEvidenceTeacher,
+) -> (Option<&'a MatchedCollaborationEvidence>, usize) {
+    evidence.match_context_action(
+        &decision.task_class,
+        effort,
+        context_fingerprint,
+        route_action_id,
+        &decision.learning_signature(),
+    )
 }
 
 pub fn assess_auto_computation_value(
@@ -284,6 +344,8 @@ mod tests {
                 role: ModelRole::Executor,
                 supports_tools: true,
                 supports_vision: true,
+                tools_capability_source: crate::ModelCapabilitySource::Configured,
+                vision_capability_source: crate::ModelCapabilitySource::Configured,
                 cost_tier: 1,
                 latency_tier: 1,
             }],
@@ -411,6 +473,8 @@ mod tests {
         let evidence = MatchedCollaborationEvidence {
             task_class: decision.task_class.clone(),
             effort: "auto".to_string(),
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: decision.learning_signature(),
             examples: 8,
             team_wins: 0,

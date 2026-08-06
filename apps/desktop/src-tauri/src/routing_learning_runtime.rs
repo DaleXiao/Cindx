@@ -377,6 +377,16 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                 .and_then(|latency| latency.parse::<u64>().ok());
             Some(WorkflowExecutionTelemetry {
                 task_class,
+                pre_decision_context_fingerprint: planned
+                    .metadata
+                    .get("pre_decision_context_fingerprint")
+                    .cloned()
+                    .unwrap_or_default(),
+                route_action_id: planned
+                    .metadata
+                    .get("causal_route_selected_action_id")
+                    .cloned()
+                    .unwrap_or_default(),
                 routing_signature: planned
                     .metadata
                     .get("routing_signature")

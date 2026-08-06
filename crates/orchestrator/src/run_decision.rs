@@ -1,13 +1,16 @@
 use crate::{
-    assess_auto_computation_value, matching_collaboration_evidence, minimum_team_uplift_bps,
-    AgentDecisionCalibration, AutoComputationAssessment, ConductorExecutionContract,
-    ConductorFallbackPolicy, ConductorStopPolicy, MatchedCollaborationEvidence, ModelCandidate,
-    OrchestrationPolicy, RoutingContext, RoutingDecision, TaskClass,
+    causal_route_action_id_v2, matching_collaboration_evidence_for_context,
+    minimum_team_uplift_bps, select_causal_route_v2, AgentDecisionCalibration,
+    AutoComputationAssessment, CausalRouteReason, CausalRouteSelectionV2,
+    ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy,
+    MatchedCollaborationEvidenceTeacher, ModelCandidate, OrchestrationPolicy,
+    RouteFeatureSnapshotV2, RoutingContext, RoutingDecision, TaskClass,
     AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub const AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1";
 pub const MAX_RUN_DECISION_QUERY_CHARS: usize = 2_000;
@@ -65,6 +68,25 @@ pub enum AgentToolRequirement {
     Effects,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEffectAuthority {
+    Forbidden,
+    #[default]
+    Allowed,
+    Required,
+}
+
+impl AgentEffectAuthority {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Forbidden => "forbidden",
+            Self::Allowed => "allowed",
+            Self::Required => "required",
+        }
+    }
+}
+
 impl AgentToolRequirement {
     const fn strength(self) -> u8 {
         match self {
@@ -90,6 +112,7 @@ impl AgentToolRequirement {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentRouteRequirements {
     pub minimum_tool_requirement: AgentToolRequirement,
+    pub effect_authority: AgentEffectAuthority,
     pub image_input_required: bool,
 }
 
@@ -122,6 +145,16 @@ impl AgentRouteRequirements {
         decision: &AgentRunDecision,
         model_candidates: &[ModelCandidate],
     ) -> Result<(), String> {
+        if self.effect_authority == AgentEffectAuthority::Forbidden
+            && decision.tool_requirement == AgentToolRequirement::Effects
+        {
+            return Err("run decision exceeds the prompt effect authority".to_string());
+        }
+        if self.effect_authority == AgentEffectAuthority::Required
+            && decision.tool_requirement != AgentToolRequirement::Effects
+        {
+            return Err("run decision omitted required effect authority".to_string());
+        }
         if !decision
             .tool_requirement
             .satisfies(self.minimum_tool_requirement)
@@ -256,6 +289,8 @@ pub struct AgentRunDecision {
     pub calibration: Option<AgentDecisionCalibration>,
     #[serde(skip)]
     pub computation_value: Option<AutoComputationAssessment>,
+    #[serde(skip)]
+    pub causal_route: Option<CausalRouteSelectionV2>,
 }
 
 impl AgentRunDecision {
@@ -282,6 +317,7 @@ impl AgentRunDecision {
             calibration_reason: None,
             calibration: None,
             computation_value: None,
+            causal_route: None,
         }
     }
 
@@ -456,32 +492,6 @@ impl AgentRunDecision {
         Ok(())
     }
 
-    fn matched_collaboration_rejection(
-        &self,
-        effort: &str,
-        matched_evidence: &[MatchedCollaborationEvidence],
-    ) -> Option<String> {
-        if self.execution != AgentExecutionMode::Workflow {
-            return None;
-        }
-        let normalized_effort = effort.trim().to_ascii_lowercase();
-        let required_uplift = match normalized_effort.as_str() {
-            "auto" => AUTO_COLLABORATION_MIN_UPLIFT_BPS,
-            "pro" => minimum_team_uplift_bps("pro"),
-            _ => return None,
-        };
-        matching_collaboration_evidence(self, &normalized_effort, matched_evidence)
-            .filter(|evidence| evidence.strong_evidence_against_collaboration(required_uplift))
-            .map(|evidence| {
-            format!(
-                "matched direct-anchor evidence rejects collaboration for this task shape: samples={} average_uplift={}bps below_admission_floor_lower_confidence={:.2}",
-                evidence.examples,
-                evidence.average_uplift_bps,
-                evidence.below_admission_floor_confidence
-            )
-        })
-    }
-
     fn calibrated_to_direct(
         mut self,
         calibration: AgentDecisionCalibration,
@@ -654,9 +664,11 @@ pub struct AgentRunDecisionRequest {
     pub max_parallelism: usize,
     pub evolved_directive: String,
     pub historical_evidence: String,
-    pub matched_collaboration_evidence: Vec<MatchedCollaborationEvidence>,
+    pub matched_collaboration_evidence: Arc<MatchedCollaborationEvidenceTeacher>,
     pub execution_constraints: String,
     pub route_requirements: AgentRouteRequirements,
+    pub budget_fingerprint: Option<String>,
+    pub prompt_profile_sha256: String,
 }
 
 #[derive(Debug, Clone)]
@@ -731,10 +743,10 @@ impl AgentRunDecisionHarness {
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
-                "Workflow admission is enforced after parsing. Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence, then admits collaboration only when confidence-weighted, evidence-adjusted benefit covers the independent branches, synthesis, verification, and serial-interaction cost; otherwise runtime preserves the selected model, tools, vision, retrieval, memory, and risk posture in a direct or grounded-direct route without a repair call. Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. If you cannot justify those estimates, choose direct.\n",
+                "Workflow admission is enforced after parsing. Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 then admits collaboration only when explicit independent demand and a conservative lower-bound value cover capability uncertainty, model cost, coordination, verification, and critical-path latency. Otherwise runtime preserves the selected model, tools, vision, retrieval, memory, and risk posture in a direct or grounded-direct route without a repair call. If you cannot justify those estimates, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
                 "Runtime execution constraints are facts, not suggestions. Do not assign required effects or interactive work to a worker that cannot perform them:\n{execution_constraints}\n\n",
-                "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade or omit them.\n\n",
+                "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, effect_authority={effect_authority}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade them and never request effects when effect_authority=forbidden.\n\n",
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
                 "Return this shape exactly:\n",
                 "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\"}}\n\n",
@@ -753,6 +765,7 @@ impl AgentRunDecisionHarness {
             historical_evidence = historical_evidence,
             execution_constraints = execution_constraints,
             minimum_tool_requirement = request.route_requirements.minimum_tool_requirement.label(),
+            effect_authority = request.route_requirements.effect_authority.label(),
             image_input_required = request.route_requirements.image_input_required,
             schema = AGENT_RUN_DECISION_SCHEMA,
             effort = request.effort,
@@ -782,54 +795,66 @@ impl AgentRunDecisionHarness {
             .ok_or_else(|| "run decision returned incomplete JSON".to_string())?;
         let mut decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
+        let snapshot = RouteFeatureSnapshotV2::from_request(
+            &self.request.objective,
+            &self.request.recent_context,
+            &self.request.effort,
+            self.request.route_requirements,
+            &self.request.model_candidates,
+            self.request.budget_fingerprint.clone(),
+            self.request.prompt_profile_sha256.clone(),
+        );
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
         self.request
             .route_requirements
             .validate_decision(&decision, &self.request.model_candidates)?;
         let normalized_effort = self.request.effort.trim().to_ascii_lowercase();
-        if normalized_effort != "auto" {
-            decision.validate_effort_admission(&self.request.effort)?;
-        }
-        if let Some(reason) = decision.matched_collaboration_rejection(
-            &self.request.effort,
+        let candidate_action_id = causal_route_action_id_v2(&decision)?;
+        let (matched, evidence_key_lookups) = matching_collaboration_evidence_for_context(
+            &decision,
+            &normalized_effort,
+            &snapshot.context_fingerprint,
+            &candidate_action_id,
             &self.request.matched_collaboration_evidence,
-        ) {
+        );
+        let receipt = select_causal_route_v2(
+            &decision,
+            &snapshot,
+            &self.request.model_candidates,
+            matched,
+            evidence_key_lookups,
+        )?;
+        let legacy_auto_assessment = (normalized_effort == "auto"
+            && decision.execution == AgentExecutionMode::Workflow)
+            .then(|| AutoComputationAssessment::from_causal_route(&receipt));
+        if decision.execution == AgentExecutionMode::Workflow && !receipt.admitted() {
+            let calibration = if receipt.reason == CausalRouteReason::MatchedEvidenceAgainst {
+                AgentDecisionCalibration::MatchedEvidence
+            } else {
+                AgentDecisionCalibration::ValueOfComputation
+            };
             decision = decision.calibrated_to_direct(
-                AgentDecisionCalibration::MatchedEvidence,
-                reason,
-                None,
+                calibration,
+                format!(
+                    "Causal Router v2 {}: predicted={}bps adjusted={}bps coordination={}bps latency={}bps uncertainty={}bps net_lower={}bps",
+                    receipt.reason.label(),
+                    receipt.predicted_benefit_bps,
+                    receipt.evidence_adjusted_benefit_bps,
+                    receipt.coordination_cost_bps,
+                    receipt.latency_cost_bps,
+                    receipt.uncertainty_bps,
+                    receipt.net_value_lower_bps,
+                ),
+                legacy_auto_assessment,
             );
             decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
             self.request
                 .route_requirements
                 .validate_decision(&decision, &self.request.model_candidates)?;
-        } else if normalized_effort == "auto" && decision.execution == AgentExecutionMode::Workflow
-        {
-            let objective_context = RoutingContext::from_prompt(
-                &self.request.objective,
-                self.request.model_candidates.clone(),
-            );
-            let matched = matching_collaboration_evidence(
-                &decision,
-                &normalized_effort,
-                &self.request.matched_collaboration_evidence,
-            );
-            let assessment = assess_auto_computation_value(&decision, &objective_context, matched);
-            if assessment.admitted() {
-                decision.computation_value = Some(assessment);
-            } else {
-                let reason = assessment.rationale();
-                decision = decision.calibrated_to_direct(
-                    AgentDecisionCalibration::ValueOfComputation,
-                    reason,
-                    Some(assessment),
-                );
-                decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
-                self.request
-                    .route_requirements
-                    .validate_decision(&decision, &self.request.model_candidates)?;
-            }
+        } else if let Some(assessment) = legacy_auto_assessment {
+            decision.computation_value = Some(assessment);
         }
+        decision.causal_route = Some(receipt);
         Ok(decision)
     }
 }
@@ -847,7 +872,7 @@ fn bounded_chars(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentRouteTier, AutoComputationVerdict};
+    use crate::{AgentRouteTier, AutoComputationVerdict, MatchedCollaborationEvidence};
 
     fn request() -> AgentRunDecisionRequest {
         AgentRunDecisionRequest {
@@ -863,6 +888,8 @@ mod tests {
                     role: ModelRole::Executor,
                     supports_tools: true,
                     supports_vision: true,
+                    tools_capability_source: crate::ModelCapabilitySource::Configured,
+                    vision_capability_source: crate::ModelCapabilitySource::Configured,
                     cost_tier: 1,
                     latency_tier: 1,
                 })
@@ -870,9 +897,11 @@ mod tests {
             max_parallelism: 3,
             evolved_directive: String::new(),
             historical_evidence: String::new(),
-            matched_collaboration_evidence: Vec::new(),
+            matched_collaboration_evidence: Arc::new(Default::default()),
             execution_constraints: "isolated workers are read-only".to_string(),
             route_requirements: AgentRouteRequirements::default(),
+            budget_fingerprint: Some("0".repeat(64)),
+            prompt_profile_sha256: "1".repeat(64),
         }
     }
 
@@ -970,7 +999,7 @@ mod tests {
         assert!(prompt.contains("Memory and workspace retrieval are blocking foreground work"));
         assert!(prompt.contains("missing evidence can materially change answer quality"));
         assert!(prompt.contains("Greetings, capability questions, and self-contained requests"));
-        assert!(prompt.contains("evidence-adjusted benefit covers the independent branches"));
+        assert!(prompt.contains("conservative lower-bound value cover capability uncertainty"));
         assert!(prompt.contains("without a repair call"));
     }
 
@@ -987,6 +1016,7 @@ mod tests {
         let mut request = request();
         request.route_requirements = AgentRouteRequirements {
             minimum_tool_requirement: AgentToolRequirement::Effects,
+            effect_authority: AgentEffectAuthority::Required,
             image_input_required: true,
         };
 
@@ -1002,6 +1032,7 @@ mod tests {
         let mut request = request();
         request.route_requirements = AgentRouteRequirements {
             minimum_tool_requirement: AgentToolRequirement::Effects,
+            effect_authority: AgentEffectAuthority::Required,
             image_input_required: true,
         };
         let harness = AgentRunDecisionHarness::new(request);
@@ -1009,7 +1040,43 @@ mod tests {
 
         let error = harness.parse(&decision).unwrap_err();
 
-        assert!(error.contains("below the runtime minimum"));
+        assert!(error.contains("omitted required effect authority"));
+    }
+
+    #[test]
+    fn runtime_effect_authority_rejects_an_unrequested_side_effect_upgrade() {
+        let mut request = request();
+        request.route_requirements = AgentRouteRequirements {
+            minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+            effect_authority: AgentEffectAuthority::Forbidden,
+            image_input_required: false,
+        };
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.tool_requirement = AgentToolRequirement::Effects;
+
+        let error = AgentRunDecisionHarness::new(request)
+            .parse(&serde_json::to_string(&decision).unwrap())
+            .unwrap_err();
+
+        assert!(error.contains("exceeds the prompt effect authority"));
+    }
+
+    #[test]
+    fn ambiguous_effect_authority_preserves_permission_gated_effects() {
+        let mut request = request();
+        request.route_requirements = AgentRouteRequirements {
+            minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+            effect_authority: AgentEffectAuthority::Allowed,
+            image_input_required: false,
+        };
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.tool_requirement = AgentToolRequirement::Effects;
+
+        let parsed = AgentRunDecisionHarness::new(request)
+            .parse(&serde_json::to_string(&decision).unwrap())
+            .expect("ambiguous intent should preserve the existing permission-gated effect path");
+
+        assert_eq!(parsed.tool_requirement, AgentToolRequirement::Effects);
     }
 
     #[test]
@@ -1049,6 +1116,7 @@ mod tests {
         let harness = AgentRunDecisionHarness::new(request);
         let decision = AgentRouteRequirements {
             minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+            effect_authority: AgentEffectAuthority::Forbidden,
             image_input_required: false,
         }
         .apply_to_direct(AgentRunDecision::direct("executor"));
@@ -1158,6 +1226,8 @@ mod tests {
         let evidence = MatchedCollaborationEvidence {
             task_class: auto.task_class.clone(),
             effort: "auto".to_string(),
+            pre_decision_context_fingerprint: String::new(),
+            route_action_id: String::new(),
             routing_signature: auto.learning_signature(),
             examples: 8,
             team_wins: 0,
@@ -1173,7 +1243,9 @@ mod tests {
         assert!(auto.validate_effort_admission("auto").is_ok());
 
         let mut calibrated_request = request();
-        calibrated_request.matched_collaboration_evidence = vec![evidence.clone()];
+        calibrated_request.matched_collaboration_evidence = Arc::new(
+            MatchedCollaborationEvidenceTeacher::from_calibrated_evidence(vec![evidence.clone()]),
+        );
         let calibrated = AgentRunDecisionHarness::new(calibrated_request)
             .parse(&serde_json::to_string(&auto).unwrap())
             .expect("strong matched evidence should calibrate without a repair call");
@@ -1186,12 +1258,14 @@ mod tests {
         );
         assert!(calibrated
             .rationale
-            .contains("matched direct-anchor evidence rejects collaboration"));
+            .contains("Causal Router v2 matched_evidence_against"));
 
-        let mut unrelated = evidence;
+        let mut unrelated = evidence.clone();
         unrelated.routing_signature = "different-task-shape".to_string();
         let mut unrelated_request = request();
-        unrelated_request.matched_collaboration_evidence = vec![unrelated];
+        unrelated_request.matched_collaboration_evidence = Arc::new(
+            MatchedCollaborationEvidenceTeacher::from_calibrated_evidence(vec![unrelated]),
+        );
         let uncalibrated = AgentRunDecisionHarness::new(unrelated_request)
             .parse(&serde_json::to_string(&auto).unwrap())
             .unwrap();
@@ -1201,6 +1275,19 @@ mod tests {
             .computation_value
             .as_ref()
             .is_some_and(AutoComputationAssessment::admitted));
+
+        let mut cross_context = evidence.clone();
+        cross_context.pre_decision_context_fingerprint = "f".repeat(64);
+        cross_context.route_action_id = causal_route_action_id_v2(&auto).unwrap();
+        let mut cross_context_request = request();
+        cross_context_request.matched_collaboration_evidence = Arc::new(
+            MatchedCollaborationEvidenceTeacher::from_calibrated_evidence(vec![cross_context]),
+        );
+        let cross_context_result = AgentRunDecisionHarness::new(cross_context_request)
+            .parse(&serde_json::to_string(&auto).unwrap())
+            .unwrap();
+        assert_eq!(cross_context_result.execution, AgentExecutionMode::Workflow);
+        assert!(cross_context_result.calibration_reason.is_none());
     }
 
     #[test]
@@ -1210,6 +1297,7 @@ mod tests {
             "Inspect the workspace evidence and image before applying the change".to_string();
         request.route_requirements = AgentRouteRequirements {
             minimum_tool_requirement: AgentToolRequirement::Effects,
+            effect_authority: AgentEffectAuthority::Required,
             image_input_required: true,
         };
         let decision = AgentRunDecisionHarness::new(request)

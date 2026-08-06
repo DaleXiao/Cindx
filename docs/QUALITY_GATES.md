@@ -8,7 +8,7 @@ does not claim Fugu Ultra equivalence.
 
 - `quick`: documentation, version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, the typed collaboration execution
-  contract, Evaluation v2 foundation, the
+  contract, the Causal Router v2 contract and scaling bound, Evaluation v2 foundation, the
   120-case arena schema/evidence-ingestion contract, the Agent Real-World V5
   measurement contract, the exact managed-process session contract, memory, and
   frontend state behavior.
@@ -27,7 +27,8 @@ does not claim Fugu Ultra equivalence.
   runtime snapshots, prompt-learning outbox delta projection, shared graph
   parsing, prepared image/request reuse, retry reuse, and linear frontend
   streaming Markdown work, plus the bounded Agent cognitive-loop projection and
-  adaptive cursor. It uses operation counts and identity invariants and never cross-machine wall-clock thresholds.
+  adaptive cursor and the Causal Router v2 two-action/indexed-evidence receipt.
+  It uses operation counts and identity invariants and never cross-machine wall-clock thresholds.
 - `full`: all shipping deterministic gates, including the Agent Real-World V5
   measurement and managed-process session contracts, sidecars, frontend
   production build, and Rust tests; heavier same-machine diagnostics remain in
@@ -125,6 +126,17 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   overlay dispatchable together. These are deterministic execution-plane
   contracts, not provider-backed evidence of collaboration quality or
   intelligence uplift.
+- The exact `causal-router-v2-contract` gate requires one
+  `cindx.causal-router-v2-contract.v1` marker. It proves a stable pre-decision
+  fingerprint, explicit workflow/direct counterfactual, deterministic policy,
+  capability and effect-authority checks, and exact context-and-action evidence
+  semantics. The paired `causal-router-v2-scaling` gate requires one
+  `cindx.causal-router-v2-scaling.v1` marker and proves identical selection when
+  the exact record is after the prompt's top eight in both 32- and 2,048-row
+  inputs. Selection performs at most one exact and one explicit-legacy key
+  lookup, scans no history rows after index construction, evaluates at most two
+  actions, and keeps its receipt within 4 KiB. These are routing-control
+  contracts, not provider-backed quality or intelligence evidence.
 - Exact workspace file-plane tests cover stale, ambiguous, racing, locked, and
   failed-publication patches; permission and receipt preservation; degraded
   output-history capture; read hashes and batch partial/offset behavior;

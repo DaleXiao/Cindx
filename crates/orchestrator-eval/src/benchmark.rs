@@ -746,6 +746,8 @@ fn candidate(name: &str, role: ModelRole, cost_tier: u8, latency_tier: u8) -> Mo
         role,
         supports_tools: true,
         supports_vision: true,
+        tools_capability_source: orchestrator::ModelCapabilitySource::Configured,
+        vision_capability_source: orchestrator::ModelCapabilitySource::Configured,
         cost_tier,
         latency_tier,
     }

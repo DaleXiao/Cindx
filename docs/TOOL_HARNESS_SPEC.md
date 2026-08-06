@@ -301,18 +301,24 @@ persisted run context instead of falling back to a broader catalog.
 
 Before model execution, a separate typed route contract pins the minimum tool
 class from the active completion intent. Image generation raises that floor to
-effects, and a current user image pins vision. The conductor response, Fast
-direct route, and degraded fallback all pass the same capability validation;
-declaring a weaker route or selecting a configured model without the required
-tool/vision capability is an explicit preparation error rather than a silent
-downgrade.
+effects, and a current user image pins vision. Effect authority is derived
+separately: explicit global no-change language is `Forbidden`, an explicit
+effect is `Required`, and ambiguous intent is `Allowed` while still passing the
+existing permission boundary. Thus a lexical miss cannot silently remove an
+existing permission-gated capability, while an explicit read-only request cannot
+be reinterpreted as permission for side effects.
+The conductor response, Fast direct route, and degraded fallback all pass the
+same capability validation; declaring a weaker route, exceeding effect
+authority, or selecting a configured model without the required tool/vision
+capability is an explicit preparation error rather than a silent downgrade.
 
-Auto value-of-computation calibration cannot weaken that route contract. When
-coordination is not worth its predicted cost, only workflow parallelism,
-quorum, and independent-verification fields are collapsed; the chosen model,
-tool class, vision requirement, risk, retrieval channels, and memory policy are
-preserved. Trace metadata distinguishes the workflow candidate from the final
-direct or grounded-direct route and records the bounded admission inputs.
+Causal Router v2 calibration cannot weaken that route contract. When
+coordination is not worth its conservative lower-bound value, only workflow
+parallelism, quorum, and independent-verification fields are collapsed; the
+chosen model, tool class, vision requirement, risk, retrieval channels, and
+memory policy are preserved. Trace metadata distinguishes the workflow
+candidate, selected action, and direct counterfactual and records a bounded
+decision receipt without private model reasoning.
 
 The provider-backed V5 evaluation can apply the same collapse as an explicit
 Grounded Direct constraint after Auto routing. It preserves the product model,
