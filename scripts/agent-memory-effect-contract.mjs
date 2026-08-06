@@ -197,8 +197,8 @@ function qualityPassed(run) {
   return run.completed === true && run.verification?.quality_passed === true;
 }
 
-function runEvidenceValid(run) {
-  return receiptValid(run) && modelReceiptsValid(run) &&
+function runEvidenceValid(testCase, run) {
+  return receiptValid(run) && modelReceiptsValid(run) && toolSafetyContractPassed(testCase, run) &&
     Number.isInteger(run.memory_records_after_seed) && run.memory_records_after_seed > 0 &&
     sha256Pattern.test(run.memory_seed_sha256 || "") &&
     run.strategy_receipt && sha256Pattern.test(run.strategy_receipt.profile_sha256 || "") &&
@@ -219,6 +219,9 @@ export function analyzeMemoryEffect(suite, raw, rawEvidenceSha256 = null, expect
   requireFact(JSON.stringify(raw.selected_cases) === JSON.stringify(suite.cases.map((item) => item.id)), "raw case selection mismatch");
   requireFact(JSON.stringify(raw.selected_treatments) === JSON.stringify(treatments), "raw treatment selection mismatch");
   requireFact(raw.runs?.length === 18, "raw report must retain all 18 cells");
+  const resolvedBudget = raw.runs[0]?.resolved_budget;
+  requireFact(resolvedBudget && typeof resolvedBudget === "object" && !Array.isArray(resolvedBudget), "resolved budget is missing");
+  requireFact(raw.runs.every((run) => JSON.stringify(run.resolved_budget) === JSON.stringify(resolvedBudget)), "resolved budget drifted across the matrix");
   const cells = expectedCells(suite);
   const byKey = new Map();
   for (const run of raw.runs) {
@@ -234,13 +237,14 @@ export function analyzeMemoryEffect(suite, raw, rawEvidenceSha256 = null, expect
 
   const runRows = cells.map((cell) => {
     const run = byKey.get(cell.key);
+    const testCase = suite.cases.find((item) => item.id === cell.caseId);
     return {
       cell_sha256: digest("cindx.agent-memory-effect-cell.v1", cell.key),
       role: cell.role,
       treatment: cell.treatment,
       completed: run.completed === true,
       quality_passed: qualityPassed(run),
-      evidence_valid: runEvidenceValid(run),
+      evidence_valid: runEvidenceValid(testCase, run),
       recall_count: run.memory_evaluation_receipt?.recall_count ?? 0,
       selected_count: run.memory_evaluation_receipt?.selected_count ?? 0,
       routed_memory_policy: run.memory_evaluation_receipt?.routed_memory_policy ?? "missing",
@@ -255,7 +259,7 @@ export function analyzeMemoryEffect(suite, raw, rawEvidenceSha256 = null, expect
       const on = byKey.get(`${testCase.id}/memory_on/r${replicate}`);
       const off = byKey.get(`${testCase.id}/memory_off/r${replicate}`);
       let status = "EVALUABLE";
-      if (!runEvidenceValid(on) || !runEvidenceValid(off)) status = "INVALID_EVIDENCE";
+      if (!runEvidenceValid(testCase, on) || !runEvidenceValid(testCase, off)) status = "INVALID_EVIDENCE";
       else if (!pairedInvariant(on, off)) status = "CONFOUNDED";
       else if (on.memory_evaluation_receipt.routed_memory_policy === "none" ||
         on.memory_evaluation_receipt.recall_count === 0 || on.memory_evaluation_receipt.selected_count === 0) status = "NOT_EXERCISED";
@@ -319,6 +323,7 @@ export function analyzeMemoryEffect(suite, raw, rawEvidenceSha256 = null, expect
       configured_models: raw.configured_models
     }),
     provider_config_sha256: raw.provider_config_sha256,
+    resolved_budget: resolvedBudget,
     evidence_digest: digestJson("cindx.agent-memory-effect-sanitized-evidence.v1", { runRows, pairs }),
     denominator: { cells: 18, pairs: 9, required_pairs: 6, irrelevant_control_pairs: 3 },
     outcomes: { by_treatment: byTreatment, terminal_status_counts: counts(raw.runs.map((run) => run.terminal_status)) },
@@ -332,7 +337,13 @@ export function analyzeMemoryEffect(suite, raw, rawEvidenceSha256 = null, expect
 }
 
 export function renderMemoryEffectMarkdown(report) {
-  return `# Cindx memory-effect evaluation\n\n- Decision: **${report.decision}**\n- Frozen denominator: ${report.denominator.cells} cells / ${report.denominator.pairs} matched pairs\n- Pair states: ${JSON.stringify(report.pair_status_counts)}\n- Positive improvements/regressions: ${report.effect.positive_improvements}/${report.effect.positive_regressions}\n- Negative-control regressions: ${report.effect.negative_regressions}\n- Evidence digest: \`${report.evidence_digest}\`\n\nFailures, invalid evidence, confounds, and non-exercised positive routes remain in the frozen denominator.\n`;
+  const on = report.outcomes.by_treatment.memory_on;
+  const off = report.outcomes.by_treatment.memory_off;
+  const interpretation = report.decision === "INVALID_EVIDENCE"
+    ? "Because the matrix contains invalid evidence, its descriptive deltas do not establish causal durable-memory utility or any product uplift."
+    : "This result is limited to durable-memory utility under the frozen matched direct harness.";
+  return `# Cindx memory-effect evaluation\n\n- Decision: **${report.decision}**\n- Execution source: Cindx \`${report.app_version}\`, commit \`${report.git_commit}\`\n- Frozen protocol: ${report.denominator.cells} cells / ${report.denominator.pairs} matched pairs (${report.denominator.required_pairs} required-memory, ${report.denominator.irrelevant_control_pairs} irrelevant-memory control)\n- Suite / plan SHA-256: \`${report.suite_sha256}\` / \`${report.execution_plan_sha256}\`\n- Provider binding / configuration SHA-256: \`${report.provider_binding_sha256}\` / \`${report.provider_config_sha256}\`\n- Resolved budget: \`${JSON.stringify(report.resolved_budget)}\`\n- Completion: memory-on ${on.completed}/${on.runs}; memory-off ${off.completed}/${off.runs}\n- Quality passed: memory-on ${on.quality_passed}/${on.runs}; memory-off ${off.quality_passed}/${off.runs}\n- Recall / selected: memory-on ${on.recall_count}/${on.selected_count}; memory-off ${off.recall_count}/${off.selected_count}\n- Pair states: ${JSON.stringify(report.pair_status_counts)}\n- Positive improvements/regressions: ${report.effect.positive_improvements}/${report.effect.positive_regressions}\n- Negative-control regressions: ${report.effect.negative_regressions}\n- Evidence-invalid cells / confounded pairs / required not-exercised pairs: ${report.confounds.evidence_invalid_cells}/${report.confounds.confounded_pairs}/${report.confounds.required_not_exercised_pairs}\n- Raw evidence SHA-256: \`${report.raw_evidence_sha256}\`\n- Sanitized evidence digest: \`${report.evidence_digest}\`\n\nFailures, invalid evidence, confounds, and non-exercised routes remain in the frozen denominator. ` +
+    `${interpretation} It does not establish native Auto-router, GEPA, distillation, or frontier-Agent uplift.\n`;
 }
 
 function write(file, content) {
