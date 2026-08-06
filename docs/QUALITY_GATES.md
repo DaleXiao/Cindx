@@ -104,6 +104,12 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   size independent of raw tool output. Target binding and desktop recovery are
   covered by their separate contract tests rather than inferred from this exact
   filter.
+- Exact workspace file-plane tests cover stale, ambiguous, racing, locked, and
+  failed-publication patches; permission and receipt preservation; degraded
+  output-history capture; read hashes and batch partial/offset behavior;
+  list/search resource bounds, snapshot pagination, cursor invalidation, UTF-8
+  truncation, and coverage; and desktop after-SHA recovery. These are mechanism
+  and control checks, not provider-backed Agent-quality evidence.
 - The execution-role contracts keep Actor and Finalizer stage usage independent,
   expose no tools or Actor turn to Finalizer delivery, bind postcondition quality
   to a typed action/observation receipt, return only a revalidated byte-identical

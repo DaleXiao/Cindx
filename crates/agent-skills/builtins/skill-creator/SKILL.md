@@ -1,7 +1,7 @@
 ---
 name: Claude Code Skill Creator
 description: Create and improve Claude Code compatible skills with focused instructions, resources, and validation.
-allowed-tools: file.read file.list file.search file.write shell.run
+allowed-tools: file.read file.list file.search file.patch file.write shell.run
 ---
 # Claude Code Skill Creator
 

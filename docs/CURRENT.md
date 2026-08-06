@@ -134,6 +134,28 @@ accepted Goal Delta increments budget credit. This keeps slow valid I/O from
 being mistaken for semantic progress and prevents busy but irrelevant tool
 loops from unlocking the maximum Auto or Pro budget.
 
+## Workspace File Tools
+
+- `file.read` keeps its raw text behavior and emits a v2 structured result with
+  a page SHA-256. A complete first page also carries the full-file SHA-256;
+  `include_sha256` can request it for a bounded file up to 8 MiB. `file.read_many`
+  still accepts legacy string paths and raw sections, while also supporting
+  per-file offsets, status, hashes, and continuations. Any child failure is an
+  explicit partial failure rather than a complete batch success.
+- `file.list` and `file.search` provide stable, bounded, snapshot-bound pages.
+  Listing supports entry-name globs; search supports literal or regular-expression
+  matching, case control, path globs, context, coverage, and byte-offset resume.
+  Snapshot or option changes invalidate a cursor instead of silently mixing pages.
+- `file.patch` is the exact-edit path for an existing UTF-8 file up to 8 MiB. It
+  requires the complete base SHA-256 plus either an exact byte range and expected
+  text or one unique anchor. The tool uses a target lock, final identity/hash
+  recheck, atomic same-directory publication, permission preservation, a typed
+  before/after/diff receipt, and a best-effort immutable output snapshot. Its
+  session permission is path-bound. `file.write` remains the compatible complete
+  overwrite path. Interrupted patch recovery confirms success only when the
+  canonical workspace file still has the recorded after-SHA; otherwise it fails
+  closed without repeating the write.
+
 ## Data, Memory, and Retrieval
 
 - SQLite is the durable product state. Startup fails closed when the persistent

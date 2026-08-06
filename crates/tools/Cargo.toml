@@ -7,5 +7,8 @@ license.workspace = true
 [dependencies]
 agent-core = { path = "../agent-core" }
 model-provider = { path = "../model-provider" }
+glob = "0.3"
+regex = "1.13"
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3.27"

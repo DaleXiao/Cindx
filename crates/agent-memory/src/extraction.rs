@@ -290,8 +290,8 @@ pub(crate) fn durable_tool_memory(event: &Event) -> Option<String> {
     }
     let tool = event.metadata.get("tool")?.as_str();
     match tool {
-        "file.write" => first_metadata_value(event, &["result_path", "path"])
-            .map(|path| format!("file.write succeeded: {path}")),
+        "file.write" | "file.patch" => first_metadata_value(event, &["result_path", "path"])
+            .map(|path| format!("{tool} succeeded: {path}")),
         "image.generate" => first_metadata_value(
             event,
             &["result_artifact_path", "artifact_path", "result_path"],

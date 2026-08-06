@@ -26,7 +26,7 @@ pub fn permission_can_allow_session(request: &PermissionRequest) -> bool {
 }
 
 pub fn permission_requires_exact_scope(request: &PermissionRequest) -> bool {
-    request.action == "shell.run"
+    matches!(request.action.as_str(), "file.patch" | "shell.run")
 }
 
 fn permission_capability_metadata_matches(
@@ -78,6 +78,16 @@ mod tests {
             &workspace,
             &another_workspace
         ));
+    }
+
+    #[test]
+    fn file_patch_session_capability_is_bound_to_the_exact_path() {
+        let granted = request("file.patch", PermissionRisk::Write, "notes/a.md");
+        let same_path = request("file.patch", PermissionRisk::Write, "notes/a.md");
+        let another_path = request("file.patch", PermissionRisk::Write, "notes/b.md");
+
+        assert!(permission_capability_matches(&granted, &same_path));
+        assert!(!permission_capability_matches(&granted, &another_path));
     }
 
     #[test]

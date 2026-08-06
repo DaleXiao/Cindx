@@ -88,7 +88,7 @@ stored as a second trajectory blob.
 | `agent-graph` | Graph extraction, provenance, persistence, direct expansion and graph-guided retrieval inputs | Vector storage |
 | `agent-storage` | SQLite event/state contracts, indexed logical-run event scope, and implementation | Agent decisions or logical permission scope |
 | `model-provider` | OpenAI-compatible request/response, streaming, embeddings, image-provider wire behavior | Routing or local tools |
-| `tools` | Built-in tool specifications, validation, local/delegated execution contracts | Permission decisions or UI |
+| `tools` | Built-in tool specifications, validation, local/delegated execution contracts, workspace exact-patch publication, bounded query cursors, and model observations | Permission decisions or UI |
 | `agent-mcp` | MCP transports, catalog cache, and tool adaptation | Permission bypass or agent policy |
 | `agent-skills` | Skill discovery, trust, selection, and loading | Privileged script execution |
 | `agent-application` | Run/reprepare driver, typed run lifecycle, application projections, and session-level contracts | Provider construction, Tauri state, persistence, or tool side effects |
@@ -125,6 +125,11 @@ touch Tauri or product state:
 - Execution adapters that translate product state into the portable
   application driver, runtime, and orchestrator contracts.
 - Background memory refresh, session-title refinement, and prompt evaluation.
+
+Workspace patch planning, hashing, target locking, race rechecks, atomic
+publication, and receipts stay in `tools`. The desktop adapter does not own a
+second file-mutation implementation; it persists the effect contract and uses
+the recorded after-SHA to verify an interrupted direct or deferred `file.patch`.
 
 This concentration is a known structural limit. New portable policy must not be
 added to the desktop prelude merely because the composition root can access all
@@ -486,6 +491,10 @@ that layer has its own frozen matched causal evaluation.
   and counters. Cold recovery supplies the separately reconstructed effective
   objective; the runtime validates prompt, transcript, prepared state, and
   recovery identity before accepting it. The v1 decoder remains explicit.
+- A started `file.patch` without a terminal result is recovered as applied only
+  when its persisted verifier exactly matches the current canonical workspace
+  file SHA-256. A mismatch or oversized/non-file target remains an unknown
+  outcome and is never repeated automatically.
 - Startup aborts if persistent state is unavailable. It never reports a
   successful in-memory substitute.
 

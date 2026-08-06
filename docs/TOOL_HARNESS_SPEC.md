@@ -131,6 +131,11 @@ respect for the current permission boundary or authorized recovery.
   verified postcondition ids. It never copies or hashes raw tool output, so
   large successful reads cannot add another output-sized allocation merely to
   request budget credit.
+- Workspace file observations are bounded. `file.read_many` accepts at most
+  eight 32 KiB pages; listing and search have hard discovery/path/byte limits.
+  Their cursors bind options and a deterministic snapshot and reject changed
+  result sets. Search resumes dense context-free pages from a byte offset rather
+  than rescanning the already-consumed prefix.
 
 ## Tool contract
 
@@ -150,13 +155,22 @@ with `ToolCallFinished` and restored during exact-call recovery, and its schema
 version participates in the prompt-learning tool-contract digest.
 
 The narrow `tools::tool_contract_v2` adapter owns the hand-written input/output
-schemas and v2 projections currently used by `file.read`, `file.search`,
-`shell.run`, and `browser.extract_text`; execution and permission ownership stays
-in each tool module. Their projections prevent long output from hiding,
-respectively, a model-visible continuation offset, search coverage, process
-termination and complete-stream artifacts, or browser page identity and
-continuation guidance. This migration does not change permission, exposure,
-concurrency, raw output, or artifact behavior.
+schemas and v2 projections used by `file.read`, `shell.run`, and
+`browser.extract_text`. `file_query_contract_v3` owns search options, cursor,
+coverage, and result projection; focused `file_list`, `file_batch`, and
+`file_patch` modules own their typed contracts. Execution remains in each tool
+module, and portable permission reuse policy remains in `agent-core`.
+
+The workspace file plane preserves legacy raw output and input where documented.
+`file.read` v2 adds page and optional bounded full-file hashes;
+`file.read_many` exposes per-item partial status and continuation. List and
+search pages are stable, bounded, and snapshot-bound. `file.patch` requires a
+full base hash plus an exact range/expected text or unique anchor, obtains Write
+permission bound to the target path, locks and rechecks file identity/content,
+then publishes a permission-preserving same-directory replacement. Its typed
+receipt contains before/after/diff hashes and bounded facts. A successful patch
+also attempts an immutable `.cindx/output-history` snapshot; snapshot failure is
+reported explicitly but cannot reverse or misreport the already-published patch.
 
 The runtime preserves model arguments as JSON. Legacy `key=value` input remains
 accepted only by built-in tools for existing sessions and the manual tool runner.
@@ -275,6 +289,11 @@ only as run-scoped pseudonymous path tokens, so cold replay can reconstruct a
 matching mutation/verification or interaction postcondition without persisting
 raw tool input or output in the witness. Older outcomes without this metadata
 remain readable and conservatively use the prior fingerprint-only fallback.
+The `file.patch` witness records its planned after-SHA. Hot or cold recovery uses
+the matching persisted started/finished contract, accepts only an in-workspace
+canonical regular file no larger than the patch limit, and reports the effect as
+applied only on an exact SHA match; every other state fails closed without a
+second mutation.
 
 Hot and cold permission recovery reconstruct the same
 `cindx.agent.action-denial.v1` fact. Its persisted state contains the contract
