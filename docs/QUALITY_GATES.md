@@ -225,18 +225,20 @@ orchestration-uplift decision are therefore `NO-GO`. Current source repairs the
 deterministic identity/projection boundary, but the historical matrix remains
 unchanged and a newly frozen provider run is required for any revised decision.
 
-The memory-effect V1 provider matrix is a separate explicit, billable run. Its
+The memory-effect provider matrix is a separate explicit, billable run. Its
 deterministic analyzer is exercised with:
 
 ```bash
 node --test scripts/agent-memory-effect-contract.test.mjs
 ```
 
-Only a clean exact-revision `--execute` run of
-`benchmarks/agent/memory-effect-v1.json`, followed by publication of sanitized
-evidence, may classify memory as `IMPROVED`, `NEUTRAL`, `REGRESSED`,
-`NOT_EXERCISED`, or `INVALID_EVIDENCE`. The matrix fixes the same compatible
-model and direct/read-only route before applying memory-on/off, denies mutation
-requests, verifies a read-only tool allowlist, and requires the negative-control
-decoy to be recalled rather than trivially absent. It is not an Auto-router
-comparison. Raw provider output remains outside Git.
+Only a clean exact-revision `--execute` run, followed by publication of
+sanitized evidence, may classify memory as `IMPROVED`, `NEUTRAL`, `REGRESSED`,
+`NOT_EXERCISED`, or `INVALID_EVIDENCE`. V1 remains frozen and invalid because
+one cell used a permissionless read-only skill tool outside its allowlist. V2
+keeps the same cases and matched design but adds that observed `skill.search`
+tool to the frozen read-only allowlist. Both matrices fix the same compatible
+model and direct/read-only route before applying
+memory-on/off, deny mutation requests, and require the negative-control decoy to
+be recalled rather than trivially absent. They are not Auto-router comparisons.
+Raw provider output remains outside Git.
