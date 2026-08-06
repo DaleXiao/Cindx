@@ -5680,7 +5680,9 @@ name = "tools"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "getrandom 0.3.4",
  "glob",
+ "libc",
  "model-provider",
  "regex",
  "serde_json",

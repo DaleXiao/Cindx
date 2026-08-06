@@ -174,10 +174,11 @@ pub(crate) fn build_tool_registry_for_state(
             model: provider_config.image_model,
             timeout_seconds: 300,
         });
-    let mut registry = ToolRegistry::with_workspace_tools_and_services(
+    let mut registry = ToolRegistry::with_workspace_tools_and_services_and_process_manager(
         workspace_root.to_path_buf(),
         web_search_config,
         image_generation_config,
+        Arc::clone(&state.process_manager),
     );
     let catalog = state
         .mcp_catalog

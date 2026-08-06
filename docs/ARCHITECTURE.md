@@ -88,7 +88,7 @@ stored as a second trajectory blob.
 | `agent-graph` | Graph extraction, provenance, persistence, direct expansion and graph-guided retrieval inputs | Vector storage |
 | `agent-storage` | SQLite event/state contracts, indexed logical-run event scope, and implementation | Agent decisions or logical permission scope |
 | `model-provider` | OpenAI-compatible request/response, streaming, embeddings, image-provider wire behavior | Routing or local tools |
-| `tools` | Built-in tool specifications, validation, local/delegated execution contracts, workspace exact-patch publication, bounded query cursors, and model observations | Permission decisions or UI |
+| `tools` | Built-in tool specifications, validation, local/delegated execution contracts, workspace exact-patch publication, bounded query cursors, managed process sessions, and model observations | Permission decisions or UI |
 | `agent-mcp` | MCP transports, catalog cache, and tool adaptation | Permission bypass or agent policy |
 | `agent-skills` | Skill discovery, trust, selection, and loading | Privileged script execution |
 | `agent-application` | Run/reprepare driver, typed run lifecycle, application projections, and session-level contracts | Provider construction, Tauri state, persistence, or tool side effects |
@@ -119,6 +119,8 @@ touch Tauri or product state:
 - Tauri commands and event emission.
 - Provider configuration and calls through `model-provider`.
 - Tool registry construction and side effects through `tools`.
+- One stable AppState `ProcessManager`, shared across registry rebuilds, owns
+  managed child lifecycle and performs bounded shutdown before application exit.
 - Permission prompts, indexed scoped session-grant lookup, and continuation. The portable capability-match and session-reuse policy remains in `agent-core`.
 - SQLite-backed project/session projections and runtime snapshots.
 - Browser/computer sidecar process integration.
@@ -170,6 +172,10 @@ The desktop precomputes a current-epoch grounded fallback before dispatch; an
 empty, malformed, tool-calling, or unavailable Finalizer either returns that
 byte-identical candidate after receipt revalidation or fails closed without
 starting another Actor turn.
+Asynchronous managed-process polls remain ordinary typed observations: their
+distance from the initiating action prevents them from minting a causally trusted
+workspace-quality receipt. Command words such as `test`, `check`, or `build` do
+not change that boundary.
 `agent_finalizer_runtime` owns fallback and receipt policy; its
 `terminal_runtime` child owns the desktop-only instruction persistence, provider
 dispatch, stream reset, and terminal handoff, keeping the Actor loop independent

@@ -37,6 +37,10 @@ The harness has one lifecycle owner per concern:
 - `agent-core` owns capability matching and the fail-closed rules for reusable
   session permissions. Desktop `permission_service` owns only indexed
   session-grant and pending-request lookup.
+- `tools::ProcessManager` owns bounded managed-process identity, lifecycle,
+  streams, and cleanup. The desktop keeps one stable AppState instance across
+  tool-registry rebuilds and shuts it down before application exit; registry
+  entries are only adapters to that owner.
   `collaboration_service` owns Fugu worker request/result envelopes, continuation
   budgets, and the reserved final-answer turn; neither service performs provider
   calls or tool side effects.
@@ -136,6 +140,13 @@ respect for the current permission boundary or authorized recovery.
   Their cursors bind options and a deterministic snapshot and reject changed
   result sets. Search resumes dense context-free pages from a byte offset rather
   than rescanning the already-consumed prefix.
+- Managed processes admit at most two active sessions per physical owner and
+  four per application. Wall time is capped at 1,800 seconds, aggregate captured
+  output at 8 MiB, CPU at 900 seconds and never above wall time, poll pages at
+  64 KiB with a two-second wait, input calls at 64 KiB and cumulative input at
+  1 MiB. Cancellation, steer-epoch invalidation, run completion, session
+  removal, limits, explicit termination, and application exit terminate and
+  reap the process group.
 
 ## Tool contract
 
@@ -172,6 +183,18 @@ receipt contains before/after/diff hashes and bounded facts. A successful patch
 also attempts an immutable `.cindx/output-history` snapshot; snapshot failure is
 reported explicitly but cannot reverse or misreport the already-published patch.
 
+The managed process plane adds `process.start`, `process.poll`, `process.input`,
+and `process.terminate` without replacing compatible `shell.run`. Start first
+creates an owner-bound opaque pending reservation; only a later poll or approved
+input activates the already-authorized command, after the start receipt can be
+durable. Poll returns bounded cursor pages plus typed pending/running/terminal,
+exit, signal, timeout, cancellation, CPU/output-limit, completeness, and
+truncation facts. Handles bind the task, project, session, physical run,
+collaboration, steer, and contract epochs, and are never recovered from an OS
+PID after restart. Input uses a bounded writer queue and a payload-bound one-shot
+permission. A parent-death watchdog and the AppState manager prevent ordinary
+cancel or application exit from leaving a managed child group behind.
+
 The runtime preserves model arguments as JSON. Legacy `key=value` input remains
 accepted only by built-in tools for existing sessions and the manual tool runner.
 Successful results still retain their full persistence and UI contract, but an
@@ -192,7 +215,10 @@ result proves an offset-zero, complete, untruncated read of the requested path.
 `shell.run` signs a workspace-wide quality check only after a structured zero
 exit from a conservative check/test/build/lint command with no shell indirection
 or compound syntax. Listing, searching, partial reads, `echo`, dynamic shell,
-and third-party read-only tools carry no authority by default. Multi-target
+third-party read-only tools, and every asynchronous `process.poll` receipt carry
+no authority by default. A command string containing `test`, `check`, or `build`
+cannot create verification; only the trusted synchronous postcondition adapter
+may sign it. Multi-target
 mutations require cumulative exact coverage of every target, unless one trusted
 workspace-wide quality check covers the set.
 
@@ -316,6 +342,11 @@ Identical tool arguments may fail twice. A third identical attempt is blocked so
 the model must use its remaining bounded alternative or report the stable
 blocker. A new prepared objective epoch clears this denial/replan state; a retry
 or continuation of the same objective does not.
+
+`process.start` uses the same exact command-and-cwd capability boundary as
+`shell.run`; destructive or dynamic commands remain one-shot. Every
+`process.input` call is separately approved and binds its handle, payload digest,
+and EOF intent, so interactive input can never inherit a session grant.
 
 ## MCP
 

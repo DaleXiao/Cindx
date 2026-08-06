@@ -91,7 +91,15 @@ impl<'app, 'state> AgentExecutionService<'app, 'state> {
             cancellation,
             base_run_context: prepared.base_run_context.clone(),
         };
-        execute_agent_run(&mut executor, prepared)
+        let task_id = prepared.runtime.task_id.clone();
+        let run_context = prepared.base_run_context.clone();
+        let result = execute_agent_run(&mut executor, prepared);
+        if !matches!(&result, Ok(state) if state.status == "waiting_for_permission") {
+            self.state
+                .process_manager
+                .shutdown_run(&task_id, &run_context);
+        }
+        result
     }
 }
 

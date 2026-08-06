@@ -7212,6 +7212,18 @@ fn completion_learning_signal_requires_post_mutation_verification() {
     );
     assert_eq!(
         completion_learning_signal(&runtime),
+        ("unverified_mutation", false)
+    );
+
+    record_tool_outcome_with_risk(
+        &mut runtime,
+        "file.read",
+        r#"{"path":"src/lib.rs"}"#,
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::ReadOnly),
+    );
+    assert_eq!(
+        completion_learning_signal(&runtime),
         ("verified_mutation", true)
     );
 }

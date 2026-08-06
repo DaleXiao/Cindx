@@ -9,6 +9,7 @@ pub(crate) fn confirm_application_exit(app_handle: &tauri::AppHandle) -> bool {
         return true;
     }
     if quit_confirmation_suppressed(app_handle) {
+        prepare_application_exit(&state);
         state.allow_exit.store(true, Ordering::SeqCst);
         return true;
     }
@@ -26,8 +27,16 @@ pub(crate) fn confirm_application_exit(app_handle: &tauri::AppHandle) -> bool {
             eprintln!("failed to save quit confirmation preference: {error}");
         }
     }
+    prepare_application_exit(&state);
     state.allow_exit.store(true, Ordering::SeqCst);
     true
+}
+
+fn prepare_application_exit(state: &AppState) {
+    if let Err(error) = state.agent_run_controls.cancel_all() {
+        eprintln!("failed to cancel agent runs before exit: {error}");
+    }
+    state.process_manager.shutdown_all();
 }
 
 pub(crate) fn quit_confirmation_preference_path(

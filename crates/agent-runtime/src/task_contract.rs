@@ -949,9 +949,7 @@ impl AgentTaskContract {
             }
             Some(ToolRisk::ExecutesProcess) => {
                 let verifies_mutation = self.mutation_epoch > self.verified_mutation_epoch
-                    && process_input_looks_like_verification(input_json);
-                let verifies_mutation =
-                    verifies_mutation && verification_authorized.unwrap_or(true);
+                    && verification_authorized == Some(true);
                 if verifies_mutation {
                     self.verified_mutation_epoch = self.mutation_epoch;
                     self.gate_attempts.remove("workspace_verification");
@@ -1385,29 +1383,6 @@ fn inferred_builtin_tool_risk(tool_name: &str) -> Option<&'static ToolRisk> {
         "shell.run" => Some(&EXECUTES_PROCESS),
         _ => None,
     }
-}
-
-fn process_input_looks_like_verification(input_json: &str) -> bool {
-    let normalized = input_json.to_ascii_lowercase();
-    [
-        " test",
-        "test ",
-        "check",
-        "build",
-        "lint",
-        "verify",
-        "pytest",
-        "vitest",
-        "jest",
-        "cargo test",
-        "cargo check",
-        "swift test",
-        "go test",
-        "git diff",
-        "git status",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
 }
 
 fn tool_can_verify_workspace_change(tool: &ToolSpec) -> bool {
@@ -1921,6 +1896,37 @@ mod tests {
             Some(&ToolRisk::ReadOnly),
         );
         assert!(contract.model_context_for_task(&tools).is_none());
+    }
+
+    #[test]
+    fn unsigned_process_text_cannot_verify_workspace_mutation() {
+        for command in ["echo check", "cargo test"] {
+            let mut contract = AgentTaskContract::default();
+            contract.record_tool_outcome(
+                "file.write",
+                r#"{"path":"src/main.rs"}"#,
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::WritesWorkspace),
+            );
+            contract.merge_workspace_verification_policy(
+                WorkspaceVerificationPolicy::RequiredAfterMutation,
+            );
+
+            contract.record_tool_outcome(
+                "shell.run",
+                &serde_json::json!({ "command": command }).to_string(),
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::ExecutesProcess),
+            );
+
+            assert!(
+                !contract.latest_mutation_verified(),
+                "unsigned command text must not mint verification authority: {command}"
+            );
+            assert!(contract
+                .model_context_for_task(&[tool("shell.run", ToolRisk::ExecutesProcess)])
+                .is_some());
+        }
     }
 
     #[test]

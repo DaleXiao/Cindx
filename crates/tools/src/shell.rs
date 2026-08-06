@@ -96,44 +96,7 @@ impl Tool for ShellRunTool {
     }
 
     fn permission_request(&self, invocation: &ToolInvocation) -> Option<PermissionRequest> {
-        let input = parse_input(&invocation.input_json);
-        let command = input
-            .get("command")
-            .cloned()
-            .unwrap_or_else(|| "<missing command>".to_string());
-        let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
-        let (risk, risk_reason) = classify_shell_permission(&command);
-        let session_reusable = risk != PermissionRisk::Destructive
-            && shell_command_can_reuse_session_permission(&command);
-        let mut metadata: Metadata = [
-            ("tool_call_id".to_string(), invocation.id.0.clone()),
-            ("tool_name".to_string(), invocation.tool_name.clone()),
-            ("command".to_string(), command),
-            ("session_reusable".to_string(), session_reusable.to_string()),
-            (
-                "environment_policy".to_string(),
-                "developer_safe_v1".to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        if let Some(reason) = risk_reason {
-            metadata.insert("destructive_reason".to_string(), reason.to_string());
-        }
-        Some(permission_request(
-            &invocation.task_id,
-            risk,
-            "shell.run",
-            if risk_reason.is_some() {
-                "Run a destructive local process. This approval cannot be reused."
-            } else if !session_reusable {
-                "Run a local process with dynamic shell behavior. This approval can only be used once."
-            } else {
-                "Run a local process in the selected workspace."
-            },
-            &workspace_scope(&self.workspace_root, &cwd),
-            metadata,
-        ))
+        shell_permission_request(&self.workspace_root, invocation, "shell.run")
     }
 
     fn postcondition_evidence(
@@ -391,7 +354,7 @@ fn run_shell_command(
     })
 }
 
-fn configure_shell_environment(command: &mut Command) {
+pub(crate) fn configure_shell_environment(command: &mut Command) {
     command.env_clear();
     for name in SAFE_SHELL_ENVIRONMENT {
         if let Some(value) = env::var_os(name) {
@@ -406,6 +369,51 @@ fn configure_shell_environment(command: &mut Command) {
     if env::var_os("PATH").is_none() {
         command.env("PATH", FALLBACK_PATH);
     }
+}
+
+pub(crate) fn shell_permission_request(
+    workspace_root: &Path,
+    invocation: &ToolInvocation,
+    action: &str,
+) -> Option<PermissionRequest> {
+    let input = parse_input(&invocation.input_json);
+    let command = input
+        .get("command")
+        .cloned()
+        .unwrap_or_else(|| "<missing command>".to_string());
+    let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
+    let (risk, risk_reason) = classify_shell_permission(&command);
+    let session_reusable =
+        risk != PermissionRisk::Destructive && shell_command_can_reuse_session_permission(&command);
+    let mut metadata: Metadata = [
+        ("tool_call_id".to_string(), invocation.id.0.clone()),
+        ("tool_name".to_string(), invocation.tool_name.clone()),
+        ("command".to_string(), command),
+        ("session_reusable".to_string(), session_reusable.to_string()),
+        (
+            "environment_policy".to_string(),
+            "developer_safe_v1".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    if let Some(reason) = risk_reason {
+        metadata.insert("destructive_reason".to_string(), reason.to_string());
+    }
+    Some(permission_request(
+        &invocation.task_id,
+        risk,
+        action,
+        if risk_reason.is_some() {
+            "Run a destructive local process. This approval cannot be reused."
+        } else if !session_reusable {
+            "Run a local process with dynamic shell behavior. This approval can only be used once."
+        } else {
+            "Run a local process in the selected workspace."
+        },
+        &workspace_scope(workspace_root, &cwd),
+        metadata,
+    ))
 }
 
 fn capture_process_stream(mut stream: impl Read, artifact_path: PathBuf) -> BoundedStreamCapture {

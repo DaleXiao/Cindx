@@ -385,6 +385,61 @@ fn untrusted_shell_and_file_list_cannot_verify_but_trusted_quality_check_can() {
 }
 
 #[test]
+fn recovered_signed_shell_evidence_retains_verification_authority() {
+    let mut state = start_agent_loop(
+        TaskId("typed-recovered-shell-verifier".to_string()),
+        "update and recover the verification result",
+        AgentRuntimeConfig::default(),
+    );
+    state
+        .task_contract
+        .merge_workspace_verification_policy(WorkspaceVerificationPolicy::RequiredAfterMutation);
+    let write_spec = workspace_write_spec("file.write");
+    let write = tool_request("write", "file.write", r#"{"path":"README.md"}"#);
+    apply_contract_transition(
+        &mut state,
+        &write,
+        &ToolOutcomeStatus::Succeeded,
+        &ToolRisk::WritesWorkspace,
+        &write_spec,
+        None,
+        "updated",
+        POSTCONDITION_SCOPE,
+    );
+
+    let shell_input = r#"{"command":"cargo test --quiet","cwd":"."}"#;
+    let shell_spec = quality_check_spec("shell.run");
+    let evidence = quality_check_evidence();
+    let encoded = PersistedToolEffectWitness::capture_with_postcondition_evidence(
+        "shell.run",
+        shell_input,
+        Some(&ToolRisk::ExecutesProcess),
+        POSTCONDITION_SCOPE,
+        Some(&shell_spec),
+        Some(&evidence),
+    )
+    .and_then(|witness| witness.encode())
+    .expect("trusted shell evidence should persist");
+    let recovered = PersistedToolEffectWitness::decode(&encoded)
+        .expect("signed typed shell evidence should recover");
+    let fingerprint = crate::tool_input_fingerprint("shell.run", shell_input);
+
+    AgentKernel::new(&mut state, std::slice::from_ref(&shell_spec))
+        .apply_persisted_tool_observation(
+            ToolCallId("recovered-shell".to_string()),
+            "shell.run",
+            &fingerprint,
+            None,
+            Some(&recovered),
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ExecutesProcess),
+            "tests passed",
+        );
+
+    assert!(state.task_contract.latest_mutation_verified());
+}
+
+#[test]
 fn target_witness_cannot_cross_logical_run_scope() {
     let mut state = start_agent_loop(
         TaskId("typed-scope-isolation".to_string()),
