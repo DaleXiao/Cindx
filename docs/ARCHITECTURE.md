@@ -292,6 +292,20 @@ for whether those segments require effects.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
   dependency order and runnable/resumable/degraded/exhausted states.
+- Workflow policy is an execution boundary rather than a prompt hint.
+  `ReadOnlyEvidence` exposes only substantive statically read-only tools,
+  `ReadOnlyExploration` may include bounded discovery tools, and `None` exposes
+  no tools. Synthesis is always tool-free; every effectful action remains in the
+  foreground executor and follows the ordinary permission contract.
+- Evidence projection accepts only successful, substantive, typed receipts from
+  the current collaboration and steer epoch. The task-graph step id is the
+  authoritative source, and the original tool request is rechecked against the
+  foreground task's target anchors before it may satisfy an obligation.
+- Verification text has no verdict authority. A step is `Passed` only when its
+  typed `cindx.workflow-verification.v1` receipt reviews all dependency steps and
+  cites admitted evidence from every evidence-bearing input; absent or invalid
+  receipts remain `Inconclusive`, while explicit unresolved findings degrade the
+  step.
 - `first_verified` requires an observed verified verdict before normal early
   commit. Terminal reserve may still return a usable best-known fallback, but
   the selection assessment keeps unmet verification as degradation. A prompt
@@ -301,7 +315,10 @@ for whether those segments require effects.
   cannot be assigned permission-gated browser, computer, shell, or mutation work;
   those effects remain in the foreground executor.
 - Independent workflow contributions are defined by non-overlapping task and
-  evidence lineage, not by model identity. The conductor may reuse the selected
+  evidence lineage, not by model identity. Root assignments are compared with a
+  bounded case/punctuation/whitespace-normalized contribution key that preserves
+  token order, so formatting copies cannot manufacture parallel quorum while
+  directionally different work remains distinct. The conductor may reuse the selected
   direct-baseline model across different branches or choose another configured
   model when role capability or supported historical evidence justifies it.
 - Workflow output is a grounded handoff to the interactive loop; it does not

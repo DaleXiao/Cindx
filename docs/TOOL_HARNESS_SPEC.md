@@ -99,6 +99,25 @@ evidence lineage. It is not inferred from different model names. The conductor
 preserves the selected direct model as the baseline and introduces another model
 only when its configured role or supported prior predicts a useful contribution.
 
+Worker tool policy is enforced by the runtime catalog. `ReadOnlyEvidence` sees
+only substantive tools whose static risk and effect semantics are both
+read-only; `ReadOnlyExploration` may also see bounded discovery tools; `None`
+sees no tools. Analysis and verification use their validated policy, while
+synthesis is always tool-free. Dynamic execution remains
+permissionless and read-only, and every effectful action stays in the foreground
+executor. Downstream workflow context accepts only typed, successful,
+substantive receipts from the current collaboration and steer epoch. It derives
+source identity from the active task-graph step and replays the original request
+through the foreground target-anchor check, so a read of a different file or
+subject cannot satisfy the requested obligation.
+
+Verification has a separate typed authority boundary. A worker must end with a
+`cindx.workflow-verification.v1` receipt that names every reviewed dependency and
+cites admitted `step_id::tool_call_id` evidence for each evidence-bearing input.
+Unstructured approval text remains `Inconclusive`; unresolved findings produce
+degradation. This receipt governs workflow selection only. It does not mint a
+tool postcondition receipt, Goal Delta, permission, budget, or terminal success.
+
 GEPA is an optimizer outside the active loop. It consumes redacted completed or
 replay trajectories, reflects on paired outcomes, and proposes a versioned prompt
 genome. Auto-to-Pro reflection requires both sides of a strict source-attested

@@ -23,7 +23,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     role: ModelRole,
     model: String,
     prompt: String,
-    allow_tools: bool,
+    access: CollaborationWorkerAccess,
     max_model_turns: usize,
     max_tool_calls: usize,
     max_output_tokens: u64,
@@ -33,6 +33,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     let started_at_ms = current_time_millis();
     let objective_epoch = run_context_steer_epoch(&run_context);
     let state = app.state::<AppState>();
+    let allow_tools = access.tool_policy != WorkflowToolPolicy::None;
     let registry = if allow_tools {
         match tool_registry_for_state(&state, &workspace_root) {
             Ok(registry) => Some(registry),
@@ -42,11 +43,16 @@ pub(crate) fn complete_collaboration_worker_with_tools(
         None
     };
     let tools = if let Some(registry) = registry.as_ref() {
-        evidence_worker_tools(
-            &registry
-                .exposure_plan(&prompt, config.context_window_tokens)
-                .inline,
-        )
+        let exposed = registry
+            .exposure_plan(&prompt, config.context_window_tokens)
+            .inline;
+        match &access.tool_policy {
+            WorkflowToolPolicy::None => Vec::new(),
+            WorkflowToolPolicy::ReadOnlyEvidence => {
+                substantive_evidence_worker_tools(&exposed)
+            }
+            WorkflowToolPolicy::ReadOnlyExploration => evidence_worker_tools(&exposed),
+        }
     } else {
         Vec::new()
     };
@@ -75,13 +81,17 @@ pub(crate) fn complete_collaboration_worker_with_tools(
         }
     ));
     let mut worker_context = run_context.clone();
-    let evidence_source = stage.clone();
+    let evidence_source = access.evidence_source.clone();
     worker_context.insert("collaboration_id".to_string(), collaboration_id.clone());
     worker_context.insert("stage".to_string(), stage.clone());
     worker_context.insert("role".to_string(), role_label(&role).to_string());
     worker_context.insert(
         "worker_runtime".to_string(),
         "isolated_evidence_v1".to_string(),
+    );
+    worker_context.insert(
+        "worker_tool_policy".to_string(),
+        access.tool_policy.label().to_string(),
     );
     let mut evidence = Vec::new();
     let mut first_delta_at_ms = None;

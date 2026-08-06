@@ -31,6 +31,10 @@ use orchestrator::{
 };
 use tools::encode_input;
 
+mod agent_collaboration_contract_tests {
+    include!("agent_collaboration_contract_tests.rs");
+}
+
 fn test_prompt_evaluation_provenance(
     candidate_id: &str,
     opponent_id: &str,
@@ -5839,16 +5843,19 @@ fn conductor_result_separates_worker_claims_from_tool_evidence() {
 
     assert!(result.contains("treat as a proposal until supported"));
     assert!(result.contains("Tool evidence ledger"));
-    assert!(result.contains("source=worker_1 call=call-1 tool=file.read status=succeeded"));
+    assert!(result.contains(
+        "ref=worker_1::call-1 source=worker_1 call=call-1 tool=file.read status=succeeded"
+    ));
     assert!(result.contains("model = B"));
 }
 
 #[test]
 fn conductor_merges_authorized_evidence_and_deduplicates_provenance() {
     let a = CollaborationEvidence {
-        evidence_schema: String::new(),
-        steer_epoch: None,
-        collaboration_id: String::new(),
+        evidence_schema: crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA
+            .to_string(),
+        steer_epoch: Some(4),
+        collaboration_id: "collaboration-1".to_string(),
         source_step: "worker_a".to_string(),
         tool_call_id: "call-1".to_string(),
         tool_name: "file.read".to_string(),
@@ -5857,9 +5864,10 @@ fn conductor_merges_authorized_evidence_and_deduplicates_provenance() {
         output: "A".to_string(),
     };
     let b = CollaborationEvidence {
-        evidence_schema: String::new(),
-        steer_epoch: None,
-        collaboration_id: String::new(),
+        evidence_schema: crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA
+            .to_string(),
+        steer_epoch: Some(4),
+        collaboration_id: "collaboration-1".to_string(),
         source_step: "worker_b".to_string(),
         tool_call_id: "call-1".to_string(),
         tool_name: "file.read".to_string(),
@@ -5874,21 +5882,29 @@ fn conductor_merges_authorized_evidence_and_deduplicates_provenance() {
     .into_iter()
     .collect();
 
-    let merged =
-        merge_collaboration_evidence(&["a".to_string(), "b".to_string()], &inherited, &[b]);
+    let merged = merge_collaboration_evidence(
+        "current",
+        &["a".to_string(), "b".to_string()],
+        &inherited,
+        &[b],
+        "collaboration-1",
+        4,
+    );
 
-    assert_eq!(merged.len(), 2);
-    assert_eq!(merged[0].source_step, "worker_a");
-    assert_eq!(merged[1].source_step, "worker_b");
+    assert_eq!(merged.len(), 3);
+    assert_eq!(merged[0].source_step, "a");
+    assert_eq!(merged[1].source_step, "b");
+    assert_eq!(merged[2].source_step, "current");
 }
 
 #[test]
 fn conductor_bounds_checkpoint_evidence_and_preserves_current_step_observations() {
     let inherited = (0..40)
         .map(|index| CollaborationEvidence {
-            evidence_schema: String::new(),
-            steer_epoch: None,
-            collaboration_id: String::new(),
+            evidence_schema: crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA
+                .to_string(),
+            steer_epoch: Some(4),
+            collaboration_id: "collaboration-1".to_string(),
             source_step: "source".to_string(),
             tool_call_id: format!("inherited-{index}"),
             tool_name: "file.read".to_string(),
@@ -5899,9 +5915,10 @@ fn conductor_bounds_checkpoint_evidence_and_preserves_current_step_observations(
         .collect::<Vec<_>>();
     let own = (0..4)
         .map(|index| CollaborationEvidence {
-            evidence_schema: String::new(),
-            steer_epoch: None,
-            collaboration_id: String::new(),
+            evidence_schema: crate::collaboration_service::COLLABORATION_TOOL_EVIDENCE_SCHEMA
+                .to_string(),
+            steer_epoch: Some(4),
+            collaboration_id: "collaboration-1".to_string(),
             source_step: "current".to_string(),
             tool_call_id: format!("own-{index}"),
             tool_name: "file.read".to_string(),
@@ -5912,7 +5929,14 @@ fn conductor_bounds_checkpoint_evidence_and_preserves_current_step_observations(
         .collect::<Vec<_>>();
     let evidence_by_step = BTreeMap::from([("source".to_string(), inherited)]);
 
-    let merged = merge_collaboration_evidence(&["source".to_string()], &evidence_by_step, &own);
+    let merged = merge_collaboration_evidence(
+        "current",
+        &["source".to_string()],
+        &evidence_by_step,
+        &own,
+        "collaboration-1",
+        4,
+    );
 
     assert_eq!(merged.len(), 32);
     assert_eq!(

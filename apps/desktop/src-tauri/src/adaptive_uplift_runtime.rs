@@ -45,6 +45,25 @@ fn anchor_is_eligible(controller: &AnytimeController, verification_required: boo
         })
 }
 
+pub(super) fn enforce_candidate_verification_gate(
+    controller: &mut AnytimeController,
+    candidate_id: &str,
+    verification_satisfied: bool,
+) -> Result<bool, String> {
+    if verification_satisfied {
+        return Ok(false);
+    }
+    let Some(mut verdict) = controller.verdict(candidate_id).cloned() else {
+        return Ok(false);
+    };
+    if !verdict.verified {
+        return Ok(false);
+    }
+    verdict.verified = false;
+    controller.revise(candidate_id, verdict)?;
+    Ok(true)
+}
+
 fn uplift_gate_input(
     controller: &AnytimeController,
     team_candidate_id: &str,
@@ -193,13 +212,25 @@ pub(super) fn repair_adaptive_uplift(
         anytime_controller,
         workflow_checkpoint,
     } = context;
+    let workflow_verification_satisfied = workflow_checkpoint
+        .workflow_verification_satisfied(anytime_controller.snapshot().config.verification_required);
     let repair_candidate_id = format!("{team_candidate_id}:{TARGETED_UPLIFT_REPAIR_SUFFIX}");
     if anytime_controller.candidate(&repair_candidate_id).is_some() {
+        if enforce_candidate_verification_gate(
+            anytime_controller,
+            &repair_candidate_id,
+            workflow_verification_satisfied,
+        )? {
+            persist_anytime_controller(workflow_checkpoint, anytime_controller)?;
+        }
         return Ok(restored_uplift_repair(
             &repair_candidate_id,
             anytime_controller,
             workflow_checkpoint,
         ));
+    }
+    if !workflow_verification_satisfied {
+        return Ok(None);
     }
 
     let Some(mut gate_input) =
@@ -345,6 +376,7 @@ pub(super) fn repair_adaptive_uplift(
         verification,
         evidence_count,
     );
+    let candidate_verified = quality_gate.passed && workflow_verification_satisfied;
     let repaired = quality_gate.output.clone();
     let pairwise_comparison = match anchor_output {
         Some(anchor) => match compare_team_guidance_with_anchor(
@@ -380,8 +412,8 @@ pub(super) fn repair_adaptive_uplift(
         &repair_candidate_id,
         AnytimeVerdict {
             quality_bps: (quality_gate.score.clamp(0.0, 1.0) * 10_000.0).round() as u16,
-            confidence_bps: if quality_gate.passed { 8_500 } else { 5_000 },
-            constraint_coverage_bps: if quality_gate.passed { 9_000 } else { 6_000 },
+            confidence_bps: if candidate_verified { 8_500 } else { 5_000 },
+            constraint_coverage_bps: if candidate_verified { 9_000 } else { 6_000 },
             evidence_count,
             safety_violations: quality_gate.safety_violations.saturating_add(
                 pairwise_comparison
@@ -389,7 +421,7 @@ pub(super) fn repair_adaptive_uplift(
                     .map_or(0, |comparison| comparison.team_safety_violations),
             ),
             deliverable: !repaired.trim().is_empty(),
-            verified: quality_gate.passed,
+            verified: candidate_verified,
             anchor_uplift_bps: pairwise_comparison
                 .as_ref()
                 .map(|comparison| comparison.team_uplift_bps),
@@ -404,13 +436,13 @@ pub(super) fn repair_adaptive_uplift(
             run_context_steer_epoch(run_context),
             "anytime_targeted_uplift_repair",
             &repaired,
-            if quality_gate.passed {
+            if candidate_verified {
                 ResultQuality::Verified
             } else {
                 ResultQuality::Grounded
             },
             evidence_count,
-            quality_gate.passed,
+            candidate_verified,
             false,
         );
     }

@@ -46,6 +46,7 @@ mod tool_runtime;
 mod turn_budget;
 mod worker_policy;
 mod worker_runtime;
+mod worker_tools;
 
 pub use adaptive_loop::{AdaptiveLoopCursor, AdaptiveLoopDisposition};
 pub use anytime_parallel::{AnytimeQuorumExecution, AnytimeQuorumPolicy};
@@ -157,6 +158,7 @@ pub use worker_runtime::{
     IsolatedWorkerRuntime, PreparedWorkerTurn, WorkerAdvance, WorkerFailure, WorkerToolAdmission,
     WorkerToolDenialKind,
 };
+pub use worker_tools::{evidence_worker_tools, substantive_evidence_worker_tools};
 
 pub const DEFAULT_MAX_AGENT_TURNS: usize = 24;
 pub const DEFAULT_COLLABORATION_WORKER_TURNS: usize = 5;
@@ -1341,14 +1343,6 @@ fn normalized_failed_tool_signatures(
 
 pub fn agent_system_prompt(tools: &[ToolSpec]) -> String {
     agent_system_prompt_with_override(tools, None)
-}
-
-pub fn evidence_worker_tools(tools: &[ToolSpec]) -> Vec<ToolSpec> {
-    tools
-        .iter()
-        .filter(|tool| matches!(tool.risk, ToolRisk::ReadOnly))
-        .cloned()
-        .collect()
 }
 
 pub fn compose_base_agent_system_prompt(user_instructions: Option<&str>) -> String {

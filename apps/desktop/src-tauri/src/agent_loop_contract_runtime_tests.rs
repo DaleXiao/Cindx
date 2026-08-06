@@ -1008,6 +1008,7 @@ fn current_collaboration_tool_receipt_satisfies_but_stale_receipt_does_not() {
             source_step: "inspect".to_string(),
             tool_call_id: format!("call-{epoch}"),
             tool_name: "file.read".to_string(),
+            request: r#"{"path":"Cargo.toml"}"#.to_string(),
             input_fingerprint: "fingerprint".to_string(),
             observation: "runtime observation".to_string(),
         }],
@@ -1090,6 +1091,11 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
                     source_step: format!("inspect-{index}"),
                     tool_call_id: format!("call-{index}"),
                     tool_name: (*tool).to_string(),
+                    request: match *tool {
+                        "file.read" => r#"{"path":"Cargo.toml"}"#.to_string(),
+                        "web.search" => r#"{"query":"Cindx release"}"#.to_string(),
+                        _ => "{}".to_string(),
+                    },
                     input_fingerprint: format!("fingerprint-{index}"),
                     observation: format!("{sentinel} {}", "evidence ".repeat(120)),
                 },
@@ -1099,7 +1105,7 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
     };
     let mut runtime = start_agent_loop(
         TaskId("combined-collaboration-grounding".to_string()),
-        "Audit this repository, verify its release online, and inspect the screen",
+        "Audit Cargo.toml and search online for the latest Cindx release",
         AgentRuntimeConfig::default(),
     );
     runtime.messages.insert(
@@ -1118,7 +1124,10 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
         .iter()
         .map(|(scope, _, _)| *scope)
         .collect::<BTreeSet<_>>();
-    let context = run_context("Audit, verify online, and inspect the screen", 4);
+    let context = run_context(
+        "Audit Cargo.toml and search online for the latest Cindx release",
+        4,
+    );
     let mut completion_intent = prompt_completion_intent(&context);
     completion_intent.evidence_scopes = scopes;
 
@@ -1131,7 +1140,19 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
     )
     .expect("collaboration evidence contract applies");
 
-    assert_eq!(runtime.task_contract.prompt_evidence_contexts().len(), 3);
+    let grounded_requirements = runtime
+        .task_contract
+        .prompt_evidence_contexts()
+        .into_iter()
+        .map(|context| context.requirement_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        grounded_requirements,
+        requirements
+            .iter()
+            .map(|(scope, _, _)| scope.requirement_id().to_string())
+            .collect::<BTreeSet<_>>()
+    );
     assert_eq!(
         AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
         Ok(None)
@@ -1142,7 +1163,7 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
     assert!(prepared.request.messages.iter().any(|message| {
         message.metadata.get("kind").map(String::as_str) == Some("collaboration_trust_policy")
     }));
-    assert!(!prepared.request.messages.iter().any(|message| {
+    assert!(prepared.request.messages.iter().any(|message| {
         message.metadata.get("kind").map(String::as_str) == Some("cognitive_state")
     }));
     for (scope, _, sentinel) in requirements {

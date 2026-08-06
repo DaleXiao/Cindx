@@ -7,12 +7,14 @@ does not claim Fugu Ultra equivalence.
 ## Profiles
 
 - `quick`: documentation, version, desktop layout, and structural UX contracts.
-- `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
+- `ci-contract`: quick checks plus routing, the typed collaboration execution
+  contract, Evaluation v2 foundation, the
   120-case arena schema/evidence-ingestion contract, the Agent Real-World V5
   measurement contract, the exact managed-process session contract, memory, and
   frontend state behavior.
 - `control-plane`: documentation and deterministic agent contracts, including
-  the Agent Real-World V5 measurement and managed-process session contracts,
+  typed collaboration execution, the Agent Real-World V5 measurement, and
+  managed-process session contracts,
   plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
@@ -114,9 +116,15 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   within 512 bytes with a saturated no-gain counter. This is a projection and
   control-state scaling contract, not provider-backed evidence of intelligence,
   answer quality, or long-horizon task success.
-- The combined collaboration grounding contract keeps three independent
-  grounding domains and their trust policy dispatchable under a 4,096-token
-  context by yielding only the advisory cognitive overlay when necessary.
+- The exact `agent-collaboration-contract` gate requires one
+  `cindx.agent-collaboration-contract.v1` marker. It proves distinct evidence and
+  exploration catalogs, static read-only effect filtering, current
+  collaboration/epoch evidence projection, typed verifier receipts, and
+  target-bound collaboration grounding. The combined 4,096-token fixture keeps
+  three independent grounding domains, trust policy, and bounded cognitive
+  overlay dispatchable together. These are deterministic execution-plane
+  contracts, not provider-backed evidence of collaboration quality or
+  intelligence uplift.
 - Exact workspace file-plane tests cover stale, ambiguous, racing, locked, and
   failed-publication patches; permission and receipt preservation; degraded
   output-history capture; read hashes and batch partial/offset behavior;

@@ -93,6 +93,7 @@ fn collaboration_context_exposes_trusted_tool_observation_to_executor() {
             source_step: "inspect".to_string(),
             tool_call_id: "call-1".to_string(),
             tool_name: "file.read".to_string(),
+            request: r#"{"path":"Cargo.toml"}"#.to_string(),
             input_fingerprint: "sha256".to_string(),
             observation: "version = 2".to_string(),
         });
@@ -110,4 +111,5 @@ fn collaboration_context_exposes_trusted_tool_observation_to_executor() {
         serde_json::from_str(&history[2].content).expect("evidence is structured JSON");
     assert_eq!(evidence["observations"][0]["tool"], "file.read");
     assert_eq!(evidence["observations"][0]["observation"], "version = 2");
+    assert!(!history[2].content.contains("Cargo.toml"));
 }

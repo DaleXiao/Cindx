@@ -559,6 +559,25 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             )
     }
 
+    pub fn record_prompt_tool_evidence_observation_at(
+        &mut self,
+        epoch: u64,
+        tool_name: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+    ) -> bool {
+        self.state
+            .task_contract
+            .record_prompt_tool_evidence_observation_at(
+                epoch,
+                tool_name,
+                source,
+                receipt,
+                observation,
+            )
+    }
+
     pub fn repeated_tool_failure_count(&self, request: &AgentToolRequest) -> usize {
         repeated_tool_failure_count(self.state, &request.tool_name, &request.input)
     }

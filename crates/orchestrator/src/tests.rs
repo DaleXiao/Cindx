@@ -171,6 +171,138 @@ fn workflow_plan(workflow_id: &str, with_verifier: bool) -> WorkflowPlanIr {
 }
 
 #[test]
+fn workflow_verification_requires_a_typed_lineage_receipt() {
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        "verification-receipt",
+        workflow_plan("workflow-verification", true),
+        1,
+    );
+    for (step_id, model, output) in [
+        ("approach_a", "planner", "primary"),
+        ("approach_b", "reviewer", "alternative"),
+    ] {
+        checkpoint
+            .complete_step(step_id, model, output.to_string(), "[]".to_string(), 2)
+            .unwrap();
+    }
+
+    checkpoint
+        .complete_step(
+            "verify",
+            "reviewer",
+            "plausible prose without a receipt".to_string(),
+            "[]".to_string(),
+            3,
+        )
+        .unwrap();
+    assert_eq!(
+        checkpoint.steps["verify"].semantic.verification,
+        WorkflowVerificationState::Inconclusive
+    );
+
+    let receipt = WorkflowVerificationReceipt {
+        schema: WORKFLOW_VERIFICATION_RECEIPT_SCHEMA.to_string(),
+        verdict: WorkflowVerificationVerdict::Passed,
+        reviewed_steps: vec!["approach_a".to_string(), "approach_b".to_string()],
+        evidence_refs: Vec::new(),
+        unresolved: Vec::new(),
+    };
+    checkpoint
+        .complete_step_with_evidence(
+            "verify",
+            "reviewer",
+            "audited both branches".to_string(),
+            "[]".to_string(),
+            WorkflowEvidenceSummary::default(),
+            Some(receipt),
+            4,
+        )
+        .unwrap();
+    assert_eq!(
+        checkpoint.steps["verify"].semantic.verification,
+        WorkflowVerificationState::Passed
+    );
+}
+
+#[test]
+fn workflow_verification_receipt_is_exactly_one_final_line() {
+    let receipt = r#"CINDX_VERIFICATION: {"schema":"cindx.workflow-verification.v1","verdict":"passed","reviewed_steps":[],"evidence_refs":[],"unresolved":[]}"#;
+    assert!(WorkflowVerificationReceipt::from_worker_output(&format!(
+        "review complete\n{receipt}\n"
+    ))
+    .is_some());
+    assert!(
+        WorkflowVerificationReceipt::from_worker_output(&format!("{receipt}\ntrailing prose"))
+            .is_none()
+    );
+    assert!(
+        WorkflowVerificationReceipt::from_worker_output(&format!("{receipt}\n{receipt}")).is_none()
+    );
+}
+
+#[test]
+fn workflow_verification_receipt_must_cite_each_grounded_input() {
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        "verification-evidence",
+        workflow_plan("workflow-verification-evidence", true),
+        1,
+    );
+    for (step_id, model) in [("approach_a", "planner"), ("approach_b", "reviewer")] {
+        checkpoint
+            .complete_step(
+                step_id,
+                model,
+                format!("{step_id} output"),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+    }
+    let evidence = WorkflowEvidenceSummary::from_items(
+        [
+            ("approach_a".to_string(), "approach_a::call-a".to_string()),
+            ("approach_b".to_string(), "approach_b::call-b".to_string()),
+        ],
+        "verify",
+    );
+    let receipt = WorkflowVerificationReceipt {
+        schema: WORKFLOW_VERIFICATION_RECEIPT_SCHEMA.to_string(),
+        verdict: WorkflowVerificationVerdict::Passed,
+        reviewed_steps: vec!["approach_a".to_string(), "approach_b".to_string()],
+        evidence_refs: vec!["approach_a::call-a".to_string()],
+        unresolved: Vec::new(),
+    };
+
+    checkpoint
+        .complete_step_with_evidence(
+            "verify",
+            "reviewer",
+            "incomplete audit".to_string(),
+            "[{},{}]".to_string(),
+            evidence,
+            Some(receipt),
+            3,
+        )
+        .unwrap();
+    assert_eq!(
+        checkpoint.steps["verify"].semantic.verification,
+        WorkflowVerificationState::Inconclusive
+    );
+}
+
+#[test]
+fn workflow_synthesis_is_a_tool_free_terminal_boundary() {
+    let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+    let mut plan = workflow_plan("synthesis-boundary", false);
+    plan.steps.last_mut().unwrap().tool_policy = WorkflowToolPolicy::ReadOnlyEvidence;
+
+    assert_eq!(
+        plan.validate(&allowed_models),
+        Err("workflow synthesis step synthesize cannot execute tools".to_string())
+    );
+}
+
+#[test]
 fn fallback_delivery_sink_has_a_terminal_output_contract() {
     let plan = WorkflowPlanIr::from_adaptive(
         "single-step",
@@ -908,6 +1040,12 @@ fn conductor_harness_requires_distinct_work_but_not_distinct_models() {
             .expect_err("duplicate branch assignments should be rejected");
     assert!(duplicate_subtask.contains("repeat the same subtask"));
 
+    harness
+            .parse_plan(
+                r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"validate A before B","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"validate B before A","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both","access":["a","b"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
+            )
+            .expect("directionally different assignments must remain independent");
+
     let incomplete_review = harness
             .parse_plan(
                 r#"{"steps":[{"id":"a","role":"thinker","model":"planner","subtask":"primary analysis","access":[]},{"id":"b","role":"worker","model":"reviewer","subtask":"independent implementation","access":[]},{"id":"verify","role":"verifier","model":"reviewer","subtask":"audit one branch","access":["a"]},{"id":"final","role":"synthesizer","model":"planner","subtask":"merge","access":["a","b","verify"]}]}"#,
@@ -916,6 +1054,40 @@ fn conductor_harness_requires_distinct_work_but_not_distinct_models() {
     assert!(
         incomplete_review.contains("directly audits every independent contribution"),
         "{incomplete_review}"
+    );
+}
+
+#[test]
+fn conductor_evidence_steps_require_direct_observations() {
+    let mut request = conductor_request();
+    request.execution_contract.verification_required = false;
+    request.execution_contract.min_distinct_contributions = 1;
+    let harness = ConductorHarness::new(request);
+    let plan = harness
+        .parse_plan(
+            r#"{"steps":[{"id":"inspect","role":"worker","model":"planner","subtask":"inspect runtime evidence","access":[],"output_kind":"evidence","tool_policy":"read_only_evidence"},{"id":"final","role":"synthesizer","model":"planner","subtask":"integrate the evidence","access":["inspect"],"output_kind":"synthesis","tool_policy":"none"}]}"#,
+        )
+        .expect("explicit evidence contract should parse");
+
+    assert_eq!(
+        plan.steps[0]
+            .contract
+            .completion
+            .minimum_direct_evidence_items,
+        1
+    );
+
+    let inferred_plan = harness
+        .parse_plan(
+            r#"{"steps":[{"id":"inspect","role":"worker","model":"planner","subtask":"inspect runtime evidence","access":[],"tool_policy":"read_only_evidence"},{"id":"final","role":"synthesizer","model":"planner","subtask":"integrate the evidence","access":["inspect"],"output_kind":"synthesis","tool_policy":"none"}]}"#,
+        )
+        .expect("an inferred evidence contract should parse");
+    assert_eq!(
+        inferred_plan.steps[0]
+            .contract
+            .completion
+            .minimum_direct_evidence_items,
+        1
     );
 }
 

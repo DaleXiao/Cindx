@@ -92,8 +92,14 @@ pub(super) fn reconcile_adaptive_wave(
             }
             continue;
         };
-        let shared_evidence =
-            merge_collaboration_evidence(&spec.access, evidence_by_step, &recovered.evidence);
+        let shared_evidence = merge_collaboration_evidence(
+            &spec.step_id,
+            &spec.access,
+            evidence_by_step,
+            &recovered.evidence,
+            collaboration_id,
+            run_context_steer_epoch(run_context),
+        );
         let step_output = collaboration_step_result(
             &spec.step_id,
             &recovered.model,
@@ -102,11 +108,25 @@ pub(super) fn reconcile_adaptive_wave(
         );
         let evidence_json = serde_json::to_string(&shared_evidence)
             .map_err(|error| format!("workflow evidence serialization failed: {error}"))?;
-        workflow_checkpoint.complete_step(
+        let evidence_summary = WorkflowEvidenceSummary::from_items(
+            shared_evidence.iter().map(|evidence| {
+                (
+                    evidence.source_step.clone(),
+                    collaboration_evidence_ref(evidence),
+                )
+            }),
+            &spec.step_id,
+        );
+        let verification_receipt = WorkflowVerificationReceipt::from_worker_output(
+            &recovered.content,
+        );
+        workflow_checkpoint.complete_step_with_evidence(
             &spec.step_id,
             &recovered.model,
             step_output.clone(),
             evidence_json,
+            evidence_summary,
+            verification_receipt,
             current_time_millis(),
         )?;
         workflow_checkpoint.record_step_metrics(
