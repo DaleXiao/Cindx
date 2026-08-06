@@ -114,7 +114,7 @@ fn file_backed_memory_seed_is_visible_to_an_independent_eval_reader() {
     persist_memory_seed_fixture(
         &mut writer,
         &run_context,
-        "The durable project requirement is: rollout codename Orion Harbor and accountable owner Mina Chen.",
+        "Long-term project requirement: demo materials must label the retired launch ring as Red Juniper and list Niko Vale as the demo contact.",
     )
     .expect("memory fixture should persist");
     drop(writer);
@@ -122,8 +122,8 @@ fn file_backed_memory_seed_is_visible_to_an_independent_eval_reader() {
     let readback = read_seeded_memory_fixture(&evaluation_database, project_id, session_id)
         .expect("independent read-only connection should see the fixture");
     assert!(readback.record_count > 0);
-    assert!(readback.user_requirement.contains("Orion Harbor"));
-    assert!(readback.user_requirement.contains("Mina Chen"));
+    assert!(readback.user_requirement.contains("Red Juniper"));
+    assert!(readback.user_requirement.contains("Niko Vale"));
     assert_eq!(readback.projection_sha256.len(), 64);
     assert!(!production_database.exists());
 }

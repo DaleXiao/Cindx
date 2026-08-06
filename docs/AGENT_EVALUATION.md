@@ -91,12 +91,17 @@ and graph invariants. They answer “does this contract hold?” They do not ans
 Versioned manifests under `benchmarks/` validate routing contracts, memory
 recall fixtures, evaluation schemas, resource invariants, and safety behavior.
 Synthetic or fixture-based scores must remain labeled as contract results.
-The memory-effect V1 contract additionally proves that memory-off is imposed
-only after routing, both arms retain the same non-memory decision and budget,
-all 18 cells remain in the denominator, outputs and provider receipts are
-revalidated, and the irrelevant-memory control must pass in both arms before a
-positive decision is possible. It does not call a provider in deterministic
-profiles and does not itself prove useful memory.
+The memory-effect V1 contract additionally proves that both arms use the same
+evaluation-only matched route: the current compatible executor model with a
+fixed direct, read-only, relevant-memory plan and query. Memory-off is imposed
+only after that route is recorded and changes only the effective memory plan.
+All 18 cells remain in the denominator, outputs and provider receipts are
+revalidated, every case denies mutations and restricts receipts to frozen
+read-only evidence tools, and the irrelevant-memory control must actually
+recall its decoy while passing in both arms before a positive decision is
+possible. This isolates memory utility and recalled-context resistance rather
+than Auto router quality. It does not call a provider in deterministic profiles
+and does not itself prove useful memory.
 The `causal-router-v2-contract` and `causal-router-v2-scaling` gates establish
 deterministic policy identity, receipt integrity, counterfactual availability,
 effect-authority enforcement, and bounded operation counts. They do not show

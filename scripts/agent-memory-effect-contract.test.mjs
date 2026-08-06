@@ -68,7 +68,16 @@ function rawFixture() {
           output,
           output_sha256: sha256(output),
           resolved_budget: { max_duration_ms: 1 },
-          strategy_receipt: { profile_sha256: "c".repeat(64) },
+          strategy_receipt: {
+            requested_policy: "auto_router",
+            effective_policy: "single",
+            execution_mode: "direct",
+            decision_source: "matched_memory_evaluation",
+            execution_constraint: "matched_memory_effect",
+            workflow_profile_exercised: false,
+            profile_sha256: "c".repeat(64)
+          },
+          tool_receipts: [],
           metrics: { model_responses: 1 },
           model_receipts: [{
             configured_model: "private-model",
@@ -79,10 +88,10 @@ function rawFixture() {
           }],
           memory_evaluation_receipt: {
             constraint: treatment,
-            routed_memory_policy: required ? "relevant" : "none",
-            effective_memory_policy: treatment === "memory_off" ? "none" : required ? "relevant" : "none",
-            recall_count: treatment === "memory_on" && required ? 1 : 0,
-            selected_count: treatment === "memory_on" && required ? 1 : 0,
+            routed_memory_policy: "relevant",
+            effective_memory_policy: treatment === "memory_off" ? "none" : "relevant",
+            recall_count: treatment === "memory_on" ? 1 : 0,
+            selected_count: treatment === "memory_on" ? 1 : 0,
             routed_query_sha256: "d".repeat(64),
             selected_memory_ids_sha256: "e".repeat(64),
             non_memory_decision_sha256: "f".repeat(64)
@@ -141,6 +150,26 @@ test("routed-none positive cells are not exercised rather than counted as wins",
   const report = analyzeMemoryEffect(suite, raw);
   assert.equal(report.decision, "NOT_EXERCISED");
   assert.equal(report.pair_status_counts.NOT_EXERCISED, 3);
+});
+
+test("an irrelevant-memory control must actually recall its decoy", () => {
+  const raw = rawFixture();
+  for (const run of raw.runs.filter((item) => item.case_id === suite.cases[2].id)) {
+    run.memory_evaluation_receipt.routed_memory_policy = "none";
+    run.memory_evaluation_receipt.effective_memory_policy = "none";
+    run.memory_evaluation_receipt.recall_count = 0;
+    run.memory_evaluation_receipt.selected_count = 0;
+  }
+  const report = analyzeMemoryEffect(suite, raw);
+  assert.equal(report.decision, "NOT_EXERCISED");
+  assert.equal(report.pair_status_counts.NOT_EXERCISED, 3);
+});
+
+test("an effectful tool attempt cannot pass the frozen read-only contract", () => {
+  const raw = rawFixture();
+  const run = raw.runs[0];
+  run.tool_receipts.push({ tool: "file.write", status: "denied" });
+  assert.throws(() => analyzeMemoryEffect(suite, raw), /tool safety receipt mismatch/);
 });
 
 test("memory-off leakage invalidates evidence without removing failures from denominator", () => {

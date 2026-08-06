@@ -235,4 +235,8 @@ node --test scripts/agent-memory-effect-contract.test.mjs
 Only a clean exact-revision `--execute` run of
 `benchmarks/agent/memory-effect-v1.json`, followed by publication of sanitized
 evidence, may classify memory as `IMPROVED`, `NEUTRAL`, `REGRESSED`,
-`NOT_EXERCISED`, or `INVALID_EVIDENCE`. Raw provider output remains outside Git.
+`NOT_EXERCISED`, or `INVALID_EVIDENCE`. The matrix fixes the same compatible
+model and direct/read-only route before applying memory-on/off, denies mutation
+requests, verifies a read-only tool allowlist, and requires the negative-control
+decoy to be recalled rather than trivially absent. It is not an Auto-router
+comparison. Raw provider output remains outside Git.

@@ -126,6 +126,45 @@ pub(crate) fn plan_agent_run(
         prompt_genome_sha256(&profile).map_err(CollaborationStageError::Failed)?;
     let recent_context = collaboration_recent_context(history);
 
+    if execution_constraint.is_matched_memory_effect() {
+        let decision = requirements::fast_direct_route_decision(
+            preferred_fallback_model,
+            &candidates,
+            route_requirements,
+        )
+        .map_err(CollaborationStageError::Failed)?;
+        let decision = execution_constraint
+            .apply(decision, effort)
+            .map_err(CollaborationStageError::Failed)?;
+        let planned = finalize_planned_run(
+            prompt,
+            candidates,
+            PlannedRunFinalizeInput {
+                decision,
+                source: AgentPlanningSource::MatchedMemoryEvaluation,
+                attempts: 0,
+                prompt_genome: profile,
+                effort,
+                degradation_reason: None,
+                attempted_conductor_models: Vec::new(),
+                selected_conductor_model: None,
+                route_requirements,
+                budget_fingerprint,
+                recent_context: recent_context.clone(),
+                prompt_profile_sha256: prompt_profile_sha256.clone(),
+            },
+        )
+        .map_err(CollaborationStageError::Failed)?;
+        ensure_planning_current(cancellation)?;
+        planned
+            .apply_to_context(run_context)
+            .map_err(CollaborationStageError::Failed)?;
+        run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
+        recording::record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
+            .map_err(CollaborationStageError::Failed)?;
+        return Ok(planned);
+    }
+
     if !effort.uses_conductor() {
         conductor_health_runtime::record_conductor_fast_bypass(run_context);
         let decision = requirements::fast_direct_route_decision(

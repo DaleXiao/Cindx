@@ -67,6 +67,12 @@ function validateSuite(suite) {
   }
   const control = suite.cases.find((testCase) => testCase.memory_effect.role === "irrelevant_control");
   requireFact(control.verification?.output_not_contains?.length > 0, "irrelevant control decoy contract is missing");
+  const readOnlyTools = new Set(["file.read", "file.read_many", "file.search"]);
+  for (const testCase of suite.cases) {
+    requireFact(testCase.permission_policy === "deny_mutations", `${testCase.id}: mutations are not denied`);
+    requireFact(testCase.verification?.allowed_tools?.length > 0, `${testCase.id}: tool allowlist is missing`);
+    requireFact(testCase.verification.allowed_tools.every((tool) => readOnlyTools.has(tool)), `${testCase.id}: tool allowlist is not read-only`);
+  }
 }
 
 function expectedCells(suite) {
@@ -123,6 +129,12 @@ function outputContractPassed(testCase, output) {
     (testCase.verification?.output_not_contains || []).every((value) => !normalized.includes(value.toLowerCase()));
 }
 
+function toolSafetyContractPassed(testCase, run) {
+  const allowed = new Set(testCase.verification?.allowed_tools || []);
+  return allowed.size > 0 && Array.isArray(run.tool_receipts) &&
+    run.tool_receipts.every((receipt) => receipt && typeof receipt.tool === "string" && allowed.has(receipt.tool));
+}
+
 function validateRunShape(run, cell, testCase) {
   const key = cell.key;
   requireFact(run.category === testCase.category, `${key}: category mismatch`);
@@ -135,6 +147,8 @@ function validateRunShape(run, cell, testCase) {
   requireFact(run.verification && typeof run.verification.answer_passed === "boolean" && typeof run.verification.quality_passed === "boolean", `${key}: verification receipt is invalid`);
   const answerPassed = outputContractPassed(testCase, run.output);
   requireFact(run.verification.answer_passed === answerPassed, `${key}: output contract receipt mismatch`);
+  const toolSafetyPassed = toolSafetyContractPassed(testCase, run);
+  requireFact(toolSafetyPassed || run.verification.external_effect_passed === false, `${key}: tool safety receipt mismatch`);
   if (typeof run.verification.external_effect_passed === "boolean") {
     requireFact(run.verification.quality_passed === (answerPassed && run.verification.external_effect_passed), `${key}: quality receipt is inconsistent`);
   } else {
@@ -188,6 +202,12 @@ function runEvidenceValid(run) {
     Number.isInteger(run.memory_records_after_seed) && run.memory_records_after_seed > 0 &&
     sha256Pattern.test(run.memory_seed_sha256 || "") &&
     run.strategy_receipt && sha256Pattern.test(run.strategy_receipt.profile_sha256 || "") &&
+    run.strategy_receipt.requested_policy === "auto_router" &&
+    run.strategy_receipt.effective_policy === "single" &&
+    run.strategy_receipt.execution_mode === "direct" &&
+    run.strategy_receipt.decision_source === "matched_memory_evaluation" &&
+    run.strategy_receipt.execution_constraint === "matched_memory_effect" &&
+    run.strategy_receipt.workflow_profile_exercised === false &&
     !run.setup_failure && !run.evidence_error;
 }
 
@@ -237,9 +257,8 @@ export function analyzeMemoryEffect(suite, raw, rawEvidenceSha256 = null, expect
       let status = "EVALUABLE";
       if (!runEvidenceValid(on) || !runEvidenceValid(off)) status = "INVALID_EVIDENCE";
       else if (!pairedInvariant(on, off)) status = "CONFOUNDED";
-      else if (testCase.memory_effect.role === "required" &&
-        (on.memory_evaluation_receipt.routed_memory_policy === "none" ||
-          on.memory_evaluation_receipt.recall_count === 0 || on.memory_evaluation_receipt.selected_count === 0)) status = "NOT_EXERCISED";
+      else if (on.memory_evaluation_receipt.routed_memory_policy === "none" ||
+        on.memory_evaluation_receipt.recall_count === 0 || on.memory_evaluation_receipt.selected_count === 0) status = "NOT_EXERCISED";
       pairs.push({
         pair_sha256: digest("cindx.agent-memory-effect-pair.v1", `${testCase.id}/r${replicate}`),
         case_sha256: digest("cindx.agent-memory-effect-case.v1", testCase.id),

@@ -152,10 +152,15 @@ parent module owns the frozen suite, execution plan, case materialization, and
 raw report; its `treatments` child owns versioned treatment and schema identity;
 its `execution` child owns one-cell oracle-reference or product execution; and
 its `runtime` child owns product-run continuation and event metric projection.
-Its `memory_receipts` child owns the frozen memory-on/off receipt projection;
-the evaluation-only constraint is applied after routing and changes only the
-effective memory policy, so neither arm can silently change model, tools,
-retrieval, workflow, risk, or budget.
+Its `memory_receipts` child owns the frozen memory-on/off receipt projection.
+The memory-effect suite enters an evaluation-only matched planning source that
+bypasses stochastic conductor selection and records the current compatible
+executor model with one fixed direct, read-only, relevant-memory plan. The
+memory constraint is then applied after this matched route and changes only the
+effective memory policy. Neither arm can silently change model, tools,
+retrieval, workflow, risk, query, or budget, and ordinary product ingress cannot
+select this planning source. The suite denies mutation approvals and the
+verifier rejects every tool receipt outside its frozen read-only allowlist.
 Its `http_fixture` child owns the ephemeral loopback server and request receipt
 for each browser cell; the resolved URL is part of the case contract rather than
 an ambient browser dependency. Its `tool_receipts` child projects typed attempts

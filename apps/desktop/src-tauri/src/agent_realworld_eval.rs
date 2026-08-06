@@ -100,6 +100,8 @@ struct VerificationContract {
     #[serde(default)]
     required_tools_all: Vec<String>,
     #[serde(default)]
+    allowed_tools: Vec<String>,
+    #[serde(default)]
     browser_target_receipt: Option<BrowserTargetReceiptContract>,
     #[serde(default)]
     minimum_denied_permissions: usize,
