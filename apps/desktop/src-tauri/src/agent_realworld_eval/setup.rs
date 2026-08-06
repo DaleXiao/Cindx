@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::Mutex;
-use tools::WebSearchConfig;
+use std::sync::{Arc, Mutex};
+use tools::{ProcessManager, WebSearchConfig};
 
 const EVALUATION_DATA_DIR_ENV: &str = "CINDX_AGENT_REALWORLD_DATA_DIR";
 
@@ -221,6 +221,7 @@ pub(super) fn build_evaluation_app(
             "agent realworld title",
         ),
         workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
+        process_manager: Arc::new(ProcessManager::new()),
         tool_registry_cache: Mutex::new(ToolRegistryCache::default()),
         conductor_health: Mutex::new(
             crate::conductor_health_runtime::ConductorHealthLedger::default(),

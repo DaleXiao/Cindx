@@ -156,6 +156,26 @@ loops from unlocking the maximum Auto or Pro budget.
   canonical workspace file still has the recorded after-SHA; otherwise it fails
   closed without repeating the write.
 
+## Managed Process Tools
+
+- `process.start` reserves an opaque, owner-bound process handle without running
+  the command before its start receipt can be persisted. The first
+  `process.poll` or approved `process.input` activates it; `shell.run` remains the
+  compatible foreground fallback.
+- Poll returns bounded stdout/stderr cursor pages and explicit pending, running,
+  terminal, exit code, signal, timeout, cancellation, CPU/output-limit,
+  completeness, and truncation facts. Nonzero child exit is a typed child
+  outcome rather than a failed transport.
+- Active sessions are limited to two per physical run owner and four for the
+  application. Wall, CPU, combined output, poll, and input budgets are hard
+  bounded. Cancel, steer, run completion, session removal, explicit terminate,
+  process limits, and confirmed app exit stop and reap the process group; old
+  handles are not reattached after an app restart.
+- Start authorization remains bound to the exact command and cwd. Interactive
+  input always requires a payload-bound one-shot approval. Process observations
+  do not grant workspace verification merely because a command name contains
+  `test`, `check`, or `build`.
+
 ## Data, Memory, and Retrieval
 
 - SQLite is the durable product state. Startup fails closed when the persistent

@@ -16,7 +16,7 @@ pub(crate) fn agent_session_permission_granted(
     let Some(session_id) = session_id else {
         return Ok(false);
     };
-    let require_capability_key = request.action == "shell.run";
+    let require_capability_key = matches!(request.action.as_str(), "shell.run" | "process.start");
     if require_capability_key && !request.metadata.contains_key("command") {
         return Ok(false);
     }

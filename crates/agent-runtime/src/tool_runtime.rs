@@ -99,11 +99,6 @@ impl PersistedToolEffectWitness {
                 Some(ToolRisk::ReadOnly) if !structured_effect_targets(input_json).is_empty() => {
                     PersistedToolEffectKind::WorkspaceObservation
                 }
-                Some(ToolRisk::ExecutesProcess)
-                    if process_input_looks_like_verification(input_json) =>
-                {
-                    PersistedToolEffectKind::ProcessVerification
-                }
                 _ => return None,
             },
         };
@@ -626,29 +621,6 @@ fn effect_target_digest(lineage_scope: &str, root: &str, target: &str) -> String
     digest.update(b"\n");
     digest.update(target.as_bytes());
     format!("{:x}", digest.finalize())[..32].to_string()
-}
-
-fn process_input_looks_like_verification(input_json: &str) -> bool {
-    let normalized = input_json.to_ascii_lowercase();
-    [
-        " test",
-        "test ",
-        "check",
-        "build",
-        "lint",
-        "verify",
-        "pytest",
-        "vitest",
-        "jest",
-        "cargo test",
-        "cargo check",
-        "swift test",
-        "go test",
-        "git diff",
-        "git status",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1188,6 +1160,13 @@ mod tests {
             .is_none());
 
         let shell_input = r#"{"command":"cargo clippy","cwd":"."}"#;
+        assert!(PersistedToolEffectWitness::capture(
+            "shell.run",
+            r#"{"command":"echo check"}"#,
+            Some(&ToolRisk::ExecutesProcess),
+            "logical-run:4",
+        )
+        .is_none());
         let shell_spec = ToolSpec::builtin(
             "shell.run",
             "shell",
@@ -1219,6 +1198,16 @@ mod tests {
             .is_some());
         let encoded_shell = shell_witness.encode().expect("shell witness encodes");
         assert!(!encoded_shell.contains("cargo clippy"));
+        let recovered_shell = PersistedToolEffectWitness::decode(&encoded_shell)
+            .expect("signed typed shell witness should recover");
+        assert!(recovered_shell
+            .postcondition_evidence_for(
+                "shell.run",
+                &tool_input_fingerprint("shell.run", shell_input),
+                Some(&ToolRisk::ExecutesProcess),
+                Some(&shell_spec),
+            )
+            .is_some());
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub(crate) struct AppState {
     pub(crate) queue_dispatching_sessions: ExclusiveKeyRegistry,
     pub(crate) session_title_refinement_sessions: ExclusiveKeyRegistry,
     pub(crate) workspace_knowledge_cache: Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
+    pub(crate) process_manager: Arc<ProcessManager>,
     pub(crate) tool_registry_cache: Mutex<ToolRegistryCache>,
     pub(crate) conductor_health: Mutex<ConductorHealthLedger>,
     pub(crate) tool_registry_generation: AtomicU64,

@@ -25,7 +25,15 @@ mod meta_invoke;
 mod meta_tools;
 mod postcondition_evidence;
 mod private_file;
+mod process_capture;
+mod process_contract;
 mod process_control;
+mod process_cpu;
+mod process_runtime;
+mod process_supervisor;
+#[cfg(test)]
+mod process_tests;
+mod process_tools;
 mod shell;
 mod shell_postcondition;
 mod stream_capture;
@@ -48,6 +56,10 @@ pub use file_search::SearchFilesTool;
 pub use file_tools::{ReadFileTool, WriteFileTool};
 pub use image_generation::ImageGenerationTool;
 pub use private_file::write_private_file_atomically;
+pub use process_runtime::ProcessManager;
+pub use process_tools::{
+    ProcessInputTool, ProcessPollTool, ProcessStartTool, ProcessTerminateTool,
+};
 pub use shell::ShellRunTool;
 pub use tool_support::{encode_input, parse_input};
 pub use web_search::WebSearchTool;
@@ -242,6 +254,20 @@ impl ToolRegistry {
         web_search_config: WebSearchConfig,
         image_generation_config: Option<ImageGenerationConfig>,
     ) -> Self {
+        Self::with_workspace_tools_and_services_and_process_manager(
+            workspace_root,
+            web_search_config,
+            image_generation_config,
+            Arc::new(ProcessManager::new()),
+        )
+    }
+
+    pub fn with_workspace_tools_and_services_and_process_manager(
+        workspace_root: impl Into<PathBuf>,
+        web_search_config: WebSearchConfig,
+        image_generation_config: Option<ImageGenerationConfig>,
+        process_manager: Arc<ProcessManager>,
+    ) -> Self {
         let workspace_root = workspace_root.into();
         let mut registry = Self::new();
         registry.register(Box::new(ReadFileTool::new(workspace_root.clone())));
@@ -251,6 +277,15 @@ impl ToolRegistry {
         registry.register(Box::new(PatchFileTool::new(workspace_root.clone())));
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(ShellRunTool::new(workspace_root.clone())));
+        registry.register(Box::new(ProcessStartTool::new(
+            workspace_root.clone(),
+            Arc::clone(&process_manager),
+        )));
+        registry.register(Box::new(ProcessPollTool::new(Arc::clone(&process_manager))));
+        registry.register(Box::new(ProcessInputTool::new(Arc::clone(
+            &process_manager,
+        ))));
+        registry.register(Box::new(ProcessTerminateTool::new(process_manager)));
         registry.register(Box::new(WebSearchTool::new(web_search_config)));
         if let Some(config) = image_generation_config.filter(ImageGenerationConfig::is_ready) {
             registry.register(Box::new(ImageGenerationTool::new(
@@ -448,7 +483,10 @@ fn tool_relevance_with_intent(spec: &ToolSpec, query: &str, intent: &ToolExposur
     if intent.prefer_read_only && spec.effect_semantics == ToolEffectSemantics::ReadOnly {
         score += 100;
     }
-    if intent.prefer_effects && spec.effect_semantics != ToolEffectSemantics::ReadOnly {
+    if intent.prefer_effects
+        && spec.effect_semantics != ToolEffectSemantics::ReadOnly
+        && (spec.namespace != "process" || intent.preferred_namespaces.contains("process"))
+    {
         score += 100;
     }
     score

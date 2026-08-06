@@ -34,6 +34,7 @@
       "agent-realworld-contract",
       "agent-run-lineage-contract",
       "agent-logical-tool-receipts-contract",
+      "process-session-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -49,6 +50,7 @@
       "agent-realworld-contract",
       "agent-run-lineage-contract",
       "agent-logical-tool-receipts-contract",
+      "process-session-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -99,6 +101,7 @@
       "agent-realworld-contract",
       "agent-run-lineage-contract",
       "agent-logical-tool-receipts-contract",
+      "process-session-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -276,6 +279,25 @@
       ],
       "required_output": [
         "test result: ok. 1 passed; 0 failed"
+      ]
+    },
+    {
+      "id": "process-session-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "tools",
+        "process_tests::process_session_contract_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.process-session-contract.v1"
       ]
     },
     {

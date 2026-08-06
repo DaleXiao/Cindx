@@ -18,7 +18,7 @@ pub fn permission_can_allow_session(request: &PermissionRequest) -> bool {
         return false;
     }
     let session_reusable = request.metadata.get("session_reusable").map(String::as_str);
-    if request.action == "shell.run" {
+    if matches!(request.action.as_str(), "shell.run" | "process.start") {
         session_reusable == Some("true")
     } else {
         session_reusable != Some("false")
@@ -26,14 +26,17 @@ pub fn permission_can_allow_session(request: &PermissionRequest) -> bool {
 }
 
 pub fn permission_requires_exact_scope(request: &PermissionRequest) -> bool {
-    matches!(request.action.as_str(), "file.patch" | "shell.run")
+    matches!(
+        request.action.as_str(),
+        "file.patch" | "shell.run" | "process.start"
+    )
 }
 
 fn permission_capability_metadata_matches(
     granted: &PermissionRequest,
     requested: &PermissionRequest,
 ) -> bool {
-    requested.action != "shell.run"
+    !matches!(requested.action.as_str(), "shell.run" | "process.start")
         || requested.metadata.get("command").is_some_and(|command| {
             granted.metadata.get("command").map(String::as_str) == Some(command.as_str())
         })
@@ -64,6 +67,12 @@ mod tests {
         request
             .metadata
             .insert("session_reusable".to_string(), "true".to_string());
+        request
+    }
+
+    fn process_start_request(command: &str, scope: &str) -> PermissionRequest {
+        let mut request = shell_request(command, scope);
+        request.action = "process.start".to_string();
         request
     }
 
@@ -104,6 +113,23 @@ mod tests {
             &hidden_side_effect
         ));
         assert!(!permission_capability_matches(&granted, &missing_command));
+    }
+
+    #[test]
+    fn process_start_reuse_is_bound_to_exact_command_and_working_directory() {
+        let granted = process_start_request("cargo test", "/workspace");
+        assert!(permission_capability_matches(
+            &granted,
+            &process_start_request("cargo test", "/workspace")
+        ));
+        assert!(!permission_capability_matches(
+            &granted,
+            &process_start_request("cargo test", "/other")
+        ));
+        assert!(!permission_capability_matches(
+            &granted,
+            &process_start_request("cargo check", "/workspace")
+        ));
     }
 
     #[test]

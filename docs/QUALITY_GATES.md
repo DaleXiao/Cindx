@@ -9,10 +9,11 @@ does not claim Fugu Ultra equivalence.
 - `quick`: documentation, version, desktop layout, and structural UX contracts.
 - `ci-contract`: quick checks plus routing, Evaluation v2 foundation, the
   120-case arena schema/evidence-ingestion contract, the Agent Real-World V5
-  measurement contract, memory, and frontend state behavior.
+  measurement contract, the exact managed-process session contract, memory, and
+  frontend state behavior.
 - `control-plane`: documentation and deterministic agent contracts, including
-  the Agent Real-World V5 measurement contract, plus Rust workspace and desktop
-  tests.
+  the Agent Real-World V5 measurement and managed-process session contracts,
+  plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   graph/request reuse, frontend streaming, conductor health, and 20k-chunk RAG
   diagnostics.
@@ -26,8 +27,9 @@ does not claim Fugu Ultra equivalence.
   streaming Markdown work. It uses operation counts and identity invariants,
   never cross-machine wall-clock thresholds.
 - `full`: all shipping deterministic gates, including the Agent Real-World V5
-  measurement contract, sidecars, frontend production build, and Rust tests;
-  heavier same-machine diagnostics remain in `performance`.
+  measurement and managed-process session contracts, sidecars, frontend
+  production build, and Rust tests; heavier same-machine diagnostics remain in
+  `performance`.
 
 `scripts/check-desktop-rust-light.sh` is a supplemental compile check, not a
 quality-gate profile. It deliberately avoids frontend bundle resources and the
@@ -110,6 +112,11 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   list/search resource bounds, snapshot pagination, cursor invalidation, UTF-8
   truncation, and coverage; and desktop after-SHA recovery. These are mechanism
   and control checks, not provider-backed Agent-quality evidence.
+- The exact managed-process gate proves pending-before-activation, typed terminal
+  and nonzero outcomes, bounded polling/input, explicit CPU/output truncation,
+  owner/concurrency isolation, cancel-and-reap behavior, credential isolation,
+  one-shot input permission, and absence of postcondition verifier authority.
+  These are process-control mechanisms, not provider-backed intelligence uplift.
 - The execution-role contracts keep Actor and Finalizer stage usage independent,
   expose no tools or Actor turn to Finalizer delivery, bind postcondition quality
   to a typed action/observation receipt, return only a revalidated byte-identical

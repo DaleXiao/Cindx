@@ -966,7 +966,14 @@ const toolsModuleBudgets = new Map([
   ["meta_tools.rs", 240],
   ["postcondition_evidence.rs", 60],
   ["private_file.rs", 80],
+  ["process_capture.rs", 310],
+  ["process_contract.rs", 410],
   ["process_control.rs", 30],
+  ["process_cpu.rs", 100],
+  ["process_runtime.rs", 670],
+  ["process_supervisor.rs", 340],
+  ["process_tests.rs", 740],
+  ["process_tools.rs", 370],
   ["shell.rs", 950],
   ["shell_postcondition.rs", 200],
   ["stream_capture.rs", 60],
@@ -1086,6 +1093,9 @@ assert(
     read("crates/tools/src/lib.rs").includes("mod file_tools;") &&
     read("crates/tools/src/lib.rs").includes("mod meta_tools;") &&
     read("crates/tools/src/lib.rs").includes("mod image_generation;") &&
+    read("crates/tools/src/lib.rs").includes("mod process_runtime;") &&
+    read("crates/tools/src/lib.rs").includes("mod process_supervisor;") &&
+    read("crates/tools/src/lib.rs").includes("mod process_tools;") &&
     read("crates/tools/src/lib.rs").includes("mod tool_contract_v2;") &&
     read("crates/tools/src/lib.rs").includes("mod web_search;") &&
     toolsSource.includes("web_search_is_network_permissioned_but_effect_read_only") &&

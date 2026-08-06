@@ -40,7 +40,7 @@ fn tool_exposure_intent(
         Some("coding") => {
             intent
                 .preferred_namespaces
-                .extend(["file", "shell"].map(str::to_string));
+                .extend(["file", "shell", "process"].map(str::to_string));
         }
         Some("research" | "retrieval") => {
             intent

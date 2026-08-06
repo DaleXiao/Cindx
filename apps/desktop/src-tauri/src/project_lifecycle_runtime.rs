@@ -200,6 +200,7 @@ pub(crate) fn clear_session_runtime_state(
     if session_ids.is_empty() {
         return Ok(());
     }
+    state.process_manager.shutdown_sessions(session_ids);
     state
         .agent_run_controls
         .remove_many(session_ids, true)
