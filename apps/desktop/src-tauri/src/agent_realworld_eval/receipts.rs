@@ -291,6 +291,9 @@ pub(super) fn successful_response_count(event: &Event) -> usize {
     {
         return responses;
     }
+    if event.metadata.contains_key("request_payload_sha256") {
+        return 1;
+    }
     usize::from(
         event.summary == "Agent model turn finished"
             || event.metadata.get("status").map(String::as_str) == Some("completed")
@@ -431,6 +434,47 @@ mod tests {
             assert_eq!(receipt.receipt_status, status);
             assert!(receipt.provider_response_id_sha256.is_none());
         }
+    }
+
+    #[test]
+    fn degraded_collaboration_with_provider_receipt_counts_as_a_response() {
+        let event = event(
+            "Collaboration verifier unavailable",
+            EventKind::ModelRequestFinished,
+            Metadata::from([
+                ("status".to_string(), "degraded".to_string()),
+                ("request_payload_sha256".to_string(), "a".repeat(64)),
+                ("response_semantic_sha256".to_string(), "b".repeat(64)),
+                (
+                    "provider_receipt_status".to_string(),
+                    "observed".to_string(),
+                ),
+            ]),
+        );
+
+        assert_eq!(successful_response_count(&event), 1);
+    }
+
+    #[test]
+    fn degraded_collaboration_without_provider_receipt_does_not_count_as_a_response() {
+        let event = event(
+            "Collaboration verifier unavailable",
+            EventKind::ModelRequestFinished,
+            Metadata::from([("status".to_string(), "degraded".to_string())]),
+        );
+
+        assert_eq!(successful_response_count(&event), 0);
+    }
+
+    #[test]
+    fn completed_event_without_provider_receipt_still_exposes_missing_evidence() {
+        let event = event(
+            "Collaboration verifier finished",
+            EventKind::ModelRequestFinished,
+            Metadata::from([("status".to_string(), "completed".to_string())]),
+        );
+
+        assert_eq!(successful_response_count(&event), 1);
     }
 
     #[test]
