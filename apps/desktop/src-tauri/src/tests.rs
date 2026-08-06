@@ -2149,7 +2149,15 @@ fn recovery_identity_stays_on_root_prompt_after_steer() {
         kind: EventKind::TaskStatusChanged,
         summary: "Agent task started".to_string(),
         metadata: [
+            (
+                "agent_run_identity_schema".to_string(),
+                "cindx.agent-run-identity.v1".to_string(),
+            ),
             ("agent_run_id".to_string(), "run-a".to_string()),
+            (
+                "logical_agent_run_id".to_string(),
+                "logical-run-a".to_string(),
+            ),
             ("prompt".to_string(), "Review the report".to_string()),
             (
                 "model_prompt".to_string(),
@@ -2232,6 +2240,10 @@ fn recovery_identity_stays_on_root_prompt_after_steer() {
         crate::agent_recovery_identity::resolve_agent_recovery_identity(&events, &recovery_context)
             .expect("recovery identity should resolve");
     assert_eq!(recovery.identity.source_run_id, "run-a");
+    assert_eq!(
+        recovery.identity.logical_run_id.as_deref(),
+        Some("logical-run-a")
+    );
     assert_eq!(recovery.identity.user_turn_sequence, 21);
     assert_eq!(
         recovery.identity.prompt_fingerprint,

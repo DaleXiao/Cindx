@@ -21,6 +21,11 @@ use model_provider::{
 use orchestrator::{AgentExecutionMode, AgentRunDecision, AgentToolRequirement};
 use std::path::{Path, PathBuf};
 
+#[path = "semantic_memory_event_query.rs"]
+mod event_query;
+
+use event_query::semantic_memory_events_for_run;
+
 pub(crate) fn contains_completed_agent_run(events: &[Event]) -> bool {
     events.iter().any(|event| {
         AgentRunEvent::from_event(event).map(AgentRunEvent::status)
@@ -28,10 +33,7 @@ pub(crate) fn contains_completed_agent_run(events: &[Event]) -> bool {
     })
 }
 
-pub(crate) fn semantic_memory_model_is_warranted(
-    run_context: &Metadata,
-    events: &[Event],
-) -> bool {
+pub(crate) fn semantic_memory_model_is_warranted(run_context: &Metadata, events: &[Event]) -> bool {
     if events.iter().any(is_durable_tool_memory_source) {
         return true;
     }
@@ -61,7 +63,11 @@ fn refresh_deterministic_memory_projection(
             .map_err(|error| error.to_string())?
     };
     if let Some(ledger) = ledger {
-        schedule_project_memory_vector_refresh(workspace_root.to_path_buf(), config.clone(), ledger);
+        schedule_project_memory_vector_refresh(
+            workspace_root.to_path_buf(),
+            config.clone(),
+            ledger,
+        );
     }
     Ok(())
 }
@@ -72,7 +78,7 @@ pub(crate) fn generate_semantic_memory(
     config: &ProviderConfig,
     run_context: &Metadata,
 ) -> Result<(), String> {
-    let run_id = run_context
+    run_context
         .get("agent_run_id")
         .ok_or_else(|| "semantic memory requires an agent run id".to_string())?;
     let project_id = run_context
@@ -87,20 +93,14 @@ pub(crate) fn generate_semantic_memory(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        store
-            .list_by_task_and_metadata(&task_id, "agent_run_id", run_id)
+        semantic_memory_events_for_run(&store, &task_id, run_context)
             .map_err(|error| error.to_string())?
     });
     if !contains_completed_agent_run(&events) {
         return Err("semantic memory skipped because the run is not complete".to_string());
     }
     if !semantic_memory_model_is_warranted(run_context, &events) {
-        return refresh_deterministic_memory_projection(
-            state,
-            workspace_root,
-            config,
-            run_context,
-        );
+        return refresh_deterministic_memory_projection(state, workspace_root, config, run_context);
     }
 
     let model = config.model_for_role(&ModelRole::Summarizer);
@@ -175,7 +175,11 @@ pub(crate) fn generate_semantic_memory(
             .map_err(|error| error.to_string())?
     };
     if let Some(ledger) = ledger {
-        schedule_project_memory_vector_refresh(workspace_root.to_path_buf(), config.clone(), ledger);
+        schedule_project_memory_vector_refresh(
+            workspace_root.to_path_buf(),
+            config.clone(),
+            ledger,
+        );
     }
     Ok(())
 }

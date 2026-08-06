@@ -90,6 +90,13 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   loopback HTTP fixture, current-run successful typed tool receipts, exact
   browser target, and artifact/postcondition digest rules without invoking a
   provider.
+- The exact Agent run-lineage gate proves the versioned logical/physical
+  identity contract, three-attempt legacy continuation projection, stable steer
+  identity, and fail-closed cycle/cross-scope handling. Storage and desktop
+  tests separately prove the indexed logical event scope and physical-only
+  permission boundary. A feature-enabled exact receipt gate separately proves
+  that legacy continuation attempts remain inside one logical real-world
+  evaluation denominator.
 - The exact Goal Delta gate admits budget credit only for a first contract
   obligation, recorded grounding receipt, or verified postcondition. It rejects
   ordinary success, failure states, and repeated satisfaction, and keeps receipt
@@ -152,4 +159,6 @@ It does not contact a provider and cannot establish Agent-quality or intelligenc
 uplift. The current V4 `0.2.9` provider-backed report is a `VALID_BASELINE`, but
 the collector classifies continuation tool events in two Fast runs as outside
 the current logical run. Its preregistered receipt gate and broad
-orchestration-uplift decision are therefore `NO-GO`.
+orchestration-uplift decision are therefore `NO-GO`. Current source repairs the
+deterministic identity/projection boundary, but the historical matrix remains
+unchanged and a newly frozen provider run is required for any revised decision.

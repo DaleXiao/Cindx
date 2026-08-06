@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 mod event_contract;
 mod permission_policy;
+mod run_identity;
 
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
@@ -9,6 +10,12 @@ pub use event_contract::{
 };
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
+};
+pub use run_identity::{
+    agent_run_id, logical_agent_run_id, source_agent_run_id, AgentRunIdentity,
+    AgentRunIdentityError, AgentRunLineage, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,
+    AGENT_RUN_IDENTITY_V1_SCHEMA, AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+    SOURCE_AGENT_RUN_ID_METADATA_KEY,
 };
 
 pub type Metadata = BTreeMap<String, String>;

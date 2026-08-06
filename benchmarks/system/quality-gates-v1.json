@@ -32,6 +32,8 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-run-lineage-contract",
+      "agent-logical-tool-receipts-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -45,6 +47,8 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-run-lineage-contract",
+      "agent-logical-tool-receipts-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -93,6 +97,8 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-run-lineage-contract",
+      "agent-logical-tool-receipts-contract",
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
@@ -227,6 +233,45 @@
       "id": "agent-realworld-contract",
       "category": "evaluation_contract",
       "command": ["node", "--test", "scripts/agent-realworld-contract.test.mjs"]
+    },
+    {
+      "id": "agent-run-lineage-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-core",
+        "run_identity::tests::agent_run_lineage_contract",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.agent-run-identity.v1"
+      ]
+    },
+    {
+      "id": "agent-logical-tool-receipts-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--features",
+        "realworld-eval",
+        "agent_realworld_eval::tool_receipts::tests::legacy_multi_attempt_continuations_share_one_logical_receipt_scope",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed"
+      ]
     },
     {
       "id": "agent-goal-progress-contract",

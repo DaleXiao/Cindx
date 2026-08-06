@@ -1,6 +1,7 @@
 use agent_core::{
     Event, EventId, EventKind, Metadata, PermissionDecision, PermissionRequest,
     PermissionRequestId, PermissionResolution, PermissionRisk, TaskId,
+    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
 use sha2::{Digest, Sha256};
 use std::ffi::{CStr, CString};
@@ -136,10 +137,11 @@ pub struct StoredReadModel {
     pub payload: String,
 }
 
-const EVENT_SCOPE_COLUMNS: [(&str, &str); 7] = [
+const EVENT_SCOPE_COLUMNS: [(&str, &str); 8] = [
     ("project_id", "project_id"),
     ("session_id", "session_id"),
     ("agent_run_id", "agent_run_id"),
+    (LOGICAL_AGENT_RUN_ID_METADATA_KEY, "logical_agent_run_id"),
     ("collaboration_id", "collaboration_id"),
     ("prompt_profile", "prompt_profile"),
     ("queue_id", "queue_id"),
@@ -348,13 +350,13 @@ impl SqliteStore {
             "
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
-              project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
-              queue_id, tool_call_id, effect_fingerprint
+              project_id, session_id, agent_run_id, logical_agent_run_id,
+              collaboration_id, prompt_profile, queue_id, tool_call_id, effect_fingerprint
             )
             values (
               ?1, ?2,
               (select coalesce(max(sequence), 0) + 1 from events where task_id = ?2),
-              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+              ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
             )
             ",
         )?;
@@ -368,11 +370,17 @@ impl SqliteStore {
         statement.bind_optional_text(7, metadata.get("project_id").map(String::as_str))?;
         statement.bind_optional_text(8, metadata.get("session_id").map(String::as_str))?;
         statement.bind_optional_text(9, metadata.get("agent_run_id").map(String::as_str))?;
-        statement.bind_optional_text(10, metadata.get("collaboration_id").map(String::as_str))?;
-        statement.bind_optional_text(11, metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_optional_text(12, metadata.get("queue_id").map(String::as_str))?;
-        statement.bind_optional_text(13, metadata.get("tool_call_id").map(String::as_str))?;
-        statement.bind_optional_text(14, event_effect_fingerprint(&metadata))?;
+        statement.bind_optional_text(
+            10,
+            metadata
+                .get(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+                .map(String::as_str),
+        )?;
+        statement.bind_optional_text(11, metadata.get("collaboration_id").map(String::as_str))?;
+        statement.bind_optional_text(12, metadata.get("prompt_profile").map(String::as_str))?;
+        statement.bind_optional_text(13, metadata.get("queue_id").map(String::as_str))?;
+        statement.bind_optional_text(14, metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(15, event_effect_fingerprint(&metadata))?;
         statement.expect_done()
     }
 
@@ -1124,12 +1132,13 @@ impl SqliteStore {
                  project_id = ?3,
                  session_id = ?4,
                  agent_run_id = ?5,
-                 collaboration_id = ?6,
-                 prompt_profile = ?7,
-                 queue_id = ?8,
-                 tool_call_id = ?9,
-                 effect_fingerprint = ?10
-             where id = ?11",
+                 logical_agent_run_id = ?6,
+                 collaboration_id = ?7,
+                 prompt_profile = ?8,
+                 queue_id = ?9,
+                 tool_call_id = ?10,
+                 effect_fingerprint = ?11
+             where id = ?12",
         )?;
         statement.bind_text(1, &event.summary)?;
         statement.bind_text(2, &metadata_to_text(&event.metadata))?;
@@ -1138,14 +1147,21 @@ impl SqliteStore {
         statement.bind_optional_text(5, event.metadata.get("agent_run_id").map(String::as_str))?;
         statement.bind_optional_text(
             6,
+            event
+                .metadata
+                .get(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+                .map(String::as_str),
+        )?;
+        statement.bind_optional_text(
+            7,
             event.metadata.get("collaboration_id").map(String::as_str),
         )?;
         statement
-            .bind_optional_text(7, event.metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_optional_text(8, event.metadata.get("queue_id").map(String::as_str))?;
-        statement.bind_optional_text(9, event.metadata.get("tool_call_id").map(String::as_str))?;
-        statement.bind_optional_text(10, event_effect_fingerprint(&event.metadata))?;
-        statement.bind_text(11, &event.id.0)?;
+            .bind_optional_text(8, event.metadata.get("prompt_profile").map(String::as_str))?;
+        statement.bind_optional_text(9, event.metadata.get("queue_id").map(String::as_str))?;
+        statement.bind_optional_text(10, event.metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(11, event_effect_fingerprint(&event.metadata))?;
+        statement.bind_text(12, &event.id.0)?;
         statement.expect_done()
     }
 
@@ -1163,6 +1179,7 @@ impl SqliteStore {
               project_id text,
               session_id text,
               agent_run_id text,
+              logical_agent_run_id text,
               collaboration_id text,
               prompt_profile text,
               queue_id text,
@@ -1228,6 +1245,9 @@ impl SqliteStore {
               on events(task_id, project_id, sequence);
             create index if not exists idx_events_task_run_sequence
               on events(task_id, agent_run_id, sequence);
+            create index if not exists idx_events_task_logical_run_sequence
+              on events(task_id, logical_agent_run_id, sequence)
+              where logical_agent_run_id is not null;
             create index if not exists idx_events_task_collaboration_sequence
               on events(task_id, collaboration_id, sequence);
             create index if not exists idx_events_task_prompt_profile_sequence
@@ -1249,6 +1269,7 @@ impl SqliteStore {
             ",
         )?;
         self.backfill_event_scope_columns()?;
+        self.backfill_event_logical_run_scope_column()?;
         self.backfill_event_queue_scope_column()?;
         self.backfill_permission_scope_columns()?;
         self.backfill_permission_capability_keys()
@@ -1394,6 +1415,62 @@ impl SqliteStore {
             let mut marker =
                 self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
             marker.bind_text(1, "event_queue_scope_v1")?;
+            marker.bind_text(2, "complete")?;
+            marker.expect_done()
+        })();
+        match result {
+            Ok(()) => self.exec_batch("commit"),
+            Err(error) => {
+                let _ = self.exec_batch("rollback");
+                Err(error)
+            }
+        }
+    }
+
+    fn backfill_event_logical_run_scope_column(&self) -> Result<(), StorageError> {
+        if self
+            .storage_meta_value("event_logical_agent_run_scope_v1")?
+            .as_deref()
+            == Some("complete")
+        {
+            return Ok(());
+        }
+
+        let key_prefix = format!(
+            "{}\t",
+            hex_encode(LOGICAL_AGENT_RUN_ID_METADATA_KEY.as_bytes())
+        );
+        let mut statement = self.prepare(
+            "select id, metadata_text from events
+             where logical_agent_run_id is null and
+               instr(char(10) || metadata_text, char(10) || ?1) > 0
+             order by task_id asc, sequence asc",
+        )?;
+        statement.bind_text(1, &key_prefix)?;
+        let mut rows = Vec::new();
+        while statement.step()? == StepResult::Row {
+            rows.push((statement.column_text(0)?, statement.column_text(1)?));
+        }
+        drop(statement);
+
+        self.exec_batch("begin immediate transaction")?;
+        let result = (|| {
+            for (event_id, metadata_text) in rows {
+                let metadata = metadata_from_text(&metadata_text)?;
+                let mut update =
+                    self.prepare("update events set logical_agent_run_id = ?1 where id = ?2")?;
+                update.bind_optional_text(
+                    1,
+                    metadata
+                        .get(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+                        .map(String::as_str),
+                )?;
+                update.bind_text(2, &event_id)?;
+                update.expect_done()?;
+            }
+            let mut marker =
+                self.prepare("insert or replace into storage_meta(key, value) values (?1, ?2)")?;
+            marker.bind_text(1, "event_logical_agent_run_scope_v1")?;
             marker.bind_text(2, "complete")?;
             marker.expect_done()
         })();
@@ -1577,10 +1654,10 @@ impl EventStore for SqliteStore {
             "
             insert into events(
               id, task_id, sequence, timestamp_ms, kind, summary, metadata_text,
-              project_id, session_id, agent_run_id, collaboration_id, prompt_profile,
-              queue_id, tool_call_id, effect_fingerprint
+              project_id, session_id, agent_run_id, logical_agent_run_id,
+              collaboration_id, prompt_profile, queue_id, tool_call_id, effect_fingerprint
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ",
         )?;
 
@@ -1596,13 +1673,20 @@ impl EventStore for SqliteStore {
         statement.bind_optional_text(10, event.metadata.get("agent_run_id").map(String::as_str))?;
         statement.bind_optional_text(
             11,
+            event
+                .metadata
+                .get(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+                .map(String::as_str),
+        )?;
+        statement.bind_optional_text(
+            12,
             event.metadata.get("collaboration_id").map(String::as_str),
         )?;
         statement
-            .bind_optional_text(12, event.metadata.get("prompt_profile").map(String::as_str))?;
-        statement.bind_optional_text(13, event.metadata.get("queue_id").map(String::as_str))?;
-        statement.bind_optional_text(14, event.metadata.get("tool_call_id").map(String::as_str))?;
-        statement.bind_optional_text(15, event_effect_fingerprint(&event.metadata))?;
+            .bind_optional_text(13, event.metadata.get("prompt_profile").map(String::as_str))?;
+        statement.bind_optional_text(14, event.metadata.get("queue_id").map(String::as_str))?;
+        statement.bind_optional_text(15, event.metadata.get("tool_call_id").map(String::as_str))?;
+        statement.bind_optional_text(16, event_effect_fingerprint(&event.metadata))?;
         statement.expect_done()
     }
 
@@ -2521,6 +2605,58 @@ mod tests {
     }
 
     #[test]
+    fn permission_index_remains_bound_to_the_physical_attempt() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-permission-attempt".to_string());
+        store
+            .save_permission_request(
+                PermissionRequest {
+                    id: PermissionRequestId("perm-attempt".to_string()),
+                    task_id: task_id.clone(),
+                    risk: PermissionRisk::Read,
+                    action: "file.read".to_string(),
+                    reason: "test".to_string(),
+                    scope: ".".to_string(),
+                    metadata: [
+                        ("session_id".to_string(), "session".to_string()),
+                        ("agent_run_id".to_string(), "attempt-b".to_string()),
+                        (
+                            LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+                            "logical-a".to_string(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+                100,
+            )
+            .expect("permission should save");
+
+        assert_eq!(
+            store
+                .list_permission_audits_for_session(&task_id, "session", Some("attempt-b"), 0,)
+                .expect("physical attempt should load")
+                .len(),
+            1
+        );
+        assert!(store
+            .list_permission_audits_for_session(&task_id, "session", Some("logical-a"), 0)
+            .expect("logical run must not become a permission scope")
+            .is_empty());
+
+        let mut columns = store
+            .prepare("pragma table_info(permission_requests)")
+            .unwrap();
+        let mut names = Vec::new();
+        while columns.step().unwrap() == StepResult::Row {
+            names.push(columns.column_text(1).unwrap());
+        }
+        assert!(!names
+            .iter()
+            .any(|column| column == LOGICAL_AGENT_RUN_ID_METADATA_KEY));
+    }
+
+    #[test]
     fn checks_session_capabilities_with_risk_action_scope_and_key() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let task_id = TaskId("task-agent".to_string());
@@ -3138,6 +3274,168 @@ mod tests {
     }
 
     #[test]
+    fn backfills_only_explicit_logical_run_metadata() {
+        let store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-logical-backfill".to_string());
+        for (event_id, sequence, metadata) in [
+            (
+                "explicit-logical",
+                1,
+                [
+                    ("agent_run_id".to_string(), "attempt-b".to_string()),
+                    (
+                        LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+                        "logical-a".to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect::<Metadata>(),
+            ),
+            (
+                "legacy-lineage",
+                2,
+                [
+                    ("agent_run_id".to_string(), "attempt-c".to_string()),
+                    ("source_agent_run_id".to_string(), "attempt-b".to_string()),
+                ]
+                .into_iter()
+                .collect::<Metadata>(),
+            ),
+        ] {
+            let mut statement = store
+                .prepare(
+                    "insert into events(
+                       id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+                     ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .expect("legacy insert should prepare");
+            statement.bind_text(1, event_id).unwrap();
+            statement.bind_text(2, &task_id.0).unwrap();
+            statement.bind_i64(3, sequence).unwrap();
+            statement.bind_i64(4, sequence * 100).unwrap();
+            statement.bind_text(5, "task_status_changed").unwrap();
+            statement.bind_text(6, "run event").unwrap();
+            statement
+                .bind_text(7, &metadata_to_text(&metadata))
+                .unwrap();
+            statement.expect_done().unwrap();
+        }
+        store
+            .exec_batch("delete from storage_meta where key = 'event_logical_agent_run_scope_v1'")
+            .unwrap();
+
+        store.backfill_event_logical_run_scope_column().unwrap();
+        store.backfill_event_logical_run_scope_column().unwrap();
+
+        let explicit = store
+            .list_by_task_and_metadata(&task_id, LOGICAL_AGENT_RUN_ID_METADATA_KEY, "logical-a")
+            .unwrap();
+        assert_eq!(explicit.len(), 1);
+        assert_eq!(explicit[0].id.0, "explicit-logical");
+        let mut legacy = store
+            .prepare(
+                "select count(*) from events
+                 where id = 'legacy-lineage' and logical_agent_run_id is null",
+            )
+            .unwrap();
+        assert_eq!(legacy.step().unwrap(), StepResult::Row);
+        assert_eq!(legacy.column_i64(0), 1);
+    }
+
+    #[test]
+    fn appends_updates_and_queries_logical_run_scope_independently_of_attempts() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-logical-run".to_string());
+        let mut continued = Event {
+            id: EventId("continued".to_string()),
+            task_id: task_id.clone(),
+            sequence: 1,
+            timestamp_ms: 100,
+            kind: EventKind::TaskStatusChanged,
+            summary: "continued".to_string(),
+            metadata: [
+                ("agent_run_id".to_string(), "attempt-b".to_string()),
+                (
+                    LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+                    "logical-a".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        store
+            .append(continued.clone())
+            .expect("event should append");
+        store
+            .append_next_event(
+                EventId("continued-next".to_string()),
+                task_id.clone(),
+                200,
+                EventKind::MessageAdded,
+                "continued message".to_string(),
+                [
+                    ("agent_run_id".to_string(), "attempt-c".to_string()),
+                    (
+                        LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+                        "logical-a".to_string(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .expect("next event should append");
+
+        assert_eq!(
+            store
+                .list_by_task_and_metadata(
+                    &task_id,
+                    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+                    "logical-a",
+                )
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .list_by_task_and_metadata(&task_id, "agent_run_id", "attempt-b")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        continued.metadata.insert(
+            LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+            "logical-repaired".to_string(),
+        );
+        store
+            .update_event_content(&continued)
+            .expect("event scope should update");
+        assert_eq!(
+            store
+                .list_by_task_and_metadata(
+                    &task_id,
+                    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+                    "logical-a",
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_by_task_and_metadata(
+                    &task_id,
+                    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+                    "logical-repaired",
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn scoped_session_queries_use_the_composite_index() {
         let store = SqliteStore::in_memory().expect("store should open");
         let mut statement = store
@@ -3185,6 +3483,44 @@ mod tests {
         assert!(plan
             .iter()
             .any(|step| step.contains("idx_events_task_project_sequence")));
+    }
+
+    #[test]
+    fn logical_run_queries_use_the_composite_index() {
+        let store = SqliteStore::in_memory().expect("store should open");
+        let mut definition = store
+            .prepare(
+                "select sql from sqlite_master
+                 where type = 'index' and name = 'idx_events_task_logical_run_sequence'",
+            )
+            .unwrap();
+        assert_eq!(definition.step().unwrap(), StepResult::Row);
+        assert!(definition
+            .column_text(0)
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("where logical_agent_run_id is not null"));
+
+        let mut statement = store
+            .prepare(
+                "explain query plan
+                 select id, task_id, sequence, timestamp_ms, kind, summary, metadata_text
+                 from events
+                 where task_id = ?1 and logical_agent_run_id = ?2 and sequence > ?3
+                 order by sequence asc",
+            )
+            .unwrap();
+        statement.bind_text(1, "task").unwrap();
+        statement.bind_text(2, "logical-run").unwrap();
+        statement.bind_i64(3, 0).unwrap();
+        let mut plan = Vec::new();
+        while statement.step().unwrap() == StepResult::Row {
+            plan.push(statement.column_text(3).unwrap());
+        }
+
+        assert!(plan
+            .iter()
+            .any(|step| step.contains("idx_events_task_logical_run_sequence")));
     }
 
     #[test]

@@ -40,6 +40,64 @@ fn append_test_event(store: &mut SqliteStore, kind: EventKind, summary: &str, me
         .expect("test event should append");
 }
 
+#[test]
+fn project_cleanup_deletes_current_and_legacy_memory_projection_namespaces() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-projection-cleanup";
+    for namespace in [
+        LEGACY_AGENT_MEMORY_READ_MODEL_NAMESPACE,
+        AGENT_MEMORY_READ_MODEL_NAMESPACE,
+    ] {
+        store
+            .save_read_model(namespace, project_id, 1, "derived memory")
+            .expect("memory projection should persist");
+    }
+
+    cleanup_deleted_project_storage(&mut store, project_id, &[])
+        .expect("project storage cleanup should succeed");
+
+    for namespace in [
+        LEGACY_AGENT_MEMORY_READ_MODEL_NAMESPACE,
+        AGENT_MEMORY_READ_MODEL_NAMESPACE,
+    ] {
+        assert!(store
+            .load_read_model(namespace, project_id)
+            .expect("memory projection should load")
+            .is_none());
+    }
+}
+
+#[test]
+fn project_cleanup_deletes_current_and_legacy_routing_projection_namespaces() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    for namespace in [
+        LEGACY_ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+        ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+    ] {
+        store
+            .save_read_model(
+                namespace,
+                ROUTING_TELEMETRY_READ_MODEL_KEY,
+                1,
+                "derived routing",
+            )
+            .expect("routing projection should persist");
+    }
+
+    cleanup_deleted_project_storage(&mut store, "project-routing-projection-cleanup", &[])
+        .expect("project storage cleanup should succeed");
+
+    for namespace in [
+        LEGACY_ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+        ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
+    ] {
+        assert!(store
+            .load_read_model(namespace, ROUTING_TELEMETRY_READ_MODEL_KEY)
+            .expect("routing projection should load")
+            .is_none());
+    }
+}
+
 fn session_metadata(session_id: &str) -> Metadata {
     [("session_id".to_string(), session_id.to_string())]
         .into_iter()

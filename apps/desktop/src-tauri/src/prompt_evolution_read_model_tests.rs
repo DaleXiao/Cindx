@@ -569,6 +569,7 @@ fn agent_failure_curriculum_contract() {
             session_id: "session-live".to_string(),
             resume_key: "resume-live".to_string(),
             source_run_id: "run-live".to_string(),
+            logical_run_id: Some("run-live".to_string()),
             user_turn_sequence: 1,
             prompt_fingerprint: "prompt-fingerprint".to_string(),
         },

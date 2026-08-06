@@ -154,8 +154,11 @@ the actual fresh-seed decisions and profiles, but V4 provides no evidence of
 GEPA learning, transfer, self-distillation, learned-profile uplift, or Fugu
 parity. The next measured target is narrow: eliminate physical-attempt versus
 logical-run lineage-attribution ambiguity without weakening the fail-closed
-receipt contract, then evaluate on newly frozen evidence rather than tuning or
-replaying these 72 cells.
+receipt contract. Current source now implements that deterministic identity and
+projection boundary, including a scoped legacy-chain decoder and physical-only
+permission/effect scope. This does not change the recorded V4 result. The next
+evidence step is a newly frozen provider-backed matrix, not tuning or replaying
+these 72 cells.
 
 ## Current Product Gate
 

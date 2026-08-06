@@ -5,12 +5,18 @@ use crate::suspended_run_runtime::{
     suspended_agent_run_policy, remember_suspended_agent_run, take_suspended_agent_run,
 };
 use crate::*;
+use agent_core::{
+    AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
+    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+};
 
 const PERMISSION_TOOL_OBSERVATION_SCHEMA: &str = "cindx.permission-tool-observation.v1";
 const PERMISSION_TOOL_OBSERVATION_PROVENANCE: &str = "runtime_permission_resolution";
 
 const PERMISSION_RUN_CONTEXT_KEYS: &[&str] = &[
+    AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,
     "agent_run_id",
+    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
     "agent_effort",
     "agent_model",
     "requested_policy",
@@ -919,6 +925,14 @@ fn permission_recovery_run_context(
 ) -> Metadata {
     let mut recovered = run_context.clone();
     recovered.insert(
+        AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY.to_string(),
+        AGENT_RUN_IDENTITY_V1_SCHEMA.to_string(),
+    );
+    recovered.insert(
+        LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+        recovery.identity.logical_run_id().to_string(),
+    );
+    recovered.insert(
         "recovery_resume_key".to_string(),
         recovery.identity.resume_key.clone(),
     );
@@ -1325,7 +1339,15 @@ mod tests {
     fn permission_run_context(steer_epoch: u64, prompt_contract_epoch: u64) -> Metadata {
         [
             ("session_id".to_string(), "session-a".to_string()),
+            (
+                AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY.to_string(),
+                AGENT_RUN_IDENTITY_V1_SCHEMA.to_string(),
+            ),
             ("agent_run_id".to_string(), "run-a".to_string()),
+            (
+                LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+                "logical-run-a".to_string(),
+            ),
             ("steer_epoch".to_string(), steer_epoch.to_string()),
             (
                 "prompt_contract_epoch".to_string(),
@@ -1411,6 +1433,7 @@ mod tests {
                 session_id: "session-a".to_string(),
                 resume_key: resume_key.to_string(),
                 source_run_id: "run-a".to_string(),
+                logical_run_id: Some("logical-run-a".to_string()),
                 user_turn_sequence: 1,
                 prompt_fingerprint: task_state.user_prompt_fingerprint.clone(),
             },
@@ -1431,6 +1454,39 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         }
+    }
+
+    #[test]
+    fn permission_recovery_keeps_logical_identity_on_the_physical_attempt() {
+        let runtime = start_agent_loop(
+            TaskId("permission-identity".to_string()),
+            "inspect",
+            AgentRuntimeConfig::default(),
+        );
+        let recovery = permission_recovery_envelope(
+            "identity",
+            AgentTaskStateSnapshot::capture(&runtime),
+        );
+        let recovered = permission_recovery_run_context(
+            &permission_run_context(0, 0),
+            &recovery,
+            1,
+        );
+
+        assert_eq!(
+            recovered.get("agent_run_id").map(String::as_str),
+            Some("run-a")
+        );
+        assert_eq!(
+            recovered
+                .get(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+                .map(String::as_str),
+            Some("logical-run-a")
+        );
+        assert_eq!(
+            recovered.get("source_agent_run_id").map(String::as_str),
+            Some("run-a")
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ use crate::{
     runtime_constants::{
         AGENT_MEMORY_READ_MODEL_NAMESPACE, AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
         AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, AGENT_SESSION_READ_MODEL_NAMESPACE,
+        LEGACY_AGENT_MEMORY_READ_MODEL_NAMESPACE, LEGACY_ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
         PROMPT_EVOLUTION_READ_MODEL_KEY, PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
         ROUTING_TELEMETRY_READ_MODEL_KEY, ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
     },
@@ -764,7 +765,7 @@ fn cleanup_deleted_project_storage(
                 delete_session_storage_in_transaction(transaction, session_id)?;
             }
             transaction.delete_records_by_metadata_in_transaction("project_id", project_id)?;
-            transaction.delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)?;
+            delete_project_memory_read_models(transaction, project_id)?;
             delete_global_projection_caches(transaction)
         })
         .map_err(|error| error.to_string())
@@ -783,7 +784,7 @@ fn cleanup_deleted_session_storage(
             for session_id in session_ids {
                 delete_session_storage_in_transaction(transaction, session_id)?;
             }
-            transaction.delete_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)?;
+            delete_project_memory_read_models(transaction, project_id)?;
             let mut rebuilt = load_project_memory_ledger(transaction, project_id)?;
             rebuilt.vector_history_reset_required = true;
             save_project_memory_ledger(transaction, &rebuilt)?;
@@ -791,6 +792,19 @@ fn cleanup_deleted_session_storage(
             Ok(rebuilt)
         })
         .map_err(|error| error.to_string())
+}
+
+fn delete_project_memory_read_models(
+    store: &mut SqliteStore,
+    project_id: &str,
+) -> Result<(), StorageError> {
+    for namespace in [
+        LEGACY_AGENT_MEMORY_READ_MODEL_NAMESPACE,
+        AGENT_MEMORY_READ_MODEL_NAMESPACE,
+    ] {
+        store.delete_read_model(namespace, project_id)?;
+    }
+    Ok(())
 }
 
 fn delete_session_storage_in_transaction(
@@ -809,10 +823,12 @@ fn delete_session_storage_in_transaction(
 }
 
 fn delete_global_projection_caches(store: &mut SqliteStore) -> Result<(), StorageError> {
-    store.delete_read_model(
+    for namespace in [
+        LEGACY_ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
         ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
-        ROUTING_TELEMETRY_READ_MODEL_KEY,
-    )?;
+    ] {
+        store.delete_read_model(namespace, ROUTING_TELEMETRY_READ_MODEL_KEY)?;
+    }
     store.delete_read_model(
         PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
         PROMPT_EVOLUTION_READ_MODEL_KEY,

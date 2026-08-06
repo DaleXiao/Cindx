@@ -138,11 +138,20 @@ pub struct AgentRecoveryIdentity {
     pub session_id: String,
     pub resume_key: String,
     pub source_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_run_id: Option<String>,
     pub user_turn_sequence: u64,
     pub prompt_fingerprint: String,
 }
 
 impl AgentRecoveryIdentity {
+    pub fn logical_run_id(&self) -> &str {
+        self.logical_run_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(self.source_run_id.as_str())
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.session_id.trim().is_empty() {
             return Err("agent recovery identity is missing session_id");
@@ -153,11 +162,29 @@ impl AgentRecoveryIdentity {
         if self.prompt_fingerprint.trim().is_empty() {
             return Err("agent recovery identity is missing prompt_fingerprint");
         }
+        if self
+            .logical_run_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err("agent recovery identity has an empty logical_run_id");
+        }
         Ok(())
     }
 
     pub fn matches(&self, other: &Self) -> bool {
-        self.validate().is_ok() && other.validate().is_ok() && self == other
+        self.validate().is_ok()
+            && other.validate().is_ok()
+            && self.project_id == other.project_id
+            && self.session_id == other.session_id
+            && self.resume_key == other.resume_key
+            && self.source_run_id == other.source_run_id
+            && match (&self.logical_run_id, &other.logical_run_id) {
+                (Some(left), Some(right)) => left == right,
+                _ => true,
+            }
+            && self.user_turn_sequence == other.user_turn_sequence
+            && self.prompt_fingerprint == other.prompt_fingerprint
     }
 }
 
@@ -187,6 +214,7 @@ mod tests {
             session_id: "session-1".to_string(),
             resume_key: "agent-resume-1".to_string(),
             source_run_id: "run-1".to_string(),
+            logical_run_id: Some("logical-run-1".to_string()),
             user_turn_sequence: 42,
             prompt_fingerprint: "prompt-sha".to_string(),
         }
@@ -278,6 +306,10 @@ mod tests {
         other_run.source_run_id = "run-2".to_string();
         assert!(!expected.matches(&other_run));
 
+        let mut other_logical_run = identity();
+        other_logical_run.logical_run_id = Some("logical-run-2".to_string());
+        assert!(!expected.matches(&other_logical_run));
+
         let mut other_turn = identity();
         other_turn.user_turn_sequence += 1;
         assert!(!expected.matches(&other_turn));
@@ -300,6 +332,31 @@ mod tests {
         let mut missing_prompt = identity();
         missing_prompt.prompt_fingerprint.clear();
         assert!(missing_prompt.validate().is_err());
+
+        let mut empty_logical_run = identity();
+        empty_logical_run.logical_run_id = Some(String::new());
+        assert!(empty_logical_run.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_recovery_identity_uses_source_run_as_its_logical_run() {
+        let encoded = r#"{
+            "projectId":"project-1",
+            "sessionId":"session-1",
+            "resumeKey":"agent-resume-1",
+            "sourceRunId":"run-1",
+            "userTurnSequence":42,
+            "promptFingerprint":"prompt-sha"
+        }"#;
+        let legacy: AgentRecoveryIdentity =
+            serde_json::from_str(encoded).expect("legacy identity should decode");
+        let mut current = legacy.clone();
+        current.logical_run_id = Some("logical-root-run".to_string());
+
+        assert_eq!(legacy.logical_run_id, None);
+        assert_eq!(legacy.logical_run_id(), "run-1");
+        assert!(legacy.matches(&current));
+        assert!(current.matches(&legacy));
     }
 
     #[test]

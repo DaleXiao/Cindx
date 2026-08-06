@@ -47,6 +47,17 @@ Reaching a run or turn budget is recoverable control flow: the runtime preserves
 the transcript and the desktop exposes a continuation instead of recording an
 ordinary agent failure.
 
+Run identity has two deliberately different scopes. The versioned
+`logical_agent_run_id` remains stable across steer, permission recovery, retry,
+and continuation so routing, memory, and evaluation see one canonical
+experience. The existing `agent_run_id` is the physical attempt and changes on
+continuation; `source_agent_run_id` records the exact physical recovery source.
+Permission lookup, allow-once decisions, tool effect witnesses, exact replay,
+idempotency, and runtime snapshots continue to bind the physical attempt.
+Sharing a logical ID never grants cross-attempt authority. Legacy source chains
+are projected only inside one task/project/session and fail closed on missing,
+cyclic, conflicting, or cross-scope lineage.
+
 Run activity and objective progress are separate contracts. Provider bytes,
 tool start/finish, streaming text, and status updates keep the existing
 liveness watchdog current, while generic checkpoints remain diagnostic. Neither
