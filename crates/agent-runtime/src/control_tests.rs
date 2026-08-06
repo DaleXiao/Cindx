@@ -556,6 +556,127 @@ fn detects_repeated_actions_within_a_scope() {
 }
 
 #[test]
+fn typed_partial_idempotent_observation_allows_exact_bounded_continuation() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 8;
+    budget.max_tool_calls = 8;
+    let control = AgentRunControl::with_budget(budget);
+    let input = r#"{"process_id":"proc-a","stdout_offset":0,"stderr_offset":0}"#;
+
+    assert!(control
+        .begin_tool_call("main", "process.poll", input)
+        .is_ok());
+    assert!(control.record_tool_continuation_at(
+        0,
+        "main",
+        "process.poll",
+        input,
+        &agent_core::ToolEffectSemantics::Idempotent,
+        Some(false),
+    ));
+    for _ in 0..5 {
+        assert!(control
+            .begin_tool_call("main", "process.poll", input)
+            .is_ok());
+    }
+    assert_eq!(control.stop_reason(), None);
+
+    assert!(!control.record_tool_continuation_at(
+        0,
+        "main",
+        "process.poll",
+        input,
+        &agent_core::ToolEffectSemantics::Idempotent,
+        Some(true),
+    ));
+    assert!(control
+        .begin_tool_call("main", "process.poll", input)
+        .is_ok());
+    assert_eq!(
+        control.begin_tool_call("main", "process.poll", input),
+        Err(RunStopReason::RepeatedAction)
+    );
+}
+
+#[test]
+fn partial_non_idempotent_observation_cannot_bypass_repeat_guard() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 6;
+    budget.max_tool_calls = 6;
+    let control = AgentRunControl::with_budget(budget);
+
+    assert!(!control.record_tool_continuation_at(
+        0,
+        "main",
+        "shell.run",
+        "echo mutate",
+        &agent_core::ToolEffectSemantics::NonIdempotent,
+        Some(false),
+    ));
+    assert!(control
+        .begin_tool_call("main", "shell.run", "echo mutate")
+        .is_ok());
+    assert!(control
+        .begin_tool_call("main", "shell.run", "echo mutate")
+        .is_ok());
+    assert_eq!(
+        control.begin_tool_call("main", "shell.run", "echo mutate"),
+        Err(RunStopReason::RepeatedAction)
+    );
+}
+
+#[test]
+fn continuation_lease_is_exact_immediate_and_serial() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 12;
+    budget.max_tool_calls = 12;
+    let control = AgentRunControl::with_budget(budget);
+    let poll = r#"{"process_id":"proc-a"}"#;
+
+    assert!(control
+        .begin_tool_call("main", "process.poll", poll)
+        .is_ok());
+    control.finish_tool_call();
+    assert!(control.record_tool_continuation_at(
+        0,
+        "main",
+        "process.poll",
+        poll,
+        &agent_core::ToolEffectSemantics::Idempotent,
+        Some(false),
+    ));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("process.poll", poll), ("file.read", "README.md")],
+        ),
+        RunToolCallBatchStart::SerialRequired
+    );
+
+    assert!(control
+        .begin_tool_call("main", "file.read", "README.md")
+        .is_ok());
+    control.finish_tool_call();
+    assert!(control
+        .begin_tool_call("main", "process.poll", poll)
+        .is_ok());
+    control.finish_tool_call();
+    assert!(control
+        .begin_tool_call("main", "process.poll", poll)
+        .is_ok());
+    control.finish_tool_call();
+    assert_eq!(
+        control.begin_tool_call("main", "process.poll", poll),
+        Err(RunStopReason::RepeatedAction)
+    );
+}
+
+#[test]
 fn a_different_action_resets_the_repeat_guard() {
     let mut budget = test_budget();
     budget.initial_tool_calls = 10;

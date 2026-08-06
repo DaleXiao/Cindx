@@ -5,8 +5,8 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use agent_core::{
-    permission_can_allow_session, Metadata, TaskId, ToolCallId, ToolInvocation, ToolOutcomeStatus,
-    ToolRisk,
+    permission_can_allow_session, Metadata, TaskId, ToolCallId, ToolEffectSemantics,
+    ToolInvocation, ToolOutcomeStatus, ToolRisk,
 };
 
 use crate::{
@@ -129,6 +129,9 @@ fn process_plane_registers_four_typed_non_verifier_tools() {
         assert_eq!(spec.risk, ToolRisk::ExecutesProcess);
         assert!(spec.output_schema_json.is_some());
         assert!(spec.postcondition_verifiers.is_empty());
+        if name == "process.poll" {
+            assert_eq!(spec.effect_semantics, ToolEffectSemantics::Idempotent);
+        }
     }
 }
 

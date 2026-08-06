@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 
+mod adaptive_loop;
 mod anytime_parallel;
 mod completion_intent;
 mod context_engine;
@@ -46,6 +47,7 @@ mod turn_budget;
 mod worker_policy;
 mod worker_runtime;
 
+pub use adaptive_loop::{AdaptiveLoopCursor, AdaptiveLoopDisposition};
 pub use anytime_parallel::{AnytimeQuorumExecution, AnytimeQuorumPolicy};
 pub use completion_intent::{
     prompt_completion_intent, prompt_evidence_target_anchors, prompt_replaces_prior_objective,
@@ -112,15 +114,16 @@ pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use task_contract::{
     AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,
-    AgentActionRecovery, AgentGoalDelta, AgentGoalDeltaKind, AgentTaskContract, ContractEvidence,
-    ContractEvidenceKind, GroundedCompletionBasis, GroundedCompletionIssue,
-    GroundedCompletionReceipt, OutcomeBlocker, OutcomeClaim, OutcomeClaimDecision,
-    OutcomeClaimEvidenceStatus, OutcomeClaimKind, OutcomeClaimQuality, OutcomeEvidence,
-    OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase, OutcomeLedgerShadow,
-    OutcomeObligation, OutcomeObligationKind, OutcomePostcondition, OutcomePostconditionKind,
-    OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope, OutcomeTerminal,
-    OutcomeTerminalObservation, OutcomeTruncation, PostconditionVerificationReceipt,
-    PromptEvidenceContext, WorkspaceVerificationPolicy, ACTION_DENIAL_SCHEMA, GOAL_DELTA_SCHEMA,
+    AgentActionRecovery, AgentCognitiveFocus, AgentCognitiveState, AgentGoalDelta,
+    AgentGoalDeltaKind, AgentTaskContract, ContractEvidence, ContractEvidenceKind,
+    GroundedCompletionBasis, GroundedCompletionIssue, GroundedCompletionReceipt, OutcomeBlocker,
+    OutcomeClaim, OutcomeClaimDecision, OutcomeClaimEvidenceStatus, OutcomeClaimKind,
+    OutcomeClaimQuality, OutcomeEvidence, OutcomeFailure, OutcomeFailureClass, OutcomeLedgerPhase,
+    OutcomeLedgerShadow, OutcomeObligation, OutcomeObligationKind, OutcomePostcondition,
+    OutcomePostconditionKind, OutcomePostconditionStatus, OutcomeSatisfaction, OutcomeScope,
+    OutcomeTerminal, OutcomeTerminalObservation, OutcomeTruncation,
+    PostconditionVerificationReceipt, PromptEvidenceContext, WorkspaceVerificationPolicy,
+    ACTION_DENIAL_SCHEMA, COGNITIVE_STATE_MAX_BYTES, COGNITIVE_STATE_SCHEMA, GOAL_DELTA_SCHEMA,
     GROUNDED_COMPLETION_DIGEST_METADATA_KEY, GROUNDED_COMPLETION_METADATA_KEY,
     GROUNDED_COMPLETION_SCHEMA, MAX_POSTCONDITION_VERIFICATION_RECEIPT_BYTES,
     OUTCOME_LEDGER_DIGEST_METADATA_KEY, OUTCOME_LEDGER_MAX_METADATA_BYTES,
@@ -190,11 +193,20 @@ pub struct AgentLoopState {
     pub interaction_verification_gate_requests: usize,
     pub task_contract: AgentTaskContract,
     prepared_task_state: PreparedTaskState,
+    adaptive_loop_cursor: AdaptiveLoopCursor,
     context_token_ledger: context_token_ledger::ContextTokenLedger,
 }
 
 impl AgentLoopState {
     pub fn replace_prepared_task_state(&mut self, prepared_task_state: PreparedTaskState) {
+        if prepared_task_state.steer_epoch() != self.prepared_task_state.steer_epoch()
+            || prepared_task_state.contract_epoch() != self.prepared_task_state.contract_epoch()
+            || prepared_task_state.objective_fingerprint()
+                != self.prepared_task_state.objective_fingerprint()
+        {
+            self.adaptive_loop_cursor
+                .reset_for_steer(prepared_task_state.steer_epoch());
+        }
         self.prepared_task_state = prepared_task_state;
     }
 
@@ -203,7 +215,12 @@ impl AgentLoopState {
     }
 
     pub fn advance_prepared_task_control_epoch(&mut self, steer_epoch: u64) {
+        let prior_epoch = self.prepared_task_state.steer_epoch();
         self.prepared_task_state.advance_control_epoch(steer_epoch);
+        if self.prepared_task_state.steer_epoch() != prior_epoch {
+            self.adaptive_loop_cursor
+                .reset_for_steer(self.prepared_task_state.steer_epoch());
+        }
     }
 
     pub fn successful_mutations(&self) -> usize {
@@ -397,6 +414,7 @@ pub fn start_agent_loop(
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
         prepared_task_state,
+        adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
     }
 }
@@ -427,6 +445,7 @@ pub fn start_agent_loop_with_history(
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
         prepared_task_state,
+        adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
     }
 }
@@ -469,6 +488,7 @@ pub fn resume_agent_loop_from_messages(
         interaction_verification_gate_requests: 0,
         task_contract: AgentTaskContract::default(),
         prepared_task_state,
+        adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
     };
     rebuild_interaction_verification_state(&mut state);

@@ -128,6 +128,29 @@ existing sessions. The v2 checkpoint stores objective fingerprints and typed
 intent, not raw objectives or target anchors. Permission and restart recovery
 rebuild runtime-only anchors from the effective objective and reject mismatched
 lineage instead of silently applying state to another task.
+
+Every Actor and Finalizer request receives at most one protected, transient
+`cindx.agent.cognitive-state.v1` overlay. `agent-runtime` derives it from the
+prepared task identity and authoritative task-contract outcome ledger. The
+bounded projection contains the current steer/contract epochs, typed focus and
+permitted action alternatives, bounded typed verification targets, pending or
+blocked obligations, postconditions, and evidence sequence references; it
+contains no transcript text, raw tool input/output, or model reasoning. It is
+advisory request context, not persisted task state or a second source of
+completion, permission, or budget authority. If including this overlay would
+violate a hard context invariant, the kernel reprojects once without only the
+cognitive overlay; required trust policy, grounding evidence, and the current
+request never yield to advisory state.
+
+The adaptive loop cursor observes only trusted `cindx.tool-observation.v2`
+results. Repeated exact actions with identical complete typed outcomes receive
+one bounded replan before terminal delivery of the strongest available result;
+a new steer, changed prepared objective, Goal Delta, changed outcome, or
+incomplete evidence resets or advances the cursor instead of counting false
+no-progress. The cursor stores only bounded hashes and counters. It is reset on
+cold task-state recovery, while the persisted prepared task and task contract
+remain authoritative and regenerate the cognitive overlay.
+
 Provider and tool activity still drives the existing liveness watchdog, while
 generic checkpoints remain diagnostic. Neither extends a run segment: only an
 accepted Goal Delta increments budget credit. This keeps slow valid I/O from
@@ -165,7 +188,11 @@ loops from unlocking the maximum Auto or Pro budget.
 - Poll returns bounded stdout/stderr cursor pages and explicit pending, running,
   terminal, exit code, signal, timeout, cancellation, CPU/output-limit,
   completeness, and truncation facts. Nonzero child exit is a typed child
-  outcome rather than a failed transport.
+  outcome rather than a failed transport. `process.poll` declares idempotent
+  effect semantics. A successful typed but incomplete poll can continue only by
+  repeating the exact scope, tool, and input; this exempts that invocation from
+  repeated-action classification but still consumes the ordinary tool-call
+  budget and grants no new permission or effect authority.
 - Active sessions are limited to two per physical run owner and four for the
   application. Wall, CPU, combined output, poll, and input budgets are hard
   bounded. Cancel, steer, run completion, session removal, explicit terminate,

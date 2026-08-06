@@ -81,6 +81,7 @@ pub(crate) fn poll_spec() -> ToolSpec {
         })
         .to_string(),
     )
+    .with_effect_semantics(ToolEffectSemantics::Idempotent)
     .with_output_schema(process_snapshot_schema("cindx.process-poll-result.v1"))
 }
 

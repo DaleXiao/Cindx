@@ -185,6 +185,10 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
         let terminal_commit = actor_requested_finalizer
             || matches!(
+                runtime.adaptive_loop_disposition(),
+                agent_runtime::AdaptiveLoopDisposition::CommitTerminalResult
+            )
+            || matches!(
                 cancellation.continuation_directive(),
                 RunContinuationDirective::CommitTerminalResult
             );

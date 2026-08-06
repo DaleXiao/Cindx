@@ -250,6 +250,7 @@ impl AgentRunControl {
                 partial_output: String::new(),
                 action_history: BTreeMap::new(),
                 recent_actions: BTreeMap::new(),
+                continuation_actions: BTreeMap::new(),
                 observation_fingerprints: BTreeSet::new(),
                 observation_count: 0,
                 checkpoint_fingerprints: BTreeSet::new(),

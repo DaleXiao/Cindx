@@ -31,6 +31,9 @@ impl AgentRunControl {
         if calls.len() < 2 {
             return RunToolCallBatchStart::SerialRequired;
         }
+        if state.continuation_actions.contains_key(scope) {
+            return RunToolCallBatchStart::SerialRequired;
+        }
 
         let current_calls = self.tool_calls.load(Ordering::SeqCst);
         let Some(last_call) = current_calls.checked_add(calls.len()) else {

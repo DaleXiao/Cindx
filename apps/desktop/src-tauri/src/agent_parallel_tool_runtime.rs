@@ -409,6 +409,7 @@ fn execute_prepared_parallel_tool_batch(
             postcondition_evidence.as_ref(),
             &observation,
             None,
+            Some(&result),
             &image_paths,
             snapshot_cursor,
         )?;

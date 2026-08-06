@@ -80,7 +80,7 @@ stored as a second trajectory blob.
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `agent-core` | Shared ids, logical-run/physical-attempt lineage, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
-| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, task-contract Goal Delta and denial/replan policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
+| `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, bounded cognitive projection and adaptive cursor, task-contract Goal Delta and denial/replan policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
@@ -163,6 +163,19 @@ Prompt grounding classification, evidence-tool pinning, run-context objective
 selection, and model-stream retry/progress policy are portable
 `agent-runtime` responsibilities. The desktop loop supplies catalog and product
 state, then executes the resulting provider and tool side effects.
+
+`agent-runtime::task_contract::cognitive_state` owns the bounded model-facing
+projection of the current prepared epoch. It derives one protected transient
+overlay from `PreparedTaskState`, `AgentTaskContract`, and its outcome ledger;
+if that advisory overlay alone prevents a hard context invariant, the kernel
+reprojects once without it rather than discarding required trust or evidence.
+The projection is never another mutable or durable fact store. The adjacent
+adaptive cursor owns only bounded typed-observation hashes and no-gain counters,
+and cold task-state restoration intentionally recreates it empty for the
+restored steer epoch. The desktop adapter transports the complete `ToolResult`
+into the runtime transition and executes the resulting continuation or terminal
+disposition. It does not derive cognitive facts or maintain a parallel loop
+state.
 
 The foreground execution path has three explicit responsibilities. The Actor
 owns model/tool iteration and its turn budget. Verifier authority belongs to the
@@ -304,6 +317,9 @@ These are separate inputs and must remain distinguishable in trace metadata:
 
 - **Conversation context** is a bounded projection of canonical session
   messages for the current objective.
+- **Cognitive state** is a bounded transient projection of the current prepared
+  epoch's typed task contract, evidence references, and adaptive disposition. It
+  does not replace canonical conversation history or persist a second truth.
 - **Durable memory** is cross-turn or cross-session evidence produced from
   eligible prior runs and recalled with trust controls.
 - **Workspace knowledge** comes from indexed files and graph relations.

@@ -79,5 +79,6 @@ fn open_applied_objective_segment(
     state.model_extension_goal_delta = state.goal_delta_count;
     state.tool_extension_goal_delta = state.goal_delta_count;
     state.agent_turn_extension_goal_delta = state.goal_delta_count;
+    state.continuation_actions.clear();
     state.last_progress_at = Instant::now();
 }

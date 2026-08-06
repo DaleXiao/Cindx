@@ -24,8 +24,8 @@ does not claim Fugu Ultra equivalence.
 - `shipping-performance`: resource-bounded hard gates for incremental Session and
   runtime snapshots, prompt-learning outbox delta projection, shared graph
   parsing, prepared image/request reuse, retry reuse, and linear frontend
-  streaming Markdown work. It uses operation counts and identity invariants,
-  never cross-machine wall-clock thresholds.
+  streaming Markdown work, plus the bounded Agent cognitive-loop projection and
+  adaptive cursor. It uses operation counts and identity invariants and never cross-machine wall-clock thresholds.
 - `full`: all shipping deterministic gates, including the Agent Real-World V5
   measurement and managed-process session contracts, sidecars, frontend
   production build, and Rust tests; heavier same-machine diagnostics remain in
@@ -106,6 +106,17 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   size independent of raw tool output. Target binding and desktop recovery are
   covered by their separate contract tests rather than inferred from this exact
   filter.
+- The deterministic `agent-cognitive-loop-scaling` contract runs
+  `task_contract::cognitive_state::tests::compact_cognitive_state_and_adaptive_loop_scaling_contract`
+  and requires the `cindx.agent-cognitive-loop-scaling.v1` marker. Its 2,048
+  synthetic obligations prove the cognitive JSON remains within 8 KiB, action
+  alternatives and truncation remain bounded, and the adaptive cursor remains
+  within 512 bytes with a saturated no-gain counter. This is a projection and
+  control-state scaling contract, not provider-backed evidence of intelligence,
+  answer quality, or long-horizon task success.
+- The combined collaboration grounding contract keeps three independent
+  grounding domains and their trust policy dispatchable under a 4,096-token
+  context by yielding only the advisory cognitive overlay when necessary.
 - Exact workspace file-plane tests cover stale, ambiguous, racing, locked, and
   failed-publication patches; permission and receipt preservation; degraded
   output-history capture; read hashes and batch partial/offset behavior;
