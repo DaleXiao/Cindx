@@ -132,6 +132,7 @@ test("matched 18-cell evidence can demonstrate bounded memory benefit", () => {
   const report = analyzeMemoryEffect(suite, rawFixture(), "5".repeat(64));
   assert.equal(report.decision, "IMPROVED");
   assert.deepEqual(report.denominator, { cells: 18, pairs: 9, required_pairs: 6, irrelevant_control_pairs: 3 });
+  assert.deepEqual(report.resolved_budget, { max_duration_ms: 1 });
   assert.equal(report.outcomes.by_treatment.memory_off.recall_count, 0);
   const encoded = JSON.stringify(report);
   for (const secret of ["private-provider", "private.example", "private-model", "Red Juniper"]) {
@@ -173,6 +174,17 @@ test("an effectful tool attempt cannot pass the frozen read-only contract", () =
   assert.doesNotThrow(() => analyzeMemoryEffect(suite, raw));
   run.tool_receipts.push({ tool: "file.write", status: "denied" });
   assert.throws(() => analyzeMemoryEffect(suite, raw), /tool safety receipt mismatch/);
+});
+
+test("an out-of-allowlist tool with a failed effect receipt invalidates evidence", () => {
+  const raw = rawFixture();
+  const run = raw.runs[0];
+  run.tool_receipts.push({ tool: "skill.search", status: "succeeded" });
+  setRunOutput(run, run.output, false);
+  const report = analyzeMemoryEffect(suite, raw);
+  assert.equal(report.decision, "INVALID_EVIDENCE");
+  assert.equal(report.confounds.evidence_invalid_cells, 1);
+  assert.equal(report.pair_status_counts.INVALID_EVIDENCE, 1);
 });
 
 test("memory-off leakage invalidates evidence without removing failures from denominator", () => {

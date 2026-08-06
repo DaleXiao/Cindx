@@ -95,6 +95,18 @@ evidence by itself.
 The earlier `0.1.80` lite diagnostic remains historical evidence for its own
 revision and is no longer the current product decision.
 
+## Current Targeted Causal Evidence
+
+- [Cindx Memory-effect V1 0.2.19](CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md)
+  is an 18-cell provider-backed matched memory-on/off matrix on source commit
+  `1abdd6849e4a99c7b30f7f7aa2123efbbdb0d51a`. One required memory-off cell
+  invoked `skill.search` outside the frozen allowlist, so its fail-closed
+  decision is `INVALID_EVIDENCE` with 8/9 pairs evaluable. The five evaluable
+  required pairs favored memory-on and all three controls passed, but those
+  descriptive outcomes do not establish causal memory utility. The run does
+  not replace V5 or establish Auto, GEPA, distillation, or frontier uplift.
+- [Sanitized Memory-effect V1 machine-readable result](CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.json)
+
 ## Latest Matched Provider Diagnostic
 
 - [Cindx Provider-backed Matched Baseline 0.1.78](CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md)
