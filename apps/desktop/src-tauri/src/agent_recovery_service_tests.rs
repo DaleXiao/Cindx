@@ -1,11 +1,23 @@
 use super::*;
 use crate::append_message_event_with_metadata;
-use agent_core::{insert_event_type_v1, EventTypeV1, EVENT_TYPE_METADATA_KEY};
+use agent_core::{
+    insert_event_type_v1, EventTypeV1, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,
+    AGENT_RUN_IDENTITY_V1_SCHEMA, EVENT_TYPE_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+    SOURCE_AGENT_RUN_ID_METADATA_KEY,
+};
 
 fn run_metadata(session_id: &str, run_id: &str, with_prompt: bool) -> Metadata {
     let mut metadata = [
         ("session_id".to_string(), session_id.to_string()),
         ("agent_run_id".to_string(), run_id.to_string()),
+        (
+            AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY.to_string(),
+            AGENT_RUN_IDENTITY_V1_SCHEMA.to_string(),
+        ),
+        (
+            LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+            run_id.to_string(),
+        ),
     ]
     .into_iter()
     .collect::<Metadata>();
@@ -13,6 +25,158 @@ fn run_metadata(session_id: &str, run_id: &str, with_prompt: bool) -> Metadata {
         metadata.insert("prompt".to_string(), "finish the task".to_string());
     }
     metadata
+}
+
+#[test]
+fn recovery_checkpoint_keeps_physical_source_separate_from_attempt_predecessor() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let mut context = run_metadata("session-lineage", "attempt-b", true);
+    context.insert(
+        LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+        "logical-root".to_string(),
+    );
+    context.insert(
+        SOURCE_AGENT_RUN_ID_METADATA_KEY.to_string(),
+        "attempt-a".to_string(),
+    );
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task retry started",
+        context.clone(),
+    )
+    .expect("continuation should start");
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "finish the task",
+        context.clone(),
+    )
+    .expect("prompt should persist");
+    let events = store
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-lineage")
+        .expect("events should load");
+
+    let checkpoint = agent_recovery_metadata_with_task_state(
+        &events,
+        &context,
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::DeadlineExceeded,
+        Metadata::new(),
+        None,
+        None,
+    )
+    .expect("checkpoint should build");
+    let envelope = serde_json::from_str::<AgentRecoveryEnvelope>(
+        checkpoint
+            .get("recovery_envelope")
+            .expect("checkpoint should encode its envelope"),
+    )
+    .expect("recovery envelope should decode");
+
+    assert_eq!(
+        checkpoint
+            .get(SOURCE_AGENT_RUN_ID_METADATA_KEY)
+            .map(String::as_str),
+        Some("attempt-a")
+    );
+    assert_eq!(envelope.identity.source_run_id, "attempt-b");
+    assert_eq!(envelope.identity.logical_run_id(), "logical-root");
+}
+
+#[test]
+fn legacy_three_attempt_recovery_inherits_the_root_logical_run() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let legacy_context = |attempt_run_id: &str, source_attempt_run_id: Option<&str>| {
+        let mut metadata = [
+            ("session_id".to_string(), "session-legacy-lineage".to_string()),
+            ("agent_run_id".to_string(), attempt_run_id.to_string()),
+            ("prompt".to_string(), "finish the task".to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>();
+        if let Some(source_attempt_run_id) = source_attempt_run_id {
+            metadata.insert(
+                SOURCE_AGENT_RUN_ID_METADATA_KEY.to_string(),
+                source_attempt_run_id.to_string(),
+            );
+        }
+        metadata
+    };
+    let context_a = legacy_context("attempt-a", None);
+    let context_b = legacy_context("attempt-b", Some("attempt-a"));
+    let context_c = legacy_context("attempt-c", Some("attempt-b"));
+    for (summary, context) in [
+        ("Agent task started", &context_a),
+        ("Agent task retry started", &context_b),
+        ("Agent task retry started", &context_c),
+    ] {
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            summary,
+            context.clone(),
+        )
+        .expect("attempt should start");
+    }
+    append_message_event_with_metadata(
+        &mut store,
+        &phase16_task_id(),
+        MessageRole::User,
+        "finish the task",
+        context_c.clone(),
+    )
+    .expect("active prompt should persist");
+    let events = store
+        .list_by_task_and_metadata(
+            &phase16_task_id(),
+            "session_id",
+            "session-legacy-lineage",
+        )
+        .expect("legacy events should load");
+    let active = active_agent_events_for_session(&events, Some("session-legacy-lineage"));
+    let mut envelope = build_agent_recovery_envelope_with_task_state(
+        &active,
+        &context_c,
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::DeadlineExceeded,
+        10,
+        None,
+        None,
+    )
+    .expect("legacy checkpoint should build");
+    envelope.identity.logical_run_id = None;
+    let mut pause_metadata = context_c.clone();
+    pause_metadata.insert("recovery_state".to_string(), "paused".to_string());
+    pause_metadata.insert(
+        "recovery_envelope".to_string(),
+        serde_json::to_string(&envelope).expect("legacy envelope should encode"),
+    );
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task paused",
+        pause_metadata,
+    )
+    .expect("legacy pause should persist");
+
+    let recovered = peek_agent_recovery_envelope(
+        &store,
+        &context_c,
+        &[AgentRecoveryState::Paused],
+    )
+    .expect("legacy recovery should be readable")
+    .expect("legacy recovery should remain available");
+
+    assert_eq!(recovered.identity.source_run_id, "attempt-c");
+    assert_eq!(
+        recovered.identity.logical_run_id.as_deref(),
+        Some("attempt-a")
+    );
 }
 
 #[test]
@@ -223,6 +387,12 @@ fn recovery_claim_rolls_back_with_its_enclosing_transaction() {
         None,
     )
     .expect("pause checkpoint should build");
+    assert_eq!(
+        paused
+            .get(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+            .map(String::as_str),
+        Some("run-claim-rollback")
+    );
     append_event(
         &mut store,
         &phase16_task_id(),
@@ -254,6 +424,25 @@ fn recovery_claim_rolls_back_with_its_enclosing_transaction() {
     .expect("rolled-back claim should remain available")
     .expect("paused checkpoint should still exist");
     assert_eq!(claimed.attempts, 1);
+    let claimed_events = store
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-claim-rollback")
+        .expect("claimed recovery events should load");
+    let claim_event = claimed_events
+        .iter()
+        .rev()
+        .find(|event| event.summary == "Recovery resume claimed")
+        .expect("recovery claim should be recorded");
+    assert_eq!(
+        claim_event
+            .metadata
+            .get(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+            .map(String::as_str),
+        Some("run-claim-rollback")
+    );
+    assert_eq!(
+        claim_event.metadata.get("agent_run_id").map(String::as_str),
+        Some("run-claim-rollback")
+    );
     assert!(pause_permission_recovery_after_handoff_error(&mut store, &context)
         .expect("a failed permission handoff should release the claim"));
     let events = store

@@ -1,4 +1,8 @@
 use super::queue::*;
+use super::run_identity::{
+    assign_continuation_agent_run_identity, assign_initial_agent_run_identity,
+    inherited_agent_run_identity, inherited_agent_run_identity_from_events,
+};
 use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
@@ -8,6 +12,7 @@ use crate::suspended_run_runtime::{
     take_suspended_agent_run, SuspendedAgentRun,
 };
 use crate::*;
+use agent_core::AgentRunIdentity;
 
 pub(crate) fn persisted_agent_policy_from_active_events(
     active_events: &[Event],
@@ -103,7 +108,7 @@ pub(crate) fn run_agent_task_blocking_inner(
     };
     let prompt = prompt_with_attachments(&display_prompt, &attachments);
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
-    run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
+    assign_initial_agent_run_identity(&mut run_context)?;
     run_context.insert("steer_epoch".to_string(), "0".to_string());
     run_context.insert(
         "initial_prompt_objective".to_string(),
@@ -392,14 +397,15 @@ pub(crate) fn resume_suspended_agent_run(
             AgentRecoveryReason::UserContinued,
         )?
     };
+    let mut inherited_identity = inherited_agent_run_identity(&run_context)?;
     if let Some(recovery) = recovery {
+        inherited_identity = Some((
+            recovery.identity.logical_run_id().to_string(),
+            recovery.identity.source_run_id.clone(),
+        ));
         run_context.insert(
             "recovery_resume_key".to_string(),
             recovery.identity.resume_key.clone(),
-        );
-        run_context.insert(
-            "source_agent_run_id".to_string(),
-            recovery.identity.source_run_id.clone(),
         );
         run_context.insert(
             "recovery_attempts".to_string(),
@@ -410,7 +416,15 @@ pub(crate) fn resume_suspended_agent_run(
             run_context.insert("queue_id".to_string(), queue_id);
         }
     }
-    run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
+    if let Some((logical_run_id, source_attempt_run_id)) = inherited_identity {
+        assign_continuation_agent_run_identity(
+            &mut run_context,
+            &logical_run_id,
+            &source_attempt_run_id,
+        )?;
+    } else {
+        assign_initial_agent_run_identity(&mut run_context)?;
+    }
     run_context.insert(
         "current_time".to_string(),
         normalized_current_time_context(""),
@@ -513,13 +527,13 @@ pub(crate) fn retry_agent_task_blocking_inner(
         initial_objective,
         effective_objective,
         prompt_contract_epoch,
+        inherited_identity,
     ) = {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let events = store
-            .list_by_task(&task_id)
+        let events = agent_events_for_session(&store, &task_id, session_id.as_deref())
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, session_id.as_deref());
         let prompt = latest_agent_prompt_from_active_events(&active_events)
@@ -529,6 +543,26 @@ pub(crate) fn retry_agent_task_blocking_inner(
         let recovery_prompt = agent_recovery_prompt_from_active_events(&active_events)
             .unwrap_or_else(|| prompt.clone());
         let effort = persisted_agent_policy_from_active_events(&active_events)?;
+        let active_inherited_identity = match active_events
+            .iter()
+            .find(|event| is_agent_run_start_event(event))
+        {
+            Some(event)
+                if AgentRunIdentity::from_metadata(&event.metadata)
+                    .map_err(|error| format!("invalid agent run identity: {error}"))?
+                    .is_some() =>
+            {
+                inherited_agent_run_identity_from_events(&[], &event.metadata)?
+            }
+            Some(event) => {
+                let lineage_events = session_id
+                    .as_deref()
+                    .map(|session_id| agent_session_events(&events, session_id))
+                    .unwrap_or_else(|| events.clone());
+                inherited_agent_run_identity_from_events(&lineage_events, &event.metadata)?
+            }
+            None => None,
+        };
         let recovery = claim_agent_recovery_envelope(
             &mut store,
             &run_context,
@@ -548,6 +582,15 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .and_then(|snapshot| snapshot.prepared_task_state.as_ref())
             .map(|prepared| prepared.contract_epoch)
             .unwrap_or(applied_steer_epoch);
+        let inherited_identity = recovery
+            .as_ref()
+            .map(|recovery| {
+                (
+                    recovery.identity.logical_run_id().to_string(),
+                    recovery.identity.source_run_id.clone(),
+                )
+            })
+            .or(active_inherited_identity);
         (
             prompt,
             display_prompt,
@@ -558,6 +601,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
             initial_objective,
             effective_objective,
             prompt_contract_epoch,
+            inherited_identity,
         )
     };
     run_context.insert("steer_epoch".to_string(), applied_steer_epoch.to_string());
@@ -579,16 +623,20 @@ pub(crate) fn retry_agent_task_blocking_inner(
             "recovery_attempts".to_string(),
             recovery.attempts.to_string(),
         );
-        run_context.insert(
-            "source_agent_run_id".to_string(),
-            recovery.identity.source_run_id.clone(),
-        );
         run_context.insert("continuation".to_string(), "true".to_string());
         if let Some(queue_id) = recovery.queue_id.as_ref() {
             run_context.insert("queue_id".to_string(), queue_id.clone());
         }
     }
-    run_context.insert("agent_run_id".to_string(), unique_id("agent-run"));
+    if let Some((logical_run_id, source_attempt_run_id)) = inherited_identity {
+        assign_continuation_agent_run_identity(
+            &mut run_context,
+            &logical_run_id,
+            &source_attempt_run_id,
+        )?;
+    } else {
+        assign_initial_agent_run_identity(&mut run_context)?;
+    }
     let requested_policy = effort.requested_policy();
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
     add_image_generation_run_context(&mut run_context, &config, &prompt);

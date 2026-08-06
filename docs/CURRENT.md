@@ -2,7 +2,7 @@
 
 Current application version: `0.2.10`
 
-Last code-fact review: `2026-08-04`
+Last code-fact review: `2026-08-06`
 
 This document describes the current source tree. Evaluation reports describe
 only the revision recorded in each report.
@@ -35,6 +35,18 @@ only the revision recorded in each report.
 All three modes ultimately use the same `AgentKernel`, run-control contract,
 tool permission path, persistence path, and completion transaction. They differ
 in planning and collaboration policy, not in separate product loops.
+
+Every user-visible Agent task now has a versioned
+`cindx.agent-run-identity.v1` identity. `logical_agent_run_id` is immutable for
+the task, while the existing `agent_run_id` remains the physical attempt ID.
+They are equal on the first attempt; steer changes only `steer_epoch`, and a
+continuation or retry preserves the logical ID while creating a fresh physical
+ID. `source_agent_run_id` names the exact physical recovery source. Routing,
+memory, and evaluation aggregate canonical evidence by logical run, but
+permissions, effect replay, idempotency, runtime snapshots, and the active UI
+remain physical-attempt scoped. Legacy continuation chains are resolved only
+within one task/project/session; ambiguous, cyclic, or cross-scope lineage is
+not merged.
 
 ## Agent Run
 
@@ -308,7 +320,7 @@ evolved profile improves external product quality.
 The current source defines Agent Real-World V4 as the active execution contract.
 Browser cases receive a per-cell loopback HTTP fixture instead of a
 `file://` target. Tool obligations can be satisfied only by successful typed
-receipts from the current run; projected failed, denied, cancelled, and
+receipts from the current logical run; projected failed, denied, cancelled, and
 unfinished calls remain visible in the tool-call denominator and cannot count as
 tool success. A process-level timeout remains a failed matrix cell even when it
 cannot emit a final tool receipt. Browser evidence must bind the exact resolved
@@ -318,7 +330,12 @@ with an empty Agent answer cannot pass quality. Deterministic tests verify this
 measurement machinery only. The completed V4 `0.2.9` provider-backed matrix is
 a `VALID_BASELINE`, but the collector classifies continuation tool events in two
 Fast runs as outside the current logical run. The shared receipt gate and broad
-orchestration-uplift decision are therefore `NO-GO`.
+orchestration-uplift decision are therefore `NO-GO`. Current source resolves
+physical continuation attempts through the versioned logical-run identity and
+a fail-closed legacy lineage projection. That is a deterministic attribution
+fix, not a reinterpretation of the recorded V4 matrix; a newly frozen
+provider-backed run is still required before making a quality or
+orchestration-uplift claim.
 
 ## Current Evidence Boundary
 

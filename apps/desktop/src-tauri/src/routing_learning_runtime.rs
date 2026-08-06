@@ -1,217 +1,16 @@
 use super::*;
 pub(crate) use crate::learning_evidence_runtime::learning_budget_fingerprint;
+use crate::learning_evidence_runtime::workflow_learning_evidence;
 #[cfg(test)]
 pub(crate) use crate::learning_evidence_runtime::LEARNING_BUDGET_KEYS;
-use crate::learning_evidence_runtime::{
-    learning_lineage_usage_from_metadata, routing_learning_evidence, workflow_learning_evidence,
-};
 
-fn is_agent_run_terminal(event: &Event) -> bool {
-    AgentRunEvent::from_event(event).is_some_and(|event| event.status().is_terminal())
-}
+mod agent_run_projection;
 
-pub(crate) fn load_routing_telemetry_read_model(
-    store: &mut SqliteStore,
-) -> Result<Vec<RoutingTelemetry>, StorageError> {
-    load_routing_telemetry_read_model_inner(store, true)
-}
-
+pub(crate) use agent_run_projection::load_routing_telemetry_read_model;
 #[cfg(test)]
-pub(crate) fn load_routing_telemetry_read_model_snapshot(
-    store: &mut SqliteStore,
-) -> Result<Vec<RoutingTelemetry>, StorageError> {
-    load_routing_telemetry_read_model_inner(store, false)
-}
-
-fn load_routing_telemetry_read_model_inner(
-    store: &mut SqliteStore,
-    persist: bool,
-) -> Result<Vec<RoutingTelemetry>, StorageError> {
-    let task_id = phase16_task_id();
-    let revision = store.event_revision(&task_id)?;
-    let stored = store
-        .load_read_model(
-            ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
-            ROUTING_TELEMETRY_READ_MODEL_KEY,
-        )?
-        .and_then(|stored| {
-            serde_json::from_str::<RoutingTelemetryReadModel>(&stored.payload)
-                .ok()
-                .filter(|model| {
-                    model.schema == ROUTING_TELEMETRY_READ_MODEL_NAMESPACE
-                        && model.revision == stored.revision
-                        && model.revision <= revision.latest_sequence
-                        && model.event_count <= revision.event_count
-                })
-        });
-    let rebuilt = stored.is_none();
-    let mut model = stored.unwrap_or_else(|| RoutingTelemetryReadModel {
-        schema: ROUTING_TELEMETRY_READ_MODEL_NAMESPACE.to_string(),
-        revision: 0,
-        event_count: 0,
-        entries: Vec::new(),
-    });
-    let mut delta = store.list_by_task_after(&task_id, model.revision)?;
-    let mut changed = rebuilt || !delta.is_empty();
-    if model.event_count.saturating_add(delta.len() as u64) != revision.event_count {
-        changed = true;
-        model.revision = 0;
-        model.event_count = 0;
-        model.entries.clear();
-        delta = store.list_by_task_after(&task_id, 0)?;
-    }
-
-    let completed_run_ids = delta
-        .iter()
-        .filter(|event| is_agent_run_terminal(event))
-        .filter_map(|event| event.metadata.get("agent_run_id"))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for run_id in completed_run_ids {
-        let run_events = store.list_by_task_and_metadata(&task_id, "agent_run_id", &run_id)?;
-        let Some(telemetry) = routing_telemetry_from_events(&run_events)
-            .into_iter()
-            .next()
-        else {
-            continue;
-        };
-        model.entries.retain(|entry| entry.run_id != run_id);
-        model
-            .entries
-            .push(RoutingTelemetryEntry { run_id, telemetry });
-    }
-    if model.entries.len() > ROUTING_TELEMETRY_MAX_RUNS {
-        model
-            .entries
-            .drain(0..model.entries.len() - ROUTING_TELEMETRY_MAX_RUNS);
-    }
-    model.revision = revision.latest_sequence;
-    model.event_count = revision.event_count;
-    if persist && changed {
-        let payload = serde_json::to_string(&model).map_err(|error| {
-            StorageError::new(format!("routing telemetry serialization failed: {error}"))
-        })?;
-        store.save_read_model(
-            ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
-            ROUTING_TELEMETRY_READ_MODEL_KEY,
-            model.revision,
-            &payload,
-        )?;
-    }
-    Ok(model
-        .entries
-        .into_iter()
-        .map(|entry| entry.telemetry)
-        .collect())
-}
-
-pub(crate) fn routing_telemetry_from_events(events: &[Event]) -> Vec<RoutingTelemetry> {
-    let mut runs = BTreeMap::<String, Vec<&Event>>::new();
-    for event in events {
-        if let Some(run_id) = event.metadata.get("agent_run_id") {
-            runs.entry(run_id.clone()).or_default().push(event);
-        }
-    }
-    runs.into_values()
-        .filter_map(|mut run_events| {
-            run_events.sort_by_key(|event| event.sequence);
-            let started = run_events.iter().find(|event| {
-                AgentRunEvent::from_event(event).is_some_and(AgentRunEvent::is_start)
-            })?;
-            let decision = run_events
-                .iter()
-                .rev()
-                .find(|event| event.summary == "Agent run decision selected")
-                .copied()
-                .unwrap_or(started);
-            let terminal = run_events
-                .iter()
-                .rev()
-                .find(|event| is_agent_run_terminal(event))?;
-            let event_epoch = |event: &Event| {
-                event
-                    .metadata
-                    .get("steer_epoch")
-                    .cloned()
-                    .unwrap_or_else(|| "0".to_string())
-            };
-            let stable_epoch = event_epoch(decision);
-            if event_epoch(terminal) != stable_epoch {
-                return None;
-            }
-            let stable_events = run_events
-                .iter()
-                .copied()
-                .filter(|event| event_epoch(event) == stable_epoch)
-                .collect::<Vec<_>>();
-            let task_class = parse_task_class_label(decision.metadata.get("task_class")?)?;
-            let selected_policy = parse_policy(decision.metadata.get("collaboration_policy")?)?;
-            let selected_model = decision
-                .metadata
-                .get("agent_model")
-                .or_else(|| decision.metadata.get("router_model"))?
-                .clone();
-            let outcome = routing_outcome_for_run(&stable_events, terminal)?;
-            let (quality_score, verification_passed) =
-                routing_quality_signals(&stable_events, terminal);
-            let learning_evidence = routing_learning_evidence(
-                &stable_events,
-                decision,
-                terminal,
-                stable_epoch.parse::<u64>().ok(),
-            );
-            let logical_cost_proxy = stable_events
-                .iter()
-                .filter(|event| event.kind == EventKind::ModelRequestFinished)
-                .filter_map(|event| event.metadata.get("total_tokens"))
-                .filter_map(|value| value.parse::<u64>().ok())
-                .sum();
-            let cost_proxy = learning_evidence
-                .is_learnable()
-                .then(|| learning_lineage_usage_from_metadata(&terminal.metadata))
-                .flatten()
-                .filter(|usage| usage.completeness == learning_evidence.usage_completeness)
-                .map(|usage| usage.total_tokens)
-                .unwrap_or(logical_cost_proxy);
-            let tool_count = stable_events
-                .iter()
-                .filter(|event| event.kind == EventKind::ToolCallFinished)
-                .count() as u64;
-            let retrieval_count = stable_events
-                .iter()
-                .filter(|event| event.kind == EventKind::RetrievalPerformed)
-                .count() as u64;
-            Some(RoutingTelemetry {
-                task_class,
-                context_signature: decision
-                    .metadata
-                    .get("routing_signature")
-                    .cloned()
-                    .unwrap_or_default(),
-                selected_policy,
-                selected_model,
-                latency_ms: terminal.timestamp_ms.saturating_sub(
-                    stable_events
-                        .first()
-                        .map(|event| event.timestamp_ms)
-                        .unwrap_or(started.timestamp_ms),
-                ),
-                outcome,
-                quality_score,
-                verification_passed,
-                learning_evidence,
-                cost_proxy,
-                tool_count,
-                retrieval_count,
-                user_override: started
-                    .metadata
-                    .get("requested_policy")
-                    .map(|policy| policy != "auto_router")
-                    .unwrap_or(false),
-            })
-        })
-        .collect()
-}
+pub(crate) use agent_run_projection::{
+    load_routing_telemetry_read_model_snapshot, routing_telemetry_from_events,
+};
 
 pub(crate) fn load_workflow_telemetry_read_model(
     store: &mut SqliteStore,
@@ -572,8 +371,7 @@ pub(crate) fn workflow_execution_telemetry_from_events(
                 .rev()
                 .find(|event| {
                     event.kind == EventKind::ModelRequestFinished
-                        && event.metadata.get("stage").map(String::as_str)
-                            == Some("direct_anchor")
+                        && event.metadata.get("stage").map(String::as_str) == Some("direct_anchor")
                 })
                 .and_then(|event| event.metadata.get("latency_ms"))
                 .and_then(|latency| latency.parse::<u64>().ok());

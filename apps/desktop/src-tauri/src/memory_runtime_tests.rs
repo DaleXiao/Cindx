@@ -12,6 +12,7 @@ use crate::{
     },
     runtime_values::{phase16_task_id, unique_id},
 };
+use agent_core::AgentRunIdentity;
 use agent_harness::ExclusiveKeyRegistry;
 use agent_memory::{extract_durable_memories, MemoryControlAction, MEMORY_LEDGER_SCHEMA};
 
@@ -454,6 +455,261 @@ fn append_durable_requirement_run(
         ]
         .into_iter()
         .collect(),
+    );
+}
+
+#[test]
+fn logical_memory_projection_collects_attempts_once_and_keeps_physical_provenance() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-logical-memory";
+    let session_id = "session-logical-memory";
+    let logical_run_id = "logical-memory-run";
+    let content = "Always preserve reviewed release requirements";
+    let mut requirement =
+        durable_requirement_metadata(project_id, session_id, "attempt-a", content);
+    AgentRunIdentity::new(logical_run_id, "attempt-a")
+        .expect("initial identity should be valid")
+        .insert_into(&mut requirement)
+        .expect("initial identity should attach");
+    append_durable_memory_event_at(
+        &mut store,
+        "event-logical-memory-requirement",
+        100,
+        EventKind::MessageAdded,
+        "user message",
+        requirement,
+    );
+
+    let mut paused = [
+        ("project_id".to_string(), project_id.to_string()),
+        ("session_id".to_string(), session_id.to_string()),
+        ("agent_run_id".to_string(), "attempt-a".to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    AgentRunIdentity::new(logical_run_id, "attempt-a")
+        .expect("paused identity should be valid")
+        .insert_into(&mut paused)
+        .expect("paused identity should attach");
+    append_durable_memory_event_at(
+        &mut store,
+        "event-logical-memory-paused",
+        200,
+        EventKind::TaskStatusChanged,
+        "Agent task paused",
+        paused,
+    );
+
+    let mut completed = [
+        ("project_id".to_string(), project_id.to_string()),
+        ("session_id".to_string(), session_id.to_string()),
+        ("agent_run_id".to_string(), "attempt-b".to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    AgentRunIdentity::continuation(logical_run_id, "attempt-b", "attempt-a")
+        .expect("continuation identity should be valid")
+        .insert_into(&mut completed)
+        .expect("continuation identity should attach");
+    append_durable_memory_event_at(
+        &mut store,
+        "event-logical-memory-completed",
+        300,
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        completed,
+    );
+
+    let ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("logical memory projection should load");
+    assert_eq!(ledger.records.len(), 1);
+    assert_eq!(ledger.records[0].content, content);
+    assert_eq!(
+        ledger.records[0].provenance.agent_run_id.as_deref(),
+        Some("attempt-a")
+    );
+}
+
+#[test]
+fn memory_v3_rebuilds_from_events_without_consuming_v2_cache() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-v3-rebuild";
+    append_durable_requirement_run(
+        &mut store,
+        project_id,
+        "session-memory-v3-rebuild",
+        "run-memory-v3-rebuild",
+        "Always preserve canonical memory events",
+    );
+    let revision = store
+        .event_revision_by_metadata(&phase16_task_id(), "project_id", project_id)
+        .expect("memory revision should load");
+    let mut stale = MemoryLedger::new(project_id);
+    stale.revision = revision.latest_sequence;
+    stale.event_count = revision.event_count;
+    store
+        .save_read_model(
+            "agent-memory-v2",
+            project_id,
+            stale.revision,
+            &serde_json::to_string(&stale).expect("stale ledger should encode"),
+        )
+        .expect("stale memory model should save");
+
+    let ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("current memory model should rebuild");
+    assert_eq!(ledger.records.len(), 1);
+    assert!(store
+        .load_read_model("agent-memory-v2", project_id)
+        .expect("old memory namespace should remain readable")
+        .is_some());
+    assert!(store
+        .load_read_model(AGENT_MEMORY_READ_MODEL_NAMESPACE, project_id)
+        .expect("current memory namespace should load")
+        .is_some());
+}
+
+#[test]
+fn incremental_memory_bridges_legacy_predecessors_into_explicit_lineage() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-hybrid";
+    let session_id = "session-memory-hybrid";
+    let content = "Always preserve hybrid recovery evidence";
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-hybrid-requirement",
+        100,
+        EventKind::MessageAdded,
+        "user message",
+        durable_requirement_metadata(project_id, session_id, "attempt-a", content),
+    );
+    for (event_id, timestamp_ms, attempt_run_id, source_run_id) in [
+        ("event-memory-hybrid-b", 200, "attempt-b", "attempt-a"),
+        ("event-memory-hybrid-c", 300, "attempt-c", "attempt-b"),
+    ] {
+        append_durable_memory_event_at(
+            &mut store,
+            event_id,
+            timestamp_ms,
+            EventKind::TaskStatusChanged,
+            "Agent task retry started",
+            [
+                ("project_id".to_string(), project_id.to_string()),
+                ("session_id".to_string(), session_id.to_string()),
+                ("agent_run_id".to_string(), attempt_run_id.to_string()),
+                ("source_agent_run_id".to_string(), source_run_id.to_string()),
+                ("steer_epoch".to_string(), "0".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+    }
+    assert!(load_project_memory_ledger(&mut store, project_id)
+        .expect("incomplete hybrid memory should project")
+        .records
+        .is_empty());
+
+    let mut completed = [
+        ("project_id".to_string(), project_id.to_string()),
+        ("session_id".to_string(), session_id.to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    AgentRunIdentity::continuation("attempt-a", "attempt-d", "attempt-c")
+        .expect("hybrid continuation identity should be valid")
+        .insert_into(&mut completed)
+        .expect("hybrid continuation identity should attach");
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-hybrid-completed",
+        400,
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        completed,
+    );
+
+    let ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("completed hybrid memory should project");
+    assert_eq!(ledger.records.len(), 1);
+    assert_eq!(ledger.records[0].content, content);
+    assert_eq!(
+        ledger.records[0].provenance.agent_run_id.as_deref(),
+        Some("attempt-a")
+    );
+}
+
+#[test]
+fn incremental_memory_rejects_cross_session_logical_id_collisions() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-scope";
+    let logical_run_id = "logical-memory-collision";
+    for (event_id, session_id, attempt_run_id, content) in [
+        (
+            "event-memory-scope-a",
+            "session-memory-scope-a",
+            "attempt-scope-a",
+            "Always keep session A evidence scoped",
+        ),
+        (
+            "event-memory-scope-b",
+            "session-memory-scope-b",
+            "attempt-scope-b",
+            "Always keep session B evidence scoped",
+        ),
+    ] {
+        let mut metadata =
+            durable_requirement_metadata(project_id, session_id, attempt_run_id, content);
+        AgentRunIdentity::new(logical_run_id, attempt_run_id)
+            .expect("scoped identity should be valid")
+            .insert_into(&mut metadata)
+            .expect("scoped identity should attach");
+        append_durable_memory_event_at(
+            &mut store,
+            event_id,
+            100,
+            EventKind::MessageAdded,
+            "user message",
+            metadata,
+        );
+    }
+    assert!(load_project_memory_ledger(&mut store, project_id)
+        .expect("incomplete scoped memory should project")
+        .records
+        .is_empty());
+
+    let mut completed = [
+        ("project_id".to_string(), project_id.to_string()),
+        (
+            "session_id".to_string(),
+            "session-memory-scope-a".to_string(),
+        ),
+        ("agent_run_id".to_string(), "attempt-scope-a".to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    AgentRunIdentity::new(logical_run_id, "attempt-scope-a")
+        .expect("completion identity should be valid")
+        .insert_into(&mut completed)
+        .expect("completion identity should attach");
+    append_durable_memory_event_at(
+        &mut store,
+        "event-memory-scope-completed",
+        200,
+        EventKind::TaskStatusChanged,
+        "Agent task completed",
+        completed,
+    );
+
+    let ledger = load_project_memory_ledger(&mut store, project_id)
+        .expect("completed scoped memory should project");
+    assert_eq!(ledger.records.len(), 1);
+    assert_eq!(
+        ledger.records[0].provenance.session_id,
+        "session-memory-scope-a"
     );
 }
 

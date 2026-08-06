@@ -589,10 +589,14 @@ mod tests {
 
     #[test]
     fn exact_call_replay_accepts_the_recovery_source_run() {
-        let original = recovery_file_write_invocation(
+        let mut original = recovery_file_write_invocation(
             "call-1",
             "run-source",
             r#"{"path":"a.txt","content":"written"}"#,
+        );
+        original.metadata.insert(
+            "logical_agent_run_id".to_string(),
+            "logical-run".to_string(),
         );
         let mut result = ToolResult::text(
             original.id.clone(),
@@ -729,6 +733,10 @@ mod tests {
             "call-2",
             "run-new",
             r#"{"path":"a.txt","content":"written"}"#,
+        );
+        recovered.metadata.insert(
+            "logical_agent_run_id".to_string(),
+            "logical-run".to_string(),
         );
         assert!(!supports_recovery_effect_replay(&recovered));
         recovered.metadata.insert(

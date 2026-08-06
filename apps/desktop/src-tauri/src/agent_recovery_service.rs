@@ -4,7 +4,10 @@ use crate::{
         active_agent_events_for_session, agent_events_for_session,
         is_agent_run_start_event,
     },
-    agent_recovery_identity::resolve_agent_recovery_identity,
+    agent_recovery_identity::{
+        enrich_legacy_recovery_envelope, enrich_legacy_run_context,
+        resolve_agent_recovery_identity,
+    },
     agent_resource_snapshot::load_matching_agent_resource_snapshot,
     agent_runtime_snapshot::{
         delete_persisted_agent_runtime_snapshot, load_matching_agent_runtime_snapshot,
@@ -17,6 +20,11 @@ use crate::{
 };
 #[path = "agent_recovery_status.rs"]
 mod recovery_status;
+use agent_core::{
+    AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
+    AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+};
+pub(super) use crate::agent_recovery_identity::recovery_envelope_matches_active_turn;
 pub(super) use recovery_status::agent_task_is_cancelled;
 use recovery_status::{latest_agent_run_event, recovery_run_context};
 
@@ -207,8 +215,16 @@ pub(super) fn agent_recovery_metadata_with_task_state(
         envelope.budget_extensions.to_string(),
     );
     metadata.insert(
-        "source_agent_run_id".to_string(),
+        AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY.to_string(),
+        AGENT_RUN_IDENTITY_V1_SCHEMA.to_string(),
+    );
+    metadata.insert(
+        AGENT_RUN_ID_METADATA_KEY.to_string(),
         envelope.identity.source_run_id.clone(),
+    );
+    metadata.insert(
+        LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+        envelope.identity.logical_run_id().to_string(),
     );
     metadata.insert(
         "user_turn_sequence".to_string(),
@@ -226,19 +242,6 @@ pub(super) fn agent_recovery_metadata_with_task_state(
     Ok(metadata_with_context(metadata, run_context))
 }
 
-pub(super) fn recovery_envelope_matches_active_turn(
-    envelope: &AgentRecoveryEnvelope,
-    events: &[Event],
-    run_context: &Metadata,
-) -> bool {
-    let Some(active) = resolve_agent_recovery_identity(events, run_context)
-    else {
-        return false;
-    };
-    envelope.schema == AGENT_RECOVERY_SCHEMA
-        && envelope.identity.matches(&active.identity)
-}
-
 pub(super) fn peek_agent_recovery_envelope(
     store: &SqliteStore,
     run_context: &Metadata,
@@ -250,7 +253,7 @@ pub(super) fn peek_agent_recovery_envelope(
     let events = agent_events_for_session(store, &phase16_task_id(), Some(session_id))
         .map_err(|error| error.to_string())?;
     let active_events = active_agent_events_for_session(&events, Some(session_id));
-    let Some(envelope) = latest_agent_recovery_envelope(&active_events) else {
+    let Some(mut envelope) = latest_agent_recovery_envelope(&active_events) else {
         return Ok(None);
     };
     if envelope.state == AgentRecoveryState::Resuming {
@@ -277,6 +280,7 @@ pub(super) fn peek_agent_recovery_envelope(
     if !recovery_envelope_matches_active_turn(&envelope, &active_events, run_context) {
         return Err("agent recovery checkpoint is stale for the latest user turn".to_string());
     }
+    enrich_legacy_recovery_envelope(&events, &mut envelope);
     if envelope
         .resource_snapshot
         .as_ref()
@@ -352,6 +356,14 @@ pub(super) fn claim_agent_recovery_envelope_in_transaction(
                     envelope.identity.source_run_id.clone(),
                 ),
                 (
+                    AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY.to_string(),
+                    AGENT_RUN_IDENTITY_V1_SCHEMA.to_string(),
+                ),
+                (
+                    LOGICAL_AGENT_RUN_ID_METADATA_KEY.to_string(),
+                    envelope.identity.logical_run_id().to_string(),
+                ),
+                (
                     "recovery_envelope".to_string(),
                     serde_json::to_string(&envelope).map_err(|error| {
                         format!("failed to encode claimed recovery checkpoint: {error}")
@@ -416,6 +428,7 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
         let events = agent_events_for_session(store, &task_id, session_id)
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, session_id);
+        enrich_legacy_run_context(&events, &mut run_context);
         run_context.insert(
             "steer_epoch".to_string(),
             latest_applied_agent_steer_epoch(&active_events).to_string(),

@@ -65,18 +65,28 @@ run_agent_task
 Steer, queue, cancellation, permission continuation, retry, and recovery reuse
 the same run-control and lifecycle vocabulary. They are not independent loops.
 
+`agent-core` defines `cindx.agent-run-identity.v1`: the immutable
+`logical_agent_run_id` identifies one user task and `agent_run_id` identifies
+one physical execution attempt. Initial execution sets them equal; steer keeps
+both and advances its epoch; continuation keeps the logical ID, records the
+physical `source_agent_run_id`, and creates a new physical ID. The memoized
+legacy projection follows source-attempt chains only inside the same
+task/project/session and rejects conflicts, missing links, cycles, and
+cross-scope edges. This projection is derived from canonical events rather than
+stored as a second trajectory blob.
+
 ## Crate Ownership
 
 | Crate | Owns | Does not own |
 | --- | --- | --- |
-| `agent-core` | Shared ids, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
+| `agent-core` | Shared ids, logical-run/physical-attempt lineage, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
 | `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, task-contract Goal Delta and denial/replan policy, run control, budgets, context governance, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
 | `agent-memory` | Durable memory extraction, trust labels, deduplication, supersession, lexical/semantic recall | Workspace file indexing |
 | `agent-rag` | Workspace chunking, embeddings, file-backed index, optional LanceDB implementation, semantic search | Graph relationships or session memory |
 | `agent-graph` | Graph extraction, provenance, persistence, direct expansion and graph-guided retrieval inputs | Vector storage |
-| `agent-storage` | SQLite event/state contracts and implementation | Agent decisions |
+| `agent-storage` | SQLite event/state contracts, indexed logical-run event scope, and implementation | Agent decisions or logical permission scope |
 | `model-provider` | OpenAI-compatible request/response, streaming, embeddings, image-provider wire behavior | Routing or local tools |
 | `tools` | Built-in tool specifications, validation, local/delegated execution contracts | Permission decisions or UI |
 | `agent-mcp` | MCP transports, catalog cache, and tool adaptation | Permission bypass or agent policy |
@@ -127,8 +137,8 @@ its `runtime` child owns product-run continuation and event metric projection.
 Its `http_fixture` child owns the ephemeral loopback server and request receipt
 for each browser cell; the resolved URL is part of the case contract rather than
 an ambient browser dependency. Its `tool_receipts` child projects typed attempts
-only from the current Agent run, preserves every projected terminal or unfinished
-attempt in the denominator, and digests workspace-bound artifact evidence.
+only from the current logical Agent run, preserves every projected terminal or
+unfinished attempt in the denominator, and digests workspace-bound artifact evidence.
 Verification accepts a tool obligation only after successful
 completion. Exact browser-target matching and artifact or postcondition digests
 bind observed effects to the frozen case. This is evaluation wiring and does not
@@ -424,6 +434,10 @@ that layer has its own frozen matched causal evaluation.
   state.
 - User messages, lifecycle transitions, tool events, permission decisions,
   traces, and completion data are persisted as events/projections.
+- Events index both immutable logical-run identity and physical-attempt
+  identity. Permission rows deliberately index only the physical attempt, so a
+  continuation cannot inherit an allow-once decision or effect authority merely
+  because it belongs to the same logical task.
 - Suspended and recoverable runs preserve canonical transcript state, typed
   prepared-task and obligation checkpoints, and typed recovery state, reason,
   and identity. The desktop adapter keeps the existing storage wire through an

@@ -10,12 +10,21 @@ use crate::{
     runtime_values::phase16_task_id,
 };
 use agent_application::AgentRunEvent;
-use agent_core::{Event, EventKind, EVENT_TYPE_METADATA_KEY};
+use agent_core::{
+    AgentRunLineage, Event, EventKind, EVENT_TYPE_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+};
 use agent_memory::{
     extract_durable_memories, is_memory_user_confirmation_event, merge_memory_records, MemoryLedger,
 };
 use agent_storage::{SqliteStore, StorageError};
 use std::collections::BTreeMap;
+
+mod run_identity_projection;
+
+use run_identity_projection::{
+    group_memory_run_events, memory_run_scope, select_memory_run_events, BridgedMemoryRunEvents,
+    MemoryRunScope,
+};
 
 pub(crate) fn is_memory_checkpoint_event(event: &Event) -> bool {
     AgentRunEvent::from_event(event)
@@ -117,52 +126,83 @@ pub(crate) fn load_project_memory_ledger_inner(
         delta = store.list_by_task_and_metadata_after(&task_id, "project_id", project_id, 0)?;
     }
 
-    let rebuilding_runs = if rebuilding {
-        let mut runs = BTreeMap::<String, Vec<Event>>::new();
-        for event in &delta {
-            if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
-                continue;
-            }
-            if let Some(run_id) = event.metadata.get("agent_run_id") {
-                runs.entry(run_id.clone()).or_default().push(event.clone());
-            }
-        }
-        Some(runs)
+    let has_legacy_checkpoint = delta.iter().any(|event| {
+        event.metadata.get("project_id").map(String::as_str) == Some(project_id)
+            && is_memory_checkpoint_event(event)
+            && !event
+                .metadata
+                .contains_key(LOGICAL_AGENT_RUN_ID_METADATA_KEY)
+    });
+    let loaded_lineage_events;
+    let lineage_events = if rebuilding || !has_legacy_checkpoint {
+        delta.as_slice()
+    } else {
+        loaded_lineage_events =
+            store.list_by_task_and_metadata(&task_id, "project_id", project_id)?;
+        loaded_lineage_events.as_slice()
+    };
+    let lineage = AgentRunLineage::from_events(lineage_events).ok();
+    let scoped_run_events = if rebuilding || has_legacy_checkpoint {
+        Some(group_memory_run_events(
+            lineage_events,
+            project_id,
+            lineage.as_ref(),
+        ))
     } else {
         None
     };
+    let latest_checkpoints = delta
+        .iter()
+        .filter(|event| {
+            event.metadata.get("project_id").map(String::as_str) == Some(project_id)
+                && is_memory_checkpoint_event(event)
+        })
+        .filter_map(|event| {
+            memory_run_scope(event, lineage.as_ref()).map(|scope| (scope, event.sequence))
+        })
+        .fold(
+            BTreeMap::<MemoryRunScope, u64>::new(),
+            |mut checkpoints, (scope, sequence)| {
+                checkpoints
+                    .entry(scope)
+                    .and_modify(|latest| *latest = (*latest).max(sequence))
+                    .or_insert(sequence);
+                checkpoints
+            },
+        );
+    let mut bridged_run_events = BridgedMemoryRunEvents::new();
     for event in &delta {
         if event.metadata.get("project_id").map(String::as_str) != Some(project_id) {
             continue;
         }
         if is_memory_checkpoint_event(event) {
-            let Some(run_id) = event
-                .metadata
-                .get("agent_run_id")
-                .filter(|run_id| !run_id.is_empty())
-            else {
+            let Some(scope) = memory_run_scope(event, lineage.as_ref()) else {
                 continue;
             };
-            let events = match rebuilding_runs.as_ref() {
-                Some(runs) => runs.get(run_id).cloned().unwrap_or_default(),
-                None => store.list_by_task_and_metadata(&task_id, "agent_run_id", run_id)?,
-            }
-            .into_iter()
-            .filter(|candidate| candidate.sequence <= event.sequence)
-            .filter(|candidate| {
-                candidate.metadata.get("project_id").map(String::as_str) == Some(project_id)
-            })
-            .collect::<Vec<_>>();
-            let events = memory_events_for_terminal_steer_epoch(events);
-            if let Some(session_id) = events
-                .iter()
-                .find_map(|candidate| candidate.metadata.get("session_id"))
-            {
-                merge_memory_records(
-                    &mut ledger,
-                    extract_durable_memories(&events, project_id, session_id),
-                    AGENT_MEMORY_MAX_RECORDS,
-                );
+            if latest_checkpoints.get(&scope).copied() == Some(event.sequence) {
+                let events = select_memory_run_events(
+                    store,
+                    &task_id,
+                    project_id,
+                    &scope,
+                    scoped_run_events.as_ref(),
+                    &mut bridged_run_events,
+                )?;
+                let events = events
+                    .into_iter()
+                    .filter(|candidate| candidate.sequence <= event.sequence)
+                    .collect::<Vec<_>>();
+                let events = memory_events_for_terminal_steer_epoch(events);
+                if let Some(session_id) = events
+                    .iter()
+                    .find_map(|candidate| candidate.metadata.get("session_id"))
+                {
+                    merge_memory_records(
+                        &mut ledger,
+                        extract_durable_memories(&events, project_id, session_id),
+                        AGENT_MEMORY_MAX_RECORDS,
+                    );
+                }
             }
         }
         replay_project_memory_record(&mut ledger, event, project_id);

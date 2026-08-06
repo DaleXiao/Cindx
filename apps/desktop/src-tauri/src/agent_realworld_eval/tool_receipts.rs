@@ -1,5 +1,5 @@
 use crate::{is_agent_run_start_event, sha256_hex, EventKind};
-use agent_core::Event;
+use agent_core::{Event, AgentRunLineage};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -68,11 +68,28 @@ struct FinishedReceipt {
 
 pub(super) fn project_tool_receipts(events: &[Event], root: &Path) -> ToolReceiptProjection {
     let mut projection = ToolReceiptProjection::default();
-    let Some(root_run_id) = events
+    let Some(root_event) = events
         .iter()
         .find(|event| is_agent_run_start_event(event))
-        .and_then(|event| event.metadata.get("agent_run_id"))
-        .cloned()
+    else {
+        projection
+            .errors
+            .push("current Agent run identity is missing".to_string());
+        return projection;
+    };
+    let lineage = match AgentRunLineage::from_events(events) {
+        Ok(lineage) => lineage,
+        Err(error) => {
+            projection
+                .errors
+                .push(format!("current Agent run lineage is invalid: {error}"));
+            return projection;
+        }
+    };
+    let Some(root_run_id) = lineage
+        .logical_run_id_for_event(root_event)
+        .ok()
+        .flatten()
     else {
         projection
             .errors
@@ -86,9 +103,14 @@ pub(super) fn project_tool_receipts(events: &[Event], root: &Path) -> ToolReceip
             EventKind::ToolCallProposed | EventKind::ToolCallStarted | EventKind::ToolCallFinished
         )
     }) {
-        if !belongs_to_run(event, &root_run_id) {
+        if lineage
+            .logical_run_id_for_event(event)
+            .ok()
+            .flatten()
+            != Some(root_run_id)
+        {
             projection.errors.push(format!(
-                "tool event {} is outside the current Agent run",
+                "tool event {} is outside the current logical Agent run",
                 event.sequence
             ));
             continue;
@@ -157,15 +179,6 @@ pub(super) fn project_tool_receipts(events: &[Event], root: &Path) -> ToolReceip
         .map(|attempt| build_receipt(attempt, canonical_root.as_deref(), &mut projection.errors))
         .collect();
     projection
-}
-
-fn belongs_to_run(event: &Event, root_run_id: &str) -> bool {
-    event.metadata.get("agent_run_id").map(String::as_str) == Some(root_run_id)
-        || event
-            .metadata
-            .get("source_agent_run_id")
-            .map(String::as_str)
-            == Some(root_run_id)
 }
 
 fn merge_common_metadata(attempt: &mut AttemptBuilder, event: &Event, errors: &mut Vec<String>) {
@@ -605,6 +618,44 @@ mod tests {
         assert_eq!(projection.receipts[0].tool, "file.read");
         assert_eq!(projection.receipts[0].status, ToolReceiptStatus::Succeeded);
         assert_eq!(projection.errors.len(), 2);
+    }
+
+    #[test]
+    fn legacy_multi_attempt_continuations_share_one_logical_receipt_scope() {
+        let root = tempfile::tempdir().expect("workspace");
+        let mut start = Metadata::new();
+        start.insert("agent_run_id".to_string(), "attempt-a".to_string());
+
+        let mut started_b = metadata("call-b", "file.read", "attempt-b");
+        started_b.insert(
+            "source_agent_run_id".to_string(),
+            "attempt-a".to_string(),
+        );
+        let mut finished_b = started_b.clone();
+        finished_b.insert("status".to_string(), "failed".to_string());
+
+        let mut started_c = metadata("call-c", "file.read", "attempt-c");
+        started_c.insert(
+            "source_agent_run_id".to_string(),
+            "attempt-b".to_string(),
+        );
+        let mut finished_c = started_c.clone();
+        finished_c.insert("status".to_string(), "succeeded".to_string());
+
+        let events = vec![
+            event(1, EventKind::TaskStatusChanged, start),
+            event(2, EventKind::ToolCallStarted, started_b),
+            event(3, EventKind::ToolCallFinished, finished_b),
+            event(4, EventKind::ToolCallStarted, started_c),
+            event(5, EventKind::ToolCallFinished, finished_c),
+        ];
+
+        let projection = project_tool_receipts(&events, root.path());
+
+        assert!(projection.errors.is_empty(), "{:?}", projection.errors);
+        assert_eq!(projection.receipts.len(), 2);
+        assert_eq!(projection.receipts[0].status, ToolReceiptStatus::Failed);
+        assert_eq!(projection.receipts[1].status, ToolReceiptStatus::Succeeded);
     }
 
     #[test]
