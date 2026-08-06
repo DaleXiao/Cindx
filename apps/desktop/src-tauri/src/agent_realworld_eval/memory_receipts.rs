@@ -79,6 +79,7 @@ pub(super) fn validate_memory_effect_suite(suite: &super::RealworldSuite) -> Res
                         | "file.read"
                         | "file.read_many"
                         | "file.search"
+                        | "skill.search"
                         | "tool.inspect"
                         | "tool.search"
                 )

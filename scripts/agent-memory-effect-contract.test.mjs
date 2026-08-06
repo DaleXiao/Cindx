@@ -6,6 +6,7 @@ import { analyzeMemoryEffect } from "./agent-memory-effect-contract.mjs";
 import { validatePreflight } from "./run-agent-realworld.mjs";
 
 const suite = JSON.parse(fs.readFileSync(new URL("../benchmarks/agent/memory-effect-v1.json", import.meta.url)));
+const suiteV2 = JSON.parse(fs.readFileSync(new URL("../benchmarks/agent/memory-effect-v2.json", import.meta.url)));
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -132,6 +133,8 @@ test("matched 18-cell evidence can demonstrate bounded memory benefit", () => {
   const report = analyzeMemoryEffect(suite, rawFixture(), "5".repeat(64));
   assert.equal(report.decision, "IMPROVED");
   assert.deepEqual(report.denominator, { cells: 18, pairs: 9, required_pairs: 6, irrelevant_control_pairs: 3 });
+  assert.equal(report.suite_id, suite.id);
+  assert.equal(report.suite_version, suite.version);
   assert.deepEqual(report.resolved_budget, { max_duration_ms: 1 });
   assert.equal(report.outcomes.by_treatment.memory_off.recall_count, 0);
   const encoded = JSON.stringify(report);
@@ -185,6 +188,26 @@ test("an out-of-allowlist tool with a failed effect receipt invalidates evidence
   assert.equal(report.decision, "INVALID_EVIDENCE");
   assert.equal(report.confounds.evidence_invalid_cells, 1);
   assert.equal(report.pair_status_counts.INVALID_EVIDENCE, 1);
+});
+
+test("v2 freezes the observed permissionless read-only skill search tool", () => {
+  const raw = rawFixture();
+  raw.suite_id = suiteV2.id;
+  raw.suite_version = suiteV2.version;
+  raw.suite_description = suiteV2.description;
+  raw.runs[0].tool_receipts.push({ tool: "skill.search", status: "succeeded" });
+  const report = analyzeMemoryEffect(suiteV2, raw);
+  assert.equal(report.decision, "IMPROVED");
+  assert.equal(report.suite_id, "cindx-agent-memory-effect-v2");
+  assert.equal(report.suite_version, 2);
+});
+
+test("v2 raw identity cannot drift back to v1", () => {
+  const raw = rawFixture();
+  raw.suite_id = suiteV2.id;
+  raw.suite_version = 1;
+  raw.suite_description = suiteV2.description;
+  assert.throws(() => analyzeMemoryEffect(suiteV2, raw), /raw suite identity mismatch/);
 });
 
 test("memory-off leakage invalidates evidence without removing failures from denominator", () => {
