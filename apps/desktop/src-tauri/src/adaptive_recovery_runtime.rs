@@ -201,7 +201,7 @@ pub(crate) fn recover_adaptive_worker(
             prior_evidence,
             spec.prompt
         ),
-        CollaborationWorkerAccess::new(spec.step_id.clone(), spec.tool_policy.clone()),
+        CollaborationWorkerAccess::new(spec.step_id.clone(), spec.tool_policy),
         spec.max_model_turns,
         spec.max_tool_calls,
         spec.max_output_tokens,

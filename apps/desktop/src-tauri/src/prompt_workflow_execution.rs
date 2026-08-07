@@ -493,7 +493,7 @@ fn execute_step(request: ExecuteStepRequest) -> PromptExecutionStep {
                 role: role.clone(),
                 model: model.clone(),
                 prompt: prompt.clone(),
-                tool_policy: step.tool_policy.clone(),
+                tool_policy: step.tool_policy,
                 max_model_turns,
                 max_tool_calls,
                 max_output_tokens,

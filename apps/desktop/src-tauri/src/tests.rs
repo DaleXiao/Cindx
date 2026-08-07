@@ -9129,8 +9129,12 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
         input_fingerprint: None,
     })
     .unwrap();
-    let contrastive =
-        prompt_mutation_reflection_packets(&observations, &[failure.clone()], profile_id, "pro");
+    let contrastive = prompt_mutation_reflection_packets(
+        &observations,
+        std::slice::from_ref(&failure),
+        profile_id,
+        "pro",
+    );
     assert_eq!(contrastive.len(), 6);
     assert_eq!(
         contrastive
@@ -9151,8 +9155,12 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             packet.verifier.score = 0.0;
         }
     }
-    let without_anchor =
-        prompt_mutation_reflection_packets(&failure_only, &[failure.clone()], profile_id, "pro");
+    let without_anchor = prompt_mutation_reflection_packets(
+        &failure_only,
+        std::slice::from_ref(&failure),
+        profile_id,
+        "pro",
+    );
     assert!(without_anchor
         .iter()
         .all(|packet| { packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1 }));
@@ -9165,7 +9173,7 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
     }
     assert!(prompt_mutation_reflection_packets(
         &invalid_anchor,
-        &[failure.clone()],
+        std::slice::from_ref(&failure),
         profile_id,
         "pro",
     )

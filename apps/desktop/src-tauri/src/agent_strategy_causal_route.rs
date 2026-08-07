@@ -11,6 +11,7 @@ pub(super) fn neutral_prompt_profile_sha256(effort: AgentPolicy) -> String {
         .expect("built-in route-neutral prompt profile must validate")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_causal_route(
     prompt: &str,
     recent_context: &str,

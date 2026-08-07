@@ -288,6 +288,7 @@ pub(crate) fn canonical_prompt_profile_fingerprint_by_id(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prompt_pair_side_has_canonical_lineage(
     profile_id: &str,
     opponent_profile_id: Option<&str>,
@@ -539,6 +540,7 @@ pub(crate) fn frozen_prompt_profile_for_promotion(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod canonical_prompt_lineage_tests {
     use super::prompt_pair_side_has_canonical_lineage;
 

@@ -56,6 +56,7 @@ fn permission_prompt_contract_epoch(run_context: &Metadata) -> u64 {
         .unwrap_or_default()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn permission_tool_observation_metadata(
     request_id: &PermissionRequestId,
     tool_call_id: &str,

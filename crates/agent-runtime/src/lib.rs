@@ -1122,6 +1122,7 @@ pub fn record_tool_outcome_with_risk(
     update_verified_interactions(state, pending_before);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_tool_outcome_transition_with_risk(
     state: &mut AgentLoopState,
     tool_name: &str,
@@ -1189,6 +1190,7 @@ fn update_verified_interactions(state: &mut AgentLoopState, pending_before: usiz
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_persisted_tool_outcome_with_risk(
     state: &mut AgentLoopState,
     tool_name: &str,

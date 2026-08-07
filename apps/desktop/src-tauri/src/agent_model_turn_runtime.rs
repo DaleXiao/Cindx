@@ -310,7 +310,7 @@ pub(crate) fn execute_agent_model_turn(
                 cancellation.finish_model_call_at(epoch_lease.epoch());
                 return Ok(AgentModelTurnOutcome::RestartAfterSteer);
             }
-            Err(reason) if reason == RunStopReason::StageBudgetExhausted => {
+            Err(RunStopReason::StageBudgetExhausted) => {
                 cancellation.finish_model_call_at(epoch_lease.epoch());
                 return Ok(stage_budget_exhaustion_outcome(
                     turn_role,

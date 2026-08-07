@@ -523,32 +523,35 @@ claim machinery only; they do not establish intelligence uplift.
 
 V5 preserves V4's six frozen cases, three repeats, isolated browser fixture,
 typed current-logical-run tool receipts, exact target and artifact binding, and
-visible permission-denial requirement. The completed V5 `0.2.11` matrix is the
-current provider-backed baseline. V4 `0.2.9` remains historical evidence for
-its exact revision.
+visible permission-denial requirement. The completed V5 `0.2.22` matrix is the
+current provider-backed baseline. The `0.2.11` V5 matrix and V4 `0.2.9` remain
+historical evidence for their exact revisions.
 
 ## Current Evidence Boundary
 
 The latest provider-backed Agent baseline is
-[Cindx Agent Real-World V5 0.2.11](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md),
-captured on source commit `3765d23042dcafaeb721accc0460f149e1ea5ade`.
+[Cindx Agent Real-World V5 0.2.22](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.md),
+captured on source commit `a0000fa55907b90adf6684b39aa3b9d5cc679f42`.
 It retained all 72 position-balanced cells across Oracle Reference, Grounded
 Direct, Auto, and Pro, with complete provider and strategy evidence, zero setup
 failures, zero timeouts, and zero safety violations. The publication contract
 marks it `VALID_BASELINE`.
 
-- All four treatments scored `100.0%` quality. Completion was `100.0%`,
-  `83.3%`, `83.3%`, and `88.9%`, respectively.
-- Against iso-budget Grounded Direct, Auto had zero quality and completion
-  delta, `5,989 ms` lower median latency, and `1.8%` more total tokens. Because
-  no matched pair improved quality, adaptive-direct is `NEUTRAL`.
+- Oracle Reference, Grounded Direct, Auto, and Pro scored `100.0%`, `77.8%`,
+  `83.3%`, and `83.3%` quality. Completion was `100.0%`, `77.8%`, `77.8%`,
+  and `83.3%`, respectively.
+- Against iso-budget Grounded Direct, Auto improved one of 18 matched quality
+  outcomes (`+5.6 pp`), preserved completion, had a matched-pair median latency
+  delta of `-3,585 ms`, and used about `10.0%` fewer total tokens. The frozen
+  claim gates therefore classify adaptive-direct as `IMPROVED` on this exact
+  matrix.
 - No Auto run exercised workflow collaboration, so workflow is
   `NOT_EXERCISED`; it is not silently merged into the adaptive-direct result.
-- Pro completed one more matched run and had `4,722 ms` lower median latency
-  than Grounded Direct, but is descriptive because its native budget differs.
-- Six Grounded Direct and Auto browser runs failed terminal completion
-  symmetrically. Pro retained one browser failure and one long-horizon failure;
-  all eight failures remain in the denominator.
+- Pro improved one matched quality outcome and completed one more matched run;
+  it remains descriptive because its native budget differs.
+- All nine product coding runs failed terminal completion; one Grounded Direct
+  and one Auto browser run also failed. All 11 failures remain in the
+  denominator.
 - All product treatments completed all denied-mutation runs with the required
   visible permission-denied explanation.
 - No frozen learned profile was executed, so learned-profile and Pro-to-Auto
@@ -567,16 +570,17 @@ Therefore the current claim is:
 
 - The control plane, local memory contract, permission boundary, and
   deterministic quality gates have substantial automated coverage.
-- Auto preserves the Grounded Direct quality and completion baseline while
-  reducing median latency, but it shows no matched quality uplift.
+- Auto shows a bounded matched adaptive-direct improvement over Grounded Direct
+  on the frozen V5 suite while preserving completion and reducing latency and
+  token use. The matrix does not isolate which individual control caused it.
 - The current source now has a deterministic, observable Auto
   value-of-computation admission mechanism and bounded single-conductor
   no-progress handling, plus typed denial and bounded same-epoch replan
   contracts. It also has an authoritative-objective Context Compiler contract,
   but V5 did not isolate any of these controls' causal contribution or measure
   the compiler's effect on provider-backed answer quality.
-- Pro's completion signal is descriptive rather than causal; browser terminal
-  completion remains the clearest measured weakness.
+- Pro's quality and completion signals are descriptive rather than causal;
+  coding terminal completion is the clearest measured weakness.
 - No current provider-backed result identifies an evolved profile or proves a
   GEPA, transfer, or self-distillation gain.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.

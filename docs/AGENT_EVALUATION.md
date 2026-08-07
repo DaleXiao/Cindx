@@ -8,7 +8,8 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 
 | Evidence | Version | Scope | Current conclusion |
 | --- | --- | --- | --- |
-| [Agent Real-World V5](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md) | `0.2.11` | 6 frozen product cases; Oracle Reference/Grounded Direct/Auto/Pro; 72 position-balanced provider-backed runs | `VALID_BASELINE`, zero incomplete evidence, setup failures, timeouts, and safety violations; adaptive-direct is `NEUTRAL`, while workflow, learned-profile, and distillation are `NOT_EXERCISED`; Pro is descriptive because its native budget differs |
+| [Agent Real-World V5](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.md) | `0.2.22` | 6 frozen product cases; Oracle Reference/Grounded Direct/Auto/Pro; 72 position-balanced provider-backed runs | `VALID_BASELINE`, zero incomplete evidence, setup failures, timeouts, and safety violations; iso-budget adaptive-direct is `IMPROVED` with one additional quality-pass pair, unchanged completion, lower median latency, and fewer total tokens; workflow, learned-profile, and distillation are `NOT_EXERCISED`; Pro remains descriptive |
+| [Agent Real-World V5 (previous)](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md) | `0.2.11` | Same frozen V5 matrix on its recorded revision | `VALID_BASELINE`; adaptive-direct was `NEUTRAL`, workflow, learned-profile, and distillation were `NOT_EXERCISED`, and Pro was descriptive |
 | [Agent Real-World V4](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md) | `0.2.9` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 position-balanced provider-backed runs with current-run tool, strategy, and provider receipts | `VALID_BASELINE`, zero setup failures, and zero safety violations; Auto/Pro pass their paired quality, completion, latency, and token gates, but the collector classifies continuation tool events in two Fast runs as outside the current logical run, so the receipt gate fails closed and broad orchestration uplift remains `NO-GO`; no learned artifact was supplied |
 | [Agent Real-World V3](evaluations/CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md) | `0.2.3` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 position-balanced provider-backed runs with strategy and provider receipts | `VALID_BASELINE`, zero setup failures, and zero safety violations; receipt evidence fails closed on five browser timeouts, Auto/Pro lose completion despite quality gains, and broad orchestration uplift remains `NO-GO`; no learned artifact was supplied |
 | [Agent Real-World V2](evaluations/CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md) | `0.1.98` | 6 frozen product cases; Direct/Fast/Auto/Pro; 72 provider-backed runs | `VALID_BASELINE` with zero setup failures and zero safety violations; Auto/Pro trade quality gains for materially lower completion and higher latency, so broad orchestration uplift remains `NO-GO` |
@@ -29,17 +30,20 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
 
-The `0.2.11` V5 matrix is the latest complete provider-backed product baseline.
+The `0.2.22` V5 matrix is the latest complete provider-backed product baseline.
 All 72 cells were retained, with complete provider and strategy evidence, zero
 setup failure, zero timeout, and zero safety violation. Its `VALID_BASELINE`
 status means the matrix is structurally usable; it is not a capability `GO`.
-Against the iso-budget Grounded Direct product baseline, Auto preserved quality
-and completion, reduced median latency by `5,989 ms`, and used `1.8%` more total
-tokens. No pair improved quality, so adaptive-direct is `NEUTRAL`, not uplift.
+Against the iso-budget Grounded Direct product baseline, Auto improved one of
+18 matched quality outcomes (`+5.6 pp`), preserved completion, had a
+matched-pair median latency delta of `-3,585 ms`, and used about `10.0%` fewer
+total tokens. The frozen claim gates therefore classify adaptive-direct as
+`IMPROVED` on this exact matrix; they do not identify which individual control
+caused the gain.
 No Auto run exercised workflow collaboration, and no frozen learned artifact
 was supplied, so workflow, learned-profile, and distillation remain
-`NOT_EXERCISED`. Pro completed one more matched run and had lower median latency
-than Grounded Direct, but remains descriptive because its native budget differs.
+`NOT_EXERCISED`. Pro improved one matched quality outcome and completed one more
+matched run, but remains descriptive because its native budget differs.
 
 The `0.1.95` 13A repair calibration remains the before-matrix confirmation
 that false external grounding was closed on its exact six-run subset. The
@@ -159,28 +163,29 @@ reports are immutable and live under `evaluations/archive/`.
 
 ## Current Real-World Findings
 
-The `0.2.11` V5 baseline contains 72 position-balanced observations. Oracle
-Reference, Grounded Direct, Auto, and Pro each passed `100.0%` of quality and
-safety checks. Completion was `100.0%`, `83.3%`, `83.3%`, and `88.9%`,
-respectively. The matrix retained 64 completed and eight failed runs, with no
-timeout, permission wait, setup failure, provider-evidence gap, strategy-evidence
-gap, or safety violation.
+The `0.2.22` V5 baseline contains 72 position-balanced observations. Oracle
+Reference, Grounded Direct, Auto, and Pro passed `100.0%`, `77.8%`, `83.3%`,
+and `83.3%` of quality checks, respectively, with zero safety violation.
+Completion was `100.0%`, `77.8%`, `77.8%`, and `83.3%`. The matrix retained 61
+completed and 11 failed runs, with no timeout, permission wait, setup failure,
+provider-evidence gap, strategy-evidence gap, or safety violation.
 
 The primary causal comparison is Grounded Direct versus iso-budget Auto. Across
-all 18 matched pairs, quality and completion deltas were both zero. Auto's median
-latency was `5,989 ms` lower, its median-latency ratio was `0.796`, and its total
-token ratio was `1.018`. The resource and non-regression gates passed, but the
-frozen quality-improvement gate did not; adaptive-direct is therefore
-`NEUTRAL`. Strategy receipts show no executed Auto workflow subset, so workflow
-is `NOT_EXERCISED` rather than neutral or improved.
+all 18 matched pairs, Auto improved one quality outcome (`+5.6 pp`) while
+completion was unchanged. Auto's matched-pair median latency delta was
+`-3,585 ms`, its aggregate median-latency ratio was `0.906`, and its total-token
+ratio was `0.900`. The quality, completion, resource, setup, and safety gates
+all passed;
+adaptive-direct is therefore `IMPROVED` for this frozen suite. Strategy receipts
+show no executed Auto workflow subset, so workflow is `NOT_EXERCISED` rather
+than neutral or improved.
 
-Pro completed one additional matched run (`+5.6 pp`) and had `4,722 ms` lower
-median latency than Grounded Direct with equal measured quality. That result is
-descriptive only because Pro uses a different native budget. Six Grounded Direct
-and Auto browser runs failed terminal completion symmetrically; Pro retained one
-browser failure and one long-horizon failure. Every failed run remains in the
-denominator, while the verified answers and external effects still pass the
-frozen quality checks.
+Pro improved one matched quality outcome (`+5.6 pp`), completed one additional
+matched run (`+5.6 pp`), and had a matched-pair median latency delta of
+`-137 ms` against Grounded Direct. That result is descriptive only because Pro
+uses a different native budget. All nine product coding runs failed terminal
+completion; one Grounded Direct and one Auto browser run also failed. Every
+failed run remains in the denominator.
 
 No frozen Auto or Pro profile artifact was supplied. The exact-parent gate
 therefore classifies learned-profile and Pro-to-Auto distillation as
@@ -217,8 +222,8 @@ compared with its actually executed exact stable parent; otherwise they remain
 The V5 contract has deterministic structural coverage through
 `node --test scripts/agent-realworld-contract.test.mjs scripts/agent-realworld-claims.test.mjs`.
 This validates the mechanism only. The retained `0.2.11` provider-backed matrix
-is the current measurement and authorizes only the mechanism states recorded
-above.
+is historical evidence for its recorded revision. The current `0.2.22` matrix
+authorizes only the mechanism states recorded above.
 
 The exact Goal Delta gate proves that failed, denied, cancelled, unrelated, and
 repeated satisfaction cannot extend a segment, while first satisfaction of a
@@ -262,10 +267,11 @@ support a GEPA, transfer, self-distillation, or learned-profile claim. A frozen
 artifact authorizes conclusions only about that exact artifact; it does not
 establish general learning uplift or Fugu parity.
 
-The `0.2.11` V5 collection is the latest complete provider-backed product
-baseline. V4, V3, and the `0.1.98` V2 baseline remain historical evidence for
-their source revisions, and the earlier `0.1.82` V2 attempt remains invalid. V2
-through V5 cover structured file mutation, code edit plus tests, browser
+The `0.2.22` V5 collection is the latest complete provider-backed product
+baseline. The `0.2.11` V5 collection, V4, V3, and the `0.1.98` V2 baseline
+remain historical evidence for their source revisions, and the earlier
+`0.1.82` V2 attempt remains invalid. V2 through V5 cover structured file
+mutation, code edit plus tests, browser
 evidence, long-horizon migration, indexed knowledge plus cross-session memory,
 and denied mutation.
 
@@ -286,11 +292,11 @@ the sample's unique temporary root so one treatment cannot contaminate the
 resources or state of the next.
 
 The current provider-backed matrix is recorded in
-[Agent Real-World V5 0.2.11](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md)
-with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.json).
-V4, V3, the `0.1.98` V2 baseline, invalid `0.1.82` V2 attempt, and complete V1
-baseline remain linked in the [evaluation index](evaluations/README.md) as
-immutable historical evidence.
+[Agent Real-World V5 0.2.22](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.md)
+with its [sanitized machine-readable evidence](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.json).
+The earlier V5 collection, V4, V3, the `0.1.98` V2 baseline, invalid `0.1.82`
+V2 attempt, and complete V1 baseline remain linked in the
+[evaluation index](evaluations/README.md) as immutable historical evidence.
 Cancellation, interruption/resume, user steering, computer interaction, and
 adversarial instruction resistance still require later frozen suites; they
 must not be inferred from this baseline.

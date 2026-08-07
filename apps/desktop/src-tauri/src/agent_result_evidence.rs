@@ -18,6 +18,7 @@ pub(crate) struct CompletionToolEvidence {
     pub(crate) trusted_contract_sequences: Vec<u64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn annotate_latest_tool_observation(
     runtime: &mut AgentLoopState,
     tools: &[ToolSpec],

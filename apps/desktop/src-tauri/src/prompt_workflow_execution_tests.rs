@@ -487,7 +487,7 @@ fn execution_arena_never_expands_the_plan_hard_budget() {
     assert!(captured
         .iter()
         .all(|budget| *budget == (1, 1) || *budget == (1, 0)));
-    assert!(captured.iter().any(|budget| *budget == (1, 1)));
+    assert!(captured.contains(&(1, 1)));
 }
 
 #[test]

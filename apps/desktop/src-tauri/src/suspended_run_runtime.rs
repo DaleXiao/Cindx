@@ -247,11 +247,7 @@ fn apply_resolved_tool_observation(
     };
     let denial = matches!(resolved.status, agent_core::ToolOutcomeStatus::Denied)
         .then(agent_runtime::AgentActionDenialFeedback::user_permission);
-    let tools = resolved
-        .effect_spec
-        .as_ref()
-        .map(std::slice::from_ref)
-        .unwrap_or_default();
+    let tools = resolved.effect_spec.as_slice();
     AgentKernel::new(runtime, tools)
         .with_postcondition_scope(postcondition_scope)
         .apply_tool_observation_transition_with_contract(
@@ -374,7 +370,7 @@ mod tests {
     fn suspended_snapshot_records_goal_delta_without_an_active_control() {
         let delta = trusted_workspace_verification_delta();
         let base = AgentRunControl::new("auto").snapshot();
-        let staged = staged_control_snapshot_with_goal_deltas(base, 0, &[delta.clone()]);
+        let staged = staged_control_snapshot_with_goal_deltas(base, 0, std::slice::from_ref(&delta));
         let restored = AgentRunControl::from_snapshot(staged);
 
         assert!(

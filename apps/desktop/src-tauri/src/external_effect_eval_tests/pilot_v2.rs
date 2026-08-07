@@ -324,7 +324,7 @@ fn deterministic_plan(
         },
     );
     for step in &mut plan.steps {
-        step.tool_policy = tool_policy.clone();
+        step.tool_policy = tool_policy;
     }
     PromptPlanCandidate {
         genome: profile.genome.clone(),
@@ -372,7 +372,7 @@ fn conductor_plan(
             4
         };
         for step in &mut plan.steps {
-            step.tool_policy = tool_policy.clone();
+            step.tool_policy = tool_policy;
         }
     }
     candidate

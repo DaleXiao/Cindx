@@ -78,7 +78,7 @@ pub(crate) fn prompt_genomes_from_events(
     population
 }
 
-fn prompt_agent_run_event_index<'a>(events: &'a [Event]) -> BTreeMap<&'a str, Vec<&'a Event>> {
+fn prompt_agent_run_event_index(events: &[Event]) -> BTreeMap<&str, Vec<&Event>> {
     let mut index = BTreeMap::<&str, Vec<&Event>>::new();
     for event in events {
         if let Some(run_id) = event.metadata.get("agent_run_id") {
