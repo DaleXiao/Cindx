@@ -299,10 +299,7 @@ pub(crate) struct CollaborationWorkerAccess {
 }
 
 impl CollaborationWorkerAccess {
-    pub(crate) fn new(
-        evidence_source: impl Into<String>,
-        tool_policy: WorkflowToolPolicy,
-    ) -> Self {
+    pub(crate) fn new(evidence_source: impl Into<String>, tool_policy: WorkflowToolPolicy) -> Self {
         Self {
             evidence_source: evidence_source.into(),
             tool_policy,

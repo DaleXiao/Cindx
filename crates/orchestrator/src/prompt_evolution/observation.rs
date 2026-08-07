@@ -49,6 +49,44 @@ fn default_evaluation_mode() -> PromptEvaluationMode {
 }
 
 pub const PROMPT_EVALUATION_PROTOCOL_BLIND_PAIRWISE_SWAP_V1: &str = "blind_pairwise_swap_v1";
+pub const PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1: &str =
+    "cindx.prompt-live-assignment-provenance.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptLiveAssignmentProvenanceV1 {
+    pub schema: String,
+    pub assignment_receipt_sha256: String,
+    pub assignment_source: String,
+    pub profile_id: String,
+    pub profile_sha256: String,
+    #[serde(default)]
+    pub scope_sha256: String,
+    pub source_revision: u64,
+    pub deployment_generation: u64,
+    #[serde(default)]
+    pub distillation_lease_sha256: Option<String>,
+}
+
+impl PromptLiveAssignmentProvenanceV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1
+            || !matches!(self.assignment_source.as_str(), "stable" | "canary")
+            || self.profile_id.trim().is_empty()
+            || !is_sha256(&self.assignment_receipt_sha256)
+            || !is_sha256(&self.profile_sha256)
+            || !is_sha256(&self.scope_sha256)
+            || self.source_revision == 0
+            || self.deployment_generation == 0
+            || self
+                .distillation_lease_sha256
+                .as_deref()
+                .is_some_and(|digest| !is_sha256(digest))
+        {
+            return Err("live prompt assignment provenance is invalid".to_string());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptTransferProvenance {
@@ -149,6 +187,8 @@ pub struct PromptEvaluationProvenance {
     pub pro_to_auto_distillation: Option<PromptProToAutoDistillationProvenanceV1>,
     #[serde(default)]
     pub matched_evaluation: Option<super::PromptMatchedEvaluationIdentityV1>,
+    #[serde(default)]
+    pub live_assignment: Option<PromptLiveAssignmentProvenanceV1>,
 }
 
 impl PromptEvaluationProvenance {
@@ -183,6 +223,7 @@ impl PromptEvaluationProvenance {
             transfer: None,
             pro_to_auto_distillation: None,
             matched_evaluation: None,
+            live_assignment: None,
         }
     }
 
@@ -235,12 +276,14 @@ impl PromptEvaluationProvenance {
     pub fn is_scientific(&self) -> bool {
         self.transfer.is_none()
             && self.pro_to_auto_distillation.is_none()
+            && self.live_assignment.is_none()
             && self.has_scientific_core()
     }
 
     pub fn is_scientific_transfer(&self) -> bool {
         self.has_scientific_core()
             && self.pro_to_auto_distillation.is_none()
+            && self.live_assignment.is_none()
             && self
                 .transfer
                 .as_ref()
@@ -258,6 +301,7 @@ impl PromptEvaluationProvenance {
     pub fn is_scientific_pro_to_auto_distillation(&self) -> bool {
         self.has_scientific_core()
             && self.transfer.is_none()
+            && self.live_assignment.is_none()
             && self
                 .pro_to_auto_distillation
                 .as_ref()
@@ -334,6 +378,23 @@ fn default_true() -> bool {
 }
 
 impl PromptEvolutionObservation {
+    pub fn is_trusted_live_assignment(&self) -> bool {
+        self.mode == PromptEvaluationMode::Live
+            && self.opponent_profile_id.is_none()
+            && self.provenance.transfer.is_none()
+            && self.provenance.pro_to_auto_distillation.is_none()
+            && self.provenance.matched_evaluation.is_none()
+            && self
+                .provenance
+                .live_assignment
+                .as_ref()
+                .is_some_and(|assignment| {
+                    assignment.validate().is_ok()
+                        && assignment.profile_id == self.profile_id
+                        && assignment.profile_sha256 == self.provenance.candidate_prompt_sha256
+                })
+    }
+
     pub fn is_scientific_evidence(&self) -> bool {
         self.mode.is_execution()
             && !self.evaluation_id.trim().is_empty()
@@ -745,6 +806,53 @@ mod tests {
             "b".repeat(64),
             "c".repeat(64),
         )
+    }
+
+    #[test]
+    fn live_assignment_provenance_is_isolated_and_profile_bound() {
+        let profile_sha256 = "b".repeat(64);
+        let mut provenance = PromptEvaluationProvenance {
+            protocol: PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1.to_string(),
+            candidate_prompt_sha256: profile_sha256.clone(),
+            live_assignment: Some(PromptLiveAssignmentProvenanceV1 {
+                schema: PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1.to_string(),
+                assignment_receipt_sha256: "a".repeat(64),
+                assignment_source: "canary".to_string(),
+                profile_id: "profile-live".to_string(),
+                profile_sha256,
+                scope_sha256: "d".repeat(64),
+                source_revision: 7,
+                deployment_generation: 3,
+                distillation_lease_sha256: Some("c".repeat(64)),
+            }),
+            ..PromptEvaluationProvenance::default()
+        };
+        let mut observation = PromptEvolutionObservation {
+            profile_id: "profile-live".to_string(),
+            evaluation_id: "live-evaluation".to_string(),
+            case_id: "live-case".to_string(),
+            opponent_profile_id: None,
+            task_class: "coding".to_string(),
+            split: PromptEvaluationSplit::Train,
+            mode: PromptEvaluationMode::Live,
+            format_valid: true,
+            succeeded: true,
+            quality_score: 0.9,
+            latency_ms: 10,
+            total_tokens: 10,
+            estimated_cost_microusd: 0,
+            safety_violations: 0,
+            relative_reward: None,
+            step_credits: Vec::new(),
+            reflection_packet: None,
+            provenance: provenance.clone(),
+        };
+
+        assert!(observation.is_trusted_live_assignment());
+        assert!(!observation.provenance.is_scientific());
+        provenance.candidate_prompt_sha256 = "d".repeat(64);
+        observation.provenance = provenance;
+        assert!(!observation.is_trusted_live_assignment());
     }
 
     #[test]

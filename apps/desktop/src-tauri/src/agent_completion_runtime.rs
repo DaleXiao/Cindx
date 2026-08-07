@@ -470,7 +470,10 @@ pub(crate) fn finalize_agent_completion(
         ),
         (
             "pending_interaction_verifications".to_string(),
-            runtime.pending_interaction_verifications().len().to_string(),
+            runtime
+                .pending_interaction_verifications()
+                .len()
+                .to_string(),
         ),
         (
             "checkpoints".to_string(),
@@ -728,9 +731,7 @@ mod tests {
             ResultQuality::Verified
         );
         assert_eq!(
-            grounded_completion_quality(
-                agent_runtime::GroundedCompletionBasis::ConstraintObserved
-            ),
+            grounded_completion_quality(agent_runtime::GroundedCompletionBasis::ConstraintObserved),
             ResultQuality::Substantive
         );
     }

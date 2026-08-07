@@ -10,6 +10,7 @@ mod learning_outbox;
 mod matched_evaluation;
 mod observation;
 mod pareto;
+mod phenotype;
 mod pro_teacher_source;
 mod reflection_selection;
 mod search;
@@ -216,6 +217,39 @@ mod tests {
     }
 
     #[test]
+    fn prompt_budget_mutations_are_canonical_and_phenotypically_distinct() {
+        let mut parent = ConductorPromptGenome::seed_for_effort("auto");
+        parent.max_model_turns_per_step = 4;
+        parent.max_tool_calls_per_step = 8;
+        let mutations = parent.mutations();
+        let mut phenotypes = BTreeSet::new();
+
+        for mutation in &mutations {
+            assert_ne!(mutation.execution_phenotype(), parent.execution_phenotype());
+            assert!(phenotypes.insert(mutation.execution_phenotype()));
+            assert_eq!(
+                mutation.max_model_turns_per_step,
+                mutation.effective_max_model_turns_per_step()
+            );
+            assert_eq!(
+                mutation.max_tool_calls_per_step,
+                mutation.effective_max_tool_calls_per_step()
+            );
+        }
+
+        let ids = mutations
+            .iter()
+            .map(|mutation| mutation.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.iter().any(|id| id.ends_with("-t2")));
+        assert!(!ids.iter().any(|id| id.ends_with("-t1")));
+        assert!(ids.iter().any(|id| id.ends_with("-tc4")));
+        assert!(!ids
+            .iter()
+            .any(|id| id.ends_with("-tc1") || id.ends_with("-tc2")));
+    }
+
+    #[test]
     fn reflective_proposal_must_improve_on_a_paired_minibatch() {
         let parent = ConductorPromptGenome::seed_for_effort("auto");
         let mut proposal = parent.mutations().remove(0);
@@ -338,6 +372,38 @@ mod tests {
         assert!(mutation.require_final_synthesis);
         assert_eq!(mutation.graph_depth, PromptGraphDepth::Deep);
         assert!(!mutation.custom_directive.is_empty());
+    }
+
+    #[test]
+    fn learned_tool_policy_upgrade_counts_as_one_gene_before_budget_normalization() {
+        let auto = ConductorPromptGenome::seed_for_effort("auto");
+        let mut auto_response = auto.clone();
+        auto_response.tool_policy = PromptToolPolicy::ReadOnlyExploration;
+        let auto_mutation = auto
+            .learned_mutation_from_response(
+                &serde_json::to_string(&auto_response).unwrap(),
+                "learned-auto-tools-explore",
+            )
+            .unwrap();
+        assert_eq!(
+            auto_mutation.tool_policy,
+            PromptToolPolicy::ReadOnlyExploration
+        );
+        assert_eq!(auto_mutation.max_model_turns_per_step, 3);
+        assert_eq!(auto_mutation.max_tool_calls_per_step, 6);
+
+        let fast = ConductorPromptGenome::seed_for_effort("fast");
+        let mut fast_response = fast.clone();
+        fast_response.tool_policy = PromptToolPolicy::EvidenceOnly;
+        let fast_mutation = fast
+            .learned_mutation_from_response(
+                &serde_json::to_string(&fast_response).unwrap(),
+                "learned-fast-tools-evidence",
+            )
+            .unwrap();
+        assert_eq!(fast_mutation.tool_policy, PromptToolPolicy::EvidenceOnly);
+        assert_eq!(fast_mutation.max_model_turns_per_step, 2);
+        assert_eq!(fast_mutation.max_tool_calls_per_step, 4);
     }
 
     #[test]

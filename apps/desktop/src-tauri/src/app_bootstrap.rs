@@ -131,9 +131,7 @@ pub fn run() -> Result<(), String> {
                 "prompt evaluation control",
             ),
             rag_operation_controls: Mutex::new(BTreeMap::new()),
-            queue_dispatching_sessions: agent_harness::ExclusiveKeyRegistry::new(
-                "queue dispatch",
-            ),
+            queue_dispatching_sessions: agent_harness::ExclusiveKeyRegistry::new("queue dispatch"),
             session_title_refinement_sessions: agent_harness::ExclusiveKeyRegistry::new(
                 "session title refinement",
             ),

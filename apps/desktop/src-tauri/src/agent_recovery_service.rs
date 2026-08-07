@@ -1,12 +1,10 @@
 use crate::desktop_prelude::*;
 use crate::{
     agent_read_model::{
-        active_agent_events_for_session, agent_events_for_session,
-        is_agent_run_start_event,
+        active_agent_events_for_session, agent_events_for_session, is_agent_run_start_event,
     },
     agent_recovery_identity::{
-        enrich_legacy_recovery_envelope, enrich_legacy_run_context,
-        resolve_agent_recovery_identity,
+        enrich_legacy_recovery_envelope, enrich_legacy_run_context, resolve_agent_recovery_identity,
     },
     agent_resource_snapshot::load_matching_agent_resource_snapshot,
     agent_runtime_snapshot::{
@@ -20,11 +18,11 @@ use crate::{
 };
 #[path = "agent_recovery_status.rs"]
 mod recovery_status;
+pub(super) use crate::agent_recovery_identity::recovery_envelope_matches_active_turn;
 use agent_core::{
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
     AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
-pub(super) use crate::agent_recovery_identity::recovery_envelope_matches_active_turn;
 pub(super) use recovery_status::agent_task_is_cancelled;
 use recovery_status::{latest_agent_run_event, recovery_run_context};
 
@@ -34,16 +32,16 @@ pub(super) fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRe
         .rev()
         .find(|event| event.metadata.contains_key("recovery_envelope"))
         .and_then(|event| {
-        let encoded = event.metadata.get("recovery_envelope")?;
-        let envelope = serde_json::from_str::<AgentRecoveryEnvelope>(encoded).ok()?;
-        (envelope.schema == AGENT_RECOVERY_SCHEMA
-            && envelope.identity.validate().is_ok()
-            && envelope
-                .task_state
-                .as_ref()
-                .is_none_or(|snapshot| snapshot.validate_checkpoint().is_ok()))
-        .then_some(envelope)
-    })
+            let encoded = event.metadata.get("recovery_envelope")?;
+            let envelope = serde_json::from_str::<AgentRecoveryEnvelope>(encoded).ok()?;
+            (envelope.schema == AGENT_RECOVERY_SCHEMA
+                && envelope.identity.validate().is_ok()
+                && envelope
+                    .task_state
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.validate_checkpoint().is_ok()))
+            .then_some(envelope)
+        })
 }
 
 pub(super) fn latest_applied_agent_steer_epoch(events: &[Event]) -> u64 {
@@ -299,13 +297,8 @@ pub(super) fn claim_agent_recovery_envelope(
 ) -> Result<Option<AgentRecoveryEnvelope>, String> {
     store
         .with_immediate_transaction(|store| {
-            claim_agent_recovery_envelope_in_transaction(
-                store,
-                run_context,
-                allowed_states,
-                reason,
-            )
-            .map_err(StorageError::new)
+            claim_agent_recovery_envelope_in_transaction(store, run_context, allowed_states, reason)
+                .map_err(StorageError::new)
         })
         .map_err(|error| error.to_string())
 }
@@ -466,21 +459,23 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
                 AgentRecoveryReason::AppRestartedWaitingForPermission,
             )
         };
-        let (task_state, resource_snapshot) =
-            match resolve_agent_recovery_identity(&active_events, &run_context) {
-                Some(resolved) => {
-                    let latest_revision = active_events
-                        .last()
-                        .map(|event| event.sequence)
-                        .unwrap_or_default();
-                    let persisted_task_state = load_matching_agent_runtime_snapshot(
-                        store,
-                        &run_context,
-                        &resolved.identity.source_run_id,
-                        &resolved.identity.prompt_fingerprint,
-                        latest_revision,
-                    )?;
-                    let task_state = latest_agent_recovery_envelope(&active_events)
+        let (task_state, resource_snapshot) = match resolve_agent_recovery_identity(
+            &active_events,
+            &run_context,
+        ) {
+            Some(resolved) => {
+                let latest_revision = active_events
+                    .last()
+                    .map(|event| event.sequence)
+                    .unwrap_or_default();
+                let persisted_task_state = load_matching_agent_runtime_snapshot(
+                    store,
+                    &run_context,
+                    &resolved.identity.source_run_id,
+                    &resolved.identity.prompt_fingerprint,
+                    latest_revision,
+                )?;
+                let task_state = latest_agent_recovery_envelope(&active_events)
                         .and_then(|recovery| {
                             crate::agent_commands::recovery_task_state_with_persisted_permission_denials(
                                 &active_events,
@@ -490,18 +485,18 @@ pub(super) fn reconcile_interrupted_agent_runs(store: &mut SqliteStore) -> Resul
                             )
                         })
                         .or(persisted_task_state);
-                    (
-                        task_state,
-                        load_matching_agent_resource_snapshot(
-                            store,
-                            &run_context,
-                            &resolved.identity.source_run_id,
-                            latest_revision,
-                        )?,
-                    )
-                }
-                None => (None, None),
-            };
+                (
+                    task_state,
+                    load_matching_agent_resource_snapshot(
+                        store,
+                        &run_context,
+                        &resolved.identity.source_run_id,
+                        latest_revision,
+                    )?,
+                )
+            }
+            None => (None, None),
+        };
         let metadata = agent_recovery_metadata_with_task_state(
             &active_events,
             &run_context,

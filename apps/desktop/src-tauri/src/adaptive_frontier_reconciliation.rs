@@ -117,9 +117,8 @@ pub(super) fn reconcile_adaptive_wave(
             }),
             &spec.step_id,
         );
-        let verification_receipt = WorkflowVerificationReceipt::from_worker_output(
-            &recovered.content,
-        );
+        let verification_receipt =
+            WorkflowVerificationReceipt::from_worker_output(&recovered.content);
         workflow_checkpoint.complete_step_with_evidence(
             &spec.step_id,
             &recovered.model,

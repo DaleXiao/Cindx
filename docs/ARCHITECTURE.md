@@ -424,6 +424,47 @@ run. Candidate genomes are evaluated outside the active loop and promoted only
 through the configured evidence gates. A promoted immutable profile may
 configure a future conductor/workflow run.
 
+`prompt_profile_serving` is the narrow boundary between learning and request
+execution. The background prompt worker owns full evolution projection,
+evaluation, rollout reconciliation, canonical rollout events, and publication
+of a compact deployment read model. The foreground strategy planner owns only
+an exact `(project fingerprint, effort)` lookup and deterministic logical-run
+assignment. It cannot depend on observations, datasets, mutation, promotion,
+outbox dispatch, provider workers, or rollout writes. A deployment carries only
+the validated stable/canary genomes and fingerprints, canary stage, status, and
+source revision; canonical events and the full evolution projection remain the
+recovery and audit authority.
+
+The deployment row has its own monotonic generation, a per-key canonical-content
+binding epoch, and a durable per-scope fence. The binding hashes only the
+scope-and-effort serving determinants, so unrelated event revisions do not
+rotate a live canary lineage. An ordinary publisher may validate but never
+replace the binding; event-first canonical publication and recovery rebind only
+after verifying the persisted canonical projection inside the same SQLite write
+transaction. Project cleanup fences the scope and removes deployment bindings
+inside the existing lifecycle transaction. Recovery builds one catalog from the
+canonical projection, enumerates both exact per-key namespaces, and tombstones
+binding-only or deployment-only orphans; one invalid scope does not prevent
+reconciliation of the rest.
+
+The selected assignment receipt is copied into run context and canonical
+strategy/workflow events, while the selected genome is frozen into the workflow
+checkpoint. Physical retries retain the logical-run bucket. A missing or invalid
+deployment fails to a typed seed selection and cannot masquerade as a stable
+profile. Live rollout projection revalidates that receipt against the exact
+genome, source/deployment revisions, and optional distillation evidence lease
+before recording an outcome. Fast and disabled evolution bypass the deployment
+store.
+
+Prompt genomes are causally restricted to the matched workflow surface. The
+pre-workflow `AgentRunDecision` receives a route-neutral profile identity and no
+evolved directive; the actual fingerprint remains in the assignment and
+strategy attribution records. Inside `ConductorHarness`, model-returned tool
+policy is intersected with the genome ceiling. The normalized genome phenotype
+removes behaviorally duplicate mutations, while the plan and every runner take
+the minimum of that phenotype and the outer hard budget. Thus profile defaults
+cannot expand a zero/one runtime limit.
+
 The Pro evolution path can learn from qualified Auto outcomes without coupling
 the two foreground runtimes:
 
@@ -547,8 +588,10 @@ intent or audit event is deleted.
 
 The desktop boundary keeps live canary outcome projection in
 `prompt_canary_outcome_projection` and bounded canary observation, quarantine,
-and rollback helpers in `prompt_canary_runtime`; the evolution read model and
-rollout reconciler compose those narrower responsibilities.
+health, and rollback helpers in `prompt_canary_runtime`.
+`prompt_canary_lineage` owns exact active-deployment and distillation-lease
+attribution; the evolution read model and rollout reconciler compose those
+narrower responsibilities.
 
 The evolution read model scopes learned genomes, observations, offline
 datasets, failure curricula, and rollout state by project. Records without a durable scope are

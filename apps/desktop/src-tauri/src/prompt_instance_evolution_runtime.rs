@@ -21,9 +21,8 @@ pub(crate) fn prompt_instance_pareto_scores(
         .filter(|observation| observation.mode == PromptEvaluationMode::PairedExecution)
         .filter(|observation| observation.is_scientific_evidence())
         .filter(|observation| {
-            active_cohort_sha256.is_some_and(|digest| {
-                observation.scientific_cohort_sha256() == Some(digest)
-            })
+            active_cohort_sha256
+                .is_some_and(|digest| observation.scientific_cohort_sha256() == Some(digest))
         })
         .filter(|observation| !observation.case_id.trim().is_empty())
         .filter_map(|observation| {

@@ -36,11 +36,10 @@ pub(crate) fn cached_agent_output_artifacts(
         SessionOutputCacheLookup::Empty => None,
     };
 
-    let outputs = if let Some((event_count, latest_sequence, outputs)) = cached.filter(
-        |(event_count, latest_sequence, _)| {
+    let outputs = if let Some((event_count, latest_sequence, outputs)) =
+        cached.filter(|(event_count, latest_sequence, _)| {
             *event_count <= revision.event_count && *latest_sequence <= revision.latest_sequence
-        },
-    ) {
+        }) {
         let delta = store
             .list_by_task_and_metadata_after(
                 &phase16_task_id(),

@@ -261,21 +261,25 @@ impl ConductorPromptGenome {
     }
 
     pub fn effective_max_model_turns_per_step(&self) -> usize {
-        if self.max_model_turns_per_step == 0 {
+        let declared_turns = if self.max_model_turns_per_step == 0 {
             self.max_step_attempts.clamp(1, 4)
         } else {
             self.max_model_turns_per_step
-        }
+        };
+        self.workflow_tool_ceiling()
+            .effective_model_turn_budget(declared_turns)
     }
 
     pub fn effective_max_tool_calls_per_step(&self) -> usize {
-        if self.tool_policy == PromptToolPolicy::Disabled {
+        let declared_calls = if self.tool_policy == PromptToolPolicy::Disabled {
             0
         } else if self.max_tool_calls_per_step == 0 {
             4
         } else {
             self.max_tool_calls_per_step
-        }
+        };
+        self.workflow_tool_ceiling()
+            .effective_tool_call_budget(declared_calls)
     }
 
     pub fn conductor_directive(&self) -> String {
@@ -404,6 +408,14 @@ impl ConductorPromptGenome {
         }
     }
 
+    pub fn workflow_tool_ceiling(&self) -> crate::WorkflowToolPolicy {
+        match self.tool_policy {
+            PromptToolPolicy::Disabled => crate::WorkflowToolPolicy::None,
+            PromptToolPolicy::EvidenceOnly => crate::WorkflowToolPolicy::ReadOnlyEvidence,
+            PromptToolPolicy::ReadOnlyExploration => crate::WorkflowToolPolicy::ReadOnlyExploration,
+        }
+    }
+
     pub fn mutation_prompt(&self, evaluation_feedback: &str) -> String {
         format!(
             concat!(
@@ -489,6 +501,12 @@ impl ConductorPromptGenome {
         mutation.require_final_synthesis = self.require_final_synthesis;
         mutation.validate()?;
 
+        // Count the genes the response explicitly changed before policy-derived
+        // budget floors are materialized. A tool-policy upgrade is one gene;
+        // the larger executable budget it requires is part of that phenotype,
+        // not two additional model-authored mutations.
+        let mut budget_comparison = mutation.clone();
+        budget_comparison.tool_policy = self.tool_policy;
         let changed_genes = usize::from(mutation.graph_depth != self.graph_depth)
             + usize::from(mutation.verification != self.verification)
             + usize::from(mutation.context_policy != self.context_policy)
@@ -500,11 +518,11 @@ impl ConductorPromptGenome {
             + usize::from(mutation.commit_strategy != self.commit_strategy)
             + usize::from(mutation.max_step_attempts != self.max_step_attempts)
             + usize::from(
-                mutation.effective_max_model_turns_per_step()
+                budget_comparison.effective_max_model_turns_per_step()
                     != self.effective_max_model_turns_per_step(),
             )
             + usize::from(
-                mutation.effective_max_tool_calls_per_step()
+                budget_comparison.effective_max_tool_calls_per_step()
                     != self.effective_max_tool_calls_per_step(),
             )
             + usize::from(mutation.custom_directive.trim() != self.custom_directive.trim());
@@ -512,6 +530,11 @@ impl ConductorPromptGenome {
             return Err(format!(
                 "prompt mutation must change one or two genes, changed {changed_genes}"
             ));
+        }
+        mutation.normalize_behavioral_budgets();
+        mutation.validate()?;
+        if mutation.execution_phenotype() == self.execution_phenotype() {
+            return Err("prompt mutation must change the execution phenotype".to_string());
         }
         Ok(mutation)
     }
@@ -641,29 +664,48 @@ impl ConductorPromptGenome {
             }
         }
         for turns in 1..=4 {
-            if turns != self.effective_max_model_turns_per_step() {
-                let mut variant = self.child(format!("{}-g{}-t{turns}", self.id, next_generation));
-                variant.max_model_turns_per_step = turns;
+            let mut variant = self.child(format!("{}-g{}-t{turns}", self.id, next_generation));
+            variant.max_model_turns_per_step = turns;
+            variant.normalize_behavioral_budgets();
+            if variant.max_model_turns_per_step != self.effective_max_model_turns_per_step() {
+                variant.id = format!(
+                    "{}-g{}-t{}",
+                    self.id, next_generation, variant.max_model_turns_per_step
+                );
                 variants.push(variant);
             }
         }
         if self.tool_policy != PromptToolPolicy::Disabled {
             for tool_calls in [1, 2, 4, 6, 8] {
-                if tool_calls != self.effective_max_tool_calls_per_step() {
-                    let mut variant =
-                        self.child(format!("{}-g{}-tc{tool_calls}", self.id, next_generation));
-                    variant.max_tool_calls_per_step = tool_calls;
+                let mut variant =
+                    self.child(format!("{}-g{}-tc{tool_calls}", self.id, next_generation));
+                variant.max_tool_calls_per_step = tool_calls;
+                variant.normalize_behavioral_budgets();
+                if variant.max_tool_calls_per_step != self.effective_max_tool_calls_per_step() {
+                    variant.id = format!(
+                        "{}-g{}-tc{}",
+                        self.id, next_generation, variant.max_tool_calls_per_step
+                    );
                     variants.push(variant);
                 }
             }
         }
+        for variant in &mut variants {
+            variant.normalize_behavioral_budgets();
+        }
+        let parent_phenotype = self.execution_phenotype();
+        let mut unique_phenotypes = BTreeSet::new();
+        variants.retain(|variant| {
+            let phenotype = variant.execution_phenotype();
+            phenotype != parent_phenotype && unique_phenotypes.insert(phenotype)
+        });
         variants
     }
 
     pub fn crossover(id: impl Into<String>, left: &Self, right: &Self) -> Result<Self, String> {
         left.validate()?;
         right.validate()?;
-        let child = Self {
+        let mut child = Self {
             schema: PROMPT_GENOME_SCHEMA.to_string(),
             id: id.into(),
             generation: left.generation.max(right.generation).saturating_add(1),
@@ -687,6 +729,7 @@ impl ConductorPromptGenome {
             require_final_synthesis: left.require_final_synthesis || right.require_final_synthesis,
             custom_directive: String::new(),
         };
+        child.normalize_behavioral_budgets();
         child.validate()?;
         Ok(child)
     }
@@ -723,6 +766,7 @@ impl ConductorPromptGenome {
         for gene in &right_changes {
             child.copy_gene_from(*gene, right);
         }
+        child.normalize_behavioral_budgets();
         child.validate()?;
         Ok(child)
     }

@@ -101,8 +101,8 @@ pub(super) fn enrich_legacy_run_context(events: &[Event], run_context: &mut Meta
     let Some(attempt_run_id) = run_context.get(AGENT_RUN_ID_METADATA_KEY).cloned() else {
         return;
     };
-    let logical_run_id = legacy_logical_run_id(events, &attempt_run_id)
-        .unwrap_or_else(|| attempt_run_id.clone());
+    let logical_run_id =
+        legacy_logical_run_id(events, &attempt_run_id).unwrap_or_else(|| attempt_run_id.clone());
     run_context.insert(
         AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY.to_string(),
         AGENT_RUN_IDENTITY_V1_SCHEMA.to_string(),

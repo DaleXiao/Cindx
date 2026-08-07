@@ -8,8 +8,7 @@ use crate::{
         resolve_finalizer_response,
     },
     agent_model_turn_runtime::{
-        execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnPlan,
-        AgentModelTurnResponse,
+        execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnPlan, AgentModelTurnResponse,
     },
     agent_query_commands::emit_agent_stream_delta,
     agent_read_model::agent_state_for_session,
@@ -64,15 +63,7 @@ fn resolve_internal_finalizer_failure(
 ) -> Result<TerminalFinalizerOutcome, String> {
     let session_id = context.run_context.get("session_id").map(String::as_str);
     if reset_stream {
-        emit_agent_stream_delta(
-            context.app,
-            request_id,
-            session_id,
-            "",
-            false,
-            true,
-            None,
-        );
+        emit_agent_stream_delta(context.app, request_id, session_id, "", false, true, None);
     }
     let failure = AgentFailure::internal(code, message);
     match resolve_loop_failure(

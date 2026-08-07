@@ -971,14 +971,12 @@ mod tests {
         ));
         assert_eq!(control.stop_reason(), None);
 
-        let AgentModelTurnOutcome::Unavailable(unavailable) =
-            stage_budget_exhaustion_outcome(
-                AgentModelTurnRole::Finalizer,
-                "finalizer-request".to_string(),
-                lease,
-                "finalizer reserve unavailable",
-            )
-        else {
+        let AgentModelTurnOutcome::Unavailable(unavailable) = stage_budget_exhaustion_outcome(
+            AgentModelTurnRole::Finalizer,
+            "finalizer-request".to_string(),
+            lease,
+            "finalizer reserve unavailable",
+        ) else {
             panic!("Finalizer exhaustion must enter grounded fallback resolution");
         };
         assert_eq!(unavailable.failure.code, "stage_budget_exhausted");

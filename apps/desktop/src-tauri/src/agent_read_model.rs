@@ -173,12 +173,9 @@ pub(crate) fn agent_state_from_events(
         .and_then(|event| event.metadata.get("run_budget_ms"))
         .and_then(|value| value.parse::<u64>().ok())
         .or_else(|| {
-            fallback_run_budget.as_ref().map(|budget| {
-                budget
-                    .max_duration
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64
-            })
+            fallback_run_budget
+                .as_ref()
+                .map(|budget| budget.max_duration.as_millis().min(u64::MAX as u128) as u64)
         })
         .unwrap_or_default();
     let run_model_call_budget = run_start

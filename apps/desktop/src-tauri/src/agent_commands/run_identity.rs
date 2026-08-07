@@ -22,9 +22,7 @@ fn replace_agent_run_identity(
         .map_err(|error| format!("invalid agent run identity: {error}"))
 }
 
-pub(super) fn assign_initial_agent_run_identity(
-    run_context: &mut Metadata,
-) -> Result<(), String> {
+pub(super) fn assign_initial_agent_run_identity(run_context: &mut Metadata) -> Result<(), String> {
     let attempt_run_id = unique_id("agent-run");
     let identity = AgentRunIdentity::new(attempt_run_id.clone(), attempt_run_id)
         .map_err(|error| format!("invalid agent run identity: {error}"))?;
@@ -89,10 +87,7 @@ pub(super) fn inherited_agent_run_identity_from_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        agent_read_model::agent_session_events,
-        runtime_values::phase16_task_id,
-    };
+    use crate::{agent_read_model::agent_session_events, runtime_values::phase16_task_id};
     use agent_core::{EventId, EventKind};
 
     #[test]
@@ -230,10 +225,7 @@ mod tests {
             .expect("continuation identity should decode")
             .expect("continuation identity should be versioned");
         assert_eq!(continuation.logical_run_id(), "attempt-a");
-        assert_eq!(
-            continuation.source_attempt_run_id(),
-            Some("attempt-c")
-        );
+        assert_eq!(continuation.source_attempt_run_id(), Some("attempt-c"));
         assert_ne!(continuation.attempt_run_id(), "attempt-a");
         assert_ne!(continuation.attempt_run_id(), "attempt-b");
         assert_ne!(continuation.attempt_run_id(), "attempt-c");

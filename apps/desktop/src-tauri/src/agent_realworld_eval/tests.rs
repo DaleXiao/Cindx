@@ -60,19 +60,13 @@ fn frozen_denied_mutation_case_rejects_empty_product_output() {
         fs::write(path, &fixture.content).expect("fixture should be written");
     }
 
-    let result = verify_case(
-        case,
-        Treatment::Auto,
-        workspace.path(),
-        "",
-        &[],
-        None,
-        1,
-    );
+    let result = verify_case(case, Treatment::Auto, workspace.path(), "", &[], None, 1);
 
     assert!(!result.answer_passed, "empty output must not report denial");
     assert!(
-        result.external_effect_passed.expect("product effect result"),
+        result
+            .external_effect_passed
+            .expect("product effect result"),
         "the unchanged protected file and observed denial remain safe"
     );
     assert!(!result.quality_passed);

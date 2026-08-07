@@ -91,7 +91,10 @@ fn legacy_three_attempt_recovery_inherits_the_root_logical_run() {
     let mut store = SqliteStore::in_memory().expect("store should open");
     let legacy_context = |attempt_run_id: &str, source_attempt_run_id: Option<&str>| {
         let mut metadata = [
-            ("session_id".to_string(), "session-legacy-lineage".to_string()),
+            (
+                "session_id".to_string(),
+                "session-legacy-lineage".to_string(),
+            ),
             ("agent_run_id".to_string(), attempt_run_id.to_string()),
             ("prompt".to_string(), "finish the task".to_string()),
         ]
@@ -131,11 +134,7 @@ fn legacy_three_attempt_recovery_inherits_the_root_logical_run() {
     )
     .expect("active prompt should persist");
     let events = store
-        .list_by_task_and_metadata(
-            &phase16_task_id(),
-            "session_id",
-            "session-legacy-lineage",
-        )
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-legacy-lineage")
         .expect("legacy events should load");
     let active = active_agent_events_for_session(&events, Some("session-legacy-lineage"));
     let mut envelope = build_agent_recovery_envelope_with_task_state(
@@ -164,13 +163,9 @@ fn legacy_three_attempt_recovery_inherits_the_root_logical_run() {
     )
     .expect("legacy pause should persist");
 
-    let recovered = peek_agent_recovery_envelope(
-        &store,
-        &context_c,
-        &[AgentRecoveryState::Paused],
-    )
-    .expect("legacy recovery should be readable")
-    .expect("legacy recovery should remain available");
+    let recovered = peek_agent_recovery_envelope(&store, &context_c, &[AgentRecoveryState::Paused])
+        .expect("legacy recovery should be readable")
+        .expect("legacy recovery should remain available");
 
     assert_eq!(recovered.identity.source_run_id, "attempt-c");
     assert_eq!(
@@ -313,11 +308,26 @@ fn startup_recovery_replays_denial_after_a_pre_denial_snapshot() {
                             "permission_observation_provenance".to_string(),
                             "runtime_permission_resolution".to_string(),
                         ),
-                        ("tool_input_fingerprint".to_string(), input_fingerprint.clone()),
-                        ("action_denial_schema".to_string(), agent_runtime::ACTION_DENIAL_SCHEMA.to_string()),
-                        ("action_denial_kind".to_string(), "user_permission".to_string()),
-                        ("action_denial_code".to_string(), "user_permission_denied".to_string()),
-                        ("action_denial_recovery".to_string(), "finalize_blocked".to_string()),
+                        (
+                            "tool_input_fingerprint".to_string(),
+                            input_fingerprint.clone(),
+                        ),
+                        (
+                            "action_denial_schema".to_string(),
+                            agent_runtime::ACTION_DENIAL_SCHEMA.to_string(),
+                        ),
+                        (
+                            "action_denial_kind".to_string(),
+                            "user_permission".to_string(),
+                        ),
+                        (
+                            "action_denial_code".to_string(),
+                            "user_permission_denied".to_string(),
+                        ),
+                        (
+                            "action_denial_recovery".to_string(),
+                            "finalize_blocked".to_string(),
+                        ),
                     ]
                     .into_iter()
                     .collect(),
@@ -371,11 +381,7 @@ fn recovery_claim_rolls_back_with_its_enclosing_transaction() {
     )
     .expect("prompt should persist");
     let events = store
-        .list_by_task_and_metadata(
-            &phase16_task_id(),
-            "session_id",
-            "session-claim-rollback",
-        )
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-claim-rollback")
         .expect("events should load");
     let paused = agent_recovery_metadata_with_task_state(
         &events,
@@ -443,14 +449,12 @@ fn recovery_claim_rolls_back_with_its_enclosing_transaction() {
         claim_event.metadata.get("agent_run_id").map(String::as_str),
         Some("run-claim-rollback")
     );
-    assert!(pause_permission_recovery_after_handoff_error(&mut store, &context)
-        .expect("a failed permission handoff should release the claim"));
+    assert!(
+        pause_permission_recovery_after_handoff_error(&mut store, &context)
+            .expect("a failed permission handoff should release the claim")
+    );
     let events = store
-        .list_by_task_and_metadata(
-            &phase16_task_id(),
-            "session_id",
-            "session-claim-rollback",
-        )
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-claim-rollback")
         .expect("released recovery events should load");
     let released = latest_agent_recovery_envelope(&events)
         .expect("the released claim should remain recoverable");

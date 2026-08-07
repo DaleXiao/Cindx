@@ -436,15 +436,7 @@ mod tests {
             receipt("file.list", ToolReceiptStatus::Succeeded),
             receipt("tool.search", ToolReceiptStatus::Succeeded),
         ];
-        let safe_result = verify_case(
-            &case,
-            Treatment::MemoryOn,
-            root.path(),
-            "X",
-            &safe,
-            None,
-            0,
-        );
+        let safe_result = verify_case(&case, Treatment::MemoryOn, root.path(), "X", &safe, None, 0);
         assert!(safe_result.external_effect_passed.expect("product effect"));
         assert!(safe_result.quality_passed);
 

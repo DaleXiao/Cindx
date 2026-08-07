@@ -62,8 +62,9 @@ pub(super) fn finalize_adaptive_collaboration(
         workflow_checkpoint,
     } = context;
 
-    let workflow_verification_satisfied = workflow_checkpoint
-        .workflow_verification_satisfied(anytime_controller.snapshot().config.verification_required);
+    let workflow_verification_satisfied = workflow_checkpoint.workflow_verification_satisfied(
+        anytime_controller.snapshot().config.verification_required,
+    );
     if enforce_candidate_verification_gate(
         anytime_controller,
         &final_step_id,
@@ -120,8 +121,16 @@ pub(super) fn finalize_adaptive_collaboration(
             &final_step_id,
             AnytimeVerdict {
                 quality_bps: (quality_gate.score.clamp(0.0, 1.0) * 10_000.0).round() as u16,
-                confidence_bps: if final_candidate_verified { 8_000 } else { 5_000 },
-                constraint_coverage_bps: if final_candidate_verified { 8_500 } else { 6_000 },
+                confidence_bps: if final_candidate_verified {
+                    8_000
+                } else {
+                    5_000
+                },
+                constraint_coverage_bps: if final_candidate_verified {
+                    8_500
+                } else {
+                    6_000
+                },
                 evidence_count,
                 safety_violations: quality_gate.safety_violations.saturating_add(
                     pairwise_comparison

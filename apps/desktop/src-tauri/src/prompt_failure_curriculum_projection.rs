@@ -2,9 +2,7 @@ use crate::{
     app_state::AgentRecoveryEnvelope, runtime_constants::AGENT_RECOVERY_SCHEMA,
     view_models::PromptFailureCurriculumRecord,
 };
-use agent_application::{
-    AgentRecoveryReason, AgentRecoveryState, AgentRunEvent, AgentRunStatus,
-};
+use agent_application::{AgentRecoveryReason, AgentRecoveryState, AgentRunEvent, AgentRunStatus};
 use agent_core::Event;
 use agent_runtime::{
     AgentActionDenialKind, ContractEvidenceKind, OutcomeFailureClass, OutcomeLedgerPhase,
@@ -162,8 +160,7 @@ fn completed_denial_curricula(
         &context.outcome.metadata,
         OutcomeLedgerPhase::Completed,
     )
-    .filter(|ledger| ledger.steer_epoch == context.steer_epoch)
-    else {
+    .filter(|ledger| ledger.steer_epoch == context.steer_epoch) else {
         return Vec::new();
     };
     let Some(source_digest) = context
@@ -212,9 +209,7 @@ fn failed_run_curriculum(
         (OutcomeFailureClass::Contract, "no_progress" | "repeated_action") => {
             PromptFailureCurriculumKind::NoProgress
         }
-        (OutcomeFailureClass::Budget, "deadline_exceeded") => {
-            PromptFailureCurriculumKind::Timeout
-        }
+        (OutcomeFailureClass::Budget, "deadline_exceeded") => PromptFailureCurriculumKind::Timeout,
         _ => return None,
     };
     let source_digest = context
@@ -250,9 +245,17 @@ fn paused_run_curriculum(
     if envelope.state != AgentRecoveryState::Paused
         || envelope.identity.source_run_id != context.run_id
         || envelope.identity.project_id.as_deref().unwrap_or("global") != context.scope
-        || context.outcome.metadata.get("recovery_reason").map(String::as_str)
+        || context
+            .outcome
+            .metadata
+            .get("recovery_reason")
+            .map(String::as_str)
             != Some(envelope.reason.label())
-        || context.outcome.metadata.get("stop_reason").map(String::as_str)
+        || context
+            .outcome
+            .metadata
+            .get("stop_reason")
+            .map(String::as_str)
             != Some(envelope.reason.label())
     {
         return None;

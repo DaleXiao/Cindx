@@ -48,9 +48,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
             .inline;
         match &access.tool_policy {
             WorkflowToolPolicy::None => Vec::new(),
-            WorkflowToolPolicy::ReadOnlyEvidence => {
-                substantive_evidence_worker_tools(&exposed)
-            }
+            WorkflowToolPolicy::ReadOnlyEvidence => substantive_evidence_worker_tools(&exposed),
             WorkflowToolPolicy::ReadOnlyExploration => evidence_worker_tools(&exposed),
         }
     } else {

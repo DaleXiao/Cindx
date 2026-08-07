@@ -195,14 +195,11 @@ pub(super) fn execute_prompt_workflow_candidate_with_runner_impl(
                 let runner = Arc::clone(&runner);
                 let alternate_models = alternate_models.clone();
                 let control = control.clone();
-                let max_model_turns = scheduled_step
-                    .step
-                    .tool_policy
-                    .effective_model_turn_budget(plan.budget.max_model_turns_per_step);
+                let max_model_turns = plan.budget.max_model_turns_per_step;
                 let max_tool_calls = scheduled_step
                     .step
                     .tool_policy
-                    .effective_tool_call_budget(plan.budget.max_tool_calls_per_step);
+                    .tool_call_budget_within(plan.budget.max_tool_calls_per_step);
                 let max_output_tokens = plan.budget.max_output_tokens_per_step as u64;
                 Box::new(move |branch_cancellation| {
                     execute_step(ExecuteStepRequest {

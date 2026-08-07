@@ -440,6 +440,24 @@ const promptEvolutionReadModelSource = read(
 const promptEvolutionRuntimeSource = read(
   "apps/desktop/src-tauri/src/prompt_evolution_runtime.rs"
 );
+const promptCanaryRuntimeSource = read(
+  "apps/desktop/src-tauri/src/prompt_canary_runtime.rs"
+);
+const promptCanaryLineageSource = read(
+  "apps/desktop/src-tauri/src/prompt_canary_lineage.rs"
+);
+const promptProfileServingSource = readRustSourceTree(
+  path.join(desktopRustSourceDirectory, "prompt_profile_serving")
+);
+const promptProfileSelectionSource = read(
+  "apps/desktop/src-tauri/src/prompt_profile_serving/selection.rs"
+);
+const agentStrategyPreparationSource = read(
+  "apps/desktop/src-tauri/src/agent_strategy_preparation.rs"
+);
+const agentStrategyRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_strategy_runtime.rs"
+);
 const promptEvolutionHotStateSource = read(
   "apps/desktop/src-tauri/src/prompt_evolution_hot_state.rs"
 );
@@ -550,6 +568,7 @@ const shippingPerformanceGateIds = [
   "session-projection-scaling",
   "agent-runtime-snapshot-scaling",
   "prompt-learning-outbox-scaling",
+  "prompt-profile-selection-scaling",
   "workspace-graph-cache-scaling",
   "prepared-image-request-scaling",
   "model-transport-prepare-scaling",
@@ -596,6 +615,13 @@ const shippingPerformanceProofs = new Map([
     [
       "prompt_learning_outbox_projection::tests::prompt_learning_outbox_delta_projection_scaling_gate",
       "cindx.prompt-learning-outbox-scaling.v1"
+    ]
+  ],
+  [
+    "prompt-profile-selection-scaling",
+    [
+      "prompt_profile_serving::tests::prompt_profile_selection_scaling_gate",
+      "cindx.prompt-profile-selection-scaling.v1"
     ]
   ],
   [
@@ -3725,7 +3751,8 @@ assert(
     promptEvolutionSource.includes("format_valid_rate < 1.0") &&
     rustLib.includes("pareto_search_teacher_v2") &&
     rustLib.includes("prompt_evolution_enabled") &&
-    rustLib.includes("prompt_evolution_evaluation_for_run") &&
+    promptEvolutionRuntimeSource.includes("reconcile_prompt_evolution_for_background") &&
+    promptEvolutionRuntimeSource.includes("publish_canonical_prompt_profile_deployment") &&
     rustLib.includes('"prompt_evolution_mutation"') &&
     rustLib.includes("PROMPT_EVOLUTION_STAGNATION_PATIENCE") &&
     rustLib.includes("PROMPT_EVOLUTION_SHADOW_INTERVAL") &&
@@ -3753,7 +3780,8 @@ assert(
       "foreground_agent_should_preempt"
     ) &&
     rustLib.includes("schedule_prompt_pairwise_evaluation") &&
-    rustLib.includes("bounded_evolution") &&
+    promptProfileServingSource.includes("select_prompt_profile_for_run") &&
+    promptProfileServingSource.includes("recover_prompt_profile_deployments") &&
     rustLib.includes("prompt_objective") &&
     rustLib.includes("conductor_directive.as_deref()") &&
     rustLib.includes("evaluate_prompt_candidate_pair") &&
@@ -3764,8 +3792,12 @@ assert(
     rustLib.includes("PromptEvaluationMode::PairedExecution") &&
     rustLib.includes("PromptEvaluationMode::ReplayExecution") &&
     rustLib.includes("reconcile_prompt_rollout") &&
-    rustLib.includes("next_prompt_canary_stage") &&
-    rustLib.includes("prompt_canary_degraded") &&
+    promptCanaryRuntimeSource.includes("next_prompt_canary_stage") &&
+    promptCanaryRuntimeSource.includes("prompt_canary_degraded") &&
+    promptCanaryLineageSource.includes("prompt_live_observation_matches_lineage") &&
+    promptCanaryLineageSource.includes(
+      "prompt_live_observation_matches_distillation_assignment"
+    ) &&
     rustLib.includes("prompt_rollout_transition_is_valid") &&
     rustLib.includes('next.status == "promoted"') &&
     rustLib.includes(
@@ -3811,6 +3843,26 @@ assert(
     !settingsPageSource.includes("prompt-evolution-efforts") &&
     !settingsPageSource.includes("prompt-evolution-profiles"),
   "Conductor workflows must run executable harness evolution with confidence-gated canary rollout"
+);
+assert(
+  !agentStrategyPreparationSource.includes("prompt_evolution_evaluation_for_run") &&
+    !agentStrategyPreparationSource.includes("evaluate_prompt_evolution_read_model") &&
+    !agentStrategyPreparationSource.includes("reconcile_prompt_rollout") &&
+    agentStrategyPreparationSource.includes("select_prompt_profile_for_run") &&
+    (promptProfileSelectionSource.match(/load_read_model\(/g)?.length ?? 0) === 1 &&
+    !promptProfileSelectionSource.includes("append_event") &&
+    !promptProfileSelectionSource.includes("reconcile_prompt_rollout") &&
+    !promptProfileSelectionSource.includes("prompt_learning_outbox") &&
+    /fn run_decision_evolved_directive\([^)]*\)[\s\S]*?String::new\(\)/.test(
+      agentStrategyRuntimeSource
+    ) &&
+    orchestratorSource.includes("tool_policy.limited_by(step.tool_policy)") &&
+    promptProfileServingSource.includes("LOGICAL_AGENT_RUN_ID_METADATA_KEY") &&
+    promptProfileServingSource.includes("MAX_ASSIGNMENT_RECEIPT_BYTES") &&
+    promptProfileServingSource.includes("PromptProfileDistillationLease") &&
+    rustLib.includes("validated_live_prompt_assignment") &&
+    rustLib.includes("is_trusted_live_assignment"),
+  "Foreground prompt-profile selection must stay O(1), read-only, retry-stable, and isolated from route authority"
 );
 assert(
   orchestratorSource.includes('"cindx.prompt-learning-eligibility.v1"') &&

@@ -247,8 +247,7 @@ fn validate_gpqa_baseline_profiles(
     auto: &EvaluationPromptProfile,
     pro: &EvaluationPromptProfile,
 ) -> Result<(), String> {
-    if fixed_protocol_sha256(GPQA_BASELINE_DIRECT_PROFILE)
-        != GPQA_BASELINE_DIRECT_PROFILE_SHA256
+    if fixed_protocol_sha256(GPQA_BASELINE_DIRECT_PROFILE) != GPQA_BASELINE_DIRECT_PROFILE_SHA256
         || auto.origin != "built_in_seed"
         || auto.genome.id != "seed-auto-v1"
         || auto.genome_sha256 != GPQA_BASELINE_AUTO_PROFILE_SHA256

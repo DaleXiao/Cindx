@@ -1,17 +1,16 @@
+use crate::app_state::AppState;
 use crate::collaboration_models::PromptOfflineCase;
 use crate::configuration_models::ProviderConfig;
 use crate::event_security::{is_sensitive_assignment_key, redact_sensitive_text};
 use crate::runtime_constants::PROMPT_MATCHED_EVALUATION_LANES;
-use crate::app_state::AppState;
 use agent_core::{Event, EventKind, ModelRole};
 use agent_runtime::{AgentRunControl, RunBudget, RunStopReason};
 use model_provider::MODEL_REQUEST_CANCELLED;
 use orchestrator::{
     prompt_genome_sha256, sha256_hex, AgentPolicy, ConductorPromptGenome, LearningAttribution,
-    LearningEvidenceV1, LearningVerification, PromptDatasetCaseIdentityV1,
-    PromptDatasetIdentityV1, PromptExecutionContextV1, PromptLearningCohortV1,
-    PromptLearningEligibilityReceiptV1, PromptLearningPurpose,
-    PromptLearningQualificationInput, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    LearningEvidenceV1, LearningVerification, PromptDatasetCaseIdentityV1, PromptDatasetIdentityV1,
+    PromptExecutionContextV1, PromptLearningCohortV1, PromptLearningEligibilityReceiptV1,
+    PromptLearningPurpose, PromptLearningQualificationInput, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
     PROMPT_LEARNING_REDACTION_SCHEMA_V1,
 };
 use sha2::{Digest, Sha256};
@@ -103,10 +102,9 @@ pub(crate) fn prompt_text_contains_residual_secret(value: &str) -> bool {
 }
 
 fn sensitive_assignment_is_redacted(value: &str) -> bool {
-    let normalized = value
-        .trim_start_matches(|character: char| {
-            character.is_ascii_whitespace() || matches!(character, '\\' | '"')
-        });
+    let normalized = value.trim_start_matches(|character: char| {
+        character.is_ascii_whitespace() || matches!(character, '\\' | '"')
+    });
     ["[REDACTED]", "Bearer [REDACTED]"]
         .into_iter()
         .any(|redacted| {
@@ -155,12 +153,14 @@ pub(crate) fn prompt_learning_receipt(
     steer_epoch: u64,
 ) -> PromptLearningEligibilityReceiptV1 {
     let evidence = LearningEvidenceV1::from_metadata(&terminal.metadata);
-    let permission_denied = crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(terminal)
-        || run_events.iter().any(|event| {
-        event.kind == EventKind::PermissionResolved
-            && event.metadata.get("decision").is_some_and(|decision| {
-                !matches!(decision.as_str(), "allow_once" | "allow_for_session")
-            })
+    let permission_denied =
+        crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
+            terminal,
+        ) || run_events.iter().any(|event| {
+            event.kind == EventKind::PermissionResolved
+                && event.metadata.get("decision").is_some_and(|decision| {
+                    !matches!(decision.as_str(), "allow_once" | "allow_for_session")
+                })
         });
     let safety_violations = run_events
         .iter()
@@ -362,11 +362,9 @@ pub(crate) fn validate_prompt_evaluation_request_configuration(
         profile,
         prompt_evaluation_parent_budget(),
     )?;
-    (current == expected_sha256)
-        .then_some(())
-        .ok_or_else(|| {
-            "prompt evaluation request execution context changed before replay".to_string()
-        })
+    (current == expected_sha256).then_some(()).ok_or_else(|| {
+        "prompt evaluation request execution context changed before replay".to_string()
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -763,13 +761,7 @@ fn hash_git_workspace(
         }
         let path = std::str::from_utf8(path)
             .map_err(|_| "untracked workspace path is not UTF-8".to_string())?;
-        hash_workspace_file(
-            &top_level,
-            &top_level.join(path),
-            hasher,
-            byte_count,
-            guard,
-        )?;
+        hash_workspace_file(&top_level, &top_level.join(path), hasher, byte_count, guard)?;
     }
     Ok(())
 }
@@ -1108,8 +1100,7 @@ mod tests {
         };
         assert!(!prompt_learning_case_is_safe(&case, &config));
         let assignment_case = PromptOfflineCase {
-            objective:
-                "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            objective: "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             ..case
         };
         assert!(!prompt_learning_case_is_safe(

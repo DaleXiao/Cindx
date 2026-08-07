@@ -12,12 +12,12 @@ pub(super) use agent_runtime::{
     tool_invocation_event_metadata,
 };
 use agent_storage::{SqliteStore, StorageError};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Read,
     path::{Component, Path},
 };
-use sha2::{Digest, Sha256};
 use tools::ToolError;
 
 pub(super) fn failed_tool_result(invocation_id: ToolCallId, error: ToolError) -> ToolResult {
@@ -191,10 +191,7 @@ fn workspace_file_sha256_matches(
     workspace_root: &Path,
     expected_sha256: &str,
 ) -> bool {
-    if expected_sha256.len() != 64
-        || !expected_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return false;
     }
@@ -861,10 +858,9 @@ mod tests {
         original
             .metadata
             .insert("agent_run_id".to_string(), "run-new".to_string());
-        original.metadata.insert(
-            "source_agent_run_id".to_string(),
-            "run-source".to_string(),
-        );
+        original
+            .metadata
+            .insert("source_agent_run_id".to_string(), "run-source".to_string());
         original
             .metadata
             .insert("recovery_resume_key".to_string(), "resume-1".to_string());
@@ -918,8 +914,8 @@ mod tests {
             &root
         ));
 
-        deferred_patch.input_json = r#"{"name":"shell.run","arguments":{"path":"a.txt"}}"#
-            .to_string();
+        deferred_patch.input_json =
+            r#"{"name":"shell.run","arguments":{"path":"a.txt"}}"#.to_string();
         assert!(!deterministic_effect_is_still_applied(
             &deferred_patch,
             &root
@@ -1081,7 +1077,10 @@ mod tests {
             .expect("mismatched state should fail closed");
         assert_eq!(blocked.status, ToolOutcomeStatus::Failed);
         assert_eq!(
-            blocked.failure.as_ref().map(|failure| failure.code.as_str()),
+            blocked
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.as_str()),
             Some("tool_effect_outcome_unknown")
         );
         fs::remove_dir_all(root).expect("temporary workspace should be removed");
@@ -1096,11 +1095,10 @@ mod tests {
             "uses_network".to_string(),
         );
 
-        assert!(interrupted_tool_call_started_event(
-            &[started_event(&invocation)],
-            &invocation
-        )
-        .is_some());
+        assert!(
+            interrupted_tool_call_started_event(&[started_event(&invocation)], &invocation)
+                .is_some()
+        );
         let result = unknown_interrupted_effect_result(&invocation);
         assert_eq!(result.status, ToolOutcomeStatus::Failed);
         assert_eq!(
@@ -1129,10 +1127,9 @@ mod tests {
             tool_effect_recovery_policy(&invocation),
             ToolEffectRecoveryPolicy::SafeToRetry
         );
-        assert!(interrupted_tool_call_started_event(
-            &[started_event(&invocation)],
-            &invocation
-        )
-        .is_some());
+        assert!(
+            interrupted_tool_call_started_event(&[started_event(&invocation)], &invocation)
+                .is_some()
+        );
     }
 }

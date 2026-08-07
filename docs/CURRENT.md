@@ -282,6 +282,37 @@ completed evidence, evaluates candidates against paired and holdout gates, and
 can promote a frozen profile for future runs. It cannot mutate an in-flight
 transcript, tool result, permission, or budget.
 
+The foreground serving path is separate from that learning state. Background
+workers alone evaluate evidence, reconcile rollout stages, append the canonical
+rollout event, and publish a compact project-and-effort deployment snapshot by
+compare-and-swap. Auto and Pro planning perform one exact snapshot lookup and
+never scan observations, rebuild the evolution model, reconcile a rollout, or
+write learning state. Selection is fixed by logical run identity, so retry and
+recovery attempts stay on the same stable or canary arm. Its bounded assignment
+receipt contains profile and deployment fingerprints, rollout stage, hashed
+logical-run assignment identity, and operation counts but no project id, run
+id, prompt, history, or model output. Missing, malformed, or unreadable
+deployment state produces a typed
+seed fallback instead of being silently confused with a disabled optimizer.
+Fast and explicitly disabled evolution remain seed-only and do not acquire the
+store merely to select that seed.
+
+Deployment generations are monotonic independently of the deletable evolution
+event sequence. Each key also has a durable monotonic binding to its
+serving-relevant canonical content. Ordinary publication can only match that
+binding; startup recovery or the event-first canonical publisher may advance
+it. This rejects an older history even when its numeric revision is reused,
+while unrelated events do not rotate the live lineage. Project deletion
+publishes a durable scope fence and removes deployment bindings in the same
+transaction, so a stale background connection cannot resurrect a deleted
+profile. Startup recovery reconciles both per-key namespaces, repairs corrupt
+rows, and withdraws deployments whose rollout is no longer canonical without
+blocking unrelated scopes. A live stable/canary result enters rollout
+accounting only when its
+profile event contains a canonical assignment receipt matching the exact
+genome, scope hash, logical run, source revision, deployment generation, and,
+for a distilled canary, its frozen evidence lease.
+
 Pro also has an Auto-to-Pro transfer track. A completed Auto workflow becomes a
 teacher case only when its terminal evidence is positive, independently scored,
 usage-complete, bound to the final steer epoch, free of denied permissions and
@@ -337,6 +368,13 @@ stopping, context policy, and bounded step budgets. Per-request route,
 retrieval, and memory decisions remain owned by `AgentRunDecision`; the current
 GEPA campaign does not execute that decision layer, so those fields are not
 presented as learned strategy without a matched causal evaluation.
+Accordingly, learned or canary directives are not supplied to the pre-workflow
+route prompt, and learned profile identity is neutralized in route matching
+while its actual fingerprint remains in attribution receipts. Once a workflow
+has been admitted, model-proposed step tool policy may only narrow the selected
+genome ceiling. Planning and every runner also intersect that phenotype with
+the outer run budget; an external zero/one limit is never raised to a profile
+default.
 
 Transfer observations are appended as one mirrored pair and enter the canonical
 evolution read model only when both sides are scientific, project-scoped, and

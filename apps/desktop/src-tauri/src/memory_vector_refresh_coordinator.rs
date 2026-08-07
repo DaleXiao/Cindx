@@ -271,8 +271,7 @@ pub(crate) fn schedule_project_memory_vector_refresh(
     drop(pending);
     let inflight = MEMORY_VECTOR_REFRESH_INFLIGHT
         .get_or_init(|| ExclusiveKeyRegistry::new("memory vector refresh inflight"));
-    let Ok(Some(inflight_lease)) = inflight.try_acquire(key.clone())
-    else {
+    let Ok(Some(inflight_lease)) = inflight.try_acquire(key.clone()) else {
         return;
     };
     tauri::async_runtime::spawn_blocking(move || {

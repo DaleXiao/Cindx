@@ -397,6 +397,27 @@ fn tool_steps_keep_a_discovery_and_evidence_round_without_slowing_text_only_fast
         WorkflowToolPolicy::ReadOnlyExploration.effective_tool_call_budget(4),
         6
     );
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyEvidence.tool_call_budget_within(1),
+        1
+    );
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyExploration.tool_call_budget_within(0),
+        0
+    );
+    assert_eq!(WorkflowToolPolicy::None.tool_call_budget_within(8), 0);
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyExploration.limited_by(WorkflowToolPolicy::ReadOnlyEvidence),
+        WorkflowToolPolicy::ReadOnlyEvidence
+    );
+    assert_eq!(
+        WorkflowToolPolicy::ReadOnlyEvidence.limited_by(WorkflowToolPolicy::None),
+        WorkflowToolPolicy::None
+    );
+    assert_eq!(
+        WorkflowToolPolicy::None.limited_by(WorkflowToolPolicy::ReadOnlyExploration),
+        WorkflowToolPolicy::None
+    );
 }
 
 #[test]
@@ -1207,6 +1228,119 @@ fn conductor_harness_enforces_the_selected_prompt_genome() {
         pro_plan.steps.last().unwrap().tool_policy,
         WorkflowToolPolicy::None
     );
+}
+
+#[test]
+fn conductor_model_cannot_expand_the_prompt_genome_tool_ceiling() {
+    let mut disabled_request = conductor_request();
+    disabled_request.execution_contract.verification_required = false;
+    disabled_request
+        .execution_contract
+        .min_distinct_contributions = 1;
+    disabled_request.prompt_genome.tool_policy = PromptToolPolicy::Disabled;
+    let disabled = ConductorHarness::new(disabled_request);
+    let disabled_plan = disabled
+        .parse_plan(
+            r#"{"steps":[{"id":"inspect","role":"worker","model":"planner","subtask":"inspect supplied context","access":[],"output_kind":"analysis","tool_policy":"read_only_exploration"},{"id":"final","role":"synthesizer","model":"planner","subtask":"integrate","access":["inspect"],"output_kind":"synthesis","tool_policy":"none"}]}"#,
+        )
+        .expect("model semantics must be narrowed to the disabled ceiling");
+    assert_eq!(disabled_plan.steps[0].tool_policy, WorkflowToolPolicy::None);
+
+    let mut evidence_request = conductor_request();
+    evidence_request.execution_contract.verification_required = false;
+    evidence_request
+        .execution_contract
+        .min_distinct_contributions = 1;
+    evidence_request.prompt_genome.tool_policy = PromptToolPolicy::EvidenceOnly;
+    let evidence = ConductorHarness::new(evidence_request);
+    let evidence_plan = evidence
+        .parse_plan(
+            r#"{"steps":[{"id":"inspect","role":"worker","model":"planner","subtask":"inspect runtime evidence","access":[],"output_kind":"evidence","tool_policy":"read_only_exploration"},{"id":"final","role":"synthesizer","model":"planner","subtask":"integrate","access":["inspect"],"output_kind":"synthesis","tool_policy":"none"}]}"#,
+        )
+        .expect("model semantics must be narrowed to the evidence ceiling");
+    assert_eq!(
+        evidence_plan.steps[0].tool_policy,
+        WorkflowToolPolicy::ReadOnlyEvidence
+    );
+}
+
+#[test]
+fn fingerprinted_prompt_genome_limits_match_normalized_plan_limits() {
+    let mut request = conductor_request();
+    request.execution_contract.verification_required = false;
+    request.execution_contract.min_distinct_contributions = 1;
+    request.prompt_genome.tool_policy = PromptToolPolicy::EvidenceOnly;
+    request.prompt_genome.max_model_turns_per_step = 1;
+    request.prompt_genome.max_tool_calls_per_step = 1;
+    let expected_turns = request.prompt_genome.effective_max_model_turns_per_step();
+    let expected_tool_calls = request.prompt_genome.effective_max_tool_calls_per_step();
+    let profile_sha = prompt_genome_sha256(&request.prompt_genome).expect("profile should hash");
+    assert_eq!((expected_turns, expected_tool_calls), (2, 4));
+    assert!(request
+        .prompt_genome
+        .conductor_directive()
+        .contains("2 model turns, or 4 read-only tool calls per step"));
+
+    let harness = ConductorHarness::new(request);
+    assert_eq!(
+        prompt_genome_sha256(&harness.request().prompt_genome).expect("profile should rehash"),
+        profile_sha
+    );
+    let plan = harness
+        .parse_plan(
+            r#"{"steps":[{"id":"inspect","role":"worker","model":"planner","subtask":"inspect runtime evidence","access":[],"output_kind":"evidence","tool_policy":"read_only_evidence"},{"id":"final","role":"synthesizer","model":"planner","subtask":"integrate","access":["inspect"],"output_kind":"synthesis","tool_policy":"none"}]}"#,
+        )
+        .expect("normalized profile limits should produce a valid plan");
+    assert_eq!(plan.budget.max_model_turns_per_step, expected_turns);
+    assert_eq!(plan.budget.max_tool_calls_per_step, expected_tool_calls);
+    assert_eq!(
+        plan.steps[0]
+            .tool_policy
+            .effective_model_turn_budget(plan.budget.max_model_turns_per_step),
+        expected_turns
+    );
+    assert_eq!(
+        plan.steps[0]
+            .tool_policy
+            .effective_tool_call_budget(plan.budget.max_tool_calls_per_step),
+        expected_tool_calls
+    );
+}
+
+#[test]
+fn outer_workflow_budget_remains_a_hard_ceiling_for_evolved_tool_profiles() {
+    let mut request = conductor_request();
+    request.execution_contract.verification_required = false;
+    request.execution_contract.min_distinct_contributions = 1;
+    request.budget.max_model_turns_per_step = 1;
+    request.budget.max_tool_calls_per_step = 0;
+    request.prompt_genome.tool_policy = PromptToolPolicy::EvidenceOnly;
+    request.prompt_genome.max_model_turns_per_step = 1;
+    request.prompt_genome.max_tool_calls_per_step = 1;
+
+    let harness = ConductorHarness::new(request);
+    assert!(harness
+        .planning_prompt()
+        .contains("model_turns=1, read_only_tool_calls=0"));
+    let plan = harness
+        .parse_plan(
+            r#"{"steps":[{"id":"inspect","role":"worker","model":"planner","subtask":"inspect supplied context","access":[],"output_kind":"analysis","tool_policy":"read_only_evidence"},{"id":"final","role":"synthesizer","model":"planner","subtask":"integrate","access":["inspect"],"output_kind":"synthesis","tool_policy":"none"}]}"#,
+        )
+        .expect("the outer zero-tool ceiling should disable tools instead of widening the budget");
+
+    assert_eq!(plan.budget.max_model_turns_per_step, 1);
+    assert_eq!(plan.budget.max_tool_calls_per_step, 0);
+    assert!(plan
+        .steps
+        .iter()
+        .all(|step| step.tool_policy == WorkflowToolPolicy::None));
+
+    let mut checkpoint = WorkflowExecutionCheckpoint::new("hard-ceiling", plan, 1);
+    checkpoint.begin_step("inspect", "planner", 2).unwrap();
+    let error = checkpoint
+        .begin_step("inspect", "planner", 3)
+        .expect_err("the runner must not receive the genome's larger normalized turn floor");
+    assert!(error.contains("1-turn budget"), "{error}");
 }
 
 #[test]

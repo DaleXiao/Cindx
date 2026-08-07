@@ -242,8 +242,7 @@ pub(crate) fn evaluate_prompt_evolution_with_curriculum(
         let complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS
             && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
         let search_complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS;
-        let priority = if (genome.id.starts_with("learned-")
-            || genome.id.starts_with("merge-"))
+        let priority = if (genome.id.starts_with("learned-") || genome.id.starts_with("merge-"))
             && !search_complete
         {
             0
@@ -268,8 +267,7 @@ pub(crate) fn evaluate_prompt_evolution_with_curriculum(
             let (train, holdout) = split_counts.get(&genome.id).copied().unwrap_or_default();
             let runs = train + holdout;
             let search_complete = train >= PROMPT_EVOLUTION_MIN_TRAIN_RUNS;
-            let complete = search_complete
-                && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
+            let complete = search_complete && holdout >= PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS;
             let priority = if !search_complete && runs > 0 {
                 0
             } else if !search_complete {
@@ -338,12 +336,7 @@ pub(crate) fn evaluate_prompt_evolution_with_curriculum(
     let mutation_trajectories = mutation_candidate
         .as_ref()
         .map(|parent| {
-            prompt_mutation_reflection_packets(
-                &observations,
-                failure_curricula,
-                &parent.id,
-                effort,
-            )
+            prompt_mutation_reflection_packets(&observations, failure_curricula, &parent.id, effort)
         })
         .unwrap_or_default();
     let mutation_parent = mutation_candidate.filter(|_| !mutation_trajectories.is_empty());
@@ -365,41 +358,46 @@ pub(crate) fn evaluate_prompt_evolution_with_curriculum(
     })
 }
 
-pub(crate) fn prompt_evolution_evaluation_for_run(
-    state: &tauri::State<'_, AppState>,
+pub(crate) fn reconcile_prompt_evolution_for_background(
+    store: &mut SqliteStore,
     effort: &str,
+    evidence_scope: &str,
     run_context: &Metadata,
 ) -> Result<PromptEvolutionEvaluation, String> {
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let model =
-        load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
-    let evidence_scope = run_context
-        .get("project_id")
-        .cloned()
-        .unwrap_or_else(|| "global".to_string());
-    let mut scoped_model = prompt_evolution_read_model_for_scope(&model, &evidence_scope);
-    let mut evaluation = evaluate_prompt_evolution_read_model(&scoped_model, effort)?;
+    let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+    let mut scoped_model = prompt_evolution_read_model_for_scope(&model, evidence_scope);
+    let evaluation = evaluate_prompt_evolution_read_model(&scoped_model, effort)?;
     let previous_rollout = scoped_model.rollouts.get(effort).cloned();
-    let rollout = reconcile_prompt_rollout(&mut scoped_model, effort, &evaluation);
-    apply_prompt_rollout_selection(
-        &mut evaluation,
-        &rollout,
-        &scoped_model,
-        run_context,
+    let active_lineage = crate::prompt_profile_serving::active_prompt_profile_deployment_lineage(
+        store,
+        evidence_scope,
         effort,
+    )
+    .map_err(|error| error.to_string())?;
+    let rollout = reconcile_prompt_rollout_with_lineage(
+        &mut scoped_model,
+        effort,
+        &evaluation,
+        active_lineage.as_ref(),
     );
-    if previous_rollout.as_ref() != Some(&rollout) {
-        append_prompt_rollout_update(
-            &mut store,
+    let rollout_changed = previous_rollout.as_ref() != Some(&rollout);
+    if rollout_changed {
+        append_prompt_rollout_update(store, effort, evidence_scope, &rollout, run_context)
+            .map_err(|error| error.to_string())?;
+        let canonical =
+            load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
+        scoped_model = prompt_evolution_read_model_for_scope(&canonical, evidence_scope);
+    }
+    if rollout_changed || active_lineage.is_none() {
+        let published = crate::prompt_profile_serving::publish_canonical_prompt_profile_deployment(
+            store,
+            &scoped_model,
             effort,
-            &evidence_scope,
-            &rollout,
-            run_context,
-        )
-        .map_err(|error| error.to_string())?;
+            evidence_scope,
+        )?;
+        if !published {
+            return Err("prompt profile canonical publication source drifted".to_string());
+        }
     }
     Ok(evaluation)
 }
@@ -499,7 +497,7 @@ mod prompt_rollout_persistence_tests {
     #[test]
     fn rollout_update_failure_cannot_escape_canonical_event_replay() {
         let mut store = SqliteStore::in_memory().expect("store should open");
-        let rollout = default_prompt_rollout("auto");
+        let rollout = crate::prompt_canary_runtime::default_prompt_rollout("auto");
         let run_context = [("project_id".to_string(), "project-a".to_string())]
             .into_iter()
             .collect::<Metadata>();
@@ -515,13 +513,8 @@ mod prompt_rollout_persistence_tests {
             )
             .expect("failure trigger should install");
 
-        let failed = append_prompt_rollout_update(
-            &mut store,
-            "auto",
-            "project-a",
-            &rollout,
-            &run_context,
-        );
+        let failed =
+            append_prompt_rollout_update(&mut store, "auto", "project-a", &rollout, &run_context);
         assert!(failed.is_err());
         assert!(store
             .list_by_task(&phase16_task_id())
@@ -529,21 +522,17 @@ mod prompt_rollout_persistence_tests {
             .is_empty());
         let after_failure =
             load_prompt_evolution_read_model(&mut store).expect("read model should recover");
-        assert!(prompt_evolution_read_model_for_scope(&after_failure, "project-a")
-            .rollouts
-            .is_empty());
+        assert!(
+            prompt_evolution_read_model_for_scope(&after_failure, "project-a")
+                .rollouts
+                .is_empty()
+        );
 
         store
             .execute_batch_for_testing("drop trigger fail_prompt_rollout_event;")
             .expect("failure trigger should uninstall");
-        append_prompt_rollout_update(
-            &mut store,
-            "auto",
-            "project-a",
-            &rollout,
-            &run_context,
-        )
-        .expect("retry should append the canonical event");
+        append_prompt_rollout_update(&mut store, "auto", "project-a", &rollout, &run_context)
+            .expect("retry should append the canonical event");
 
         let incrementally_loaded =
             load_prompt_evolution_read_model(&mut store).expect("read model should load");
@@ -645,9 +634,7 @@ pub(crate) fn prompt_evolution_state(
     let mut replay_runs = 0usize;
     let mut reflection_packets = 0usize;
     let mut learned_profiles = 0usize;
-    let inflight_efforts = prompt_evaluation_inflight()
-        .snapshot()
-        .unwrap_or_default();
+    let inflight_efforts = prompt_evaluation_inflight().snapshot().unwrap_or_default();
     for effort in ["fast", "auto", "pro"] {
         let effort_failure_curricula = failure_curricula
             .iter()
@@ -668,9 +655,8 @@ pub(crate) fn prompt_evolution_state(
             orchestrator::latest_scientific_dataset_digest(&evaluation.observations);
         let is_active_scientific = |observation: &&PromptEvolutionObservation| {
             observation.is_scientific_evidence()
-                && active_cohort_sha256.is_some_and(|digest| {
-                    observation.scientific_cohort_sha256() == Some(digest)
-                })
+                && active_cohort_sha256
+                    .is_some_and(|digest| observation.scientific_cohort_sha256() == Some(digest))
         };
         let effort_paired_runs = evaluation
             .observations
@@ -714,7 +700,7 @@ pub(crate) fn prompt_evolution_state(
         let rollout = rollouts
             .get(effort)
             .cloned()
-            .unwrap_or_else(|| default_prompt_rollout(effort));
+            .unwrap_or_else(|| crate::prompt_canary_runtime::default_prompt_rollout(effort));
         let dataset = datasets
             .values()
             .filter(|dataset| dataset.effort == effort)

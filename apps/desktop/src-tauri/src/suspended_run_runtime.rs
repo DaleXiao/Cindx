@@ -88,11 +88,7 @@ impl SuspendedRunStore {
         })
     }
 
-    fn agent_policy(
-        &self,
-        session_id: &str,
-        now_ms: u64,
-    ) -> Result<Option<AgentPolicy>, String> {
+    fn agent_policy(&self, session_id: &str, now_ms: u64) -> Result<Option<AgentPolicy>, String> {
         self.with_runs(|runs| {
             Self::purge_expired(runs, now_ms);
             runs.get(session_id).map(|run| {

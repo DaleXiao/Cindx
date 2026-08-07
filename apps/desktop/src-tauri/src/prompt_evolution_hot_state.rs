@@ -2,8 +2,8 @@ use crate::view_models::{
     PromptEvaluationAttemptState, PromptEvolutionReadModel, PromptGenomeRecord, PromptRolloutState,
 };
 use orchestrator::{
-    sha256_hex, AgentPolicy, PromptEvaluationAttemptStatus, PromptEvaluationMode,
-    PromptEvolutionObservation, PromptLearningCohortV1,
+    sha256_hex, AgentPolicy, PromptEvaluationAttemptStatus, PromptEvolutionObservation,
+    PromptLearningCohortV1,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,9 +61,7 @@ fn prompt_genome_identity_key(record: &PromptGenomeRecord) -> String {
 }
 
 fn prompt_genome_record_fingerprint(record: &PromptGenomeRecord) -> String {
-    sha256_hex(
-        &serde_json::to_vec(record).expect("validated prompt genome records must serialize"),
-    )
+    sha256_hex(&serde_json::to_vec(record).expect("validated prompt genome records must serialize"))
 }
 
 fn prompt_genome_key_from_identity(encoded: &str) -> Option<PromptGenomeKey> {
@@ -85,12 +83,16 @@ pub(crate) fn prompt_model_genome_conflict_keys(
 }
 
 pub(crate) fn prompt_genome_identities_are_valid(model: &PromptEvolutionReadModel) -> bool {
-    if model.genome_identity_fingerprints.iter().any(|(identity, fingerprint)| {
-        prompt_genome_key_from_identity(identity).is_none()
-            || (fingerprint != PROMPT_GENOME_IDENTITY_CONFLICT
-                && (fingerprint.len() != 64
-                    || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())))
-    }) {
+    if model
+        .genome_identity_fingerprints
+        .iter()
+        .any(|(identity, fingerprint)| {
+            prompt_genome_key_from_identity(identity).is_none()
+                || (fingerprint != PROMPT_GENOME_IDENTITY_CONFLICT
+                    && (fingerprint.len() != 64
+                        || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())))
+        })
+    {
         return false;
     }
     model.genomes.iter().all(|record| {
@@ -136,10 +138,9 @@ pub(crate) fn upsert_prompt_genome(
                 .iter()
                 .any(|existing| !prompt_genome_records_match(existing, &record))
             {
-                model.genome_identity_fingerprints.insert(
-                    identity,
-                    PROMPT_GENOME_IDENTITY_CONFLICT.to_string(),
-                );
+                model
+                    .genome_identity_fingerprints
+                    .insert(identity, PROMPT_GENOME_IDENTITY_CONFLICT.to_string());
                 model
                     .genomes
                     .retain(|existing| prompt_genome_key(existing) != record_key);
@@ -235,7 +236,7 @@ pub(crate) fn prompt_observation_matches_persisted_attempt(
     cohorts: &BTreeMap<String, PromptLearningCohortV1>,
 ) -> bool {
     let Some(identity) = observation.provenance.matched_evaluation.as_ref() else {
-        return observation.mode == PromptEvaluationMode::Live;
+        return observation.is_trusted_live_assignment();
     };
     cohorts.get(&identity.cohort_sha256).is_some_and(|cohort| {
         crate::prompt_attempt_runtime::prompt_matched_identity_belongs_to_cohort(identity, cohort)
@@ -515,10 +516,7 @@ fn compact_prompt_observations(
     });
 }
 
-fn compact_prompt_failure_curricula(
-    model: &mut PromptEvolutionReadModel,
-    limit_per_scope: usize,
-) {
+fn compact_prompt_failure_curricula(model: &mut PromptEvolutionReadModel, limit_per_scope: usize) {
     let mut retained = BTreeMap::<PromptScopeEffort, usize>::new();
     let mut keep = vec![false; model.failure_curricula.len()];
     for (index, record) in model.failure_curricula.iter().enumerate().rev() {
@@ -694,10 +692,7 @@ pub(crate) fn compact_prompt_evolution_hot_state_to_limits(
 ) {
     let active_cohorts = prompt_active_cohort_references(model);
     compact_prompt_observations(model, &active_cohorts, observation_limit_per_scope);
-    compact_prompt_failure_curricula(
-        model,
-        PROMPT_FAILURE_CURRICULUM_HOT_RETENTION_PER_SCOPE,
-    );
+    compact_prompt_failure_curricula(model, PROMPT_FAILURE_CURRICULUM_HOT_RETENTION_PER_SCOPE);
     compact_prompt_attempts_and_cohorts(model, &active_cohorts, attempt_limit, cohort_limit);
     compact_prompt_genomes(model, genome_limit_per_scope);
 }
