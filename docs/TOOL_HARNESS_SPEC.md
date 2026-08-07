@@ -418,6 +418,22 @@ the model must use its remaining bounded alternative or report the stable
 blocker. A new prepared objective epoch clears this denial/replan state; a retry
 or continuation of the same objective does not.
 
+The adaptive observer does not deduplicate successful calls before execution.
+After a trusted, complete result commits, it may compare a dynamically
+`ReadOnly` tool's exact action fingerprint with a bounded history of content
+hashes. The content identity includes bounded model-visible summary, guidance,
+and stable facts plus at most 32 KiB of evidence; strictly valid
+`sha256`/`*_sha256` facts provide the content identity when evidence is empty or
+larger. Confirmed transport fields such as duration and artifact paths do not
+fabricate progress. Re-observing the same content for the same exact action
+requests one replan, including across intervening read-only actions; another
+known duplicate after that advisory can request terminal delivery. Changed
+visible content or stable facts are progress. Effectful, unknown, unsuccessful,
+incomplete, untyped, or result-less recovery observations are semantic-history
+barriers, and missing content identity continues without a stop signal. The
+bounded observer stores hashes only and cannot reuse output, skip permission or
+dispatch, satisfy an obligation, or mint Goal Delta credit.
+
 `process.start` uses the same exact command-and-cwd capability boundary as
 `shell.run`; destructive or dynamic commands remain one-shot. Every
 `process.input` call is separately approved and binds its handle, payload digest,

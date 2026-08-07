@@ -771,8 +771,11 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 &request.tool_name,
                 &request.input,
                 result,
+                effect_spec.map(|spec| &spec.effect_semantics),
                 goal_delta.as_ref(),
             );
+        } else {
+            self.state.clear_adaptive_state_for_missing_tool_result();
         }
         AgentToolObservationTransition {
             goal_delta,
@@ -908,7 +911,9 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             &mut self.state.messages,
             &new_evidence,
         );
-        self.state.task_contract.goal_delta_since(&goal_progress)
+        let goal_delta = self.state.task_contract.goal_delta_since(&goal_progress);
+        self.state.clear_adaptive_state_for_missing_tool_result();
+        goal_delta
     }
 }
 
@@ -1749,7 +1754,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_no_gain_results_drive_one_replan_then_reset_on_cold_restore() {
+    fn repeated_semantic_reads_drive_one_replan_then_reset_on_cold_restore() {
         let mut state = start_agent_loop(
             TaskId("adaptive-loop".to_string()),
             "inspect the workspace",
@@ -1757,18 +1762,24 @@ mod tests {
         );
         state.task_contract.require_tool_success("file.read");
         let tools = vec![read_tool()];
-        let request = request();
+        let request_a = request();
+        let mut request_b = request();
+        request_b.call_id = ToolCallId("call-2".to_string());
+        request_b.input = r#"{"path":"CHANGELOG.md"}"#.to_string();
         let result = typed_result("1");
         let mut kernel = AgentKernel::new(&mut state, &tools);
 
-        for expected in [
-            crate::AdaptiveLoopDisposition::Continue,
-            crate::AdaptiveLoopDisposition::Continue,
-            crate::AdaptiveLoopDisposition::ReplanOnce,
-            crate::AdaptiveLoopDisposition::CommitTerminalResult,
+        for (request, expected) in [
+            (&request_a, crate::AdaptiveLoopDisposition::Continue),
+            (&request_b, crate::AdaptiveLoopDisposition::Continue),
+            (&request_a, crate::AdaptiveLoopDisposition::ReplanOnce),
+            (
+                &request_a,
+                crate::AdaptiveLoopDisposition::CommitTerminalResult,
+            ),
         ] {
             kernel.apply_tool_result_transition_with_contract(
-                &request,
+                request,
                 Some(&ToolRisk::ReadOnly),
                 Some(&tools[0]),
                 None,
@@ -1812,6 +1823,58 @@ mod tests {
             .progress_fingerprint(),
             authoritative_fingerprint,
             "cold restore preserves authoritative cognitive facts"
+        );
+    }
+
+    #[test]
+    fn persisted_observation_is_a_semantic_history_barrier() {
+        let mut state = start_agent_loop(
+            TaskId("adaptive-persisted-barrier".to_string()),
+            "inspect the workspace",
+            AgentRuntimeConfig::default(),
+        );
+        let tools = vec![read_tool()];
+        let request = request();
+        let result = typed_result("1");
+        let mut kernel = AgentKernel::new(&mut state, &tools);
+
+        kernel.apply_tool_result_transition_with_contract(
+            &request,
+            Some(&ToolRisk::ReadOnly),
+            Some(&tools[0]),
+            None,
+            &result,
+            "tool=file.read\nstatus=succeeded\noutput=workspace facts",
+            None,
+        );
+        assert_eq!(
+            kernel.state().adaptive_loop_disposition(),
+            crate::AdaptiveLoopDisposition::Continue
+        );
+
+        kernel.apply_persisted_tool_observation(
+            ToolCallId("persisted-call".to_string()),
+            "file.read",
+            "sha256:persisted",
+            None,
+            None,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            "tool=file.read\nstatus=succeeded\noutput=recovered facts",
+        );
+        kernel.apply_tool_result_transition_with_contract(
+            &request,
+            Some(&ToolRisk::ReadOnly),
+            Some(&tools[0]),
+            None,
+            &result,
+            "tool=file.read\nstatus=succeeded\noutput=workspace facts",
+            None,
+        );
+        assert_eq!(
+            kernel.state().adaptive_loop_disposition(),
+            crate::AdaptiveLoopDisposition::Continue,
+            "a result-less recovery transition must not bridge live semantic observations"
         );
     }
 

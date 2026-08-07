@@ -188,13 +188,16 @@ projection of the current prepared epoch. It derives one protected transient
 overlay from `PreparedTaskState`, `AgentTaskContract`, and its outcome ledger;
 if that advisory overlay alone prevents a hard context invariant, the kernel
 reprojects once without it rather than discarding required trust or evidence.
-The projection is never another mutable or durable fact store. The adjacent
-adaptive cursor owns only bounded typed-observation hashes and no-gain counters,
-and cold task-state restoration intentionally recreates it empty for the
-restored steer epoch. The desktop adapter transports the complete `ToolResult`
-into the runtime transition and executes the resulting continuation or terminal
-disposition. It does not derive cognitive facts or maintain a parallel loop
-state.
+The projection is never another mutable or durable fact store. Run control owns
+pre-execution exact-action and short-cycle admission; the adaptive cursor is the
+distinct post-execution observer. It owns only bounded typed-observation hashes,
+no-gain counters, and at most eight exact-action-to-semantic-outcome identities
+for successful complete read-only results. It does not cache a result, suppress
+execution, or create task progress. Cold task-state restoration intentionally
+recreates it empty for the restored steer epoch. The desktop adapter transports
+the complete `ToolResult` into the runtime transition and executes the resulting
+continuation or terminal disposition. It does not derive cognitive facts or
+maintain a parallel loop state.
 
 The foreground execution path has three explicit responsibilities. The Actor
 owns model/tool iteration and its turn budget. Verifier authority belongs to the
