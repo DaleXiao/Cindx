@@ -12,13 +12,13 @@ does not claim Fugu Ultra equivalence.
   Context Compiler contract and operation-count bound, Evaluation v2
   foundation, the
   120-case arena schema/evidence-ingestion contract, the Agent Real-World V5
-  measurement contract, the 18-cell memory-effect evidence contract, the exact
-  managed-process session contract, memory attribution, and frontend state
-  behavior.
+  measurement contract, the Direct-finalizer causal/evolution contracts, the 18-cell
+  memory-effect evidence contract, the exact managed-process session contract,
+  memory attribution, and frontend state behavior.
 - `control-plane`: documentation and deterministic agent contracts, including
   typed collaboration execution, the Agent Real-World V5 measurement, and
-  memory-effect, authoritative Context Compiler, and managed-process session
-  contracts,
+  Direct-finalizer causal/evolution, memory-effect, authoritative Context Compiler, and
+  managed-process session contracts,
   plus Rust workspace and desktop tests.
 - `performance`: long-session incremental projection, bounded context governance,
   authoritative Context Compiler operation counts, graph/request reuse, frontend
@@ -35,9 +35,9 @@ does not claim Fugu Ultra equivalence.
   the Context Compiler's candidate-proportional operation bound.
   It uses operation counts and identity invariants and never cross-machine wall-clock thresholds.
 - `full`: all shipping deterministic gates, including the Agent Real-World V5
-  measurement and managed-process session contracts, sidecars, frontend
-  production build, and Rust tests; heavier same-machine diagnostics remain in
-  `performance`.
+  measurement, Direct-finalizer causal/evolution, and managed-process session contracts,
+  sidecars, frontend production build, and Rust tests; heavier same-machine
+  diagnostics remain in `performance`.
 
 `scripts/check-desktop-rust-light.sh` is a supplemental compile check, not a
 quality-gate profile. It deliberately avoids frontend bundle resources and the
@@ -183,6 +183,13 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   grounded fallback, and commit one durable success or failure terminal across
   replay. These deterministic checks establish control semantics, not
   provider-backed answer-quality uplift.
+- The Direct-finalizer causal contracts prove that the default phenotype is
+  byte-compatible, a non-default phenotype changes only the tools-disabled
+  Finalizer prompt, assignment/request/non-fallback delivery receipts remain
+  exact, the reviewer and GEPA schemas fail closed, and provider-call accounting
+  is durable before execution with a hard 58-call cap. The frozen suite contract
+  checks six train, eight holdout and preregistered preservation controls. These
+  tests do not contact a provider or establish intelligence uplift.
 - The typed denial gate keeps permission, policy, capability, and repeated-action
   refusals distinct from ordinary failure and success. It proves one bounded
   same-epoch replan, exact-call suppression before permission, epoch isolation,

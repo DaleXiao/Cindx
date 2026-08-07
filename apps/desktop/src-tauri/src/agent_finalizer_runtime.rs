@@ -5,6 +5,8 @@ use agent_runtime::{
 };
 use model_provider::ModelResponse;
 
+#[path = "agent_direct_finalizer_policy.rs"]
+pub(crate) mod direct_finalizer_policy;
 #[path = "agent_terminal_finalizer_runtime.rs"]
 pub(crate) mod terminal_runtime;
 
@@ -42,12 +44,21 @@ fn candidate_is_tool_carrier(runtime: &agent_runtime::AgentLoopState, content: &
 pub(crate) fn prepare_finalizer_turn(
     runtime: &mut agent_runtime::AgentLoopState,
     system_prompt: Option<&str>,
+    direct_finalizer_directive: Option<&str>,
     runtime_context: Option<&str>,
     context_window_tokens: u64,
     max_output_tokens: u64,
 ) -> Result<agent_runtime::PreparedAgentTurn, AgentTurnPreparationError> {
+    let augmented_system_prompt = direct_finalizer_directive.map(|directive| {
+        let base = system_prompt.unwrap_or_default().trim();
+        if base.is_empty() {
+            directive.to_string()
+        } else {
+            format!("{base}\n\nDirect finalizer policy:\n{directive}")
+        }
+    });
     let mut prepared = AgentKernel::new(runtime, &[]).prepare_finalizer_turn(
-        system_prompt,
+        augmented_system_prompt.as_deref().or(system_prompt),
         runtime_context,
         context_window_tokens,
         max_output_tokens,
@@ -235,11 +246,51 @@ mod tests {
     fn finalizer_request_is_toolless_and_does_not_advance_the_actor_turn() {
         let mut runtime = runtime();
         let before = runtime.turn;
-        let prepared = prepare_finalizer_turn(&mut runtime, None, None, 8_192, 1_024)
+        let prepared = prepare_finalizer_turn(&mut runtime, None, None, None, 8_192, 1_024)
             .expect("finalizer request should prepare");
         assert!(prepared.request.tools.is_empty());
         assert_eq!(prepared.request.role, ModelRole::Summarizer);
         assert_eq!(runtime.turn, before);
+    }
+
+    #[test]
+    fn direct_policy_changes_only_the_toolless_finalizer_prompt() {
+        let mut baseline_runtime = runtime();
+        let mut candidate_runtime = baseline_runtime.clone();
+        let baseline = prepare_finalizer_turn(
+            &mut baseline_runtime,
+            Some("base system prompt"),
+            None,
+            None,
+            8_192,
+            1_024,
+        )
+        .expect("baseline finalizer should prepare");
+        let directive = "challenge visible evidence before delivery";
+        let candidate = prepare_finalizer_turn(
+            &mut candidate_runtime,
+            Some("base system prompt"),
+            Some(directive),
+            None,
+            8_192,
+            1_024,
+        )
+        .expect("candidate finalizer should prepare");
+
+        assert_eq!(baseline.request.role, candidate.request.role);
+        assert!(baseline.request.tools.is_empty());
+        assert!(candidate.request.tools.is_empty());
+        assert_eq!(baseline_runtime.turn, candidate_runtime.turn);
+        assert!(!baseline
+            .request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(directive)));
+        assert!(candidate
+            .request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(directive)));
     }
 
     #[test]

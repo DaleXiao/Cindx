@@ -88,6 +88,14 @@ fn default_prompt_commit_strategy() -> PromptCommitStrategy {
     PromptCommitStrategy::Adaptive
 }
 
+fn default_direct_finalizer_verification() -> PromptVerification {
+    PromptVerification::Evidence
+}
+
+fn direct_finalizer_verification_is_default(value: &PromptVerification) -> bool {
+    *value == default_direct_finalizer_verification()
+}
+
 fn default_max_step_attempts() -> usize {
     2
 }
@@ -121,6 +129,11 @@ pub struct ConductorPromptGenome {
     pub role_strategy: PromptRoleStrategy,
     #[serde(default = "default_prompt_commit_strategy")]
     pub commit_strategy: PromptCommitStrategy,
+    #[serde(
+        default = "default_direct_finalizer_verification",
+        skip_serializing_if = "direct_finalizer_verification_is_default"
+    )]
+    pub direct_finalizer_verification: PromptVerification,
     #[serde(default = "default_max_step_attempts")]
     pub max_step_attempts: usize,
     #[serde(default = "default_max_model_turns_per_step")]
@@ -223,6 +236,7 @@ impl ConductorPromptGenome {
             topology_strategy,
             role_strategy,
             commit_strategy: PromptCommitStrategy::Adaptive,
+            direct_finalizer_verification: default_direct_finalizer_verification(),
             max_step_attempts,
             max_model_turns_per_step,
             max_tool_calls_per_step,
@@ -500,6 +514,11 @@ impl ConductorPromptGenome {
         mutation.parents = vec![self.id.clone()];
         mutation.require_final_synthesis = self.require_final_synthesis;
         mutation.validate()?;
+        if mutation.direct_finalizer_verification != self.direct_finalizer_verification {
+            return Err(
+                "workflow prompt mutation must not change the direct finalizer gene".to_string(),
+            );
+        }
 
         // Count the genes the response explicitly changed before policy-derived
         // budget floors are materialized. A tool-policy upgrade is one gene;
@@ -719,6 +738,7 @@ impl ConductorPromptGenome {
             topology_strategy: left.topology_strategy,
             role_strategy: right.role_strategy,
             commit_strategy: right.commit_strategy,
+            direct_finalizer_verification: left.direct_finalizer_verification,
             max_step_attempts: left.max_step_attempts.min(right.max_step_attempts),
             max_model_turns_per_step: left
                 .effective_max_model_turns_per_step()

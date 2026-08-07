@@ -207,6 +207,12 @@ The desktop precomputes a current-epoch grounded fallback before dispatch; an
 empty, malformed, tool-calling, or unavailable Finalizer either returns that
 byte-identical candidate after receipt revalidation or fails closed without
 starting another Actor turn.
+`agent_finalizer_runtime::direct_finalizer_policy` is the narrow adapter for the orthogonal
+Direct-finalizer genome surface. It accepts only a receipt-valid Auto/Pro
+profile whose recorded decision is Direct, projects the bounded phenotype into
+the Finalizer system prompt, and emits request/delivery attribution. The seed
+phenotype is byte-compatible and adds no prompt text; workflow planning and the
+Actor remain independent of this policy.
 Asynchronous managed-process polls remain ordinary typed observations: their
 distance from the initiating action prevents them from minting a causally trusted
 workspace-quality receipt. Command words such as `test`, `check`, or `build` do
@@ -467,6 +473,17 @@ policy is intersected with the genome ceiling. The normalized genome phenotype
 removes behaviorally duplicate mutations, while the plan and every runner take
 the minimum of that phenotype and the outer hard budget. Thus profile defaults
 cannot expand a zero/one runtime limit.
+
+Direct-finalizer evolution is a separate one-gene surface, not an extension of
+the workflow phenotype. The feature-gated evaluator materializes one canonical
+pre-treatment runtime, changes only the Finalizer system-prompt directive, and
+uses an independent position-balanced reviewer. Campaign orchestration,
+provider execution, strict frozen-suite/receipt contracts, evidence projection,
+and checkpoint support live in separate `agent_realworld_eval` children, each
+below the desktop integration boundary. The reviewer remains treatment-blind;
+the GEPA selector receives the exact exercised candidate and may only promote
+or reject it. Reject stops before holdout, and promotion still requires the
+existing paired train/holdout gate.
 
 The Pro evolution path can learn from qualified Auto outcomes without coupling
 the two foreground runtimes:

@@ -168,7 +168,7 @@ use agent_loop_runtime::*;
 use agent_query_commands::*;
 use agent_read_model::*;
 #[cfg(feature = "realworld-eval")]
-pub use agent_realworld_eval::run_agent_realworld_eval;
+pub use agent_realworld_eval::{run_agent_realworld_eval, run_direct_finalizer_gepa_eval};
 use agent_recovery_service::*;
 #[cfg(test)]
 use agent_resource_snapshot::*;

@@ -24,6 +24,19 @@ fn insert_context_compiler_event_metadata(
     context_governor.insert_metadata(metadata);
 }
 
+fn insert_direct_finalizer_event_metadata(metadata: &mut Metadata, request: &Metadata) {
+    for key in [
+        "direct_finalizer_phenotype_receipt",
+        "direct_finalizer_phenotype_receipt_sha256",
+        "direct_finalizer_phenotype_sha256",
+        "direct_finalizer_verification",
+    ] {
+        if let Some(value) = request.get(key) {
+            metadata.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
 pub(crate) struct AgentModelTurnResponse {
     pub response: ModelResponse,
     pub request_id: String,
@@ -276,6 +289,7 @@ pub(crate) fn execute_agent_model_turn(
             metadata.insert("policy".to_string(), collaboration.policy.clone());
         }
         insert_context_compiler_event_metadata(&mut metadata, context_governor);
+        insert_direct_finalizer_event_metadata(&mut metadata, &request.metadata);
         append_event(
             &mut store,
             &runtime.task_id,
@@ -742,6 +756,7 @@ pub(crate) fn execute_agent_model_turn(
             metadata.insert("role".to_string(), turn_role.label().to_string());
             metadata.insert("policy".to_string(), collaboration.policy.clone());
         }
+        insert_direct_finalizer_event_metadata(&mut metadata, &request.metadata);
         append_event(
             &mut store,
             &runtime.task_id,

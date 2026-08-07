@@ -18,6 +18,11 @@ name = "cindx-agent-realworld-eval"
 path = "src/bin/agent_realworld_eval.rs"
 required-features = ["realworld-eval"]
 
+[[bin]]
+name = "cindx-direct-finalizer-gepa-eval"
+path = "src/bin/direct_finalizer_gepa_eval.rs"
+required-features = ["realworld-eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

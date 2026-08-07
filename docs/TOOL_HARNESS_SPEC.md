@@ -305,6 +305,11 @@ its bounded evidence before state restoration.
   cannot mint a verification receipt.
 - Finalizer requests expose zero tools, use only the Finalizer stage reserve, and
   do not consume an Actor turn or tool/step budget.
+- For receipt-valid Auto/Pro Direct runs, a learned Direct-finalizer phenotype
+  may add one bounded terminal verification directive. It cannot expose tools,
+  alter Actor state or budgets, or run on a workflow route. The seed phenotype
+  adds no directive, and fallback delivery is never reported as exercising a
+  learned phenotype.
 - Before a Finalizer call, the runtime freezes a grounded current-epoch fallback.
   Empty, malformed, unavailable, or tool-calling output returns that exact
   candidate after receipt revalidation; without one, delivery fails closed and
