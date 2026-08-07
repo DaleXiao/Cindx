@@ -128,7 +128,7 @@ pub(super) fn prepare_adaptive_wave(
                 prompt: worker_prompt,
                 request_id: unique_id("collaboration-model"),
                 access: step.access.clone(),
-                tool_policy: workflow_plan.steps[step_index].tool_policy.clone(),
+                tool_policy: workflow_plan.steps[step_index].tool_policy,
                 output_kind: workflow_plan.steps[step_index].contract.output_kind.clone(),
                 max_attempts: max_step_attempts,
                 max_model_turns: max_model_turns_per_step,
@@ -261,7 +261,7 @@ pub(super) fn execute_adaptive_wave(
             let role = adaptive_model_role(&spec.role, &spec.output_kind);
             let prompt = spec.prompt.clone();
             let worker_access =
-                CollaborationWorkerAccess::new(spec.step_id.clone(), spec.tool_policy.clone());
+                CollaborationWorkerAccess::new(spec.step_id.clone(), spec.tool_policy);
             let max_model_turns = spec.max_model_turns;
             let max_tool_calls = spec.max_tool_calls;
             let max_output_tokens = spec.max_output_tokens;

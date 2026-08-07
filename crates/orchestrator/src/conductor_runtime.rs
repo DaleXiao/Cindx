@@ -192,7 +192,7 @@ impl ConductorHarness {
                 .map(|(index, step)| {
                     semantics.push(ConductorStepSemantics {
                         output_kind: step.output_kind.clone(),
-                        tool_policy: step.tool_policy.clone(),
+                        tool_policy: step.tool_policy,
                     });
                     let access = step
                         .access
@@ -390,7 +390,7 @@ impl ConductorHarness {
         }
         for (index, step) in plan.steps.iter_mut().enumerate() {
             let semantics = semantics.and_then(|values| values.get(index));
-            if let Some(tool_policy) = semantics.and_then(|value| value.tool_policy.clone()) {
+            if let Some(tool_policy) = semantics.and_then(|value| value.tool_policy) {
                 step.tool_policy = if self.request.prompt_evolution_enabled {
                     tool_policy.limited_by(step.tool_policy)
                 } else {

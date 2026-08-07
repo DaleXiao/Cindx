@@ -730,7 +730,7 @@ fn normalized_topology_steps(plan: &WorkflowPlanIr) -> Vec<WorkflowTopologyStep>
                 .iter()
                 .filter_map(|dependency| indexes.get(dependency.as_str()).copied())
                 .collect(),
-            tool_policy: step.tool_policy.clone(),
+            tool_policy: step.tool_policy,
             preferred_tools: Vec::new(),
         })
         .collect()

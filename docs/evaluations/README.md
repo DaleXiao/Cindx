@@ -15,16 +15,24 @@ evidence by itself.
 
 ## Current Product Decision
 
-- [Cindx Agent Real-World V5 0.2.11](CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md)
+- [Cindx Agent Real-World V5 0.2.22](CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.md)
   is the current 72-cell provider-backed baseline on source commit
-  `3765d23042dcafaeb721accc0460f149e1ea5ade`. All cells were retained, with
+  `a0000fa55907b90adf6684b39aa3b9d5cc679f42`. All cells were retained, with
   complete provider and strategy evidence, zero setup failures, zero timeouts,
   and zero safety violations, so baseline validity is `VALID_BASELINE`. Auto
-  preserved Grounded Direct quality and completion, reduced median latency by
-  `5,989 ms`, and used `1.8%` more total tokens. With no matched quality
-  improvement, adaptive-direct is `NEUTRAL`. Workflow, learned-profile, and
-  distillation were not exercised. Pro's higher completion is descriptive
-  because its native budget differs.
+  improved one matched quality outcome, preserved completion, had a
+  matched-pair median latency delta of `-3,585 ms`, and used about `10.0%`
+  fewer total tokens, so the frozen adaptive-direct claim is `IMPROVED`.
+  Workflow, learned-profile, and
+  distillation were not exercised. Pro remains descriptive because its native
+  budget differs.
+- [Sanitized V5 0.2.22 machine-readable result](CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.json)
+
+- [Cindx Agent Real-World V5 0.2.11](CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md)
+  is the previous V5 provider-backed baseline on source commit
+  `3765d23042dcafaeb721accc0460f149e1ea5ade`. It was a `VALID_BASELINE` with
+  adaptive-direct `NEUTRAL`; workflow, learned-profile, and distillation were
+  not exercised.
 - [Sanitized V5 0.2.11 machine-readable result](CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.json)
 
 - [Cindx Agent Real-World V4 0.2.9](CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md)

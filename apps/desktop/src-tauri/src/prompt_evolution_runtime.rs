@@ -491,6 +491,7 @@ fn append_prompt_rollout_update(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod prompt_rollout_persistence_tests {
     use super::*;
 

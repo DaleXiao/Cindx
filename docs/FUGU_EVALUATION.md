@@ -22,16 +22,16 @@ Auto, and Pro paths, preserves failures in the denominator, and publishes only
 sanitized hashes, scores, latency, and routing evidence.
 
 The latest provider-backed product baseline is
-[`Cindx Agent Real-World V4 0.2.9`](evaluations/CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md).
+[`Cindx Agent Real-World V5 0.2.22`](evaluations/CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.md).
 It is a complete `VALID_BASELINE` with zero setup failures and zero safety
 violations, but it is not protocol-equivalent to the external matrix below.
-Auto and Pro preserved quality and completion against Fast and improved paired
-quality and completion within their resource ceilings, but the collector
-classified continuation tool events in two Fast runs as outside the current
-logical Agent run. The preregistered receipt gate therefore fails closed and the
-Agent-intelligence uplift decision remains `NO-GO`. No frozen learned profile
-was supplied, so the report is
-`FRESH-SEED-ONLY` and supports no causal claim about GEPA, transfer, or
+Against the iso-budget Grounded Direct product baseline, Auto improved one of
+18 matched quality outcomes, preserved completion, and reduced both median
+latency and total token use, so adaptive-direct is `IMPROVED` on that exact
+suite. This does not establish Fugu protocol parity, frontier performance, or
+the contribution of any individual control. No workflow or frozen learned
+profile was executed, so workflow, learned-profile, and distillation remain
+`NOT_EXERCISED` and the report supports no causal claim about GEPA, transfer, or
 self-distillation.
 
 The frozen source is [Fugu: A Model Family for Agentic Intelligence, v1](https://arxiv.org/html/2606.21228v1), Table 1 and Appendix A. The v1 LiveCodeBench score is 92.0. Later values on the product page are not silently substituted.

@@ -129,7 +129,7 @@ pub(crate) fn restore_prompt_profile_selection(
     {
         return Err("prompt profile assignment scope is invalid".to_string());
     }
-    let lease_is_valid = receipt.distillation_lease.as_ref().map_or(true, |lease| {
+    let lease_is_valid = receipt.distillation_lease.as_ref().is_none_or(|lease| {
         let selected_matches = match receipt.source {
             PromptProfileAssignmentSource::Stable => {
                 receipt.profile_id == lease.stable_profile_id

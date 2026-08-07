@@ -88,15 +88,14 @@ pub(crate) fn dispatch_prompt_auto_transfer_intents(app: &tauri::AppHandle) -> R
             .any(|event| event.summary == "Conductor prompt evaluation requested");
         if prompt_learning_dispatch_recovery(request_exists)
             == PromptLearningDispatchRecovery::EnqueueThenMark
-        {
-            if !crate::prompt_pairwise_runtime::enqueue_prompt_auto_transfer_evaluation(
+            && !crate::prompt_pairwise_runtime::enqueue_prompt_auto_transfer_evaluation(
                 app,
                 &task_id,
                 intent.run_context(),
                 Some(request_id),
-            )? {
-                continue;
-            }
+            )?
+        {
+            continue;
         }
         append_dispatched(&state, &intent)?;
         dispatched_any = true;

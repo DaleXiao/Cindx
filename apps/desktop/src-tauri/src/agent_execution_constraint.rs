@@ -93,7 +93,7 @@ mod tests {
     fn native_is_metadata_compatible_and_grounded_direct_is_explicit() {
         let mut context = Metadata::new();
         AgentExecutionConstraint::Native.write_to_context(&mut context);
-        assert!(context.get(AGENT_EXECUTION_CONSTRAINT_KEY).is_none());
+        assert!(!context.contains_key(AGENT_EXECUTION_CONSTRAINT_KEY));
         assert_eq!(
             AgentExecutionConstraint::from_context(&context),
             Ok(AgentExecutionConstraint::Native)

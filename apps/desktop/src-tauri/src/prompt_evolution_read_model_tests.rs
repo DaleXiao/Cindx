@@ -80,6 +80,7 @@ fn append_live_assignment(metadata: &mut Metadata) {
     metadata.insert("prompt_rollout_status".to_string(), "stable".to_string());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prompt_rollout_event(
     sequence: u64,
     status: &str,
@@ -1410,7 +1411,7 @@ fn prompt_rollout_quarantine_blocks_a_after_a_then_b_roll_back() {
     let candidates = seed.mutations();
     let candidate_a = &candidates[0].id;
     let candidate_b = &candidates[1].id;
-    let events = vec![
+    let events = [
         with_distillation_lease(
             prompt_rollout_event(1, "canary", &seed.id, Some(candidate_a), 10, 0, &[], None),
             &seed.id,
@@ -2145,11 +2146,11 @@ fn hot_state_soft_caps_are_reference_safe_and_incrementally_deterministic() {
     incremental
         .rollouts
         .insert(prompt_rollout_key("project-a", "auto"), rollout);
-    for index in 0..observations.len() {
+    for (index, observation) in observations.iter().enumerate() {
         if let Some(genome) = genomes.get(index) {
             incremental.genomes.push(genome.clone());
         }
-        incremental.observations.push(observations[index].clone());
+        incremental.observations.push(observation.clone());
         compact_prompt_evolution_hot_state_to_limits(
             &mut incremental,
             usize::MAX,
