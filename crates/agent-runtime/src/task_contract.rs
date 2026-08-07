@@ -43,7 +43,9 @@ pub use outcome_ledger::{
     OUTCOME_LEDGER_METADATA_KEY, OUTCOME_LEDGER_SCHEMA,
 };
 
-pub(crate) use postcondition_receipt::PostconditionTargetWitness;
+pub(crate) use postcondition_receipt::{
+    workspace_action_verifier_family, PostconditionTargetWitness,
+};
 use postcondition_receipt::{PostconditionActionBinding, PostconditionBindingKey};
 pub use postcondition_receipt::{
     PostconditionVerificationReceipt, MAX_POSTCONDITION_VERIFICATION_RECEIPT_BYTES,

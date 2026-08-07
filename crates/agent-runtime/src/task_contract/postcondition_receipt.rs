@@ -17,8 +17,17 @@ const MAX_VERIFIER_CONTRACT_BYTES: usize = 128;
 const MAX_POSTCONDITION_TARGETS: usize = 8;
 const POSTCONDITION_TARGET_DIGEST_DOMAIN: &str = "cindx.postcondition-target.v2";
 const WORKSPACE_FILE_CONTENT_VERIFIER: &str = "workspace_file_content_v1";
+const WORKSPACE_FILE_SHA256_VERIFIER_PREFIX: &str = "workspace_file_sha256_v1:";
 const BROWSER_OBSERVATION_VERIFIER: &str = "browser_observation_v1";
 const COMPUTER_OBSERVATION_VERIFIER: &str = "computer_observation_v1";
+
+pub(crate) fn workspace_action_verifier_family(value: &str) -> Option<&'static str> {
+    (value == WORKSPACE_FILE_CONTENT_VERIFIER
+        || value
+            .strip_prefix(WORKSPACE_FILE_SHA256_VERIFIER_PREFIX)
+            .is_some_and(is_sha256_hex))
+    .then_some(WORKSPACE_FILE_CONTENT_VERIFIER)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

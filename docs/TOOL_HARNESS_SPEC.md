@@ -285,6 +285,12 @@ may sign it. Multi-target
 mutations require cumulative exact coverage of every target, unless one trusted
 workspace-wide quality check covers the set.
 
+Workspace mutation binding accepts the built-in complete-write verifier and a
+well-formed `file.patch` after-SHA verifier as the same closed workspace-file
+effect family. The patch digest remains the recovery verifier; it does not
+verify completion by itself. A separate trusted exact readback or workspace-wide
+quality check is still required to mint the postcondition receipt.
+
 Persisted workspace target witnesses contain only logical-run and contract-epoch
 scoped digests. A witness from another run, another contract epoch, legacy v1,
 or an untyped recovered action fails closed. The full task checkpoint is capped
