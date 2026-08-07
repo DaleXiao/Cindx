@@ -10,9 +10,8 @@ use crate::prompt_rollout_runtime::stable_prompt_profile_fingerprint;
 use crate::runtime_values::phase16_task_id;
 use agent_core::{Event, EventKind};
 use orchestrator::{
-    prompt_learning_dispatch_recovery, AgentPolicy, OrchestrationPolicy,
-    PromptLearningDispatchRecovery, PromptLearningOutboxProjection,
-    PromptProDistillationIntent, ProTeacherAttestationV1,
+    prompt_learning_dispatch_recovery, AgentPolicy, OrchestrationPolicy, ProTeacherAttestationV1,
+    PromptLearningDispatchRecovery, PromptLearningOutboxProjection, PromptProDistillationIntent,
 };
 use std::sync::atomic::Ordering;
 use tauri::Manager;
@@ -38,15 +37,9 @@ fn pro_distillation_intent_from_rollout(event: &Event) -> Option<PromptProDistil
         .or_else(|| event.metadata.get("project_id"))?;
     let stable_profile_id = event.metadata.get("stable_profile")?;
     let encoded = event.metadata.get("frozen_prompt_profile")?;
-    let snapshot = orchestrator::FrozenPromptProfileSnapshot::from_json_slice(encoded.as_bytes())
-        .ok()?;
-    PromptProDistillationIntent::new(
-        project_id,
-        stable_profile_id,
-        &event.metadata,
-        snapshot,
-    )
-    .ok()
+    let snapshot =
+        orchestrator::FrozenPromptProfileSnapshot::from_json_slice(encoded.as_bytes()).ok()?;
+    PromptProDistillationIntent::new(project_id, stable_profile_id, &event.metadata, snapshot).ok()
 }
 
 pub(crate) fn dispatch_prompt_pro_distillation_intents(
@@ -409,7 +402,10 @@ mod tests {
                 summary: DISPATCHED_EVENT.to_string(),
                 metadata: [
                     ("project_id".to_string(), "project".to_string()),
-                    (INTENT_ID_KEY.to_string(), first_intent.intent_id().to_string()),
+                    (
+                        INTENT_ID_KEY.to_string(),
+                        first_intent.intent_id().to_string(),
+                    ),
                 ]
                 .into_iter()
                 .collect(),
@@ -491,5 +487,4 @@ mod tests {
                 .contains("mismatched project scope")
         );
     }
-
 }

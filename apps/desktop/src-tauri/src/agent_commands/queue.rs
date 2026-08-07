@@ -48,7 +48,9 @@ pub(crate) fn enqueue_agent_message_inner(
     let payload = QueuedAgentMessagePayload {
         prompt: display_prompt,
         attachments,
-        effort: AgentPolicy::parse_ingress(&input.effort).label().to_string(),
+        effort: AgentPolicy::parse_ingress(&input.effort)
+            .label()
+            .to_string(),
         current_time: normalized_current_time_context(&input.current_time),
     };
     let queue_id = queued_agent_message_id(input.queue_id.as_deref());

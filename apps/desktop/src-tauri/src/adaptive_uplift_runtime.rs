@@ -212,8 +212,9 @@ pub(super) fn repair_adaptive_uplift(
         anytime_controller,
         workflow_checkpoint,
     } = context;
-    let workflow_verification_satisfied = workflow_checkpoint
-        .workflow_verification_satisfied(anytime_controller.snapshot().config.verification_required);
+    let workflow_verification_satisfied = workflow_checkpoint.workflow_verification_satisfied(
+        anytime_controller.snapshot().config.verification_required,
+    );
     let repair_candidate_id = format!("{team_candidate_id}:{TARGETED_UPLIFT_REPAIR_SUFFIX}");
     if anytime_controller.candidate(&repair_candidate_id).is_some() {
         if enforce_candidate_verification_gate(

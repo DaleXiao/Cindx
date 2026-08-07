@@ -153,6 +153,18 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   indexing, and membership checks using deterministic operation counts rather
   than wall-clock duration. These are request-compilation control and resource
   contracts, not provider-backed answer-quality, GEPA, or intelligence evidence.
+- The exact prompt-profile shipping, live-assignment attribution,
+  distillation-control, and recovery gates
+  require their versioned markers and prove that only a background worker can
+  reconcile/publish a compact stable/canary deployment; foreground assignment
+  is project-isolated, logical-run-stable, typed on fallback, bound to exact
+  genome/deployment/lease lineage, route-isolated, and unable to broaden tool
+  authority or runtime limits. Recovery also rejects same-revision history ABA
+  through a persistent content binding and cleans binding-only orphans. The
+  matching selection-scaling gate compares small and heavily populated unrelated state
+  using deterministic lookup/scan/write counts, not wall-clock latency. These
+  gates establish causal wiring, recovery, and resource bounds; they do not
+  establish provider-backed GEPA, distillation, Auto, or Pro quality uplift.
 - Exact workspace file-plane tests cover stale, ambiguous, racing, locked, and
   failed-publication patches; permission and receipt preservation; degraded
   output-history capture; read hashes and batch partial/offset behavior;

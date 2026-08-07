@@ -131,12 +131,10 @@ pub(super) fn prepare_adaptive_wave(
                 tool_policy: workflow_plan.steps[step_index].tool_policy.clone(),
                 output_kind: workflow_plan.steps[step_index].contract.output_kind.clone(),
                 max_attempts: max_step_attempts,
-                max_model_turns: workflow_plan.steps[step_index]
-                    .tool_policy
-                    .effective_model_turn_budget(max_model_turns_per_step),
+                max_model_turns: max_model_turns_per_step,
                 max_tool_calls: workflow_plan.steps[step_index]
                     .tool_policy
-                    .effective_tool_call_budget(workflow_plan.budget.max_tool_calls_per_step),
+                    .tool_call_budget_within(workflow_plan.budget.max_tool_calls_per_step),
                 max_output_tokens: workflow_plan.budget.max_output_tokens_per_step as u64,
             })
         })

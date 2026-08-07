@@ -189,77 +189,12 @@ pub(crate) fn evaluate_prompt_evolution_read_model(
     )
 }
 
-pub(crate) fn default_prompt_rollout(effort: &str) -> PromptRolloutState {
-    PromptRolloutState {
-        stable_profile_id: ConductorPromptGenome::seed_for_effort(effort).id,
-        canary_profile_id: None,
-        canary_percent: 0,
-        evidence_checkpoint: 0,
-        live_checkpoint: 0,
-        stable_live_checkpoint: 0,
-        quarantined_profile_ids: Vec::new(),
-        distillation_lease: None,
-        rollback_count: 0,
-        status: "stable".to_string(),
-        last_reason: None,
-        promotion_confidence: None,
-        frozen_profile: None,
-    }
-}
-
 pub(crate) fn prompt_live_observations<'a>(
     model: &'a PromptEvolutionReadModel,
     effort: &str,
     profile_id: &str,
 ) -> Vec<&'a PromptEvolutionObservation> {
     crate::prompt_canary_runtime::collect_prompt_live_observations(model, effort, profile_id)
-}
-
-pub(crate) fn prompt_canary_degraded(
-    model: &PromptEvolutionReadModel,
-    effort: &str,
-    stable_profile_id: &str,
-    canary_profile_id: &str,
-) -> Option<String> {
-    let canary = prompt_live_observations(model, effort, canary_profile_id);
-    if canary
-        .iter()
-        .rev()
-        .take(4)
-        .any(|observation| observation.safety_violations > 0 || !observation.format_valid)
-    {
-        return Some("canary_safety_regression".to_string());
-    }
-    let recent_canary = canary.iter().rev().take(4).copied().collect::<Vec<_>>();
-    if recent_canary.len() >= 2 {
-        let success_rate = recent_canary
-            .iter()
-            .filter(|observation| observation.succeeded)
-            .count() as f64
-            / recent_canary.len() as f64;
-        if success_rate < 0.5 {
-            return Some("canary_success_regression".to_string());
-        }
-    }
-    let stable = prompt_live_observations(model, effort, stable_profile_id);
-    let recent_stable = stable.iter().rev().take(4).copied().collect::<Vec<_>>();
-    if recent_canary.len() >= 2 && recent_stable.len() >= 2 {
-        let average = |entries: &[&PromptEvolutionObservation]| {
-            entries.iter().map(|entry| entry.reward()).sum::<f64>() / entries.len() as f64
-        };
-        if average(&recent_canary) + 0.08 < average(&recent_stable) {
-            return Some("canary_reward_regression".to_string());
-        }
-    }
-    None
-}
-
-pub(crate) fn next_prompt_canary_stage(current: u8) -> u8 {
-    match current {
-        0..=9 => 10,
-        10..=24 => 25,
-        _ => 50,
-    }
 }
 
 pub(crate) fn prompt_promotion_gate_config() -> PromptPromotionGateConfig {
@@ -733,16 +668,36 @@ pub(crate) fn prompt_rollout_transition_has_canonical_evidence(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn reconcile_prompt_rollout(
     model: &mut PromptEvolutionReadModel,
     effort: &str,
     evaluation: &PromptEvolutionEvaluation,
 ) -> PromptRolloutState {
+    reconcile_prompt_rollout_inner(model, effort, evaluation, None, false)
+}
+
+pub(crate) fn reconcile_prompt_rollout_with_lineage(
+    model: &mut PromptEvolutionReadModel,
+    effort: &str,
+    evaluation: &PromptEvolutionEvaluation,
+    active_lineage: Option<&crate::prompt_profile_serving::PromptProfileDeploymentLineage>,
+) -> PromptRolloutState {
+    reconcile_prompt_rollout_inner(model, effort, evaluation, active_lineage, true)
+}
+
+fn reconcile_prompt_rollout_inner(
+    model: &mut PromptEvolutionReadModel,
+    effort: &str,
+    evaluation: &PromptEvolutionEvaluation,
+    active_lineage: Option<&crate::prompt_profile_serving::PromptProfileDeploymentLineage>,
+    require_active_lineage: bool,
+) -> PromptRolloutState {
     let mut rollout = model
         .rollouts
         .get(effort)
         .cloned()
-        .unwrap_or_else(|| default_prompt_rollout(effort));
+        .unwrap_or_else(|| crate::prompt_canary_runtime::default_prompt_rollout(effort));
     let distillation_candidate = if effort == "auto" {
         rollout
             .canary_profile_id
@@ -1012,14 +967,35 @@ pub(crate) fn reconcile_prompt_rollout(
         model.rollouts.insert(effort.to_string(), rollout.clone());
         return rollout;
     }
+    if require_active_lineage && active_lineage.is_none() {
+        model.rollouts.insert(effort.to_string(), rollout.clone());
+        return rollout;
+    }
     let distillation_stage_ready = if candidate_is_distillation {
-        match crate::prompt_distillation_rollout::prompt_distillation_canary_assessment(
-            model,
-            &rollout.stable_profile_id,
-            candidate_id,
-            rollout.live_checkpoint,
-            rollout.stable_live_checkpoint,
-        ) {
+        let assessment = match active_lineage {
+            Some(lineage) => match rollout.distillation_lease.as_ref() {
+                Some(lease) => crate::prompt_distillation_rollout::prompt_distillation_canary_assessment_for_lineage(
+                    model,
+                    &rollout.stable_profile_id,
+                    candidate_id,
+                    rollout.live_checkpoint,
+                    rollout.stable_live_checkpoint,
+                    lineage,
+                    lease,
+                ),
+                None => crate::prompt_distillation_rollout::PromptDistillationCanaryAssessment::Degraded(
+                    "canary_lease_missing".to_string(),
+                ),
+            },
+            None => crate::prompt_distillation_rollout::prompt_distillation_canary_assessment(
+                model,
+                &rollout.stable_profile_id,
+                candidate_id,
+                rollout.live_checkpoint,
+                rollout.stable_live_checkpoint,
+            ),
+        };
+        match assessment {
             crate::prompt_distillation_rollout::PromptDistillationCanaryAssessment::Pending => {
                 false
             }
@@ -1033,14 +1009,40 @@ pub(crate) fn reconcile_prompt_rollout(
             }
         }
     } else {
-        if let Some(reason) =
-            prompt_canary_degraded(model, effort, &rollout.stable_profile_id, candidate_id)
-        {
+        let lineage_observations = active_lineage.map(|lineage| {
+            (
+                crate::prompt_canary_lineage::fresh_prompt_live_observations_for_lineage(
+                    &prompt_live_observations(model, effort, candidate_id),
+                    rollout.live_checkpoint,
+                    lineage,
+                ),
+                crate::prompt_canary_lineage::fresh_prompt_live_observations_for_lineage(
+                    &prompt_live_observations(model, effort, &rollout.stable_profile_id),
+                    rollout.stable_live_checkpoint,
+                    lineage,
+                ),
+            )
+        });
+        let degraded = match lineage_observations.as_ref() {
+            Some((canary, stable)) => {
+                crate::prompt_canary_runtime::prompt_canary_observations_degraded(canary, stable)
+            }
+            None => crate::prompt_canary_runtime::prompt_canary_degraded(
+                model,
+                effort,
+                &rollout.stable_profile_id,
+                candidate_id,
+            ),
+        };
+        if let Some(reason) = degraded {
             rollback_prompt_canary(&mut rollout, candidate_id, false, reason);
             model.rollouts.insert(effort.to_string(), rollout.clone());
             return rollout;
         }
-        live_runs.saturating_sub(rollout.live_checkpoint) >= 1
+        lineage_observations
+            .as_ref()
+            .map(|(canary, _)| !canary.is_empty())
+            .unwrap_or_else(|| live_runs.saturating_sub(rollout.live_checkpoint) >= 1)
     };
     // Distillation campaigns are terminal once their matched gate passes; later stages
     // revalidate that frozen gate and require fresh live canary traffic instead.
@@ -1081,7 +1083,8 @@ pub(crate) fn reconcile_prompt_rollout(
             rollout.status = "promoted".to_string();
             rollout.last_reason = Some("canary_completed".to_string());
         } else {
-            rollout.canary_percent = next_prompt_canary_stage(rollout.canary_percent);
+            rollout.canary_percent =
+                crate::prompt_canary_runtime::next_prompt_canary_stage(rollout.canary_percent);
             rollout.evidence_checkpoint = confidence.comparisons;
             rollout.live_checkpoint = live_runs;
             rollout.stable_live_checkpoint = stable_live_runs;
@@ -1093,6 +1096,7 @@ pub(crate) fn reconcile_prompt_rollout(
     rollout
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_rollout_bucket(value: &str) -> u8 {
     let hash = value
         .as_bytes()
@@ -1103,6 +1107,7 @@ pub(crate) fn prompt_rollout_bucket(value: &str) -> u8 {
     (hash % 100) as u8
 }
 
+#[cfg(test)]
 pub(crate) fn apply_prompt_rollout_selection(
     evaluation: &mut PromptEvolutionEvaluation,
     rollout: &PromptRolloutState,

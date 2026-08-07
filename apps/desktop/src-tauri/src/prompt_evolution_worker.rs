@@ -28,12 +28,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
 
+#[cfg(test)]
+use crate::prompt_distillation_worker_request::PROMPT_EVALUATION_REQUEST_SCHEMA;
 pub(crate) use crate::prompt_distillation_worker_request::{
     enqueue_prompt_pairwise_evaluation, enqueue_prompt_pro_to_auto_distillation,
     PromptEvaluationRequest, REQUEST_EVENT, REQUEST_ID_KEY, REQUEST_METADATA_KEY,
 };
-#[cfg(test)]
-use crate::prompt_distillation_worker_request::PROMPT_EVALUATION_REQUEST_SCHEMA;
 
 const CHECKPOINT_EVENT: &str = "Conductor prompt evaluation request checkpointed";
 const COMPLETED_EVENT: &str = "Conductor prompt evaluation request completed";
@@ -59,6 +59,9 @@ pub(crate) fn start_prompt_evolution_worker(app: tauri::AppHandle) {
 fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
     if !crate::prompt_attempt_runtime::recover_prompt_evaluation_attempts_at_worker_start(&app) {
         return;
+    }
+    if let Err(error) = recover_prompt_profile_deployments_at_worker_start(&app) {
+        eprintln!("prompt profile deployment recovery failed: {error}");
     }
     let mut wake_revision = 0u64;
     loop {
@@ -121,6 +124,17 @@ fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
             }
         }
     }
+}
+
+fn recover_prompt_profile_deployments_at_worker_start(
+    app: &tauri::AppHandle,
+) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    crate::prompt_evolution_store_runtime::with_prompt_evolution_store(&state, |store| {
+        let model = crate::prompt_evolution_read_model::load_prompt_evolution_read_model(store)
+            .map_err(|error| error.to_string())?;
+        crate::prompt_profile_serving::recover_prompt_profile_deployments(store, &model)
+    })
 }
 
 fn latest_pending_prompt_evaluations(

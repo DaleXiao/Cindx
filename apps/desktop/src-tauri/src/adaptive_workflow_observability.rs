@@ -17,7 +17,6 @@ pub(super) struct AdaptiveWorkflowObservabilityContext<'a, 'state> {
     pub(super) prompt_genome_json: &'a str,
     pub(super) effort: &'a str,
     pub(super) selection_mode: &'a str,
-    pub(super) evolution: Option<&'a PromptEvolutionEvaluation>,
     pub(super) conductor_model: &'a str,
     pub(super) execution_contract: &'a ConductorExecutionContract,
     pub(super) conductor_attempts: usize,
@@ -44,7 +43,6 @@ pub(super) fn record_adaptive_workflow_planned(
         prompt_genome_json,
         effort,
         selection_mode,
-        evolution,
         conductor_model,
         execution_contract,
         conductor_attempts,
@@ -113,9 +111,10 @@ pub(super) fn record_adaptive_workflow_planned(
                     ),
                     (
                         "prompt_evolution_status".to_string(),
-                        evolution
-                            .map(|evaluation| evaluation.status.clone())
-                            .unwrap_or_else(|| "disabled".to_string()),
+                        run_context
+                            .get("prompt_rollout_status")
+                            .cloned()
+                            .unwrap_or_else(|| "unavailable".to_string()),
                     ),
                     ("conductor_version".to_string(), "agent_v2".to_string()),
                     ("conductor_model".to_string(), conductor_model.to_string()),

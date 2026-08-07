@@ -501,8 +501,8 @@ pub(crate) fn recall_project_memory_for_prompt(
     let resource_checkpoint = |control: &AgentRunControl| {
         crate::agent_resource_snapshot::checkpoint_agent_run_resources(state, run_context, control)
     };
-    let (semantic_scores, vector_manifest, vector_error) = match project_memory_semantic_scores(
-        ProjectMemorySemanticScoreRequest {
+    let (semantic_scores, vector_manifest, vector_error) =
+        match project_memory_semantic_scores(ProjectMemorySemanticScoreRequest {
             workspace_root,
             project_id,
             ledger: &ledger,
@@ -511,11 +511,10 @@ pub(crate) fn recall_project_memory_for_prompt(
             cancellation,
             expected_epoch,
             resource_checkpoint: Some(&resource_checkpoint),
-        },
-    ) {
-        Ok((scores, manifest)) => (scores, Some(manifest), None),
-        Err(error) => (BTreeMap::new(), None, Some(error)),
-    };
+        }) {
+            Ok((scores, manifest)) => (scores, Some(manifest), None),
+            Err(error) => (BTreeMap::new(), None, Some(error)),
+        };
     let mut recalls = fuse_memory_recalls_at(
         &ledger,
         lexical_recalls,

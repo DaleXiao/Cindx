@@ -130,6 +130,33 @@ mutate an in-flight transcript, permission decision, tool result, run budget, or
 workflow checkpoint. Route, retrieval, and memory remain per-run decisions until
 their own execution path is included in the matched evaluation protocol.
 
+Serving is a distinct read-only boundary. Only the background worker may
+evaluate the full evolution projection, reconcile a rollout, or publish a new
+compact stable/canary deployment after its canonical event. Foreground Auto/Pro
+selection performs one keyed deployment lookup and emits a bounded hash-only
+assignment receipt; Fast and disabled evolution use a seed without touching the
+store. Logical run identity fixes canary assignment across physical retry and
+recovery attempts. The receipt also binds the source revision, monotonic
+deployment generation, exact genome, and any distilled-canary evidence lease.
+Live rollout evidence is rejected unless those fields revalidate from the
+canonical profile event. Corrupt, cross-scope, stale, or missing deployment data
+fails to an explicit typed seed selection and never triggers foreground
+learning. A monotonic per-key content binding prevents an old canonical history
+from publishing after the same numeric source revision is reused, without
+putting another read on the foreground selection path. Durable scope fences and
+tombstones prevent stale publishers from restoring profiles after project
+deletion.
+
+An evolved directive is applied only after the ordinary route has admitted a
+workflow. Route matching uses a neutral profile identity, while the real profile
+fingerprint remains available for attribution; the profile therefore cannot
+alter direct/workflow admission, retrieval, memory, model, or effect authority
+without a future matched route evaluator. Within a workflow, the model may
+reduce but never broaden the selected genome's tool policy. Policy defaults are
+normalized for learning, then intersected with the outer plan limit at every
+runner, so evaluation and shipping cannot turn an external zero/one ceiling
+into a larger budget.
+
 Pro may use canonical timeout, denial, and no-progress facts as an isolated
 negative failure curriculum. Each receipt is hash-only, bound to the current
 project/run/profile/policy/steer epoch, and contains no prompt, tool arguments,

@@ -88,15 +88,14 @@ fn runtime_snapshot_is_overwritten_and_bound_to_the_active_run() {
     )
     .expect("snapshot should load")
     .is_some());
-    let resources =
-        load_matching_agent_resource_snapshot(
-            &store,
-            &context,
-            &recovery.identity.source_run_id,
-            latest_revision,
-        )
-            .expect("resource snapshot should load")
-            .expect("resource snapshot should match");
+    let resources = load_matching_agent_resource_snapshot(
+        &store,
+        &context,
+        &recovery.identity.source_run_id,
+        latest_revision,
+    )
+    .expect("resource snapshot should load")
+    .expect("resource snapshot should match");
     assert_eq!(resources.segment.physical_attempts, 1);
     assert_eq!(resources.segment.reserved_tokens, 20);
 
@@ -156,12 +155,8 @@ fn runtime_snapshot_loader_rejects_an_invalid_nested_task_state() {
     persist_agent_runtime_snapshot(&mut store, &runtime, &context)
         .expect("runtime snapshot should persist");
 
-    let events = agent_events_for_session(
-        &store,
-        &phase16_task_id(),
-        Some("session-invalid"),
-    )
-    .expect("events should load");
+    let events = agent_events_for_session(&store, &phase16_task_id(), Some("session-invalid"))
+        .expect("events should load");
     let active = active_agent_events_for_session(&events, Some("session-invalid"));
     let recovery =
         resolve_agent_recovery_identity(&active, &context).expect("identity should resolve");

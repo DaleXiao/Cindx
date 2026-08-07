@@ -45,6 +45,11 @@
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
+      "prompt-profile-serving-contract",
+      "prompt-profile-recovery-contract",
+      "prompt-live-assignment-attribution-contract",
+      "prompt-distillation-control-contract",
+      "prompt-profile-selection-scaling",
       "memory-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
@@ -70,6 +75,11 @@
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
+      "prompt-profile-serving-contract",
+      "prompt-profile-recovery-contract",
+      "prompt-live-assignment-attribution-contract",
+      "prompt-distillation-control-contract",
+      "prompt-profile-selection-scaling",
       "memory-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
@@ -84,6 +94,7 @@
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
       "prompt-learning-outbox-scaling",
+      "prompt-profile-selection-scaling",
       "workspace-graph-cache-scaling",
       "prepared-image-request-scaling",
       "model-transport-prepare-scaling",
@@ -104,6 +115,7 @@
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
       "prompt-learning-outbox-scaling",
+      "prompt-profile-selection-scaling",
       "workspace-graph-cache-scaling",
       "prepared-image-request-scaling",
       "model-transport-prepare-scaling",
@@ -136,6 +148,10 @@
       "agent-goal-progress-contract",
       "agent-failure-curriculum-contract",
       "agent-failure-curriculum-mutation-contract",
+      "prompt-profile-serving-contract",
+      "prompt-profile-recovery-contract",
+      "prompt-live-assignment-attribution-contract",
+      "prompt-distillation-control-contract",
       "memory-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
@@ -145,6 +161,7 @@
       "session-projection-scaling",
       "agent-runtime-snapshot-scaling",
       "prompt-learning-outbox-scaling",
+      "prompt-profile-selection-scaling",
       "workspace-graph-cache-scaling",
       "prepared-image-request-scaling",
       "model-transport-prepare-scaling",
@@ -509,6 +526,101 @@
         "--nocapture"
       ],
       "required_output": ["test result: ok. 1 passed; 0 failed"]
+    },
+    {
+      "id": "prompt-profile-serving-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "prompt_profile_serving::tests::prompt_profile_serving_contract_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prompt-profile-serving-contract.v1"
+      ]
+    },
+    {
+      "id": "prompt-profile-recovery-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "prompt_profile_serving::tests::prompt_profile_recovery_contract_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prompt-profile-recovery-contract.v1"
+      ]
+    },
+    {
+      "id": "prompt-live-assignment-attribution-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "prompt_canary_outcome_projection::attribution::tests::live_assignment_requires_the_exact_receipt_genome_and_deployment_lineage",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prompt-live-assignment-attribution.v1"
+      ]
+    },
+    {
+      "id": "prompt-distillation-control-contract",
+      "category": "gepa",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "prompt_distillation_rollout::tests::distillation_reaches_canary_ignores_ordinary_track_and_promotes_on_fresh_live_traffic",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prompt-distillation-control-contract.v1"
+      ]
+    },
+    {
+      "id": "prompt-profile-selection-scaling",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--locked",
+        "prompt_profile_serving::tests::prompt_profile_selection_scaling_gate",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.prompt-profile-selection-scaling.v1"
+      ]
     },
     {
       "id": "memory-contract",

@@ -237,9 +237,7 @@ mod tests {
                 ))
                 .unwrap();
         }
-        let first =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap();
+        let first = load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap();
         let first_intent = test_auto_intent("project-000");
         let overflow_intent = test_auto_intent("project-256");
         assert!(first.overflowed());
@@ -257,8 +255,7 @@ mod tests {
             ))
             .unwrap();
         let refilled =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap();
+            load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap();
         assert!(!refilled.overflowed());
         assert_eq!(refilled.pending_len(), PROMPT_LEARNING_OUTBOX_MAX_PENDING);
         assert!(!refilled.contains_auto_transfer("project-000", first_intent.intent_id()));
@@ -315,16 +312,13 @@ mod tests {
                 Some("payload"),
             ))
             .unwrap();
-        let first =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap();
+        let first = load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap();
         assert_eq!(first.event_count(), 1);
         store
             .append(event(3, "unrelated", None, None, None))
             .unwrap();
         let error =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap_err();
+            load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap_err();
         assert!(error.contains("canonical replay changed twice"));
     }
 
@@ -341,8 +335,7 @@ mod tests {
             ))
             .unwrap();
         let projection =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap();
+            load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap();
         let mut corrupt = serde_json::to_value(&projection).unwrap();
         corrupt["pending_auto_transfer"]["project"]["payload"] =
             serde_json::Value::String("corrupt".to_string());
@@ -355,17 +348,12 @@ mod tests {
             )
             .unwrap();
         let rebuilt =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap();
+            load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap();
         let expected = test_auto_intent("project");
         let expected_payload = expected.to_json().unwrap();
         assert_eq!(
             rebuilt.pending_auto_transfer().next(),
-            Some((
-                "project",
-                expected.intent_id(),
-                expected_payload.as_str()
-            ))
+            Some(("project", expected.intent_id(), expected_payload.as_str()))
         );
     }
 
@@ -414,8 +402,7 @@ mod tests {
             ))
             .unwrap();
         let pending =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap();
+            load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap();
         assert_eq!(pending.pending_len(), 1);
         assert_eq!(
             orchestrator::prompt_learning_dispatch_recovery(true),
@@ -432,8 +419,7 @@ mod tests {
             ))
             .unwrap();
         let restarted =
-            load_prompt_learning_outbox_projection(&mut store, project_test_event)
-                .unwrap();
+            load_prompt_learning_outbox_projection(&mut store, project_test_event).unwrap();
         assert_eq!(restarted.pending_len(), 0);
         assert_eq!(
             store
@@ -465,13 +451,10 @@ mod tests {
             ))
             .unwrap();
         let initial_visits = Cell::new(0usize);
-        let initial = load_prompt_learning_outbox_projection(
-            &mut store,
-            |projection, event| {
-                initial_visits.set(initial_visits.get().saturating_add(1));
-                project_test_event(projection, event)
-            },
-        )
+        let initial = load_prompt_learning_outbox_projection(&mut store, |projection, event| {
+            initial_visits.set(initial_visits.get().saturating_add(1));
+            project_test_event(projection, event)
+        })
         .unwrap();
         let pending_before = initial
             .pending_auto_transfer()
@@ -489,13 +472,10 @@ mod tests {
             .append(event(HISTORY_EVENTS + 1, "unrelated", None, None, None))
             .unwrap();
         let delta_visits = Cell::new(0usize);
-        let updated = load_prompt_learning_outbox_projection(
-            &mut store,
-            |projection, event| {
-                delta_visits.set(delta_visits.get().saturating_add(1));
-                project_test_event(projection, event)
-            },
-        )
+        let updated = load_prompt_learning_outbox_projection(&mut store, |projection, event| {
+            delta_visits.set(delta_visits.get().saturating_add(1));
+            project_test_event(projection, event)
+        })
         .unwrap();
         let pending_after = updated
             .pending_auto_transfer()

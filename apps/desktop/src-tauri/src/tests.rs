@@ -30,8 +30,9 @@ use orchestrator::{
     AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRunDecisionHarness,
     AgentRunDecisionRequest, AgentToolRequirement, AgentVerificationPolicy, CausalRouteReason,
     CausalRouteSelectionV2, ModelCapabilitySource, PromptDatasetCaseIdentityV1,
-    PromptExecutionContextV1, PromptTransferProvenance, RouteFeatureSnapshotV2,
-    CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1, PromptTransferProvenance,
+    RouteFeatureSnapshotV2, CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -50,6 +51,37 @@ fn test_prompt_evaluation_provenance(
         sha256_hex(candidate_id.as_bytes()),
         sha256_hex(opponent_id.as_bytes()),
     )
+}
+
+fn test_prompt_live_assignment_provenance(
+    profile: &ConductorPromptGenome,
+) -> PromptEvaluationProvenance {
+    test_prompt_live_assignment_provenance_for_lineage(profile, "f".repeat(64), 1, 1)
+}
+
+fn test_prompt_live_assignment_provenance_for_lineage(
+    profile: &ConductorPromptGenome,
+    scope_sha256: String,
+    source_revision: u64,
+    deployment_generation: u64,
+) -> PromptEvaluationProvenance {
+    let profile_sha256 = prompt_genome_sha256(profile).unwrap();
+    PromptEvaluationProvenance {
+        protocol: PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1.to_string(),
+        candidate_prompt_sha256: profile_sha256.clone(),
+        live_assignment: Some(PromptLiveAssignmentProvenanceV1 {
+            schema: PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1.to_string(),
+            assignment_receipt_sha256: "a".repeat(64),
+            assignment_source: "canary".to_string(),
+            profile_id: profile.id.clone(),
+            profile_sha256,
+            scope_sha256,
+            source_revision,
+            deployment_generation,
+            distillation_lease_sha256: None,
+        }),
+        ..PromptEvaluationProvenance::default()
+    }
 }
 
 pub(crate) fn bind_matched_prompt_evidence(
@@ -260,7 +292,10 @@ fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -
     };
     if receipt.selected_route != decision.route_tier() {
         receipt
-            .reconcile_selected_route(decision.route_tier(), CausalRouteReason::ExecutionConstraint)
+            .reconcile_selected_route(
+                decision.route_tier(),
+                CausalRouteReason::ExecutionConstraint,
+            )
             .expect("test plan receipt should reconcile to its fixture route");
     }
     decision.causal_route = Some(receipt);
@@ -3962,6 +3997,12 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
     assert_eq!(started.canary_profile_id.as_deref(), Some("candidate-auto"));
     assert_eq!(started.canary_percent, 10);
 
+    let active_lineage = crate::prompt_profile_serving::PromptProfileDeploymentLineage {
+        scope_sha256: "f".repeat(64),
+        source_revision: 2,
+        deployment_generation: 2,
+    };
+
     model.observations.push((
         "auto".to_string(),
         PromptEvolutionObservation {
@@ -3982,9 +4023,18 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             relative_reward: None,
             step_credits: Vec::new(),
             reflection_packet: None,
-            provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
+            provenance: test_prompt_live_assignment_provenance(&candidate),
         },
     ));
+    let mut current_generation_live = model.observations.last().unwrap().1.clone();
+    current_generation_live.evaluation_id = "live-canary-current-generation".to_string();
+    current_generation_live.case_id = "live-canary-current-generation".to_string();
+    current_generation_live.provenance = test_prompt_live_assignment_provenance_for_lineage(
+        &candidate,
+        active_lineage.scope_sha256.clone(),
+        active_lineage.source_revision,
+        active_lineage.deployment_generation,
+    );
     for index in 0..2 {
         let candidate_observation = direct_observation(index + 14, PromptEvaluationSplit::Holdout);
         let mut stable_observation = candidate_observation.clone();
@@ -4001,7 +4051,22 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             .push(("auto".to_string(), stable_observation));
     }
     bind_matched_prompt_evidence(&mut model, "auto", &candidate.id, &stable.id);
-    let advanced = reconcile_prompt_rollout(&mut model, "auto", &evaluation(10));
+    let delayed_old_generation = reconcile_prompt_rollout_with_lineage(
+        &mut model,
+        "auto",
+        &evaluation(10),
+        Some(&active_lineage),
+    );
+    assert_eq!(delayed_old_generation.canary_percent, 10);
+    model
+        .observations
+        .push(("auto".to_string(), current_generation_live));
+    let advanced = reconcile_prompt_rollout_with_lineage(
+        &mut model,
+        "auto",
+        &evaluation(10),
+        Some(&active_lineage),
+    );
     assert_eq!(advanced.canary_percent, 25);
 
     model.observations.push((
@@ -4024,10 +4089,20 @@ fn prompt_rollout_advances_by_evidence_and_rolls_back_on_regression() {
             relative_reward: None,
             step_credits: Vec::new(),
             reflection_packet: None,
-            provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
+            provenance: test_prompt_live_assignment_provenance_for_lineage(
+                &candidate,
+                active_lineage.scope_sha256.clone(),
+                active_lineage.source_revision,
+                active_lineage.deployment_generation,
+            ),
         },
     ));
-    let rolled_back = reconcile_prompt_rollout(&mut model, "auto", &evaluation(12));
+    let rolled_back = reconcile_prompt_rollout_with_lineage(
+        &mut model,
+        "auto",
+        &evaluation(12),
+        Some(&active_lineage),
+    );
     assert_eq!(rolled_back.status, "rolled_back");
     assert!(rolled_back.canary_profile_id.is_none());
     assert_eq!(rolled_back.rollback_count, 1);
@@ -4047,7 +4122,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         .into_iter()
         .next()
         .expect("stable profile should have an evolved candidate");
-    let mut rollout = default_prompt_rollout("auto");
+    let mut rollout = crate::prompt_canary_runtime::default_prompt_rollout("auto");
     rollout.stable_profile_id = stable.id.clone();
     rollout.frozen_profile = Some(
         FrozenPromptProfileSnapshot::new_gepa(
@@ -4155,7 +4230,7 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
             relative_reward: None,
             step_credits: Vec::new(),
             reflection_packet: None,
-            provenance: test_prompt_evaluation_provenance("candidate", "opponent"),
+            provenance: test_prompt_live_assignment_provenance(&candidate),
         },
     ));
     let evaluation = PromptEvolutionEvaluation {
@@ -4394,7 +4469,7 @@ fn stable_prompt_rollout_uses_the_evidence_bound_frozen_genome() {
 
 #[test]
 fn ordinary_prompt_candidate_ignores_distillation_quarantine_capacity() {
-    let mut rollout = default_prompt_rollout("auto");
+    let mut rollout = crate::prompt_canary_runtime::default_prompt_rollout("auto");
     rollout.quarantined_profile_ids = (0..PROMPT_ROLLOUT_MAX_QUARANTINED_PROFILES)
         .map(|index| format!("distilled-{index}"))
         .collect();
@@ -5447,9 +5522,7 @@ fn causal_route_provenance_keeps_context_small_and_event_receipt_complete() {
         Some(&receipt.digest().unwrap())
     );
     assert_eq!(
-        event_metadata
-            .get("route_decision_id")
-            .map(String::len),
+        event_metadata.get("route_decision_id").map(String::len),
         Some(64)
     );
 }
@@ -5854,7 +5927,10 @@ fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
     decision.calibration_reason = Some("matched evidence rejects workflow".to_string());
     if receipt.selected_route != decision.route_tier() {
         receipt
-            .reconcile_selected_route(decision.route_tier(), CausalRouteReason::ExecutionConstraint)
+            .reconcile_selected_route(
+                decision.route_tier(),
+                CausalRouteReason::ExecutionConstraint,
+            )
             .expect("calibrated direct route should be one of the recorded actions");
     }
     decision.causal_route = Some(receipt);
@@ -8882,32 +8958,31 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
     let profile_id = "pro-parent";
     let auto_profile_id = "auto-stable";
     let auto_profile_sha256 = sha256_hex(b"auto-stable-genome");
-    let packet = |candidate_id: &str, run_id: String, case_id: String| {
-        AgentEvaluationReflectionPacket {
-        suite_id: "runtime-prompt-evolution".to_string(),
-        suite_version: 2,
-        case_id,
-        category: "coding".to_string(),
-        run_id,
-        seed: 0,
-        candidate_id: candidate_id.to_string(),
-        candidate_fingerprint: sha256_hex(candidate_id.as_bytes()),
-        model_fingerprints: BTreeMap::new(),
-        input: "Implement and verify a change".to_string(),
-        steps: Vec::new(),
-        final_output: "verified".to_string(),
-        verifier: AgentEvaluationVerifierOutcome {
-            source: AgentEvaluationEvidenceSource::Judge,
-            passed: true,
-            score: 0.9,
-            checks: Vec::new(),
-        },
-        actionable_feedback: ActionableSideInformation {
-            summary: "preserve verification coverage".to_string(),
-            ..ActionableSideInformation::default()
-        },
-        }
-    };
+    let packet =
+        |candidate_id: &str, run_id: String, case_id: String| AgentEvaluationReflectionPacket {
+            suite_id: "runtime-prompt-evolution".to_string(),
+            suite_version: 2,
+            case_id,
+            category: "coding".to_string(),
+            run_id,
+            seed: 0,
+            candidate_id: candidate_id.to_string(),
+            candidate_fingerprint: sha256_hex(candidate_id.as_bytes()),
+            model_fingerprints: BTreeMap::new(),
+            input: "Implement and verify a change".to_string(),
+            steps: Vec::new(),
+            final_output: "verified".to_string(),
+            verifier: AgentEvaluationVerifierOutcome {
+                source: AgentEvaluationEvidenceSource::Judge,
+                passed: true,
+                score: 0.9,
+                checks: Vec::new(),
+            },
+            actionable_feedback: ActionableSideInformation {
+                summary: "preserve verification coverage".to_string(),
+                ..ActionableSideInformation::default()
+            },
+        };
     let observation =
         |observed_profile_id: &str,
          run_id: String,
@@ -9078,9 +9153,9 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
     }
     let without_anchor =
         prompt_mutation_reflection_packets(&failure_only, &[failure.clone()], profile_id, "pro");
-    assert!(without_anchor.iter().all(|packet| {
-        packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1
-    }));
+    assert!(without_anchor
+        .iter()
+        .all(|packet| { packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1 }));
 
     let mut invalid_anchor = observations.clone();
     for observation in &mut invalid_anchor {
@@ -9103,9 +9178,11 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             observation.safety_violations = 1;
         }
     }
-    assert!(prompt_mutation_reflection_packets(&unsafe_anchor, &[failure], profile_id, "pro")
-        .iter()
-        .all(|packet| packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1));
+    assert!(
+        prompt_mutation_reflection_packets(&unsafe_anchor, &[failure], profile_id, "pro")
+            .iter()
+            .all(|packet| packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1)
+    );
 }
 
 #[test]

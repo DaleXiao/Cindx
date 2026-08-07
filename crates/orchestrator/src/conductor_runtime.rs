@@ -103,6 +103,7 @@ impl ConductorHarness {
                 "- Execution contract: task_class={task_class}, expected_uplift={expected_uplift_bps}bps, confidence={confidence_bps}bps, max_parallelism={contract_parallelism}, quorum={contract_quorum}, verification_required={contract_verification}, terminal_reserve={terminal_reserve}, stop={stop_policy:?}, fallback={fallback_policy:?}.\n",
                 "- Use between 1 and {max_steps} workflow steps, including the final synthesis step. Choose the smallest useful graph.\n",
                 "- Use no more than {max_models} distinct worker models.\n",
+                "- Outer runtime hard ceilings per step: model_turns={max_model_turns}, read_only_tool_calls={max_tool_calls}. Evolved profile defaults may narrow but never widen them.\n",
                 "- role is a short lowercase domain label such as mathematician, evidence_researcher, critic, or integrator; do not use it as an execution permission.\n",
                 "- output_kind must be exactly analysis, evidence, verification, or synthesis. The final step must use synthesis.\n",
                 "- tool_policy must be exactly none, read_only_evidence, or read_only_exploration. Never request effectful tools here.\n",
@@ -129,6 +130,8 @@ impl ConductorHarness {
             schema_example = conductor_schema_example(request),
             max_steps = request.budget.max_steps,
             max_models = request.budget.max_models,
+            max_model_turns = request.budget.max_model_turns_per_step,
+            max_tool_calls = request.budget.max_tool_calls_per_step,
             task_class = request.execution_contract.task_class.label(),
             expected_uplift_bps = request.execution_contract.expected_uplift_bps,
             confidence_bps = request.execution_contract.confidence_bps,
@@ -351,14 +354,11 @@ impl ConductorHarness {
     ) -> Result<WorkflowPlanIr, String> {
         let mut budget = self.request.budget.clone();
         if self.request.prompt_evolution_enabled {
-            budget.max_model_turns_per_step = budget
-                .max_model_turns_per_step
-                .min(
-                    self.request
-                        .prompt_genome
-                        .effective_max_model_turns_per_step(),
-                )
-                .max(1);
+            budget.max_model_turns_per_step = budget.max_model_turns_per_step.min(
+                self.request
+                    .prompt_genome
+                    .effective_max_model_turns_per_step(),
+            );
             budget.max_tool_calls_per_step = budget.max_tool_calls_per_step.min(
                 self.request
                     .prompt_genome
@@ -381,13 +381,21 @@ impl ConductorHarness {
         );
         if self.request.prompt_evolution_enabled {
             for step in &mut plan.steps {
-                step.tool_policy = self.request.prompt_genome.workflow_tool_policy(&step.role);
+                step.tool_policy = if plan.budget.max_tool_calls_per_step == 0 {
+                    WorkflowToolPolicy::None
+                } else {
+                    self.request.prompt_genome.workflow_tool_policy(&step.role)
+                };
             }
         }
         for (index, step) in plan.steps.iter_mut().enumerate() {
             let semantics = semantics.and_then(|values| values.get(index));
             if let Some(tool_policy) = semantics.and_then(|value| value.tool_policy.clone()) {
-                step.tool_policy = tool_policy;
+                step.tool_policy = if self.request.prompt_evolution_enabled {
+                    tool_policy.limited_by(step.tool_policy)
+                } else {
+                    tool_policy
+                };
             }
             if let Some(output_kind) = semantics.and_then(|value| value.output_kind.clone()) {
                 step.contract.output_kind = output_kind;

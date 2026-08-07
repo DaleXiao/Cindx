@@ -181,8 +181,8 @@ fn apply_event_to_agent_session_read_model(model: &mut AgentSessionReadModel, ev
                 .as_millis()
                 .min(u64::MAX as u128) as u64
         });
-        model.state.run_model_call_budget =
-            metadata_usize(event, "run_model_call_budget").unwrap_or(fallback_budget.max_model_calls);
+        model.state.run_model_call_budget = metadata_usize(event, "run_model_call_budget")
+            .unwrap_or(fallback_budget.max_model_calls);
         model.state.max_turns = model.state.run_model_call_budget;
         model.state.run_tool_call_budget =
             metadata_usize(event, "run_tool_call_budget").unwrap_or(fallback_budget.max_tool_calls);

@@ -272,7 +272,7 @@ fn prompt_pairwise_campaign_snapshot(
         .count();
     let rollout = rollout
         .cloned()
-        .unwrap_or_else(|| default_prompt_rollout(effort));
+        .unwrap_or_else(|| crate::prompt_canary_runtime::default_prompt_rollout(effort));
     derive_prompt_evolution_campaign(&PromptEvolutionCampaignInput {
         effort: effort.to_string(),
         applicable: effort != "fast",
@@ -1154,10 +1154,12 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     }
     let next_evaluation =
         crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
-            let model =
-                load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
-            let scoped_model = prompt_evolution_read_model_for_scope(&model, project_id);
-            evaluate_prompt_evolution_read_model(&scoped_model, effort)
+            crate::prompt_evolution_runtime::reconcile_prompt_evolution_for_background(
+                store,
+                effort,
+                project_id,
+                run_context,
+            )
         })?;
     if distillation.is_none() {
         if let Some(parent) = next_evaluation.mutation_parent.as_ref() {

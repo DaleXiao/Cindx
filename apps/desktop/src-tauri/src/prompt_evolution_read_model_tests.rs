@@ -2,12 +2,16 @@ use super::*;
 use crate::prompt_attempt_runtime::{
     PROMPT_EVALUATION_ATTEMPT_EVENT, PROMPT_EVALUATION_ATTEMPT_METADATA_KEY,
 };
+use crate::prompt_profile_serving::{
+    seed_prompt_profile_selection, PromptProfileAssignmentSource, PromptProfileFallback,
+};
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    LearningAttribution, LearningTermination, PromptDatasetCaseIdentityV1, PromptDatasetIdentityV1,
-    PromptEvaluationAttemptEventV1, PromptEvaluationAttemptStatus, PromptExecutionContextV1,
-    PromptLearningCohortV1, PromptMatchedEvaluationIdentityV1, PromptTransferProvenance,
-    PromptTreatmentIdentityV1, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    prompt_genome_sha256, sha256_hex, LearningAttribution, LearningTermination,
+    PromptDatasetCaseIdentityV1, PromptDatasetIdentityV1, PromptEvaluationAttemptEventV1,
+    PromptEvaluationAttemptStatus, PromptExecutionContextV1, PromptLearningCohortV1,
+    PromptMatchedEvaluationIdentityV1, PromptTransferProvenance, PromptTreatmentIdentityV1,
+    PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
 };
 
 fn context_metadata() -> Metadata {
@@ -31,6 +35,9 @@ fn event(
 ) -> Event {
     let mut metadata = context_metadata();
     metadata.extend(extra);
+    if summary == "Conductor prompt profile selected" {
+        append_live_assignment(&mut metadata);
+    }
     Event {
         id: EventId(format!("event-{sequence}")),
         task_id: phase16_task_id(),
@@ -40,6 +47,37 @@ fn event(
         summary: summary.to_string(),
         metadata,
     }
+}
+
+fn append_live_assignment(metadata: &mut Metadata) {
+    let effort = metadata["prompt_effort"].clone();
+    let profile_id = metadata["prompt_profile"].clone();
+    let mut selection =
+        seed_prompt_profile_selection(&effort, PromptProfileFallback::NoDeployment, metadata);
+    selection.genome.id = profile_id.clone();
+    let profile_sha256 = prompt_genome_sha256(&selection.genome).unwrap();
+    selection.receipt.source = PromptProfileAssignmentSource::Stable;
+    selection.receipt.fallback = None;
+    selection.receipt.scope_sha256 = Some(sha256_hex(b"cindx.prompt-profile-scope.v1\0global"));
+    selection.receipt.profile_id = profile_id.clone();
+    selection.receipt.profile_sha256 = profile_sha256.clone();
+    selection.receipt.stable_profile_sha256 = profile_sha256;
+    selection.receipt.rollout_status = Some("stable".to_string());
+    selection.receipt.source_revision = Some(1);
+    selection.receipt.deployment_generation = Some(1);
+    let (receipt, receipt_sha256) = selection.receipt_json_and_sha256().unwrap();
+    metadata.insert("prompt_profile".to_string(), profile_id);
+    metadata.insert(
+        "prompt_genome".to_string(),
+        serde_json::to_string(&selection.genome).unwrap(),
+    );
+    metadata.insert("prompt_profile_source".to_string(), "stable".to_string());
+    metadata.insert("prompt_profile_assignment_receipt".to_string(), receipt);
+    metadata.insert(
+        "prompt_profile_assignment_sha256".to_string(),
+        receipt_sha256,
+    );
+    metadata.insert("prompt_rollout_status".to_string(), "stable".to_string());
 }
 
 fn prompt_rollout_event(
@@ -483,12 +521,17 @@ fn agent_failure_curriculum_contract() {
         .extend(completed_denial_metadata());
 
     let denied_terminal = denied_events.last().expect("terminal event");
-    assert!(crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
-        denied_terminal
-    ));
+    assert!(
+        crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
+            denied_terminal
+        )
+    );
     let denied_observation = assert_negative_live_control(&denied_events);
     assert_eq!(denied_observation.safety_violations, 1);
-    let denied_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&denied_events);
+    let denied_records =
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            &denied_events,
+        );
     assert_eq!(denied_records.len(), 1);
     assert_eq!(
         denied_records[0].1.receipt.kind,
@@ -533,7 +576,10 @@ fn agent_failure_curriculum_contract() {
             "SENSITIVE_NO_PROGRESS_SENTINEL",
         )),
     ));
-    let no_progress_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&no_progress_events);
+    let no_progress_records =
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            &no_progress_events,
+        );
     assert_eq!(no_progress_records.len(), 1);
     assert_eq!(
         no_progress_records[0].1.receipt.kind,
@@ -560,7 +606,12 @@ fn agent_failure_curriculum_contract() {
             true,
         )),
     ));
-    assert!(crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&provider_events).is_empty());
+    assert!(
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            &provider_events
+        )
+        .is_empty()
+    );
 
     let envelope = AgentRecoveryEnvelope {
         schema: AGENT_RECOVERY_SCHEMA.to_string(),
@@ -621,14 +672,20 @@ fn agent_failure_curriculum_contract() {
             pause_metadata,
         ),
     ];
-    let timeout_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&paused_events);
+    let timeout_records =
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            &paused_events,
+        );
     assert_eq!(timeout_records.len(), 1);
     assert_eq!(
         timeout_records[0].1.receipt.kind,
         PromptFailureCurriculumKind::Timeout
     );
     let first_digest = timeout_records[0].1.receipt.digest().unwrap();
-    let replay_digest = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&paused_events)[0]
+    let replay_digest =
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            &paused_events,
+        )[0]
         .1
         .receipt
         .digest()
@@ -643,7 +700,10 @@ fn agent_failure_curriculum_contract() {
         "Agent task completed",
         [],
     ));
-    let resolved_records = crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&resolved_events)
+    let resolved_records =
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            &resolved_events,
+        )
         .into_iter()
         .map(|(_, record)| record)
         .collect();
@@ -654,7 +714,12 @@ fn agent_failure_curriculum_contract() {
     stale_events[2]
         .metadata
         .insert("steer_epoch".to_string(), "1".to_string());
-    assert!(crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(&stale_events).is_empty());
+    assert!(
+        crate::prompt_failure_curriculum_projection::prompt_failure_curriculum_records_from_events(
+            &stale_events
+        )
+        .is_empty()
+    );
 
     println!("{}", orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1);
 }
@@ -1994,13 +2059,7 @@ fn evicted_genome_identity_detects_later_conflict_like_cold_replay() {
     incremental.event_count = 5;
 
     let mut cold = build_prompt_evolution_read_model(&events, 5, 5);
-    compact_prompt_evolution_hot_state_to_limits(
-        &mut cold,
-        usize::MAX,
-        usize::MAX,
-        1,
-        usize::MAX,
-    );
+    compact_prompt_evolution_hot_state_to_limits(&mut cold, usize::MAX, usize::MAX, 1, usize::MAX);
 
     assert_eq!(
         serde_json::to_string(&incremental.genomes).unwrap(),

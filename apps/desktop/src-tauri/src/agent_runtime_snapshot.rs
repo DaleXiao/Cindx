@@ -131,11 +131,11 @@ pub(super) fn persistable_prepared_task_state(
     let prepared = runtime.prepared_task_state();
     let redacted_objective = redact_sensitive_text(prepared.effective_objective());
     let prepared_context = [
+        ("effective_prompt_objective".to_string(), redacted_objective),
         (
-            "effective_prompt_objective".to_string(),
-            redacted_objective,
+            "steer_epoch".to_string(),
+            prepared.steer_epoch().to_string(),
         ),
-        ("steer_epoch".to_string(), prepared.steer_epoch().to_string()),
         (
             "prompt_contract_epoch".to_string(),
             prepared.contract_epoch().to_string(),

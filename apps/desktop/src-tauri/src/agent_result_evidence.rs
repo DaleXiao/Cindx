@@ -464,10 +464,19 @@ mod tests {
             None,
         );
 
-        let metadata = &runtime.messages.last().expect("tool message exists").metadata;
-        assert_eq!(metadata.get("tool_name").map(String::as_str), Some("file.read"));
+        let metadata = &runtime
+            .messages
+            .last()
+            .expect("tool message exists")
+            .metadata;
         assert_eq!(
-            metadata.get("contract_evidence_sequence").map(String::as_str),
+            metadata.get("tool_name").map(String::as_str),
+            Some("file.read")
+        );
+        assert_eq!(
+            metadata
+                .get("contract_evidence_sequence")
+                .map(String::as_str),
             Some("1")
         );
     }

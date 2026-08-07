@@ -336,9 +336,7 @@ pub(crate) fn redact_prefixed_secret(value: &str, prefix: &str, minimum_length: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{
-        ToolCallId, ToolObservationV2, ToolOutcomeStatus, ToolResult,
-    };
+    use agent_core::{ToolCallId, ToolObservationV2, ToolOutcomeStatus, ToolResult};
     use agent_runtime::{
         decode_persisted_tool_model_observation, finalize_tool_result,
         TOOL_MODEL_OBSERVATION_METADATA_KEY,
@@ -351,10 +349,7 @@ mod tests {
             "cindx.agent.task-state.v2"
         );
         assert_eq!(redact_sensitive_text("sk-short"), "sk-short");
-        assert_eq!(
-            redact_sensitive_text("sk-1234567890abcdef"),
-            "[REDACTED]"
-        );
+        assert_eq!(redact_sensitive_text("sk-1234567890abcdef"), "[REDACTED]");
     }
 
     #[test]

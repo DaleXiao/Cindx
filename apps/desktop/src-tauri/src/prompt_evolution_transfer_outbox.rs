@@ -4,8 +4,8 @@ use crate::project_session_persistence::metadata_with_context;
 use crate::prompt_evolution_models::notify_prompt_evaluation_worker;
 use agent_core::{Event, EventKind, Metadata, TaskId};
 use orchestrator::{
-    prompt_learning_dispatch_recovery, PromptAutoTransferIntent,
-    PromptLearningDispatchRecovery, PromptLearningOutboxProjection,
+    prompt_learning_dispatch_recovery, PromptAutoTransferIntent, PromptLearningDispatchRecovery,
+    PromptLearningOutboxProjection,
 };
 use tauri::Manager;
 
@@ -211,10 +211,7 @@ mod tests {
         completion_metadata.insert(AUTO_TRANSFER_REQUIRED_KEY.to_string(), "true".to_string());
         let mut intent_metadata = context;
         intent_metadata.insert(INTENT_ID_KEY.to_string(), intent.intent_id().to_string());
-        intent_metadata.insert(
-            INTENT_KEY.to_string(),
-            intent.to_json().unwrap(),
-        );
+        intent_metadata.insert(INTENT_KEY.to_string(), intent.to_json().unwrap());
         let mut store = SqliteStore::in_memory().unwrap();
         store
             .append(Event {

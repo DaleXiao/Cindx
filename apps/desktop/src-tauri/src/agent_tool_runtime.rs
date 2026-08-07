@@ -355,20 +355,21 @@ pub(crate) fn execute_agent_tool_batch(
     if !contains_active_denial {
         if let Some(outcome) =
             crate::agent_parallel_tool_runtime::try_execute_parallel_agent_tool_batch(
-            app,
-            state,
-            workspace_root,
-            runtime,
-            prompt,
-            run_context,
-            active_collaboration,
-            cancellation,
-            epoch_lease,
-            registry,
-            tools,
-            &calls,
-            snapshot_cursor,
-        )? {
+                app,
+                state,
+                workspace_root,
+                runtime,
+                prompt,
+                run_context,
+                active_collaboration,
+                cancellation,
+                epoch_lease,
+                registry,
+                tools,
+                &calls,
+                snapshot_cursor,
+            )?
+        {
             return Ok(outcome);
         }
     }
@@ -541,12 +542,9 @@ fn execute_agent_tool_batch_serial(
                 &call.tool_name,
                 "denied",
                 &observation,
-                [(
-                    "failure_code".to_string(),
-                    denial.code.to_string(),
-                )]
-                .into_iter()
-                .collect(),
+                [("failure_code".to_string(), denial.code.to_string())]
+                    .into_iter()
+                    .collect(),
                 Some(run_context),
             )
             .map_err(|error| error.to_string())?;
@@ -696,8 +694,7 @@ fn execute_agent_tool_batch_serial(
                 }
             }
         };
-        let postcondition_evidence =
-            tool.postcondition_evidence(&verification_invocation, &result);
+        let postcondition_evidence = tool.postcondition_evidence(&verification_invocation, &result);
         let observation = observation_from_agent_tool_result(&tool_name, &result);
         let image_paths = tool_result_image_paths(&result);
         let commit = commit_agent_tool_observation(

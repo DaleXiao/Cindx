@@ -18,6 +18,7 @@ use crate::memory_runtime::{
     append_prepared_memory_context, append_skill_context_for_run, commit_prepared_memory_recall,
     prepare_run_knowledge_contexts, MEMORY_RECALL_STALE_ERROR,
 };
+use crate::prompt_profile_serving::copy_prompt_profile_assignment;
 use crate::runtime_values::add_image_generation_run_context;
 use crate::session_context_service::prepare_session_history_context;
 use agent_core::{EventKind, Message, MessageRole, Metadata, TaskId};
@@ -37,8 +38,7 @@ mod memory_evaluation_constraint;
 pub(crate) use memory_evaluation_constraint::AgentMemoryEvaluationConstraint;
 #[cfg(feature = "realworld-eval")]
 pub(crate) use memory_evaluation_constraint::{
-    AGENT_MEMORY_EVALUATION_CONSTRAINT_KEY, EFFECTIVE_MEMORY_POLICY_KEY,
-    ROUTED_MEMORY_POLICY_KEY,
+    AGENT_MEMORY_EVALUATION_CONSTRAINT_KEY, EFFECTIVE_MEMORY_POLICY_KEY, ROUTED_MEMORY_POLICY_KEY,
 };
 
 fn append_single_model_policy_guidance(history: &mut Vec<Message>, policy: &OrchestrationPolicy) {
@@ -212,9 +212,6 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "conductor_health_observations",
         "conductor_health_attempts",
         "conductor_hedge_enabled",
-        "prompt_profile",
-        "prompt_genome",
-        "prompt_profile_source",
         "memory_ids",
         "memory_selected_count",
         "routed_memory_policy",
@@ -238,7 +235,7 @@ pub(crate) fn prepare_agent_execution_replay(
     effort: AgentPolicy,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PreparedAgentExecution, AgentRunPreparationError> {
-    let base_run_context = run_context.clone();
+    let mut base_run_context = run_context.clone();
     if !cancellation.begin_preparation() {
         return Err(AgentRunPreparationError::ControlStop(run_context));
     }
@@ -337,6 +334,8 @@ pub(crate) fn prepare_agent_execution_replay(
                 cancellation,
             },
         );
+        copy_prompt_profile_assignment(&run_context, &mut base_run_context)
+            .map_err(|error| runtime_preparation_error(&run_context, error))?;
         let plan = match plan {
             Ok(plan) => plan,
             Err(CollaborationStageError::SteerInterrupted) => {

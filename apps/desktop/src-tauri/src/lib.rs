@@ -92,6 +92,7 @@ mod project_config_persistence;
 mod project_lifecycle_runtime;
 mod project_session_persistence;
 mod prompt_attempt_runtime;
+mod prompt_canary_lineage;
 mod prompt_canary_outcome_projection;
 mod prompt_canary_runtime;
 mod prompt_distillation_outbox;
@@ -101,7 +102,6 @@ mod prompt_distillation_worker_request;
 mod prompt_evaluation_feedback;
 mod prompt_evaluation_runtime;
 mod prompt_evidence_runtime;
-mod prompt_failure_curriculum_projection;
 mod prompt_evolution_campaign_budget;
 mod prompt_evolution_campaign_runtime;
 mod prompt_evolution_hot_state;
@@ -112,11 +112,13 @@ mod prompt_evolution_runtime;
 mod prompt_evolution_store_runtime;
 mod prompt_evolution_transfer_outbox;
 mod prompt_evolution_worker;
+mod prompt_failure_curriculum_projection;
 mod prompt_instance_evolution_runtime;
 mod prompt_learning_outbox_projection;
 mod prompt_learning_runtime;
 mod prompt_mutation_runtime;
 mod prompt_pairwise_runtime;
+mod prompt_profile_serving;
 mod prompt_rollout_runtime;
 mod prompt_teacher_attestation_runtime;
 mod prompt_transfer_runtime;
@@ -147,7 +149,6 @@ mod view_models;
 mod voice_commands;
 mod workflow_checkpoint_runtime;
 mod workflow_routing_runtime;
-
 use adaptive_anchor_runtime::*;
 use adaptive_anytime_runtime::*;
 use adaptive_collaboration_finalization::*;
@@ -168,7 +169,11 @@ use agent_query_commands::*;
 use agent_read_model::*;
 #[cfg(feature = "realworld-eval")]
 pub use agent_realworld_eval::run_agent_realworld_eval;
+use agent_recovery_service::*;
+#[cfg(test)]
+use agent_resource_snapshot::*;
 use agent_run_engine::continue_agent_loop;
+use agent_runtime_snapshot::*;
 pub use app_bootstrap::run;
 use app_bootstrap::QuitConfirmation;
 use app_state::*;
@@ -218,6 +223,8 @@ use routing_learning_runtime::*;
 use runtime_constants::*;
 use runtime_values::*;
 use schedule_commands::*;
+use session_context_service::*;
+use session_title_service::*;
 use settings_commands::*;
 use sidecar_runtime::*;
 use tool_commands::*;
@@ -226,13 +233,6 @@ use view_models::*;
 use voice_commands::*;
 use workflow_checkpoint_runtime::*;
 use workflow_routing_runtime::*;
-
-use agent_recovery_service::*;
-#[cfg(test)]
-use agent_resource_snapshot::*;
-use agent_runtime_snapshot::*;
-use session_context_service::*;
-use session_title_service::*;
 #[cfg(test)]
 mod external_effect_eval_tests;
 #[cfg(test)]

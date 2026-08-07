@@ -456,6 +456,41 @@ fn execution_arena_requires_the_declared_pro_quorum_before_promotion() {
 }
 
 #[test]
+fn execution_arena_never_expands_the_plan_hard_budget() {
+    let genome = ConductorPromptGenome::seed_for_effort("auto");
+    let mut candidate = workflow_candidate(
+        genome,
+        vec![
+            workflow_step("inspect", "worker", "worker-a", &[]),
+            workflow_step("final", "synthesizer", "worker-b", &["inspect"]),
+        ],
+    );
+    let plan = candidate.plan.as_mut().expect("candidate plan");
+    plan.budget.max_model_turns_per_step = 1;
+    plan.budget.max_tool_calls_per_step = 1;
+    let captured = Arc::new(Mutex::new(Vec::<(usize, usize)>::new()));
+    let requests = Arc::clone(&captured);
+    let runner: PromptEvaluationRunner = Arc::new(move |request, _| {
+        requests
+            .lock()
+            .expect("request capture lock")
+            .push((request.max_model_turns, request.max_tool_calls));
+        completed("bounded output")
+    });
+
+    let result =
+        execute_prompt_workflow_candidate_with_runner("Inspect and summarize", candidate, runner);
+
+    assert!(result.execution.succeeded);
+    let captured = captured.lock().expect("request capture lock");
+    assert!(!captured.is_empty());
+    assert!(captured
+        .iter()
+        .all(|budget| *budget == (1, 1) || *budget == (1, 0)));
+    assert!(captured.iter().any(|budget| *budget == (1, 1)));
+}
+
+#[test]
 fn execution_arena_propagates_a_real_partial_with_an_explicit_degraded_status() {
     let mut genome = ConductorPromptGenome::seed_for_effort("auto");
     genome.max_step_attempts = 1;

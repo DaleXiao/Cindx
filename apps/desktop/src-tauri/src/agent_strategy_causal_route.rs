@@ -1,9 +1,15 @@
 use super::requirements::AgentPlanningSource;
 use agent_core::Metadata;
 use orchestrator::{
-    select_causal_route_v2, sha256_hex, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
-    CausalRouteReason, ModelCandidate, RouteFeatureSnapshotV2,
+    prompt_genome_sha256, select_causal_route_v2, sha256_hex, AgentPolicy, AgentRouteRequirements,
+    AgentRunDecision, CausalRouteReason, ConductorPromptGenome, ModelCandidate,
+    RouteFeatureSnapshotV2,
 };
+
+pub(super) fn neutral_prompt_profile_sha256(effort: AgentPolicy) -> String {
+    prompt_genome_sha256(&ConductorPromptGenome::seed_for_effort(effort.label()))
+        .expect("built-in route-neutral prompt profile must validate")
+}
 
 pub(super) fn finalize_causal_route(
     prompt: &str,
@@ -28,7 +34,9 @@ pub(super) fn finalize_causal_route(
     );
     let mut receipt = match decision.causal_route.take() {
         Some(receipt) if receipt.feature_snapshot == snapshot => receipt,
-        Some(_) => return Err("causal route receipt does not match its planning inputs".to_string()),
+        Some(_) => {
+            return Err("causal route receipt does not match its planning inputs".to_string())
+        }
         None => select_causal_route_v2(decision, &snapshot, candidates, None, 0)?,
     };
     let final_route = decision.route_tier();
@@ -112,10 +120,7 @@ pub(crate) fn causal_route_event_metadata(
     Ok([
         ("route_decision_id".to_string(), route_decision_id),
         ("causal_route_receipt".to_string(), receipt_json),
-        (
-            "causal_route_receipt_sha256".to_string(),
-            receipt_sha256,
-        ),
+        ("causal_route_receipt_sha256".to_string(), receipt_sha256),
     ]
     .into_iter()
     .collect())

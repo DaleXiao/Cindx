@@ -34,13 +34,11 @@ use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::conductor_health_runtime;
 use crate::configuration_models::ProviderConfig;
 use crate::routing_learning_runtime::learning_budget_fingerprint;
-use crate::workflow_routing_runtime::{
-    conductor_historical_evidence, model_candidates_for_config,
-};
+use crate::workflow_routing_runtime::{conductor_historical_evidence, model_candidates_for_config};
 use agent_core::{Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
-    prompt_genome_sha256, AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
+    AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
     AgentRunDecisionHarness, AgentRunDecisionRequest, ConductorExecutionContract,
     ConductorPromptGenome, ModelCandidate, RoutingContext, RoutingDecision,
 };
@@ -83,7 +81,11 @@ struct PlannedRunFinalizeInput {
     route_requirements: AgentRouteRequirements,
     budget_fingerprint: Option<String>,
     recent_context: String,
-    prompt_profile_sha256: String,
+    route_prompt_profile_sha256: String,
+}
+
+fn run_decision_evolved_directive(_: &ConductorPromptGenome) -> String {
+    String::new()
 }
 
 pub(crate) fn plan_agent_run(
@@ -122,8 +124,7 @@ pub(crate) fn plan_agent_run(
     let preferred_fallback_model = preferred_fallback_model(config, effort, &allowed_models);
     let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context)
         .map_err(CollaborationStageError::Failed)?;
-    let prompt_profile_sha256 =
-        prompt_genome_sha256(&profile).map_err(CollaborationStageError::Failed)?;
+    let route_prompt_profile_sha256 = causal_route::neutral_prompt_profile_sha256(effort);
     let recent_context = collaboration_recent_context(history);
 
     if execution_constraint.is_matched_memory_effect() {
@@ -151,7 +152,7 @@ pub(crate) fn plan_agent_run(
                 route_requirements,
                 budget_fingerprint,
                 recent_context: recent_context.clone(),
-                prompt_profile_sha256: prompt_profile_sha256.clone(),
+                route_prompt_profile_sha256: route_prompt_profile_sha256.clone(),
             },
         )
         .map_err(CollaborationStageError::Failed)?;
@@ -191,7 +192,7 @@ pub(crate) fn plan_agent_run(
                 route_requirements,
                 budget_fingerprint,
                 recent_context: recent_context.clone(),
-                prompt_profile_sha256: prompt_profile_sha256.clone(),
+                route_prompt_profile_sha256: route_prompt_profile_sha256.clone(),
             },
         )
         .map_err(CollaborationStageError::Failed)?;
@@ -233,14 +234,14 @@ pub(crate) fn plan_agent_run(
         allowed_models: allowed_models.clone(),
         model_candidates: candidates.clone(),
         max_parallelism,
-        evolved_directive: profile.conductor_directive(),
+        evolved_directive: run_decision_evolved_directive(&profile),
         historical_evidence,
         matched_collaboration_evidence,
         route_requirements,
         execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
             .to_string(),
         budget_fingerprint: budget_fingerprint.clone(),
-        prompt_profile_sha256: prompt_profile_sha256.clone(),
+        prompt_profile_sha256: route_prompt_profile_sha256.clone(),
     };
     let decision_id = format!(
         "{}-run-decision",
@@ -341,7 +342,7 @@ pub(crate) fn plan_agent_run(
             route_requirements,
             budget_fingerprint,
             recent_context,
-            prompt_profile_sha256,
+            route_prompt_profile_sha256,
         },
     )
     .map_err(CollaborationStageError::Failed)?;
@@ -372,7 +373,7 @@ fn finalize_planned_run(
         route_requirements,
         budget_fingerprint,
         recent_context,
-        prompt_profile_sha256,
+        route_prompt_profile_sha256,
     } = input;
     decision = requirements::apply_and_validate_route_requirements(
         decision,
@@ -387,7 +388,7 @@ fn finalize_planned_run(
         route_requirements,
         &candidates,
         budget_fingerprint,
-        prompt_profile_sha256,
+        route_prompt_profile_sha256,
         source,
         degradation_reason.is_some(),
         &mut decision,
@@ -410,3 +411,7 @@ fn finalize_planned_run(
         route_requirements,
     })
 }
+
+#[cfg(test)]
+#[path = "agent_strategy_shipping_tests.rs"]
+mod tests;

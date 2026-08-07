@@ -91,9 +91,7 @@ fn parallel_tool_batch_contracts<'a>(
             {
                 return None;
             }
-            Some(ParallelToolContract {
-                effect_spec,
-            })
+            Some(ParallelToolContract { effect_spec })
         })
         .collect()
 }
@@ -149,10 +147,7 @@ fn prepare_parallel_tool_batch(
         .zip(contracts)
         .map(|(candidate, contract)| {
             let mut invocation = candidate.invocation;
-            agent_runtime::apply_tool_spec_runtime_metadata(
-                &mut invocation,
-                &contract.effect_spec,
-            );
+            agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &contract.effect_spec);
             PreparedParallelToolCall {
                 call: candidate.call,
                 invocation,
@@ -301,11 +296,8 @@ fn execute_prepared_parallel_tool_batch(
         }
     }
 
-    let mut reservations = ParallelToolReservationGuard::new(
-        cancellation,
-        epoch_lease.epoch(),
-        prepared.len(),
-    );
+    let mut reservations =
+        ParallelToolReservationGuard::new(cancellation, epoch_lease.epoch(), prepared.len());
     {
         let mut store = state
             .store
@@ -315,8 +307,7 @@ fn execute_prepared_parallel_tool_batch(
             .map_err(|error| error.to_string())?;
     }
 
-    let body_results =
-        run_parallel_tool_bodies(registry, cancellation, epoch_lease, &prepared);
+    let body_results = run_parallel_tool_bodies(registry, cancellation, epoch_lease, &prepared);
     let mut results = Vec::with_capacity(prepared.len());
     for (item, body) in prepared.iter().zip(body_results) {
         reservations.finish_one();
@@ -392,8 +383,7 @@ fn execute_prepared_parallel_tool_batch(
         let postcondition_evidence = registry
             .get(&item.invocation.tool_name)
             .and_then(|tool| tool.postcondition_evidence(&item.invocation, &result));
-        let observation =
-            observation_from_agent_tool_result(&item.invocation.tool_name, &result);
+        let observation = observation_from_agent_tool_result(&item.invocation.tool_name, &result);
         let image_paths = tool_result_image_paths(&result);
         let commit = commit_agent_tool_observation(
             state,
@@ -455,7 +445,8 @@ pub(crate) fn try_execute_parallel_agent_tool_batch(
         registry,
         tools,
         calls,
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
     execute_prepared_parallel_tool_batch(

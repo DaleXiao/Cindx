@@ -1,5 +1,5 @@
 use crate::{is_agent_run_start_event, sha256_hex, EventKind};
-use agent_core::{Event, AgentRunLineage};
+use agent_core::{AgentRunLineage, Event};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -68,10 +68,7 @@ struct FinishedReceipt {
 
 pub(super) fn project_tool_receipts(events: &[Event], root: &Path) -> ToolReceiptProjection {
     let mut projection = ToolReceiptProjection::default();
-    let Some(root_event) = events
-        .iter()
-        .find(|event| is_agent_run_start_event(event))
-    else {
+    let Some(root_event) = events.iter().find(|event| is_agent_run_start_event(event)) else {
         projection
             .errors
             .push("current Agent run identity is missing".to_string());
@@ -86,11 +83,7 @@ pub(super) fn project_tool_receipts(events: &[Event], root: &Path) -> ToolReceip
             return projection;
         }
     };
-    let Some(root_run_id) = lineage
-        .logical_run_id_for_event(root_event)
-        .ok()
-        .flatten()
-    else {
+    let Some(root_run_id) = lineage.logical_run_id_for_event(root_event).ok().flatten() else {
         projection
             .errors
             .push("current Agent run identity is missing".to_string());
@@ -103,12 +96,7 @@ pub(super) fn project_tool_receipts(events: &[Event], root: &Path) -> ToolReceip
             EventKind::ToolCallProposed | EventKind::ToolCallStarted | EventKind::ToolCallFinished
         )
     }) {
-        if lineage
-            .logical_run_id_for_event(event)
-            .ok()
-            .flatten()
-            != Some(root_run_id)
-        {
+        if lineage.logical_run_id_for_event(event).ok().flatten() != Some(root_run_id) {
             projection.errors.push(format!(
                 "tool event {} is outside the current logical Agent run",
                 event.sequence
@@ -627,18 +615,12 @@ mod tests {
         start.insert("agent_run_id".to_string(), "attempt-a".to_string());
 
         let mut started_b = metadata("call-b", "file.read", "attempt-b");
-        started_b.insert(
-            "source_agent_run_id".to_string(),
-            "attempt-a".to_string(),
-        );
+        started_b.insert("source_agent_run_id".to_string(), "attempt-a".to_string());
         let mut finished_b = started_b.clone();
         finished_b.insert("status".to_string(), "failed".to_string());
 
         let mut started_c = metadata("call-c", "file.read", "attempt-c");
-        started_c.insert(
-            "source_agent_run_id".to_string(),
-            "attempt-b".to_string(),
-        );
+        started_c.insert("source_agent_run_id".to_string(), "attempt-b".to_string());
         let mut finished_c = started_c.clone();
         finished_c.insert("status".to_string(), "succeeded".to_string());
 

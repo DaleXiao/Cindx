@@ -13,10 +13,8 @@ use orchestrator::{
 use std::collections::BTreeMap;
 use tauri::Manager;
 
-pub(crate) const PROMPT_EVALUATION_ATTEMPT_EVENT: &str =
-    "Conductor prompt evaluation attempt";
-pub(crate) const PROMPT_EVALUATION_ATTEMPT_METADATA_KEY: &str =
-    "prompt_evaluation_attempt_v1";
+pub(crate) const PROMPT_EVALUATION_ATTEMPT_EVENT: &str = "Conductor prompt evaluation attempt";
+pub(crate) const PROMPT_EVALUATION_ATTEMPT_METADATA_KEY: &str = "prompt_evaluation_attempt_v1";
 pub(crate) const PROMPT_LEARNING_COHORT_EVENT: &str = "Conductor prompt learning cohort";
 pub(crate) const PROMPT_LEARNING_COHORT_METADATA_KEY: &str = "prompt_learning_cohort_v1";
 pub(crate) const PROMPT_LEARNING_COHORT_RETENTION: usize = 256;
@@ -41,10 +39,8 @@ pub(crate) fn prompt_observation_matches_attempt(
             candidate.profile_id == observation.profile_id
                 && candidate.prompt_sha256 == observation.provenance.candidate_prompt_sha256
                 && started.treatments.iter().any(|opponent| {
-                    Some(opponent.profile_id.as_str())
-                        == observation.opponent_profile_id.as_deref()
-                        && opponent.prompt_sha256
-                            == observation.provenance.opponent_prompt_sha256
+                    Some(opponent.profile_id.as_str()) == observation.opponent_profile_id.as_deref()
+                        && opponent.prompt_sha256 == observation.provenance.opponent_prompt_sha256
                         && opponent.profile_id != candidate.profile_id
                 })
         })
@@ -94,9 +90,7 @@ pub(crate) fn append_prompt_learning_cohort_if_missing(
     .map_err(|error| error.to_string())
 }
 
-pub(crate) fn prompt_learning_cohort_from_event(
-    event: &Event,
-) -> Option<PromptLearningCohortV1> {
+pub(crate) fn prompt_learning_cohort_from_event(event: &Event) -> Option<PromptLearningCohortV1> {
     if event.summary != PROMPT_LEARNING_COHORT_EVENT {
         return None;
     }
@@ -128,13 +122,7 @@ pub(crate) fn append_prompt_evaluation_attempt_event(
             load_prompt_evolution_read_model(&mut store).map_err(|error| error.to_string())?;
         prompt_evaluation_attempt_start_is_admitted(&model.attempts, event)?;
     }
-    append_prompt_evaluation_attempt_event_to_store(
-        &mut store,
-        task_id,
-        run_context,
-        effort,
-        event,
-    )
+    append_prompt_evaluation_attempt_event_to_store(&mut store, task_id, run_context, effort, event)
 }
 
 fn prompt_evaluation_attempt_start_is_admitted(
@@ -142,11 +130,9 @@ fn prompt_evaluation_attempt_start_is_admitted(
     event: &PromptEvaluationAttemptEventV1,
 ) -> Result<(), String> {
     let new_attempt = !attempts.contains_key(&event.identity.evaluation_id);
-    let retention_full = attempts.len()
-        >= crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION;
-    let no_terminal_can_be_evicted = attempts
-        .values()
-        .all(|attempt| attempt.terminal.is_none());
+    let retention_full =
+        attempts.len() >= crate::prompt_evolution_read_model::PROMPT_EVALUATION_ATTEMPT_RETENTION;
+    let no_terminal_can_be_evicted = attempts.values().all(|attempt| attempt.terminal.is_none());
     if new_attempt && retention_full && no_terminal_can_be_evicted {
         return Err("prompt evaluation attempt retention is full".to_string());
     }
@@ -176,10 +162,7 @@ fn append_prompt_evaluation_attempt_event_to_store(
                     "prompt_evaluation_id".to_string(),
                     event.identity.evaluation_id.clone(),
                 ),
-                (
-                    PROMPT_EVALUATION_ATTEMPT_METADATA_KEY.to_string(),
-                    encoded,
-                ),
+                (PROMPT_EVALUATION_ATTEMPT_METADATA_KEY.to_string(), encoded),
             ]
             .into_iter()
             .collect(),
@@ -243,9 +226,7 @@ pub(crate) fn reconcile_incomplete_prompt_evaluation_attempts(
     Ok(terminals.len())
 }
 
-pub(crate) fn recover_prompt_evaluation_attempts_at_worker_start(
-    app: &tauri::AppHandle,
-) -> bool {
+pub(crate) fn recover_prompt_evaluation_attempts_at_worker_start(app: &tauri::AppHandle) -> bool {
     let state = app.state::<AppState>();
     if let Err(error) = reconcile_incomplete_prompt_evaluation_attempts(&state) {
         eprintln!("prompt evaluation attempt recovery failed: {error}");
@@ -294,13 +275,7 @@ impl<'a, 'state> PromptEvaluationAttemptGuard<'a, 'state> {
         if started.identity.cohort_sha256 != cohort.cohort_sha256 {
             return Err("prompt evaluation attempt guard cohort is mismatched".to_string());
         }
-        append_prompt_learning_cohort_if_missing(
-            state,
-            task_id,
-            run_context,
-            effort,
-            cohort,
-        )?;
+        append_prompt_learning_cohort_if_missing(state, task_id, run_context, effort, cohort)?;
         append_prompt_evaluation_attempt_event(state, task_id, run_context, effort, &started)?;
         Ok(Self {
             state,
@@ -491,10 +466,7 @@ mod tests {
             PROMPT_EVALUATION_ATTEMPT_METADATA_KEY.to_string(),
             serde_json::to_string(&attempt).unwrap(),
         );
-        metadata.insert(
-            "prompt_evaluation_id".to_string(),
-            "different".to_string(),
-        );
+        metadata.insert("prompt_evaluation_id".to_string(), "different".to_string());
         let event = Event {
             id: EventId("attempt".to_string()),
             task_id: phase16_task_id(),

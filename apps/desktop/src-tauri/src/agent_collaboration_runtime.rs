@@ -5,15 +5,14 @@ use crate::{
     app_state::AppState,
     collaboration_execution::{
         collaboration_candidate_models, collaboration_run_should_interrupt,
-        prioritize_collaboration_model,
-        record_collaboration_stage_started, CollaborationCandidateSpec,
+        prioritize_collaboration_model, record_collaboration_stage_started,
+        CollaborationCandidateSpec,
     },
     collaboration_stage_runtime::{record_collaboration_stage_finished, run_collaboration_stage},
     collaboration_worker_runtime::complete_collaboration_worker_with_tools,
     configuration_models::ProviderConfig,
     event_persistence::append_event,
     project_session_persistence::metadata_with_context,
-    prompt_evolution_runtime::prompt_evolution_evaluation_for_run,
     prompt_pairwise_runtime::schedule_prompt_pairwise_evaluation,
     runtime_constants::COLLABORATION_MAX_OUTPUT_TOKENS,
     runtime_values::{run_context_steer_epoch, unique_id},
@@ -378,20 +377,12 @@ pub(crate) fn prepare_agent_collaboration(
         .get("collaboration_policy")
         .cloned()
         .unwrap_or_else(|| policy.label().to_string());
-    let bounded_evolution = if bounded && config.prompt_evolution_enabled && effort != "fast" {
-        prompt_evolution_evaluation_for_run(state, &effort, run_context).ok()
-    } else {
-        None
-    };
-    let bounded_profile = bounded_evolution.as_ref().map(|evaluation| {
-        evaluation
-            .next_profile
-            .clone()
-            .with_effort_delivery_contract(&effort)
-    });
-    if let (Some(evaluation), Some(profile)) =
-        (bounded_evolution.as_ref(), bounded_profile.as_ref())
-    {
+    let bounded_profile = (bounded && config.prompt_evolution_enabled && effort != "fast")
+        .then(|| run_context.get("prompt_genome"))
+        .flatten()
+        .and_then(|encoded| serde_json::from_str::<ConductorPromptGenome>(encoded).ok())
+        .map(|profile| profile.with_effort_delivery_contract(&effort));
+    if let Some(profile) = bounded_profile.as_ref() {
         let prompt_genome = serde_json::to_string(profile)
             .map_err(|error| format!("failed to serialize prompt genome: {error}"))?;
         let mut store = state
@@ -415,16 +406,19 @@ pub(crate) fn prepare_agent_collaboration(
                     ("prompt_genome".to_string(), prompt_genome),
                     (
                         "prompt_selection_mode".to_string(),
-                        evaluation.next_mode.clone(),
+                        run_context
+                            .get("prompt_profile_source")
+                            .cloned()
+                            .unwrap_or_else(|| "run_strategy".to_string()),
                     ),
                     (
                         "prompt_evolution_status".to_string(),
-                        evaluation.status.clone(),
+                        run_context
+                            .get("prompt_rollout_status")
+                            .cloned()
+                            .unwrap_or_else(|| "unavailable".to_string()),
                     ),
-                    (
-                        "prompt_champion".to_string(),
-                        evaluation.champion_id.clone().unwrap_or_default(),
-                    ),
+                    ("prompt_champion".to_string(), String::new()),
                     ("prompt_evolution_enabled".to_string(), "true".to_string()),
                     ("collaboration_profile".to_string(), "bounded".to_string()),
                     (

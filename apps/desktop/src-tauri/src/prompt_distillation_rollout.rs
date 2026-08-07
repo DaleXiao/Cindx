@@ -1,7 +1,5 @@
 use crate::runtime_constants::PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1;
-use crate::view_models::{
-    PromptDistillationCanaryLeaseV1, PromptEvolutionReadModel,
-};
+use crate::view_models::{PromptDistillationCanaryLeaseV1, PromptEvolutionReadModel};
 use orchestrator::{
     evaluate_prompt_pro_to_auto_distillation_gate_in_cohort_with_failures, prompt_genome_sha256,
     sha256_hex, FrozenPromptProToAutoDistillationEvidence, FrozenPromptProfileSnapshot,
@@ -185,7 +183,9 @@ pub(crate) fn prompt_distillation_canary_lease(
     observations.sort_by_key(PromptEvolutionObservation::evidence_identity);
     let paired_evidence_sha256 = serde_json::to_vec(&("paired", &observations))
         .map(|encoded| sha256_hex(&encoded))
-        .map_err(|error| format!("Auto distillation canary evidence serialization failed: {error}"))?;
+        .map_err(|error| {
+            format!("Auto distillation canary evidence serialization failed: {error}")
+        })?;
     Ok(PromptDistillationCanaryLeaseV1 {
         schema: PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1.to_string(),
         candidate_profile_id: candidate_id.to_string(),
@@ -356,6 +356,51 @@ pub(crate) fn prompt_distillation_canary_assessment(
     candidate_checkpoint: usize,
     parent_checkpoint: usize,
 ) -> PromptDistillationCanaryAssessment {
+    prompt_distillation_canary_assessment_inner(
+        model,
+        auto_parent_id,
+        candidate_id,
+        candidate_checkpoint,
+        parent_checkpoint,
+        None,
+    )
+}
+
+pub(crate) fn prompt_distillation_canary_assessment_for_lineage(
+    model: &PromptEvolutionReadModel,
+    auto_parent_id: &str,
+    candidate_id: &str,
+    candidate_checkpoint: usize,
+    parent_checkpoint: usize,
+    lineage: &crate::prompt_profile_serving::PromptProfileDeploymentLineage,
+    lease: &PromptDistillationCanaryLeaseV1,
+) -> PromptDistillationCanaryAssessment {
+    if lease.candidate_profile_id != candidate_id || lease.stable_profile_id != auto_parent_id {
+        return PromptDistillationCanaryAssessment::Degraded(
+            "canary_lease_profile_mismatch".to_string(),
+        );
+    }
+    prompt_distillation_canary_assessment_inner(
+        model,
+        auto_parent_id,
+        candidate_id,
+        candidate_checkpoint,
+        parent_checkpoint,
+        Some((lineage, lease)),
+    )
+}
+
+fn prompt_distillation_canary_assessment_inner(
+    model: &PromptEvolutionReadModel,
+    auto_parent_id: &str,
+    candidate_id: &str,
+    candidate_checkpoint: usize,
+    parent_checkpoint: usize,
+    attribution: Option<(
+        &crate::prompt_profile_serving::PromptProfileDeploymentLineage,
+        &PromptDistillationCanaryLeaseV1,
+    )>,
+) -> PromptDistillationCanaryAssessment {
     let candidate_all =
         crate::prompt_rollout_runtime::prompt_live_observations(model, "auto", candidate_id);
     let parent_all =
@@ -365,8 +410,47 @@ pub(crate) fn prompt_distillation_canary_assessment(
             "canary_checkpoint_regressed".to_string(),
         );
     }
-    let candidate_fresh = &candidate_all[candidate_checkpoint..];
-    let parent_fresh = &parent_all[parent_checkpoint..];
+    let expected_lease_sha256 = match attribution {
+        Some((_, lease)) => {
+            match crate::prompt_canary_lineage::prompt_distillation_lease_sha256(lease) {
+                Ok(digest) => Some(digest),
+                Err(error) => return PromptDistillationCanaryAssessment::Degraded(error),
+            }
+        }
+        None => None,
+    };
+    let candidate_fresh = candidate_all[candidate_checkpoint..]
+        .iter()
+        .copied()
+        .filter(|observation| {
+            attribution.is_none_or(|(lineage, lease)| {
+                crate::prompt_canary_lineage::prompt_live_observation_matches_distillation_assignment(
+                    observation,
+                    lineage,
+                    "canary",
+                    candidate_id,
+                    &lease.candidate_profile_sha256,
+                    expected_lease_sha256.as_deref().unwrap_or_default(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let parent_fresh = parent_all[parent_checkpoint..]
+        .iter()
+        .copied()
+        .filter(|observation| {
+            attribution.is_none_or(|(lineage, lease)| {
+                crate::prompt_canary_lineage::prompt_live_observation_matches_distillation_assignment(
+                    observation,
+                    lineage,
+                    "stable",
+                    auto_parent_id,
+                    &lease.stable_profile_sha256,
+                    expected_lease_sha256.as_deref().unwrap_or_default(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     if candidate_fresh
         .iter()
         .any(|observation| observation.safety_violations > 0)
@@ -407,8 +491,7 @@ pub(crate) fn prompt_distillation_canary_assessment(
                           candidate_runs: usize,
                           parent_passes: usize,
                           parent_runs: usize| {
-        candidate_passes.saturating_mul(parent_runs)
-            < parent_passes.saturating_mul(candidate_runs)
+        candidate_passes.saturating_mul(parent_runs) < parent_passes.saturating_mul(candidate_runs)
     };
     for task_class in &candidate_classes {
         let candidate_class = candidate
@@ -425,7 +508,10 @@ pub(crate) fn prompt_distillation_canary_assessment(
             return PromptDistillationCanaryAssessment::Pending;
         }
         if rate_regressed(
-            candidate_class.iter().filter(|entry| entry.succeeded).count(),
+            candidate_class
+                .iter()
+                .filter(|entry| entry.succeeded)
+                .count(),
             candidate_class.len(),
             parent_class.iter().filter(|entry| entry.succeeded).count(),
             parent_class.len(),
@@ -440,7 +526,10 @@ pub(crate) fn prompt_distillation_canary_assessment(
                 .filter(|entry| entry.format_valid)
                 .count(),
             candidate_class.len(),
-            parent_class.iter().filter(|entry| entry.format_valid).count(),
+            parent_class
+                .iter()
+                .filter(|entry| entry.format_valid)
+                .count(),
             parent_class.len(),
         ) {
             return PromptDistillationCanaryAssessment::Degraded(format!(
@@ -548,9 +637,7 @@ pub(crate) fn prompt_distillation_canary_assessment(
         parent.len(),
         AUTO_DISTILLATION_MAX_HOLDOUT_TOKEN_REGRESSION_BPS,
     ) {
-        return PromptDistillationCanaryAssessment::Degraded(
-            "canary_token_regression".to_string(),
-        );
+        return PromptDistillationCanaryAssessment::Degraded("canary_token_regression".to_string());
     }
     PromptDistillationCanaryAssessment::Healthy
 }
@@ -558,9 +645,13 @@ pub(crate) fn prompt_distillation_canary_assessment(
 #[cfg(test)]
 mod tests {
     use super::evaluate_trusted_prompt_distillation_gate;
+    use crate::prompt_canary_lineage::prompt_distillation_lease_sha256;
     use crate::prompt_evolution_models::PromptEvolutionEvaluation;
     use crate::prompt_evolution_read_model::build_prompt_evolution_read_model;
-    use crate::prompt_rollout_runtime::{prompt_active_pair_cohort, reconcile_prompt_rollout};
+    use crate::prompt_profile_serving::PromptProfileDeploymentLineage;
+    use crate::prompt_rollout_runtime::{
+        prompt_active_pair_cohort, reconcile_prompt_rollout, reconcile_prompt_rollout_with_lineage,
+    };
     use crate::tests::bind_matched_prompt_evidence;
     use crate::view_models::{
         PromptEvaluationAttemptState, PromptEvolutionReadModel, PromptGenomeRecord,
@@ -572,8 +663,9 @@ mod tests {
         PromptDatasetIdentityV1, PromptEvaluationAttemptEventV1, PromptEvaluationAttemptStatus,
         PromptEvaluationMode, PromptEvaluationProvenance, PromptEvaluationSplit,
         PromptEvolutionMethod, PromptEvolutionObservation, PromptLearningCohortV1,
-        PromptProToAutoDistillationProvenanceV1, PromptRetryPolicy, PromptTreatmentIdentityV1,
-        PROMPT_AUTO_TRANSFER_GATE_PROTOCOL,
+        PromptLiveAssignmentProvenanceV1, PromptProToAutoDistillationProvenanceV1,
+        PromptRetryPolicy, PromptTreatmentIdentityV1, PROMPT_AUTO_TRANSFER_GATE_PROTOCOL,
+        PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
     };
     use std::collections::BTreeSet;
 
@@ -758,8 +850,27 @@ mod tests {
     }
 
     fn append_live_pair(fixture: &mut DistillationRolloutFixture, index: usize) {
-        let live =
-            |profile: &ConductorPromptGenome, quality_score: f64| PromptEvolutionObservation {
+        append_live_pair_with_attribution(
+            fixture,
+            index,
+            &PromptProfileDeploymentLineage {
+                scope_sha256: "f".repeat(64),
+                source_revision: 1,
+                deployment_generation: 1,
+            },
+            &"2".repeat(64),
+        );
+    }
+
+    fn append_live_pair_with_attribution(
+        fixture: &mut DistillationRolloutFixture,
+        index: usize,
+        lineage: &PromptProfileDeploymentLineage,
+        lease_sha256: &str,
+    ) {
+        let live = |profile: &ConductorPromptGenome, quality_score: f64| {
+            let profile_sha256 = prompt_genome_sha256(profile).unwrap();
+            PromptEvolutionObservation {
                 profile_id: profile.id.clone(),
                 evaluation_id: format!("live-{}-{index}", profile.id),
                 case_id: format!("live-case-{}-{index}", profile.id),
@@ -777,14 +888,29 @@ mod tests {
                 relative_reward: None,
                 step_credits: Vec::new(),
                 reflection_packet: None,
-                provenance: PromptEvaluationProvenance::blind_pairwise_swap(
-                    vec!["independent-live-judge".to_string()],
-                    vec!["live-worker".to_string()],
-                    "2".repeat(64),
-                    prompt_genome_sha256(profile).unwrap(),
-                    "3".repeat(64),
-                ),
-            };
+                provenance: PromptEvaluationProvenance {
+                    protocol: PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1.to_string(),
+                    candidate_prompt_sha256: profile_sha256.clone(),
+                    live_assignment: Some(PromptLiveAssignmentProvenanceV1 {
+                        schema: PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1.to_string(),
+                        assignment_receipt_sha256: "1".repeat(64),
+                        assignment_source: if profile.id == fixture.auto_child.id {
+                            "canary"
+                        } else {
+                            "stable"
+                        }
+                        .to_string(),
+                        profile_id: profile.id.clone(),
+                        profile_sha256,
+                        scope_sha256: lineage.scope_sha256.clone(),
+                        source_revision: lineage.source_revision,
+                        deployment_generation: lineage.deployment_generation,
+                        distillation_lease_sha256: Some(lease_sha256.to_string()),
+                    }),
+                    ..PromptEvaluationProvenance::default()
+                },
+            }
+        };
         fixture.model.observations.extend([
             ("auto".to_string(), live(&fixture.auto_child, 0.95)),
             ("auto".to_string(), live(&fixture.auto_parent, 0.9)),
@@ -950,6 +1076,41 @@ mod tests {
             PromptEvolutionMethod::ProToAutoDistillation
         );
         assert!(frozen.pro_teacher_evidence.is_some());
+        println!("cindx.prompt-distillation-control-contract.v1");
+    }
+
+    #[test]
+    fn distillation_canary_accepts_only_the_current_deployment_and_lease() {
+        let mut fixture = certified_distillation_fixture();
+        let started = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
+        assert_eq!(started.canary_percent, 10);
+        let lease = started.distillation_lease.clone().unwrap();
+        let lease_sha256 = prompt_distillation_lease_sha256(&lease).unwrap();
+        let lineage = PromptProfileDeploymentLineage {
+            scope_sha256: "e".repeat(64),
+            source_revision: 7,
+            deployment_generation: 3,
+        };
+
+        append_live_pair_with_attribution(&mut fixture, 1, &lineage, &"9".repeat(64));
+        append_live_pair_with_attribution(&mut fixture, 2, &lineage, &"9".repeat(64));
+        let old_lease_pending = reconcile_prompt_rollout_with_lineage(
+            &mut fixture.model,
+            "auto",
+            &fixture.evaluation,
+            Some(&lineage),
+        );
+        assert_eq!(old_lease_pending.canary_percent, 10);
+
+        append_live_pair_with_attribution(&mut fixture, 3, &lineage, &lease_sha256);
+        append_live_pair_with_attribution(&mut fixture, 4, &lineage, &lease_sha256);
+        let current_lease_advanced = reconcile_prompt_rollout_with_lineage(
+            &mut fixture.model,
+            "auto",
+            &fixture.evaluation,
+            Some(&lineage),
+        );
+        assert_eq!(current_lease_advanced.canary_percent, 25);
     }
 
     #[test]
@@ -1005,8 +1166,7 @@ mod tests {
             fixture.model.observations.push(extra);
         }
 
-        let rolled_back =
-            reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
+        let rolled_back = reconcile_prompt_rollout(&mut fixture.model, "auto", &fixture.evaluation);
 
         assert_eq!(rolled_back.status, "rolled_back");
         assert_eq!(

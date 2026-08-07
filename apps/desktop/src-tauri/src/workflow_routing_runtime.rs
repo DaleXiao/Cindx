@@ -43,21 +43,14 @@ pub(crate) fn workflow_prior_for_run(
 pub(crate) fn conductor_historical_evidence(
     state: &tauri::State<'_, AppState>,
     allowed_models: &[String],
-) -> Result<
-    (
-        String,
-        std::sync::Arc<MatchedCollaborationEvidenceTeacher>,
-    ),
-    String,
-> {
+) -> Result<(String, std::sync::Arc<MatchedCollaborationEvidenceTeacher>), String> {
     let (routing_telemetry, workflow_telemetry) = {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         (
-            load_routing_telemetry_read_model(&mut store)
-                .map_err(|error| error.to_string())?,
+            load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?,
             load_workflow_telemetry_read_model(&mut store, allowed_models)
                 .map_err(|error| error.to_string())?,
         )

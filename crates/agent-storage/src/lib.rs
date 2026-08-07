@@ -831,6 +831,28 @@ impl SqliteStore {
         }))
     }
 
+    pub fn list_read_models_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<(String, StoredReadModel)>, StorageError> {
+        let mut statement = self.prepare(
+            "select model_key, revision, payload from read_models
+             where namespace = ?1 order by model_key asc",
+        )?;
+        statement.bind_text(1, namespace)?;
+        let mut models = Vec::new();
+        while statement.step()? == StepResult::Row {
+            models.push((
+                statement.column_text(0)?,
+                StoredReadModel {
+                    revision: statement.column_i64(1) as u64,
+                    payload: statement.column_text(2)?,
+                },
+            ));
+        }
+        Ok(models)
+    }
+
     pub fn save_read_model(
         &mut self,
         namespace: &str,

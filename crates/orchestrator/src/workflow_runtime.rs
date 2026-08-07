@@ -26,7 +26,7 @@ pub struct AdaptiveWorkflow {
     pub steps: Vec<AdaptiveWorkflowStep>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowToolPolicy {
     None,
@@ -40,6 +40,14 @@ impl WorkflowToolPolicy {
             Self::None => "none",
             Self::ReadOnlyEvidence => "read_only_evidence",
             Self::ReadOnlyExploration => "read_only_exploration",
+        }
+    }
+
+    pub fn limited_by(self, ceiling: Self) -> Self {
+        match (self, ceiling) {
+            (Self::None, _) | (_, Self::None) => Self::None,
+            (Self::ReadOnlyEvidence, _) | (_, Self::ReadOnlyEvidence) => Self::ReadOnlyEvidence,
+            (Self::ReadOnlyExploration, Self::ReadOnlyExploration) => Self::ReadOnlyExploration,
         }
     }
 
@@ -57,6 +65,13 @@ impl WorkflowToolPolicy {
             Self::None => 0,
             Self::ReadOnlyEvidence => declared_calls.max(4),
             Self::ReadOnlyExploration => declared_calls.max(6),
+        }
+    }
+
+    pub fn tool_call_budget_within(&self, hard_limit: usize) -> usize {
+        match self {
+            Self::None => 0,
+            Self::ReadOnlyEvidence | Self::ReadOnlyExploration => hard_limit,
         }
     }
 }

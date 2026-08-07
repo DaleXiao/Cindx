@@ -12,7 +12,6 @@ pub(super) struct AdaptiveCollaborationSetup {
     pub(super) resumed_from_workflow_id: Option<String>,
     pub(super) resumed_from_checkpoint: bool,
     pub(super) prior: Option<WorkflowTopologyPrior>,
-    pub(super) evolution: Option<PromptEvolutionEvaluation>,
     pub(super) selection_mode: String,
     pub(super) prompt_genome: ConductorPromptGenome,
     pub(super) prompt_genome_json: String,
@@ -88,17 +87,6 @@ pub(super) fn prepare_adaptive_collaboration(
         .then(|| run_context.get("prompt_genome"))
         .flatten()
         .and_then(|encoded| serde_json::from_str::<ConductorPromptGenome>(encoded).ok());
-    let evolution =
-        if !resumed_from_checkpoint && strategy_genome.is_none() && config.prompt_evolution_enabled
-        {
-            Some(prompt_evolution_evaluation_for_run(
-                state,
-                &effort,
-                run_context,
-            )?)
-        } else {
-            None
-        };
     let selection_mode = if resumed_from_checkpoint {
         "checkpoint_resume".to_string()
     } else if strategy_genome.is_some() {
@@ -107,10 +95,7 @@ pub(super) fn prepare_adaptive_collaboration(
             .cloned()
             .unwrap_or_else(|| "run_strategy".to_string())
     } else {
-        evolution
-            .as_ref()
-            .map(|evaluation| evaluation.next_mode.clone())
-            .unwrap_or_else(|| "baseline".to_string())
+        "baseline".to_string()
     };
     let mut prompt_genome = workflow_checkpoint
         .as_ref()
@@ -118,11 +103,6 @@ pub(super) fn prepare_adaptive_collaboration(
             serde_json::from_str::<ConductorPromptGenome>(&checkpoint.prompt_genome_json).ok()
         })
         .or(strategy_genome)
-        .or_else(|| {
-            evolution
-                .as_ref()
-                .map(|evaluation| evaluation.next_profile.clone())
-        })
         .unwrap_or_else(|| ConductorPromptGenome::seed_for_effort(&effort));
     if resumed_from_checkpoint {
         if let Some(profile) = workflow_checkpoint
@@ -154,7 +134,6 @@ pub(super) fn prepare_adaptive_collaboration(
         prompt_delivery_contract_applied,
         &prompt_genome,
         &prompt_genome_json,
-        evolution.as_ref(),
     )?;
 
     let shared_memory = collaboration_context_for_genome(history, prompt_genome.context_policy);
@@ -176,7 +155,6 @@ pub(super) fn prepare_adaptive_collaboration(
         resumed_from_workflow_id,
         resumed_from_checkpoint,
         prior,
-        evolution,
         selection_mode,
         prompt_genome,
         prompt_genome_json,
@@ -200,7 +178,6 @@ fn record_prompt_profile_selection(
     prompt_delivery_contract_applied: bool,
     prompt_genome: &ConductorPromptGenome,
     prompt_genome_json: &str,
-    evolution: Option<&PromptEvolutionEvaluation>,
 ) -> Result<(), String> {
     let mut store = state
         .store
@@ -235,17 +212,13 @@ fn record_prompt_profile_selection(
                     if resumed_from_checkpoint {
                         "checkpoint_resume".to_string()
                     } else {
-                        evolution
-                            .map(|evaluation| evaluation.status.clone())
-                            .unwrap_or_else(|| "disabled".to_string())
+                        run_context
+                            .get("prompt_rollout_status")
+                            .cloned()
+                            .unwrap_or_else(|| "unavailable".to_string())
                     },
                 ),
-                (
-                    "prompt_champion".to_string(),
-                    evolution
-                        .and_then(|evaluation| evaluation.champion_id.clone())
-                        .unwrap_or_default(),
-                ),
+                ("prompt_champion".to_string(), String::new()),
                 (
                     "prompt_evolution_enabled".to_string(),
                     config.prompt_evolution_enabled.to_string(),

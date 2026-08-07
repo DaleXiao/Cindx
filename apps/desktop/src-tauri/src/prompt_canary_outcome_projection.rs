@@ -1,6 +1,9 @@
+mod attribution;
+
 use crate::prompt_evolution_read_model::scoped_prompt_evaluation_id;
 use agent_application::{AgentRunEvent, AgentRunStatus};
 use agent_core::{Event, EventKind};
+use attribution::validated_live_prompt_assignment;
 use orchestrator::{
     IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceV1,
     LearningUsageCompleteness, PromptEvaluationMode, PromptEvaluationSplit,
@@ -94,6 +97,12 @@ pub(crate) fn prompt_live_canary_outcome_records_from_events(
                 .get("project_id")
                 .map(String::as_str)
                 .unwrap_or("global");
+            let assignment = validated_live_prompt_assignment(
+                &profile_event.metadata,
+                evidence_scope,
+                &effort,
+                &profile_id,
+            )?;
             let bounded_profile = profile_event
                 .metadata
                 .get("collaboration_profile")
@@ -231,7 +240,10 @@ pub(crate) fn prompt_live_canary_outcome_records_from_events(
                 effort,
                 PromptEvolutionObservation {
                     profile_id,
-                    evaluation_id: scoped_prompt_evaluation_id(evidence_scope, &workflow_id),
+                    evaluation_id: scoped_prompt_evaluation_id(
+                        evidence_scope,
+                        &format!("{workflow_id}:{}", assignment.receipt_sha256),
+                    ),
                     case_id: workflow_id,
                     opponent_profile_id: None,
                     task_class: profile_event
@@ -257,7 +269,7 @@ pub(crate) fn prompt_live_canary_outcome_records_from_events(
                     relative_reward,
                     step_credits,
                     reflection_packet: None,
-                    provenance: Default::default(),
+                    provenance: assignment.provenance,
                 },
             ))
         })

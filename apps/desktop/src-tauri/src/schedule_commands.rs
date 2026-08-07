@@ -139,7 +139,9 @@ pub(crate) fn upsert_schedule(
             )
         })
         .unwrap_or((now, Vec::new(), None));
-    let effort = AgentPolicy::parse_ingress(&input.effort).label().to_string();
+    let effort = AgentPolicy::parse_ingress(&input.effort)
+        .label()
+        .to_string();
     let execution_session_id = ensure_schedule_execution_session(
         &state,
         &id,
