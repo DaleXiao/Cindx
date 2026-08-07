@@ -291,6 +291,17 @@ completed evidence, evaluates candidates against paired and holdout gates, and
 can promote a frozen profile for future runs. It cannot mutate an in-flight
 transcript, tool result, permission, or budget.
 
+The prompt genome now has one orthogonal Direct-finalizer verification gene.
+It is consulted only when an Auto or Pro run has already selected Direct
+execution and only by the tools-disabled terminal Finalizer. The legacy/seed
+`evidence` value adds no directive, so existing profiles and default requests
+retain their prior behavior. A non-default value can change only the bounded
+terminal verification instruction; it cannot change routing, tools,
+permissions, context, memory, budgets, the Actor loop, or fallback delivery.
+Selection is revalidated against the exact profile-assignment receipt and run
+decision, and an exercised non-fallback delivery carries a bounded phenotype
+receipt tied to the active steer epoch.
+
 The foreground serving path is separate from that learning state. Background
 workers alone evaluate evidence, reconcile rollout stages, append the canonical
 rollout event, and publish a compact project-and-effort deployment snapshot by

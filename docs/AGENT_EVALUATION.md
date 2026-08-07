@@ -27,6 +27,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Semantic read no-gain contract | current source | Deterministic exact-action/content identity, non-adjacent repeat, changed-evidence, effect barrier, fail-open, cold-reset, and eight-entry scaling cases | Repeated successful reads can request bounded replanning without caching or progress credit; no provider-backed quality or efficiency uplift claim |
 | Causal Router v2 contract | current source | Deterministic exact-input fingerprints, complete executable action identities, tri-state effect authority, indexed exact context-and-action evidence, conservative value decomposition, 4 KiB receipt, and 2-lookup/2-action scaling bounds | Routing provenance and bounded admission are verified; no provider-backed quality or Auto/Pro uplift claim |
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
+| Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
 | Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, route isolation, authority ceilings, and operation-count bounds | Proves learned-profile wiring and serving boundaries only; provider-backed profile or distillation uplift remains unverified |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, queue/steer, permission, recovery, projection, performance contracts | Control-plane evidence only |
@@ -123,6 +124,38 @@ not call a provider, exercise GEPA, or establish that the selected context
 improves answer quality. A quality claim requires a separately frozen matched
 provider treatment that isolates this compiler policy and retains failures in
 the denominator.
+
+The Direct-finalizer causal campaign is a narrower explicit provider treatment.
+Its frozen suite contains six train and eight holdout cases; four preregistered
+train cases form Gate A and include both correction and preservation controls.
+Each pair starts from the same canonical runtime and permits exactly one request
+difference: the tools-disabled Finalizer system-prompt directive. Provider,
+model, budget, context, task contract, evidence and pre-treatment identity are
+otherwise matched. A separate position-balanced reviewer emits strict receipts.
+Only after Gate A may a GEPA selector see the exact exercised candidate plus
+redacted matched deltas and return strict `promote` or `reject`; it cannot invent
+an untested phenotype. Reject stops before holdout. The durable checkpoint
+reserves every provider call before dispatch and caps the campaign at 58 calls
+including one bounded repair. Raw outputs and checkpoints stay outside Git;
+sanitized receipts retain failures, model identities, digests and the decision.
+Neither deterministic contracts nor a partial campaign establish quality gain,
+general Agent uplift, or Fugu parity.
+
+The campaign is never part of an ordinary quality-gate profile. From a clean
+exact revision, an explicitly authorized provider run uses external private
+paths:
+
+```sh
+CINDX_DIRECT_FINALIZER_REPORT=/private/tmp/cindx-direct-finalizer-report.json \
+CINDX_DIRECT_FINALIZER_CHECKPOINT=/private/tmp/cindx-direct-finalizer-private.json \
+CINDX_DIRECT_FINALIZER_SNAPSHOT=/private/tmp/cindx-direct-finalizer-snapshot.json \
+cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --features realworld-eval --bin cindx-direct-finalizer-gepa-eval
+```
+
+The configured Summarizer produces both arms, the configured Reviewer performs
+the blinded pair review, and the configured Planner performs the bounded GEPA
+decision. The producer and reviewer identities must differ.
 
 ### 3. Provider reasoning diagnostics
 

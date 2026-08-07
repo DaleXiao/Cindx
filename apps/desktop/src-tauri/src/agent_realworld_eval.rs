@@ -8,6 +8,19 @@ use std::process::Command;
 use std::time::Instant;
 use tauri::Manager;
 
+mod direct_finalizer;
+mod direct_finalizer_campaign;
+mod direct_finalizer_campaign_contract;
+mod direct_finalizer_campaign_evidence;
+mod direct_finalizer_campaign_execution;
+mod direct_finalizer_campaign_support;
+#[path = "direct_finalizer_evaluation_feedback.rs"]
+mod direct_finalizer_evaluation_feedback;
+mod direct_finalizer_receipts;
+#[cfg(test)]
+mod direct_finalizer_receipts_tests;
+#[cfg(test)]
+mod direct_finalizer_tests;
 mod execution;
 mod http_fixture;
 mod memory_receipts;
@@ -25,7 +38,8 @@ use http_fixture::HttpFixtureReceipt;
 use memory_receipts::{
     validate_memory_effect_suite, MemoryEffectCaseContract, MemoryEvaluationReceipt,
 };
-use receipts::{ModelReceipt, ResolvedBudgetReceipt, StrategyReceipt};
+pub(crate) use receipts::{model_receipts_from_metadata, ModelReceipt};
+use receipts::{ResolvedBudgetReceipt, StrategyReceipt};
 use setup::{activate_evaluation_data_root, build_evaluation_app, SetupFailure};
 use tool_receipts::ToolAttemptReceipt;
 use treatments::{expected_treatments, raw_schema, Treatment, MEMORY_EFFECT_SUITE_SCHEMA};
@@ -463,6 +477,10 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
         output_path.display()
     );
     Ok(())
+}
+
+pub fn run_direct_finalizer_gepa_eval() -> Result<(), String> {
+    direct_finalizer_campaign::run()
 }
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {

@@ -1,3 +1,6 @@
+use super::direct_finalizer_receipts::{
+    project_direct_finalizer_execution, DirectFinalizerExecutionReceipt,
+};
 use super::{metadata_u64, Treatment};
 use crate::*;
 use agent_core::Event;
@@ -66,17 +69,19 @@ pub(super) struct StrategyReceipt {
     pub(super) paired_evidence_sha256: Option<String>,
     pub(super) promotion_gate_protocol: Option<String>,
     pub(super) workflow_profile_exercised: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) direct_finalizer_execution: Option<DirectFinalizerExecutionReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct ModelReceipt {
-    pub(super) configured_model: String,
-    pub(super) request_payload_sha256: String,
-    pub(super) provider_response_model: Option<String>,
-    pub(super) provider_response_id_sha256: Option<String>,
-    pub(super) provider_system_fingerprint_sha256: Option<String>,
-    pub(super) receipt_status: String,
-    pub(super) response_semantic_sha256: String,
+pub(crate) struct ModelReceipt {
+    pub(crate) configured_model: String,
+    pub(crate) request_payload_sha256: String,
+    pub(crate) provider_response_model: Option<String>,
+    pub(crate) provider_response_id_sha256: Option<String>,
+    pub(crate) provider_system_fingerprint_sha256: Option<String>,
+    pub(crate) receipt_status: String,
+    pub(crate) response_semantic_sha256: String,
 }
 
 pub(super) fn resolved_budget_from_events(
@@ -127,10 +132,11 @@ pub(super) fn strategy_receipt_from_events(
     if treatment.is_oracle_reference() {
         return Ok(None);
     }
-    let event = events
+    let (decision_index, event) = events
         .iter()
+        .enumerate()
         .rev()
-        .find(|event| event.summary == "Agent run decision selected")
+        .find(|(_, event)| event.summary == "Agent run decision selected")
         .ok_or_else(|| "agent strategy receipt is missing".to_string())?;
     let decision_json = required_metadata_any(&event.metadata, &["run_decision", "decision"])?;
     let decision = serde_json::from_str::<AgentRunDecision>(decision_json)
@@ -178,6 +184,13 @@ pub(super) fn strategy_receipt_from_events(
         } else {
             false
         };
+    let direct_finalizer_execution = project_direct_finalizer_execution(
+        event,
+        &events[decision_index.saturating_add(1)..],
+        &decision,
+        &genome,
+        &profile_sha256,
+    )?;
 
     let learned = match (frozen_profile, profile_source.as_str()) {
         (Some(snapshot), "evaluation_frozen_profile") => {
@@ -237,10 +250,11 @@ pub(super) fn strategy_receipt_from_events(
         paired_evidence_sha256: learned.map(|snapshot| snapshot.paired_evidence_sha256.clone()),
         promotion_gate_protocol: learned.map(|snapshot| snapshot.promotion_gate_protocol.clone()),
         workflow_profile_exercised,
+        direct_finalizer_execution,
     }))
 }
 
-pub(super) fn model_receipts_from_metadata(
+pub(crate) fn model_receipts_from_metadata(
     metadata: &Metadata,
 ) -> Result<Vec<ModelReceipt>, String> {
     if let Some(encoded) = metadata.get("worker_provider_receipts") {
@@ -600,6 +614,10 @@ mod tests {
         );
         assert_eq!(receipt.execution_mode, "direct");
         assert!(receipt.learned_artifact_sha256.is_none());
+        assert!(receipt.direct_finalizer_execution.is_none());
+        assert!(!serde_json::to_string(&receipt)
+            .unwrap()
+            .contains("direct_finalizer_execution"));
     }
 
     #[test]

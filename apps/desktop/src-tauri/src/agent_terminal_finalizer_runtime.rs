@@ -2,6 +2,9 @@ use crate::{
     agent_completion_runtime::{
         finalize_agent_completion, AgentCompletionDelivery, AgentCompletionOutcome,
     },
+    agent_finalizer_runtime::direct_finalizer_policy::{
+        insert_direct_finalizer_receipt_metadata, selected_direct_finalizer_policy,
+    },
     agent_failure_terminal_runtime::{resolve_loop_failure, AgentFailureLoopOutcome},
     agent_finalizer_runtime::{
         grounded_finalizer_fallback, prepare_finalizer_turn, resolve_finalizer_fallback,
@@ -94,6 +97,7 @@ pub(crate) fn execute_terminal_finalizer(
     runtime: &mut agent_runtime::AgentLoopState,
     context: TerminalFinalizerContext<'_, '_>,
 ) -> Result<TerminalFinalizerOutcome, String> {
+    let direct_finalizer_policy = selected_direct_finalizer_policy(context.run_context);
     let epoch_lease = match context.cancellation.execution_epoch_lease() {
         agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
         agent_runtime::RunEpochLeaseOutcome::RestartAfterSteer => {
@@ -179,6 +183,9 @@ pub(crate) fn execute_terminal_finalizer(
     let prepared_turn = match prepare_finalizer_turn(
         runtime,
         Some(&context.config.agent_system_prompt),
+        direct_finalizer_policy
+            .as_ref()
+            .and_then(|selection| selection.phenotype.directive()),
         context.runtime_context,
         context.config.context_window_tokens,
         context.max_output_tokens,
@@ -218,6 +225,9 @@ pub(crate) fn execute_terminal_finalizer(
         "max_output_tokens".to_string(),
         context.max_output_tokens.to_string(),
     );
+    if let Some(selection) = &direct_finalizer_policy {
+        insert_direct_finalizer_receipt_metadata(&mut request.metadata, selection);
+    }
     let fallback = grounded_finalizer_fallback(
         runtime,
         context.cancellation,
@@ -312,6 +322,23 @@ pub(crate) fn execute_terminal_finalizer(
                     .cancellation
                     .record_partial_output_at(epoch_lease.epoch(), &candidate.content);
             }
+            let mut completion_run_context = context.run_context.clone();
+            if !resolution.used_fallback {
+                if let Some(selection) = &direct_finalizer_policy {
+                    insert_direct_finalizer_receipt_metadata(
+                        &mut completion_run_context,
+                        selection,
+                    );
+                    completion_run_context.insert(
+                        "direct_finalizer_profile_exercised".to_string(),
+                        "true".to_string(),
+                    );
+                    completion_run_context.insert(
+                        "direct_finalizer_delivery_request_id".to_string(),
+                        request_id.clone(),
+                    );
+                }
+            }
             let completion = finalize_agent_completion(
                 context.app,
                 context.state,
@@ -319,7 +346,7 @@ pub(crate) fn execute_terminal_finalizer(
                 context.workspace_root,
                 runtime,
                 context.prompt,
-                context.run_context,
+                &completion_run_context,
                 context.collaboration,
                 context.cancellation,
                 &request_id,

@@ -370,7 +370,8 @@ mod tests {
     fn suspended_snapshot_records_goal_delta_without_an_active_control() {
         let delta = trusted_workspace_verification_delta();
         let base = AgentRunControl::new("auto").snapshot();
-        let staged = staged_control_snapshot_with_goal_deltas(base, 0, std::slice::from_ref(&delta));
+        let staged =
+            staged_control_snapshot_with_goal_deltas(base, 0, std::slice::from_ref(&delta));
         let restored = AgentRunControl::from_snapshot(staged);
 
         assert!(

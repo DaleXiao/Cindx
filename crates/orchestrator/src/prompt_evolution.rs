@@ -1,4 +1,5 @@
 mod auto_teacher_source;
+mod direct_finalizer_evolution;
 mod distillation;
 mod distillation_snapshot;
 mod failure_curriculum;
@@ -17,6 +18,7 @@ mod search;
 mod snapshot;
 
 pub use auto_teacher_source::*;
+pub use direct_finalizer_evolution::*;
 pub use distillation::*;
 pub use distillation_snapshot::*;
 pub use failure_curriculum::*;
@@ -27,6 +29,7 @@ pub use learning_outbox::*;
 pub use matched_evaluation::*;
 pub use observation::*;
 pub use pareto::*;
+pub use phenotype::{DirectFinalizerPromptPhenotype, DIRECT_FINALIZER_PHENOTYPE_SCHEMA};
 pub use pro_teacher_source::*;
 pub use reflection_selection::{
     prompt_reflection_success_anchor, prompt_transfer_reflection_pairs,

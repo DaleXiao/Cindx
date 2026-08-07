@@ -19,6 +19,15 @@ pub(super) fn build_agent_execution_providers(
     }
 }
 
+#[cfg(feature = "realworld-eval")]
+pub(crate) fn build_agent_finalizer_provider(
+    config: &ProviderConfig,
+    agent_model: &str,
+    cancellation: &AgentRunControl,
+) -> OpenAiCompatibleProvider {
+    build_provider(config, agent_model, cancellation, RunStageClass::Finalizer)
+}
+
 fn build_provider(
     config: &ProviderConfig,
     agent_model: &str,
