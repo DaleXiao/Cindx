@@ -183,13 +183,22 @@ cognitive overlay; required trust policy, grounding evidence, and the current
 request never yield to advisory state.
 
 The adaptive loop cursor observes only trusted `cindx.tool-observation.v2`
-results. Repeated exact actions with identical complete typed outcomes receive
-one bounded replan before terminal delivery of the strongest available result;
-a new steer, changed prepared objective, Goal Delta, changed outcome, or
-incomplete evidence resets or advances the cursor instead of counting false
-no-progress. The cursor stores only bounded hashes and counters. It is reset on
-cold task-state recovery, while the persisted prepared task and task contract
-remain authoritative and regenerate the cognitive overlay.
+results. For a successful, complete, dynamically read-only observation whose
+content identity is available, it combines bounded model-visible summary,
+guidance, and stable facts with at most 32 KiB of evidence or valid SHA-256
+facts. It retains the latest semantic outcome hash for at most eight exact
+actions. Re-observing the same action and content, including after intervening
+read-only actions, requests one bounded replan; terminal delivery is advisory
+only after the model continues producing another known duplicate despite that
+replan.
+Changed content resets the no-gain signal. Effectful, unknown, failed, denied,
+cancelled, incomplete, or untyped observations cannot bridge semantic history,
+and an unidentifiable large or empty read fails open. The existing adjacent
+typed-outcome guard remains conservative for other trusted observations. The
+cursor stores only bounded hashes and counters: it never caches or skips tool
+execution and never grants Goal Delta credit. A new steer or Goal Delta resets
+it, and cold task-state recovery recreates it empty while the persisted prepared
+task and task contract remain authoritative.
 
 Provider and tool activity still drives the existing liveness watchdog, while
 generic checkpoints remain diagnostic. Neither extends a run segment: only an

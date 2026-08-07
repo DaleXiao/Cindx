@@ -215,8 +215,20 @@ mod tests {
                     "inspect",
                     crate::PromptCompletionIntent::default(),
                 ));
-                state.observe_adaptive_tool_result("file.read", "{}", &typed_result, None);
-                state.observe_adaptive_tool_result("file.read", "{}", &typed_result, None);
+                state.observe_adaptive_tool_result(
+                    "file.read",
+                    "{}",
+                    &typed_result,
+                    Some(&agent_core::ToolEffectSemantics::ReadOnly),
+                    None,
+                );
+                state.observe_adaptive_tool_result(
+                    "file.read",
+                    "{}",
+                    &typed_result,
+                    Some(&agent_core::ToolEffectSemantics::ReadOnly),
+                    None,
+                );
                 state.messages.push(Message {
                     role: MessageRole::Assistant,
                     content: "candidate".to_string(),

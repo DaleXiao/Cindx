@@ -119,9 +119,10 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   and requires the `cindx.agent-cognitive-loop-scaling.v1` marker. Its 2,048
   synthetic obligations prove the cognitive JSON remains within 8 KiB, action
   alternatives and truncation remain bounded, and the adaptive cursor remains
-  within 512 bytes with a saturated no-gain counter. This is a projection and
-  control-state scaling contract, not provider-backed evidence of intelligence,
-  answer quality, or long-horizon task success.
+  within 4 KiB with a saturated no-gain signal and all eight semantic-action
+  identities populated. This is a projection and control-state scaling
+  contract, not provider-backed evidence of intelligence, answer quality, or
+  long-horizon task success.
 - The exact `agent-collaboration-contract` gate requires one
   `cindx.agent-collaboration-contract.v1` marker. It proves distinct evidence and
   exploration catalogs, static read-only effect filtering, current

@@ -618,8 +618,9 @@ fn select_focus(
 mod tests {
     use super::*;
     use crate::{
-        adaptive_loop::MAX_ADAPTIVE_NO_GAIN_COUNT, AdaptiveLoopCursor, AgentActionDenialFeedback,
-        PromptCompletionIntent, WorkspaceVerificationPolicy,
+        adaptive_loop::{MAX_ADAPTIVE_NO_GAIN_COUNT, MAX_RECENT_SEMANTIC_ACTIONS},
+        AdaptiveLoopCursor, AgentActionDenialFeedback, PromptCompletionIntent,
+        WorkspaceVerificationPolicy,
     };
     use agent_core::{
         Metadata, ToolCallId, ToolObservationV2, ToolOutcomeStatus, ToolResult, ToolRisk,
@@ -896,13 +897,22 @@ mod tests {
             metadata: Metadata::new(),
         };
         let mut cursor = AdaptiveLoopCursor::for_steer_epoch(0);
-        for _ in 0..REQUIREMENT_COUNT {
-            cursor.observe_tool_result(0, "scale.tool", "sha256:scale", &result, None);
+        for index in 0..REQUIREMENT_COUNT {
+            cursor.observe_tool_result(
+                0,
+                "scale.tool",
+                &format!("sha256:scale:{}", index % MAX_RECENT_SEMANTIC_ACTIONS),
+                &result,
+                Some(&agent_core::ToolEffectSemantics::ReadOnly),
+                None,
+            );
         }
         let cursor_json = serde_json::to_vec(&cursor).expect("bounded adaptive cursor");
 
-        assert!(cursor.no_gain_count() <= MAX_ADAPTIVE_NO_GAIN_COUNT);
-        assert!(cursor_json.len() <= 512);
+        assert_eq!(cursor.no_gain_count(), MAX_ADAPTIVE_NO_GAIN_COUNT);
+        assert!(cursor.replan_emitted());
+        assert_eq!(cursor.semantic_history_len(), MAX_RECENT_SEMANTIC_ACTIONS);
+        assert!(cursor_json.len() <= 4_096);
         println!(
             "cindx.agent-cognitive-loop-scaling.v1 requirements={REQUIREMENT_COUNT} cognitive_bytes={} actions={} cursor_bytes={}",
             cognitive_json.len(),
