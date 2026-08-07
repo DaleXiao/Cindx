@@ -10,8 +10,8 @@ use crate::{
     PostconditionVerificationReceipt, WorkspaceVerificationPolicy,
 };
 use agent_core::{
-    Message, MessageRole, Metadata, ToolCallId, ToolInvocation, ToolOutcomeStatus,
-    ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
+    Message, MessageRole, Metadata, ToolCallId, ToolEffectSemantics, ToolInvocation,
+    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
 };
 use model_provider::{ModelRequest, ModelResponse};
 
@@ -846,6 +846,20 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             witness.supports_typed_postcondition_binding_for(tool_name, input_fingerprint, risk)
         });
         let tool_spec = self.tools.iter().find(|spec| spec.name == tool_name);
+        let replayed_action_spec = effect_witness
+            .and_then(|witness| {
+                witness.action_effect_verifier_for(tool_name, input_fingerprint, risk)
+            })
+            .and_then(|verifier| {
+                tool_spec
+                    .filter(|spec| spec.validate().is_ok())
+                    .cloned()
+                    .map(|spec| {
+                        spec.with_effect_semantics(ToolEffectSemantics::Verifiable {
+                            verifier: verifier.to_string(),
+                        })
+                    })
+            });
         let persisted_tool_evidence = effect_witness.and_then(|witness| {
             witness.postcondition_evidence_for(tool_name, input_fingerprint, risk, tool_spec)
         });
@@ -858,7 +872,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             allow_action_binding,
             status,
             risk,
-            tool_spec,
+            replayed_action_spec.as_ref().or(tool_spec),
             persisted_tool_evidence.as_ref(),
             observation,
         );

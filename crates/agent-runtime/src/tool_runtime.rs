@@ -1,4 +1,4 @@
-use crate::task_contract::PostconditionTargetWitness;
+use crate::task_contract::{workspace_action_verifier_family, PostconditionTargetWitness};
 use agent_core::{
     agent_run_id, logical_agent_run_id, Metadata, PostconditionVerifierKind, ToolArtifact,
     ToolFailure, ToolInvocation, ToolObservationV2, ToolOutcomeStatus, ToolPostconditionEvidence,
@@ -25,6 +25,7 @@ const PERSISTED_POSTCONDITION_EVIDENCE_SCHEMA: &str =
 
 const MAX_EFFECT_WITNESS_TARGETS: usize = 8;
 const MAX_EFFECT_WITNESS_PATH_COMPONENTS: usize = 8;
+const MAX_EFFECT_VERIFIER_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +52,8 @@ pub struct PersistedToolEffectWitness {
     postcondition_target_witness: Option<PostconditionTargetWitness>,
     #[serde(default, skip_serializing_if = "is_false")]
     typed_postcondition_binding: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action_effect_verifier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     postcondition_evidence: Option<PersistedToolPostconditionEvidence>,
 }
@@ -131,6 +134,7 @@ impl PersistedToolEffectWitness {
             target_tokens,
             postcondition_target_witness,
             typed_postcondition_binding,
+            action_effect_verifier: None,
             postcondition_evidence: None,
         };
         witness.is_valid().then_some(witness)
@@ -144,16 +148,17 @@ impl PersistedToolEffectWitness {
         tool_spec: Option<&ToolSpec>,
         evidence: Option<&ToolPostconditionEvidence>,
     ) -> Option<Self> {
-        let (Some(tool_spec), Some(evidence)) = (tool_spec, evidence) else {
-            return Self::capture(tool_name, input_json, risk, lineage_scope);
-        };
-        let trusted_capability = tool_spec.name == tool_name
-            && tool_spec.validate().is_ok()
-            && tool_spec.postcondition_verifiers.contains(&evidence.kind);
+        let trusted_tool_spec =
+            tool_spec.filter(|spec| spec.name == tool_name && spec.validate().is_ok());
+        let trusted_capability = trusted_tool_spec
+            .zip(evidence)
+            .is_some_and(|(spec, evidence)| spec.postcondition_verifiers.contains(&evidence.kind));
         let mut witness =
             Self::capture(tool_name, input_json, risk, lineage_scope).or_else(|| {
                 (trusted_capability
-                    && evidence.kind == PostconditionVerifierKind::WorkspaceQualityCheckV1
+                    && evidence.is_some_and(|evidence| {
+                        evidence.kind == PostconditionVerifierKind::WorkspaceQualityCheckV1
+                    })
                     && matches!(risk, Some(ToolRisk::ExecutesProcess)))
                 .then(|| Self {
                     schema: TOOL_EFFECT_WITNESS_SCHEMA.to_string(),
@@ -163,12 +168,22 @@ impl PersistedToolEffectWitness {
                     target_tokens: Vec::new(),
                     postcondition_target_witness: None,
                     typed_postcondition_binding: true,
+                    action_effect_verifier: None,
                     postcondition_evidence: None,
                 })
                 .filter(Self::is_valid)
             })?;
+        if witness.kind == PersistedToolEffectKind::WorkspaceMutation {
+            witness.action_effect_verifier = trusted_tool_spec
+                .and_then(|spec| spec.effect_semantics.verifier())
+                .filter(|verifier| workspace_action_verifier_family(verifier).is_some())
+                .map(str::to_string);
+        }
+        let (Some(_), Some(evidence)) = (trusted_tool_spec, evidence) else {
+            return witness.is_valid().then_some(witness);
+        };
         if !trusted_capability {
-            return Some(witness);
+            return witness.is_valid().then_some(witness);
         }
         let target_witness = match evidence.kind {
             PostconditionVerifierKind::WorkspaceExactReadbackV1
@@ -188,7 +203,7 @@ impl PersistedToolEffectWitness {
             {
                 None
             }
-            _ => return Some(witness),
+            _ => return witness.is_valid().then_some(witness),
         };
         witness.postcondition_evidence = PersistedToolPostconditionEvidence::new(
             tool_name,
@@ -219,6 +234,7 @@ impl PersistedToolEffectWitness {
             // verification authority.
             witness.postcondition_target_witness = None;
             witness.typed_postcondition_binding = false;
+            witness.action_effect_verifier = None;
             witness.postcondition_evidence = None;
         }
         witness.is_valid().then_some(witness)
@@ -278,6 +294,17 @@ impl PersistedToolEffectWitness {
             && self.tool_name == tool_name
             && self.input_fingerprint == input_fingerprint
             && self.matches_tool_and_risk(tool_name, registered_risk)
+    }
+
+    pub(crate) fn action_effect_verifier_for(
+        &self,
+        tool_name: &str,
+        input_fingerprint: &str,
+        registered_risk: Option<&ToolRisk>,
+    ) -> Option<&str> {
+        self.supports_typed_postcondition_binding_for(tool_name, input_fingerprint, registered_risk)
+            .then_some(self.action_effect_verifier.as_deref())
+            .flatten()
     }
 
     pub(crate) fn postcondition_evidence_for(
@@ -375,12 +402,23 @@ impl PersistedToolEffectWitness {
                 .postcondition_evidence
                 .as_ref()
                 .is_some_and(|evidence| !evidence.contract_is_valid())
+            || self
+                .action_effect_verifier
+                .as_ref()
+                .is_some_and(|verifier| {
+                    self.kind != PersistedToolEffectKind::WorkspaceMutation
+                        || !self.typed_postcondition_binding
+                        || self.postcondition_target_witness.is_none()
+                        || verifier.len() > MAX_EFFECT_VERIFIER_BYTES
+                        || workspace_action_verifier_family(verifier).is_none()
+                })
         {
             return false;
         }
         if legacy_schema
             && (self.typed_postcondition_binding
                 || self.postcondition_target_witness.is_some()
+                || self.action_effect_verifier.is_some()
                 || self.postcondition_evidence.is_some())
         {
             return false;

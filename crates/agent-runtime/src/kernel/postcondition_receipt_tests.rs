@@ -10,6 +10,7 @@ use agent_core::{
 
 const POSTCONDITION_SCOPE: &str = "logical-test-run:0";
 const WORKSPACE_FILE_CONTENT_VERIFIER: &str = "workspace_file_content_v1";
+const TEST_AFTER_SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn tool_request(call_id: &str, tool_name: &str, input: &str) -> AgentToolRequest {
     AgentToolRequest {
@@ -30,6 +31,29 @@ fn workspace_write_spec(name: &str) -> ToolSpec {
     .with_effect_semantics(ToolEffectSemantics::Verifiable {
         verifier: WORKSPACE_FILE_CONTENT_VERIFIER.to_string(),
     })
+}
+
+fn workspace_patch_spec(verifier_digest: &str) -> ToolSpec {
+    ToolSpec::builtin(
+        "file.patch",
+        "test",
+        "test exact workspace patch",
+        ToolRisk::WritesWorkspace,
+        r#"{"type":"object"}"#,
+    )
+    .with_effect_semantics(ToolEffectSemantics::Verifiable {
+        verifier: format!("workspace_file_sha256_v1:{verifier_digest}"),
+    })
+}
+
+fn workspace_patch_static_spec() -> ToolSpec {
+    ToolSpec::builtin(
+        "file.patch",
+        "test",
+        "test exact workspace patch",
+        ToolRisk::WritesWorkspace,
+        r#"{"type":"object"}"#,
+    )
 }
 
 fn exact_read_spec(name: &str) -> ToolSpec {
@@ -175,6 +199,112 @@ fn trusted_exact_readback_emits_a_bounded_verifiable_receipt() {
     assert!(!state
         .task_contract
         .verify_postcondition_receipt(&tampered, 0, 0));
+}
+
+#[test]
+fn dynamic_patch_verifier_binds_exact_readback_and_closes_completion() {
+    let mut state = start_agent_loop(
+        TaskId("typed-patch-receipt".to_string()),
+        "patch README and verify it",
+        AgentRuntimeConfig::default(),
+    );
+    state
+        .task_contract
+        .merge_workspace_verification_policy(WorkspaceVerificationPolicy::RequiredAfterMutation);
+
+    let patch_spec = workspace_patch_spec(TEST_AFTER_SHA256);
+    let patch = tool_request("patch", "file.patch", r#"{"path":"README.md"}"#);
+    assert!(apply_contract_transition(
+        &mut state,
+        &patch,
+        &ToolOutcomeStatus::Succeeded,
+        &ToolRisk::WritesWorkspace,
+        &patch_spec,
+        None,
+        "patched",
+        POSTCONDITION_SCOPE,
+    )
+    .postcondition_verification
+    .is_none());
+
+    let read_spec = exact_read_spec("file.read");
+    let read = tool_request("read", "file.read", r#"{"path":"README.md"}"#);
+    let evidence = exact_read_evidence("README.md");
+    let receipt = apply_contract_transition(
+        &mut state,
+        &read,
+        &ToolOutcomeStatus::Succeeded,
+        &ToolRisk::ReadOnly,
+        &read_spec,
+        Some(&evidence),
+        "complete file contents",
+        POSTCONDITION_SCOPE,
+    )
+    .postcondition_verification
+    .expect("trusted exact readback should verify a dynamic patch effect");
+
+    assert!(state
+        .task_contract
+        .verify_postcondition_receipt(&receipt, 0, 0));
+    assert!(state.task_contract.latest_mutation_verified());
+    assert_eq!(
+        state
+            .task_contract
+            .completion_instruction(true, &[patch_spec, read_spec])
+            .expect("completion gate evaluates"),
+        None
+    );
+}
+
+#[test]
+fn dynamic_patch_binding_rejects_invalid_digest_wrong_target_and_unsigned_read() {
+    for (task_id, verifier_digest, read_path, signed) in [
+        ("invalid-digest", "not-a-sha256", "README.md", true),
+        ("wrong-target", TEST_AFTER_SHA256, "CHANGELOG.md", true),
+        ("unsigned-read", TEST_AFTER_SHA256, "README.md", false),
+    ] {
+        let mut state = start_agent_loop(
+            TaskId(task_id.to_string()),
+            "patch README and verify it",
+            AgentRuntimeConfig::default(),
+        );
+        state.task_contract.merge_workspace_verification_policy(
+            WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
+        let patch_spec = workspace_patch_spec(verifier_digest);
+        let patch = tool_request("patch", "file.patch", r#"{"path":"README.md"}"#);
+        apply_contract_transition(
+            &mut state,
+            &patch,
+            &ToolOutcomeStatus::Succeeded,
+            &ToolRisk::WritesWorkspace,
+            &patch_spec,
+            None,
+            "patched",
+            POSTCONDITION_SCOPE,
+        );
+
+        let read_spec = exact_read_spec("file.read");
+        let read = tool_request(
+            "read",
+            "file.read",
+            &serde_json::json!({ "path": read_path }).to_string(),
+        );
+        let evidence = signed.then(|| exact_read_evidence(read_path));
+        assert!(apply_contract_transition(
+            &mut state,
+            &read,
+            &ToolOutcomeStatus::Succeeded,
+            &ToolRisk::ReadOnly,
+            &read_spec,
+            evidence.as_ref(),
+            "read output",
+            POSTCONDITION_SCOPE,
+        )
+        .postcondition_verification
+        .is_none());
+        assert!(!state.task_contract.latest_mutation_verified());
+    }
 }
 
 #[test]
@@ -625,6 +755,75 @@ fn recovered_typed_workspace_action_uses_the_same_scoped_verifier_contract() {
     let encoded = serde_json::to_string(&state.task_contract).expect("contract serializes");
     assert!(!encoded.contains("private/recovered.md"));
     assert!(!encoded.contains("do-not-retain"));
+
+    let read_spec = exact_read_spec("file.read");
+    let live_read = tool_request(
+        "live-read",
+        "file.read",
+        r#"{"path":"private/recovered.md"}"#,
+    );
+    let evidence = exact_read_evidence("private/recovered.md");
+    assert!(apply_contract_transition(
+        &mut state,
+        &live_read,
+        &ToolOutcomeStatus::Succeeded,
+        &ToolRisk::ReadOnly,
+        &read_spec,
+        Some(&evidence),
+        "recovered contents",
+        POSTCONDITION_SCOPE,
+    )
+    .postcondition_verification
+    .is_some());
+    assert!(state.task_contract.latest_mutation_verified());
+}
+
+#[test]
+fn recovered_dynamic_patch_retains_its_bounded_action_verifier() {
+    let mut state = start_agent_loop(
+        TaskId("typed-recovered-patch".to_string()),
+        "recover the patch and verify it",
+        AgentRuntimeConfig::default(),
+    );
+    state
+        .task_contract
+        .merge_workspace_verification_policy(WorkspaceVerificationPolicy::RequiredAfterMutation);
+    let patch_input = r#"{"path":"private/recovered.md","replacement":"do-not-retain"}"#;
+    let input_fingerprint = crate::tool_input_fingerprint("file.patch", patch_input);
+    let dynamic_spec = workspace_patch_spec(TEST_AFTER_SHA256);
+    let encoded = PersistedToolEffectWitness::capture_with_postcondition_evidence(
+        "file.patch",
+        patch_input,
+        Some(&ToolRisk::WritesWorkspace),
+        POSTCONDITION_SCOPE,
+        Some(&dynamic_spec),
+        None,
+    )
+    .and_then(|witness| witness.encode())
+    .expect("permission boundary should persist the dynamic patch verifier");
+    assert!(!encoded.contains("private/recovered.md"));
+    assert!(!encoded.contains("do-not-retain"));
+    let mut tampered = serde_json::from_str::<serde_json::Value>(&encoded).expect("valid json");
+    tampered["actionEffectVerifier"] =
+        serde_json::Value::String("workspace_file_sha256_v1:not-a-digest".to_string());
+    assert!(PersistedToolEffectWitness::decode(&tampered.to_string()).is_none());
+    let effect_witness =
+        PersistedToolEffectWitness::decode(&encoded).expect("current witness decodes");
+    let static_spec = workspace_patch_static_spec();
+
+    AgentKernel::new(&mut state, std::slice::from_ref(&static_spec))
+        .with_postcondition_scope(Some(POSTCONDITION_SCOPE))
+        .apply_persisted_tool_observation(
+            ToolCallId("recovered-patch".to_string()),
+            "file.patch",
+            &input_fingerprint,
+            None,
+            Some(&effect_witness),
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::WritesWorkspace),
+            "recovered patch completed",
+        );
+    assert!(!state.task_contract.latest_mutation_verified());
 
     let read_spec = exact_read_spec("file.read");
     let live_read = tool_request(

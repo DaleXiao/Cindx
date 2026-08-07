@@ -3,9 +3,9 @@ use super::validation::{
     postcondition_id, update_verifier_coverage,
 };
 use super::{
-    PostconditionActionBinding, PostconditionBindingKey, PostconditionTargetWitness,
-    PostconditionVerificationReceipt, MAX_POSTCONDITION_VERIFICATION_RECEIPTS,
-    MAX_VERIFIER_CONTRACT_BYTES, WORKSPACE_FILE_CONTENT_VERIFIER,
+    workspace_action_verifier_family, PostconditionActionBinding, PostconditionBindingKey,
+    PostconditionTargetWitness, PostconditionVerificationReceipt,
+    MAX_POSTCONDITION_VERIFICATION_RECEIPTS, MAX_VERIFIER_CONTRACT_BYTES,
 };
 use crate::task_contract::{
     fingerprint, inferred_builtin_tool_risk, interaction_action, interaction_observation,
@@ -260,8 +260,8 @@ fn verifier_kind_for_transition(
 fn workspace_action_verifier_contract(tool_spec: Option<&ToolSpec>) -> Option<String> {
     tool_spec
         .and_then(|spec| spec.effect_semantics.verifier())
-        .filter(|value| *value == WORKSPACE_FILE_CONTENT_VERIFIER)
-        .filter(|value| !value.trim().is_empty() && value.len() <= MAX_VERIFIER_CONTRACT_BYTES)
+        .filter(|value| value.len() <= MAX_VERIFIER_CONTRACT_BYTES)
+        .and_then(workspace_action_verifier_family)
         .map(str::to_string)
 }
 
