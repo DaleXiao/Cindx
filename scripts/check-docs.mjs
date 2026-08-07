@@ -79,6 +79,8 @@ for (const obsolete of [
 const evaluationRoot = path.join(root, "docs/evaluations");
 const allowedEvaluationRootFiles = new Set([
   "README.md",
+  "CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md",
+  "CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.json",
   "CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.md",
   "CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.json",
   "CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md",

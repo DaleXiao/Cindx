@@ -20,6 +20,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Matched provider baseline](evaluations/CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md) | `0.1.78` | 12 frozen GPQA-Diamond questions, 36 matched treatments | Direct `10/12`; Auto and Pro `8/12`; no orchestration uplift shown |
 | [Memory-effect V2](evaluations/CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.md) | `0.2.19` | 3 frozen cases; matched direct memory-on/off; 3 repeats; 18 provider-backed cells and 9 pairs | `IMPROVED`: 18/18 completed, 9/9 pairs evaluable, required-memory cases improved 6/6, and all 3 recalled-decoy controls passed both arms, with zero invalid evidence, confounds, regressions, safety violations, or setup failures; limited to the frozen matched direct harness |
 | [Memory-effect V1](evaluations/CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md) | `0.2.19` | 3 frozen cases; matched direct memory-on/off; 3 repeats; 18 provider-backed cells and 9 pairs | `INVALID_EVIDENCE`: 18/18 completed, but one required memory-off cell invoked `skill.search` outside the frozen allowlist, leaving 8/9 pairs evaluable; five evaluable required pairs descriptively favored memory-on and all three controls passed, but no causal memory-uplift claim is admitted |
+| [Direct-finalizer GEPA calibration](evaluations/CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md) | `0.2.23` | Four preregistered Gate A pairs; exact prompt-only parent/candidate treatment; 16 retained provider receipts and 20 conservative call reservations | `VALID_TARGETED_EVIDENCE`, `NO_GO_FOR_PROMOTION`: the candidate regressed deterministic verification on one preservation case, so GEPA, holdout, snapshot creation, deployment, and transfer did not run |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
@@ -138,8 +139,20 @@ an untested phenotype. Reject stops before holdout. The durable checkpoint
 reserves every provider call before dispatch and caps the campaign at 58 calls
 including one bounded repair. Raw outputs and checkpoints stay outside Git;
 sanitized receipts retain failures, model identities, digests and the decision.
+Once Gate A has run, the sanitized writer also requires the exact candidate
+profile identity; a blocked report cannot depend on its private checkpoint to
+recover lineage.
 Neither deterministic contracts nor a partial campaign establish quality gain,
 general Agent uplift, or Fugu parity.
+
+The authorized `0.2.23` campaign completed all four Gate A pairs. The
+Adversarial candidate passed one deterministic case versus two for the parent
+and regressed the `train-test-failure` preservation case. Gate A therefore
+blocked with `candidate_regression` after 20 conservative call reservations.
+GEPA attempts remained zero and no holdout evidence, snapshot, deployment, or
+learned-profile uplift exists. The independent reviewer and efficiency signals
+favored the candidate descriptively, but cannot override the frozen objective
+regression.
 
 The campaign is never part of an ordinary quality-gate profile. From a clean
 exact revision, an explicitly authorized provider run uses external private

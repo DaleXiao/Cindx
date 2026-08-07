@@ -117,7 +117,7 @@ pub(super) fn run() -> Result<(), String> {
             &reviewer_model,
             &gepa_model,
             parent_profile,
-            None,
+            Some(manual_candidate_profile.clone()),
             checkpoint.call_count,
             gate_a,
             DirectFinalizerGepaReceipt {
