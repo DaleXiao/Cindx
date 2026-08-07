@@ -105,6 +105,16 @@ revision and is no longer the current product decision.
 
 ## Current Targeted Causal Evidence
 
+- [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
+  is the provider-backed four-pair Gate A run on source commit
+  `2647daafae98e99d31c101886d2836e446d83d96`. It is
+  `VALID_TARGETED_EVIDENCE` and `NO_GO_FOR_PROMOTION`: the frozen Adversarial
+  candidate regressed deterministic verification on one preservation case.
+  GEPA, holdout, snapshot creation, production deployment, and transfer did not
+  run, so this is a fail-closed calibration result rather than an intelligence
+  uplift claim.
+- [Sanitized Direct-finalizer machine-readable result](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.json)
+
 - [Cindx Memory-effect V2 0.2.19](CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.md)
   is the current 18-cell provider-backed matched memory-on/off matrix on source
   commit `cd647030092971c84b7fc4dc6274285bec12b528`. All 9 pairs were

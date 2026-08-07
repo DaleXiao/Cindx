@@ -450,6 +450,12 @@ pub(super) fn write_sanitized_direct_finalizer_campaign(
             receipt.schema
         ));
     }
+    if receipt.gate_a.status != "not_run" && receipt.candidate_profile.is_none() {
+        return Err(
+            "Direct-finalizer campaign receipt with Gate A evidence requires a candidate profile"
+                .to_string(),
+        );
+    }
     let encoded = serde_json::to_vec_pretty(receipt)
         .map_err(|error| format!("failed to encode Direct-finalizer campaign receipt: {error}"))?;
     tools::write_private_file_atomically(output_path, &encoded).map_err(|error| {

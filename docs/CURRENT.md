@@ -302,6 +302,14 @@ Selection is revalidated against the exact profile-assignment receipt and run
 decision, and an exercised non-fallback delivery carries a bounded phenotype
 receipt tied to the active steer epoch.
 
+The first provider-backed Direct-finalizer calibration on source `2647daa`
+completed its four preregistered Gate A pairs and rejected the frozen
+`Adversarial` candidate for a deterministic preservation regression. GEPA,
+holdout, snapshot creation, serving, and transfer did not run. The seed profile
+therefore remains unchanged; this is valid fail-closed learning evidence, not
+an intelligence uplift. Future Gate A reports fail closed unless they retain
+the exact candidate profile identity.
+
 The foreground serving path is separate from that learning state. Background
 workers alone evaluate evidence, reconcile rollout stages, append the canonical
 rollout event, and publish a compact project-and-effort deployment snapshot by
@@ -601,8 +609,9 @@ Therefore the current claim is:
   the compiler's effect on provider-backed answer quality.
 - Pro's quality and completion signals are descriptive rather than causal;
   coding terminal completion is the clearest measured weakness.
-- No current provider-backed result identifies an evolved profile or proves a
-  GEPA, transfer, or self-distillation gain.
+- The current targeted calibration identifies one evolved candidate only to
+  reject it before GEPA and holdout; no provider-backed result proves a GEPA,
+  deployed learned-profile, transfer, or self-distillation gain.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits

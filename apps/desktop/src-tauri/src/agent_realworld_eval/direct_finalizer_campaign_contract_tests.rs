@@ -264,3 +264,19 @@ fn sanitized_campaign_writer_rejects_relative_paths_and_unknown_schema() {
     .unwrap_err();
     assert!(schema_error.contains("unsupported"));
 }
+
+#[test]
+fn sanitized_campaign_writer_requires_candidate_identity_after_gate_a_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut receipt = sample_campaign_receipt();
+    receipt.gate_a.status = "blocked".to_string();
+    receipt.gate_a.blocker_codes = vec!["candidate_regression".to_string()];
+
+    let error = write_sanitized_direct_finalizer_campaign(
+        &directory.path().join("campaign.json"),
+        &receipt,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("requires a candidate profile"));
+}
