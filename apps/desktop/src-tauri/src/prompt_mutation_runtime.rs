@@ -61,11 +61,10 @@ pub(crate) fn run_background_prompt_mutation_stage_with_liveness(
         collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
         prompt,
         Some(control.clone()),
-        CollaborationCallLimits {
-            no_progress_timeout: response_start_timeout,
-            objective_epoch: Some(run_context_steer_epoch(run_context)),
-            ..CollaborationCallLimits::default()
-        },
+        prompt_mutation_call_limits(
+            response_start_timeout,
+            run_context_steer_epoch(run_context),
+        ),
         None,
         |_| {},
     );
@@ -88,6 +87,18 @@ pub(crate) fn run_background_prompt_mutation_stage_with_liveness(
     })
 }
 
+fn prompt_mutation_call_limits(
+    response_start_timeout: Option<std::time::Duration>,
+    objective_epoch: u64,
+) -> CollaborationCallLimits {
+    CollaborationCallLimits {
+        no_progress_timeout: response_start_timeout,
+        provider_activity_is_progress: response_start_timeout.is_some(),
+        objective_epoch: Some(objective_epoch),
+        ..CollaborationCallLimits::default()
+    }
+}
+
 pub(crate) fn append_prompt_mutation_status(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
@@ -107,6 +118,27 @@ pub(crate) fn append_prompt_mutation_status(
         metadata_with_context(metadata, run_context),
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_protocol_activity_only_extends_explicit_liveness_calls() {
+        let production = prompt_mutation_call_limits(None, 7);
+        let bounded_candidate =
+            prompt_mutation_call_limits(Some(std::time::Duration::from_secs(300)), 7);
+
+        assert!(!production.provider_activity_is_progress);
+        assert_eq!(production.no_progress_timeout, None);
+        assert!(bounded_candidate.provider_activity_is_progress);
+        assert_eq!(
+            bounded_candidate.no_progress_timeout,
+            Some(std::time::Duration::from_secs(300))
+        );
+        assert_eq!(bounded_candidate.objective_epoch, Some(7));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

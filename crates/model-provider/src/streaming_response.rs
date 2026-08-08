@@ -22,8 +22,10 @@ fn apply_stream_line(
     finish_reason: &mut Option<String>,
     usage: &mut Metadata,
     on_delta: &mut impl FnMut(&str),
+    on_activity: &mut impl FnMut(),
 ) -> Result<bool, ModelError> {
     if let Some(event) = parse_stream_event(line)? {
+        on_activity();
         if event.finish_reason.is_some() {
             *finish_reason = event.finish_reason;
         }
@@ -122,6 +124,7 @@ pub(super) async fn consume_streaming_body<S, B, E>(
     hard_timeout: Duration,
     deadline: Instant,
     on_delta: &mut impl FnMut(&str),
+    on_activity: &mut impl FnMut(),
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<ModelResponse, ModelError>
 where
@@ -180,6 +183,7 @@ where
                         &mut finish_reason,
                         &mut usage,
                         &mut |delta| delta_stream.push(delta, Instant::now()),
+                        on_activity,
                     )
                 })?;
                 if parsed_event {
@@ -213,6 +217,7 @@ where
             &mut finish_reason,
             &mut usage,
             &mut |delta| delta_stream.push(delta, Instant::now()),
+            on_activity,
         )
     })?;
     delta_stream.finish(Instant::now());
@@ -243,6 +248,7 @@ pub(super) async fn consume_streaming_response(
     hard_timeout: Duration,
     deadline: Instant,
     on_delta: &mut impl FnMut(&str),
+    on_activity: &mut impl FnMut(),
     should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<ModelResponse, ModelError> {
     let status = response.status();
@@ -306,6 +312,7 @@ pub(super) async fn consume_streaming_response(
         hard_timeout,
         deadline,
         on_delta,
+        on_activity,
         should_cancel,
     )
     .await
@@ -318,6 +325,7 @@ mod tests {
     fn consume_immediate_test_stream(
         chunks: Vec<Result<&'static str, ModelError>>,
         on_delta: &mut impl FnMut(&str),
+        on_activity: &mut impl FnMut(),
         should_cancel: &mut impl FnMut() -> bool,
     ) -> Result<ModelResponse, ModelError> {
         let hard_timeout = Duration::from_secs(1);
@@ -333,6 +341,7 @@ mod tests {
             hard_timeout,
             Instant::now() + hard_timeout,
             on_delta,
+            on_activity,
             should_cancel,
         ))
     }
@@ -347,6 +356,7 @@ mod tests {
                 Ok("data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n"),
             ],
             &mut |delta| emitted.push(delta.to_string()),
+            &mut || {},
             &mut || false,
         )
         .expect("stream should complete");
@@ -365,6 +375,7 @@ mod tests {
                 Err(ModelError::new("wire failed")),
             ],
             &mut |delta| emitted.push(delta.to_string()),
+            &mut || {},
             &mut || false,
         )
         .expect_err("stream should surface the read error");
@@ -383,6 +394,7 @@ mod tests {
                 Ok("data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n"),
             ],
             &mut |delta| emitted.push(delta.to_string()),
+            &mut || {},
             &mut || {
                 cancellation_checks += 1;
                 cancellation_checks >= 3
@@ -392,6 +404,27 @@ mod tests {
 
         assert_eq!(error.message, MODEL_REQUEST_CANCELLED);
         assert_eq!(emitted, ["a", "b"]);
+    }
+
+    #[test]
+    fn reasoning_only_events_report_activity_without_exposing_hidden_content() {
+        let mut emitted = Vec::new();
+        let mut activity_count = 0usize;
+        let response = consume_immediate_test_stream(
+            vec![
+                Ok("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"}}]}\n"),
+                Ok("data: {\"choices\":[{\"delta\":{\"content\":\"visible\"}}]}\n"),
+            ],
+            &mut |delta| emitted.push(delta.to_string()),
+            &mut || activity_count += 1,
+            &mut || false,
+        )
+        .expect("reasoning-only activity should not corrupt the visible response");
+
+        assert_eq!(activity_count, 2);
+        assert_eq!(emitted, ["visible"]);
+        assert_eq!(response.message.content, "visible");
+        assert!(!response.message.content.contains("hidden"));
     }
 
     #[test]
@@ -457,6 +490,7 @@ mod tests {
         let mut finish_reason = None;
         let mut usage = Metadata::new();
         let mut parsed_event = false;
+        let mut activity_count = 0usize;
 
         for byte in wire.as_bytes().chunks(1) {
             parsed_event |= decoder
@@ -468,6 +502,7 @@ mod tests {
                         &mut finish_reason,
                         &mut usage,
                         &mut |delta| visible.push_str(delta),
+                        &mut || activity_count += 1,
                     )
                 })
                 .expect("split stream line should parse");
@@ -481,6 +516,7 @@ mod tests {
                     &mut finish_reason,
                     &mut usage,
                     &mut |delta| visible.push_str(delta),
+                    &mut || activity_count += 1,
                 )
             })
             .expect("unterminated final data line should preserve EOF behavior");
@@ -491,6 +527,7 @@ mod tests {
             .expect("split tool call should be complete");
 
         assert!(parsed_event);
+        assert_eq!(activity_count, 4);
         assert_eq!(decoder.scanned_bytes, wire.len());
         assert_eq!(answer, "hello");
         assert_eq!(visible, "hello");

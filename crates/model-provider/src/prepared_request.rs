@@ -34,7 +34,22 @@ impl OpenAiCompatibleProvider {
     pub(super) fn complete_prepared_streaming_model_request(
         &self,
         request: &PreparedStreamingModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        self.complete_prepared_streaming_model_request_with_activity(
+            request,
+            on_delta,
+            &mut || {},
+            should_cancel,
+        )
+    }
+
+    pub(super) fn complete_prepared_streaming_model_request_with_activity(
+        &self,
+        request: &PreparedStreamingModelRequest,
         mut on_delta: &mut dyn FnMut(&str),
+        mut on_activity: &mut dyn FnMut(),
         mut should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<ModelResponse, ModelError> {
         if !self.config.is_ready() {
@@ -72,6 +87,7 @@ impl OpenAiCompatibleProvider {
                 hard_timeout,
                 deadline,
                 &mut on_delta,
+                &mut on_activity,
                 &mut should_cancel,
             )
             .await
