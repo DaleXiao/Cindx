@@ -1156,6 +1156,12 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
         Some("research")
     );
     assert_eq!(
+        revised_context
+            .get("pre_decision_task_class")
+            .map(String::as_str),
+        Some("coding")
+    );
+    assert_eq!(
         revised_context.get("agent_model").map(String::as_str),
         Some("research-model")
     );
@@ -1196,7 +1202,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
     let prompt_cases = prompt_offline_dataset(&events, "project-a", None);
     assert_eq!(prompt_cases.len(), 1);
     assert_eq!(prompt_cases[0].objective, revised_objective);
-    assert_eq!(prompt_cases[0].task_class, "research");
+    assert_eq!(prompt_cases[0].task_class, "coding");
     let routing = routing_telemetry_from_events(&events);
     assert_eq!(routing.len(), 1);
     assert_eq!(routing[0].task_class, TaskClass::Research);
@@ -5502,6 +5508,10 @@ fn causal_route_provenance_keeps_context_small_and_event_receipt_complete() {
         Some(receipt.context_fingerprint.as_str())
     );
     assert_eq!(
+        context.get("pre_decision_task_class").map(String::as_str),
+        Some(receipt.feature_snapshot.task_class.label())
+    );
+    assert_eq!(
         context.get("causal_route_receipt_sha256"),
         Some(&receipt.digest().unwrap())
     );
@@ -5611,6 +5621,7 @@ fn preparation_reset_clears_causal_route_epoch_provenance() {
     let keys = [
         "route_effect_authority",
         "pre_decision_context_fingerprint",
+        "pre_decision_task_class",
         "route_requirements_fingerprint",
         "causal_route_policy",
         "causal_route_candidate",
@@ -8501,6 +8512,48 @@ fn offline_prompt_dataset_stratifies_task_classes_without_split_drift() {
             BTreeSet::from([PromptEvaluationSplit::Train, PromptEvaluationSplit::Holdout,])
         );
     }
+}
+
+#[test]
+fn offline_prompt_dataset_uses_independent_pre_decision_task_class() {
+    let metadata = [
+        ("agent_run_id".to_string(), "independent-class".to_string()),
+        ("project_id".to_string(), "project-a".to_string()),
+        ("session_id".to_string(), "session-a".to_string()),
+        (
+            "prompt".to_string(),
+            "Investigate competing evidence".to_string(),
+        ),
+        (
+            "prompt_objective".to_string(),
+            "Investigate competing evidence".to_string(),
+        ),
+        ("task_class".to_string(), "coding".to_string()),
+        (
+            "pre_decision_task_class".to_string(),
+            "research".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let events = ["Agent run decision selected", "Agent task completed"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, summary)| Event {
+            id: EventId(format!("independent-class-{index}")),
+            task_id: phase16_task_id(),
+            sequence: index as u64 + 1,
+            timestamp_ms: index as u64 + 1,
+            kind: EventKind::TaskStatusChanged,
+            summary: summary.to_string(),
+            metadata: metadata.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let dataset = prompt_offline_dataset(&events, "project-a", None);
+
+    assert_eq!(dataset.len(), 1);
+    assert_eq!(dataset[0].task_class, "research");
 }
 
 #[test]

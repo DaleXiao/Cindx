@@ -650,8 +650,16 @@ pub(crate) fn prompt_offline_dataset(
         else {
             continue;
         };
+        // Prefer a pre-treatment stratum; legacy runs retain the decision label.
         let task_class = decision
-            .and_then(|event| event.metadata.get("task_class"))
+            .and_then(|event| event.metadata.get("pre_decision_task_class"))
+            .or_else(|| {
+                run_events
+                    .iter()
+                    .rev()
+                    .find_map(|event| event.metadata.get("pre_decision_task_class"))
+            })
+            .or_else(|| decision.and_then(|event| event.metadata.get("task_class")))
             .or_else(|| {
                 run_events
                     .iter()

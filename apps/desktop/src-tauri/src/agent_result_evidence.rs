@@ -180,6 +180,15 @@ pub(crate) fn completion_learning_evidence(
     let budget_fingerprint = budget_fingerprint
         .clone()
         .expect("checked learning budget fingerprint");
+    let verified_tool_evidence = || {
+        (tool_evidence.verified_postcondition_count > 0).then(|| {
+            LearningEvidenceV1::verified_postcondition(
+                usage,
+                steer_epoch,
+                budget_fingerprint.clone(),
+            )
+        })
+    };
 
     if let Some(workflow) = workflow_terminal {
         if workflow
@@ -188,7 +197,7 @@ pub(crate) fn completion_learning_evidence(
             .and_then(|value| value.parse::<u64>().ok())
             != Some(steer_epoch)
         {
-            return censored();
+            return verified_tool_evidence().unwrap_or_else(censored);
         }
         if workflow
             .metadata
@@ -200,14 +209,14 @@ pub(crate) fn completion_learning_evidence(
                 .map(String::as_str)
                 != Some("true")
             {
-                return censored();
+                return verified_tool_evidence().unwrap_or_else(censored);
             }
             let Some(verified) = workflow
                 .metadata
                 .get("anytime_selected_verified")
                 .and_then(|value| value.parse::<bool>().ok())
             else {
-                return censored();
+                return verified_tool_evidence().unwrap_or_else(censored);
             };
             let Some(quality_bps) = workflow
                 .metadata
@@ -215,21 +224,21 @@ pub(crate) fn completion_learning_evidence(
                 .and_then(|value| value.parse::<u16>().ok())
                 .filter(|quality| *quality <= 10_000)
             else {
-                return censored();
+                return verified_tool_evidence().unwrap_or_else(censored);
             };
             let Some(quality_pass) = workflow
                 .metadata
                 .get("quality_pass")
                 .and_then(|value| value.parse::<bool>().ok())
             else {
-                return censored();
+                return verified_tool_evidence().unwrap_or_else(censored);
             };
             let Some(safety_violations) = workflow
                 .metadata
                 .get("safety_violations")
                 .and_then(|value| value.parse::<usize>().ok())
             else {
-                return censored();
+                return verified_tool_evidence().unwrap_or_else(censored);
             };
             let safety_clear = safety_violations == 0;
             return LearningEvidenceV1::independent_quality(
@@ -271,8 +280,8 @@ pub(crate) fn completion_learning_evidence(
         }
     }
 
-    if tool_evidence.verified_postcondition_count > 0 {
-        return LearningEvidenceV1::verified_postcondition(usage, steer_epoch, budget_fingerprint);
+    if let Some(evidence) = verified_tool_evidence() {
+        return evidence;
     }
     censored()
 }
@@ -349,7 +358,7 @@ mod tests {
         ToolEffectSemantics, ToolPostconditionEvidence,
     };
     use agent_runtime::{AgentRunControl, ModelAttemptUsage, ModelUsageSource, RunStageClass};
-    use orchestrator::LearningDisposition;
+    use orchestrator::{LearningDisposition, LearningVerification};
 
     fn tool_message<const N: usize>(metadata: [(&str, &str); N]) -> Message {
         Message {
@@ -699,6 +708,101 @@ mod tests {
             Some(&workflow),
         );
         assert_eq!(evidence.disposition, LearningDisposition::Censored);
+    }
+
+    #[test]
+    fn untrusted_workflow_quality_does_not_hide_verified_tool_postcondition() {
+        let mut run_context = Metadata::new();
+        for (index, key) in crate::learning_evidence_runtime::LEARNING_BUDGET_KEYS
+            .into_iter()
+            .enumerate()
+        {
+            run_context.insert(key.to_string(), (index + 1).to_string());
+        }
+        let workflow = Event {
+            id: EventId("workflow".to_string()),
+            task_id: TaskId("task".to_string()),
+            sequence: 1,
+            timestamp_ms: 1,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow completed".to_string(),
+            metadata: [
+                ("steer_epoch".to_string(), "2".to_string()),
+                (
+                    "anytime_routing_learning_eligible".to_string(),
+                    "false".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let evidence = completion_learning_evidence(
+            &run_context,
+            LearningUsageCompleteness::Complete,
+            2,
+            CompletionToolEvidence {
+                grounded_count: 1,
+                verified_postcondition_count: 1,
+                trusted_contract_sequences: vec![7],
+            },
+            Some(&workflow),
+        );
+
+        assert_eq!(evidence.disposition, LearningDisposition::Positive);
+        assert_eq!(evidence.attribution, LearningAttribution::Tool);
+        assert_eq!(evidence.verification, LearningVerification::Passed);
+    }
+
+    #[test]
+    fn verified_tool_postcondition_does_not_override_valid_negative_workflow_quality() {
+        let mut run_context = Metadata::new();
+        for (index, key) in crate::learning_evidence_runtime::LEARNING_BUDGET_KEYS
+            .into_iter()
+            .enumerate()
+        {
+            run_context.insert(key.to_string(), (index + 1).to_string());
+        }
+        let workflow = Event {
+            id: EventId("workflow".to_string()),
+            task_id: TaskId("task".to_string()),
+            sequence: 1,
+            timestamp_ms: 1,
+            kind: EventKind::TaskStatusChanged,
+            summary: "Collaboration workflow completed".to_string(),
+            metadata: [
+                ("steer_epoch".to_string(), "2".to_string()),
+                (
+                    "anytime_routing_learning_eligible".to_string(),
+                    "true".to_string(),
+                ),
+                ("anytime_selected_verified".to_string(), "true".to_string()),
+                (
+                    "anytime_selected_quality_bps".to_string(),
+                    "9500".to_string(),
+                ),
+                ("quality_pass".to_string(), "false".to_string()),
+                ("safety_violations".to_string(), "0".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let evidence = completion_learning_evidence(
+            &run_context,
+            LearningUsageCompleteness::Complete,
+            2,
+            CompletionToolEvidence {
+                grounded_count: 1,
+                verified_postcondition_count: 1,
+                trusted_contract_sequences: vec![7],
+            },
+            Some(&workflow),
+        );
+
+        assert_eq!(evidence.disposition, LearningDisposition::Negative);
+        assert_eq!(evidence.attribution, LearningAttribution::Workflow);
+        assert_eq!(evidence.verification, LearningVerification::Failed);
     }
 
     #[test]

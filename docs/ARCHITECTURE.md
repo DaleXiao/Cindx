@@ -505,13 +505,23 @@ terminal commit has produced qualified `LearningEvidenceV1`. Collaboration
 preparation and finalization do not enqueue speculative evaluations. Restored
 assignment receipts bind the evaluation to the profile that actually ran, and
 tampered or missing assignments fail closed.
+An unusable workflow-quality receipt does not erase a trusted postcondition
+receipt from the same terminal epoch: the latter remains eligible as tool
+evidence, while permission, safety, usage, and epoch gates still fail closed.
+Prompt-learning strata use the task class frozen before the conductor response,
+not the conductor's mutable class output. The conductor still chooses the live
+route dynamically, but a candidate cannot collapse or relabel its own
+generalization denominator. Legacy events without this field retain their
+recorded decision class for replay compatibility.
 
 The feature-gated Workflow GEPA V2 campaign exercises this causal chain on eight
 frozen real-agent coding and research tasks. Seed Pro runs must complete their
 deterministic file, JSON, and command postconditions before their terminal
 evidence becomes the dataset. Successful read and command receipts prove that
 the product harness was used, while the verifier remains neutral between
-authorized mutation implementations. The temporary workspace is then deleted
+authorized mutation implementations. The frozen suite contract also requires
+every declared category to match the independent pre-decision classifier. The
+temporary workspace is then deleted
 and reconstructed; its content
 fingerprint must equal the pre-treatment fingerprint before either paired
 candidate receives the read-only view. Train and holdout evidence are matched,
