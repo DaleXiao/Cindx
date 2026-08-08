@@ -46,5 +46,6 @@ inputs, feeds external deterministic outcomes into reflection, admits a single
 candidate on validation only, and reserves a separate two-repeat matched
 product test. Seed and candidate use isolated identical workspaces, execution
 order is counterbalanced, and candidate receipts must prove the exact learned
-profile influenced route semantics and at least one Task Graph run. V4 remains
-unverified until a separately authorized provider campaign completes.
+profile influenced route semantics and at least one Task Graph run. The second
+authorized V4 campaign later reached validation and rejected its candidate;
+see the current evaluation index for that separate result.
