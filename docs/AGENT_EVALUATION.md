@@ -29,7 +29,8 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Causal Router v2 contract | current source | Deterministic exact-input fingerprints, complete executable action identities, tri-state effect authority, indexed exact context-and-action evidence, conservative value decomposition, 4 KiB receipt, and 2-lookup/2-action scaling bounds | Routing provenance and bounded admission are verified; no provider-backed quality or Auto/Pro uplift claim |
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
-| Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, route isolation, authority ceilings, and operation-count bounds | Proves learned-profile wiring, recoverable serving projection, and serving boundaries only; provider-backed profile or distillation uplift remains unverified |
+| Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, behavior-only route phenotype, authority ceilings, and operation-count bounds | Proves learned-profile wiring from route through Task Graph, recoverable serving projection, and hard safety/budget boundaries only; provider-backed uplift remains unverified |
+| Workflow GEPA causal campaign | current source | 8 frozen effectful coding/research tasks; terminal-only learning admission; exact pre-treatment workspace restoration; paired seed/candidate train and holdout; fresh route/Task Graph exercise; Grounded Direct control | Feature-gated campaign contract only. No uplift is claimed until a clean-revision provider run passes every evidence and non-regression gate |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, semantic-curation loss/retry/panic recovery, queue/steer, permission, restart recovery, process CPU/output/time budgets, projection, and performance contracts | Control-plane evidence only |
 
@@ -65,12 +66,13 @@ position-balanced comparison, dual-gate promotion, frozen provenance, and
 strict paired high-information mutation input. The ordinary and transfer gates
 also reject candidate-only failure and absolute holdout quality, latency, or
 token regression against the stable profile, even if relative reviewer reward
-is positive. Those are mechanism checks, not answer-quality evidence. The
-current campaign does not execute the per-run route/retrieval decision layer, so
-no learned routing or retrieval claim is made. A future provider-backed
-treatment must compare the pre-transfer Pro profile with a promoted
-transfer-trained Pro profile on frozen matched cases before any uplift claim is
-allowed.
+is positive. Those are mechanism checks, not answer-quality evidence.
+Historical transfer evidence did not execute the per-run route decision layer.
+The feature-gated Workflow GEPA campaign now requires a fresh frozen-profile
+product run to prove that learned route semantics and the Task Graph were both
+exercised, but retrieval remains outside that treatment. Auto-to-Pro uplift
+still requires a provider-backed comparison of the pre-transfer Pro profile
+with the promoted transfer-trained profile on frozen matched cases.
 
 The Pro-to-Auto path additionally replays the current Pro champion's two gates,
 transfers only the complete bounded structural delta relative to the stable Pro

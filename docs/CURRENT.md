@@ -424,19 +424,24 @@ Auto teachers, Goal Delta, canary success, promotion evidence, or Pro-to-Auto
 teachers. Permission failures can teach stopping or recovery within existing
 authority, never permission bypass, budget expansion, or repeated side effects.
 
-The learned genome continues to govern the evaluated workflow surface:
-topology, branch shape, roles, verification, tool exposure, retry/recovery,
-stopping, context policy, and bounded step budgets. Per-request route,
-retrieval, and memory decisions remain owned by `AgentRunDecision`; the current
-GEPA campaign does not execute that decision layer, so those fields are not
-presented as learned strategy without a matched causal evaluation.
-Accordingly, learned or canary directives are not supplied to the pre-workflow
-route prompt, and learned profile identity is neutralized in route matching
-while its actual fingerprint remains in attribution receipts. Once a workflow
-has been admitted, model-proposed step tool policy may only narrow the selected
-genome ceiling. Planning and every runner also intersect that phenotype with
-the outer run budget; an external zero/one limit is never raised to a profile
-default.
+The learned genome governs both the workflow surface and the behavioral advice
+given to `AgentRunDecision`: topology, branch shape, roles, verification, tool
+exposure, retry/recovery, stopping, context policy, and bounded step budgets.
+Only behavior that differs from the effort's seed profile reaches the route
+prompt. Profile ids, generations, and Direct-finalizer-only genes are excluded
+from that route phenotype, so provenance changes cannot alter routing. The
+route receipt pins the semantic phenotype hash that was actually supplied.
+Schema validation, configured model availability, effect authority, permission
+policy, and outer runtime budgets remain deterministic hard limits; learned
+advice cannot widen them. Once a workflow has been admitted, model-proposed
+step tool policy may only narrow the selected genome ceiling, and every runner
+takes the minimum of that phenotype and the outer hard budget.
+
+Prompt evolution is scheduled only after a newly committed terminal result has
+qualified learning evidence. Pre-terminal collaboration hooks no longer enqueue
+duplicate or partial evaluations. This lets a first successful Auto or Pro run
+bootstrap its project-scoped campaign while excluding failed, unverified, or
+superseded attempts from positive evidence.
 
 Transfer observations are appended as one mirrored pair and enter the canonical
 evolution read model only when both sides are scientific, project-scoped, and

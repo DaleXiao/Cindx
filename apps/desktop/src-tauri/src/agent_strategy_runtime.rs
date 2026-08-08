@@ -16,6 +16,7 @@ pub(crate) use self::preparation::should_evaluate_strategy_profile;
 pub(crate) use self::preparation::{
     cumulative_effective_prompt_objective, effective_prompt_objective_for_messages,
 };
+use self::causal_route::run_decision_evolved_directive;
 use self::preparation::{ensure_planning_current, selected_strategy_profile};
 #[cfg(test)]
 pub(crate) use self::requirements::preferred_compatible_route_model;
@@ -84,10 +85,6 @@ struct PlannedRunFinalizeInput {
     route_prompt_profile_sha256: String,
 }
 
-fn run_decision_evolved_directive(_: &ConductorPromptGenome) -> String {
-    String::new()
-}
-
 pub(crate) fn plan_agent_run(
     state: &tauri::State<'_, AppState>,
     run_context: &mut Metadata,
@@ -124,7 +121,11 @@ pub(crate) fn plan_agent_run(
     let preferred_fallback_model = preferred_fallback_model(config, effort, &allowed_models);
     let (profile, profile_source) = selected_strategy_profile(state, config, effort, run_context)
         .map_err(CollaborationStageError::Failed)?;
-    let route_prompt_profile_sha256 = causal_route::neutral_prompt_profile_sha256(effort);
+    let route_prompt_profile_sha256 = profile
+        .route_decision_profile_sha256(effort.label())
+        .map_err(CollaborationStageError::Failed)?;
+    let evolved_route_directive = run_decision_evolved_directive(&profile, effort)
+        .map_err(CollaborationStageError::Failed)?;
     let recent_context = collaboration_recent_context(history);
 
     if execution_constraint.is_matched_memory_effect() {
@@ -234,7 +235,7 @@ pub(crate) fn plan_agent_run(
         allowed_models: allowed_models.clone(),
         model_candidates: candidates.clone(),
         max_parallelism,
-        evolved_directive: run_decision_evolved_directive(&profile),
+        evolved_directive: evolved_route_directive,
         historical_evidence,
         matched_collaboration_evidence,
         route_requirements,

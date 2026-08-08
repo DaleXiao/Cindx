@@ -32,6 +32,7 @@ pub(super) struct CaseExecutionInput<'a> {
     pub(super) root: &'a Path,
     pub(super) execution: &'a ExecutionCell,
     pub(super) frozen_profile: Option<&'a FrozenPromptProfileSnapshot>,
+    pub(super) project_scope: Option<&'a str>,
 }
 
 pub(super) fn execute_case(
@@ -48,6 +49,7 @@ pub(super) fn execute_case(
         root,
         execution,
         frozen_profile,
+        project_scope,
     } = input;
     let input_sha256 = case_input_sha256(case);
     let started = Instant::now();
@@ -190,7 +192,8 @@ pub(super) fn execute_case(
     }
 
     let key = format!("r{replicate}-{}-{}", case.id, treatment.label());
-    let (project_id, mut session_id) = match configure_run_project(state, root, &key) {
+    let (project_id, mut session_id) = match configure_run_project(state, root, &key, project_scope)
+    {
         Ok(value) => value,
         Err(error) => {
             return failed_run(

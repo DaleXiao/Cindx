@@ -2,17 +2,13 @@ use super::collaboration_service::WorkflowRoleCoverage;
 use super::*;
 
 pub(super) struct AdaptiveCollaborationFinalization<'a, 'state> {
-    pub(super) app: &'a tauri::AppHandle,
     pub(super) state: &'a tauri::State<'state, AppState>,
     pub(super) config: &'a ProviderConfig,
     pub(super) task_id: &'a TaskId,
     pub(super) run_context: &'a Metadata,
     pub(super) collaboration_id: &'a str,
     pub(super) prompt: &'a str,
-    pub(super) models: &'a [String],
-    pub(super) agent_budget: usize,
     pub(super) effort: String,
-    pub(super) policy: String,
     pub(super) prompt_genome: ConductorPromptGenome,
     pub(super) workflow_started_at_ms: u64,
     pub(super) final_step_id: String,
@@ -34,17 +30,13 @@ pub(super) fn finalize_adaptive_collaboration(
     context: AdaptiveCollaborationFinalization<'_, '_>,
 ) -> Result<String, String> {
     let AdaptiveCollaborationFinalization {
-        app,
         state,
         config,
         task_id,
         run_context,
         collaboration_id,
         prompt,
-        models,
-        agent_budget,
         effort,
-        policy,
         prompt_genome,
         workflow_started_at_ms,
         final_step_id,
@@ -536,18 +528,6 @@ pub(super) fn finalize_adaptive_collaboration(
             ),
         )
         .map_err(|error| error.to_string())?;
-    }
-    if config.prompt_evolution_enabled && effort != "fast" {
-        schedule_prompt_pairwise_evaluation(
-            app.clone(),
-            task_id.clone(),
-            run_context.clone(),
-            effort,
-            policy,
-            models.to_vec(),
-            agent_budget,
-            prompt_genome,
-        );
     }
     Ok(final_output)
 }

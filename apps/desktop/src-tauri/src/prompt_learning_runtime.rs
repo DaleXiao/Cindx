@@ -657,7 +657,7 @@ where
     })
 }
 
-fn prompt_workspace_revision_sha256(
+pub(crate) fn prompt_workspace_revision_sha256(
     workspace_root: &Path,
     control: &AgentRunControl,
 ) -> Result<String, String> {

@@ -296,7 +296,7 @@ impl ConductorPromptGenome {
             .effective_tool_call_budget(declared_calls)
     }
 
-    pub fn conductor_directive(&self) -> String {
+    pub(super) fn workflow_behavior_directive(&self) -> String {
         let graph = match self.graph_depth {
             PromptGraphDepth::Lean => {
                 "Prefer one direct worker. Add another step only when it removes a concrete risk."
@@ -385,9 +385,7 @@ impl ConductorPromptGenome {
         };
         let custom = self.custom_directive.trim();
         format!(
-            "Prompt profile {} (generation {}). {} {} {} {} {} {} {} {} Never create more than {} independent branches, {} attempts, {} model turns, or {} read-only tool calls per step.{}",
-            self.id,
-            self.generation,
+            "{} {} {} {} {} {} {} {} Never create more than {} independent branches, {} attempts, {} model turns, or {} read-only tool calls per step.{}",
             graph,
             verification,
             context,
@@ -405,6 +403,15 @@ impl ConductorPromptGenome {
             } else {
                 format!(" Additional evolved directive: {custom}")
             }
+        )
+    }
+
+    pub fn conductor_directive(&self) -> String {
+        format!(
+            "Prompt profile {} (generation {}). {}",
+            self.id,
+            self.generation,
+            self.workflow_behavior_directive()
         )
     }
 

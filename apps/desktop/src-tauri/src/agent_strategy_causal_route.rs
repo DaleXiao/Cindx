@@ -1,14 +1,17 @@
 use super::requirements::AgentPlanningSource;
 use agent_core::Metadata;
 use orchestrator::{
-    prompt_genome_sha256, select_causal_route_v2, sha256_hex, AgentPolicy, AgentRouteRequirements,
-    AgentRunDecision, CausalRouteReason, ConductorPromptGenome, ModelCandidate,
-    RouteFeatureSnapshotV2,
+    select_causal_route_v2, sha256_hex, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
+    CausalRouteReason, ConductorPromptGenome, ModelCandidate, RouteFeatureSnapshotV2,
 };
 
-pub(super) fn neutral_prompt_profile_sha256(effort: AgentPolicy) -> String {
-    prompt_genome_sha256(&ConductorPromptGenome::seed_for_effort(effort.label()))
-        .expect("built-in route-neutral prompt profile must validate")
+pub(super) fn run_decision_evolved_directive(
+    profile: &ConductorPromptGenome,
+    effort: AgentPolicy,
+) -> Result<String, String> {
+    profile
+        .route_decision_directive(effort.label())
+        .map(|directive| directive.unwrap_or_default())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,6 +75,10 @@ pub(super) fn apply_causal_route_to_context(
             receipt.requirements_fingerprint.clone(),
         ),
         ("causal_route_policy", receipt.policy.clone()),
+        (
+            "route_prompt_profile_sha256",
+            receipt.feature_snapshot.prompt_profile_sha256.clone(),
+        ),
         (
             "causal_route_candidate",
             receipt.candidate_route.label().to_string(),
