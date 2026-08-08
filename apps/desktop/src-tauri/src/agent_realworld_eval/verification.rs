@@ -444,6 +444,7 @@ mod tests {
             id: "immutable-fixture".to_string(),
             category: "coding".to_string(),
             objective: "preserve the check".to_string(),
+            campaign_split: None,
             seed_memory_prompt: None,
             index_workspace: false,
             files: vec![FixtureFile {
@@ -478,6 +479,7 @@ mod tests {
             id: "memory-effect".to_string(),
             category: "memory_required".to_string(),
             objective: "answer from memory".to_string(),
+            campaign_split: None,
             seed_memory_prompt: Some("Long-term project requirement: retain X.".to_string()),
             index_workspace: false,
             files: Vec::new(),
@@ -524,6 +526,7 @@ mod tests {
             id: "browser".to_string(),
             category: "browser".to_string(),
             objective: "Open {{BROWSER_URL}}".to_string(),
+            campaign_split: None,
             seed_memory_prompt: None,
             index_workspace: false,
             files: vec![FixtureFile {
@@ -585,6 +588,7 @@ mod tests {
             id: "memory-control".to_string(),
             category: "memory_irrelevant_control".to_string(),
             objective: "answer from the authoritative fixture".to_string(),
+            campaign_split: None,
             seed_memory_prompt: Some("obsolete Red Juniper note".to_string()),
             index_workspace: false,
             files: vec![FixtureFile {

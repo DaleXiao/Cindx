@@ -514,28 +514,29 @@ route dynamically, but a candidate cannot collapse or relabel its own
 generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
-The feature-gated Workflow GEPA V3 campaign exercises this causal chain on eight
-frozen real-agent coding and research tasks. V2 is retained only as
-`INVALID_EVALUATOR` history because it prescribed source spellings and exposed
-research answers in workspace verifier files. V3 gives the Agent answer-free
-workspace checks while the host owns hidden behavioral or exact JSON
-postconditions. Evidence and check fixtures are byte-bound to their original
-contents, so editing a visible check cannot manufacture success. Seed Pro runs
-must complete those postconditions before their terminal evidence becomes the
-dataset. Successful read and command receipts prove that the product harness was
-used, while hidden behavior checks remain neutral between authorized mutation
-implementations. The frozen suite contract also requires
-every declared category to match the independent pre-decision classifier. The
-temporary workspace is then deleted
-and reconstructed; its content
-fingerprint must equal the pre-treatment fingerprint before either paired
-candidate receives the read-only view. Train and holdout evidence are matched,
-the learned candidate must beat seed without quality, safety, completion,
-latency, or token regression, and a fresh full-product run must prove both route
-semantics and Task Graph execution. This campaign is exploratory evidence and
-does not publish a production deployment. Product background evolution is
-disabled inside the campaign app; only the bounded campaign driver may advance
-GEPA, preventing asynchronous learning from contaminating the matched cells.
+The feature-gated Workflow GEPA V4 campaign exercises this causal chain through
+five modules with one-way responsibilities: the runner owns protocol order, the
+suite module validates public requirements and frozen strata, the evidence
+module converts external product verification into redacted reflection packets,
+the execution module isolates and counterbalances matched cells, and the
+contract module computes gates from sanitized receipts. V2 is retained only as
+`INVALID_EVALUATOR` history and V3 as `INVALID_TASK_SPEC` history.
+
+V4 uses two training tasks, two validation tasks, and four untouched test tasks.
+The Agent receives every behavior requirement; only concrete host test inputs
+remain unseen. External postconditions override an internally completed status
+when producing GEPA reflection. One mutation is generated from training only,
+validation alone determines whether it may enter the final test, and no final
+test observation can select or alter that candidate. Seed and candidate runs
+use separately materialized workspaces with equal prestate fingerprints and
+separate project scopes, while order alternates across pairs. Two final repeats
+per case must show quality wins on multiple distinct cases without losses,
+safety, completion, latency, or token regression. Every candidate cell must
+bind the exact learned profile and route phenotype, and at least one must
+exercise its Task Graph. A Grounded Direct product control must also pass. The
+campaign writes an external candidate snapshot but does not deploy it. Product
+background evolution is disabled inside the campaign app, so only the bounded
+driver can mutate the candidate during the protocol.
 
 Direct-finalizer evolution is a separate one-gene surface, not an extension of
 the workflow phenotype. The feature-gated evaluator materializes one canonical

@@ -33,6 +33,10 @@ mod tool_receipts;
 mod treatments;
 mod verification;
 mod workflow_gepa_campaign;
+mod workflow_gepa_campaign_contract;
+mod workflow_gepa_campaign_evidence;
+mod workflow_gepa_campaign_execution;
+mod workflow_gepa_campaign_suite;
 
 use execution::{execute_case, CaseExecutionInput};
 use http_fixture::HttpFixtureReceipt;
@@ -70,6 +74,8 @@ struct RealworldCase {
     id: String,
     category: String,
     objective: String,
+    #[serde(default)]
+    campaign_split: Option<String>,
     #[serde(default)]
     seed_memory_prompt: Option<String>,
     #[serde(default)]
