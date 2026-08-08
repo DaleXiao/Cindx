@@ -28,21 +28,38 @@ pub(crate) struct AgentCollaboration {
     pub(crate) execution_contract: Option<String>,
     pub(crate) evidence_packet: Option<AgentEvidencePacket>,
     pub(crate) grounding_receipts: Vec<CollaborationGroundingReceipt>,
-    pub(crate) candidate_models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct AdaptiveCollaborationOutcome {
+    pub(crate) disposition: AdaptiveCollaborationDisposition,
     pub(crate) guidance: String,
     pub(crate) execution_contract: Option<String>,
     pub(crate) evidence_packet: Option<AgentEvidencePacket>,
     pub(crate) grounding_receipts: Vec<CollaborationGroundingReceipt>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdaptiveCollaborationDisposition {
+    ApplyGuidance,
+    ForegroundDirect,
+}
+
 impl AdaptiveCollaborationOutcome {
-    pub(crate) fn direct(guidance: String) -> Self {
+    pub(crate) fn guidance(guidance: String) -> Self {
         Self {
+            disposition: AdaptiveCollaborationDisposition::ApplyGuidance,
             guidance,
+            execution_contract: None,
+            evidence_packet: None,
+            grounding_receipts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn foreground_direct() -> Self {
+        Self {
+            disposition: AdaptiveCollaborationDisposition::ForegroundDirect,
+            guidance: String::new(),
             execution_contract: None,
             evidence_packet: None,
             grounding_receipts: Vec::new(),
@@ -54,6 +71,7 @@ impl AdaptiveCollaborationOutcome {
         checkpoint: &WorkflowExecutionCheckpoint,
     ) -> Result<Self, String> {
         Ok(Self {
+            disposition: AdaptiveCollaborationDisposition::ApplyGuidance,
             evidence_packet: Some(checkpoint_evidence_packet(&guidance, checkpoint)),
             grounding_receipts: checkpoint_grounding_receipts(checkpoint),
             guidance,

@@ -54,7 +54,6 @@ fn collaboration_receipt(request: &str) -> AgentCollaboration {
             input_fingerprint: agent_runtime::tool_input_fingerprint("file.read", request),
             observation: "permission implementation".to_string(),
         }],
-        candidate_models: vec!["model-a".to_string()],
     }
 }
 
@@ -213,14 +212,34 @@ fn agent_collaboration_contract_gate() {
     )
     .unwrap();
     assert!(!controller.verdict("final").unwrap().verified);
+    let rejected_decision = crate::adaptive_uplift_runtime::adaptive_uplift_selection_decision(
+        &controller,
+        "final",
+        None,
+    );
     assert!(!matches!(
-        crate::adaptive_uplift_runtime::adaptive_uplift_selection_decision(
-            &controller,
-            "final",
-            None,
-        ),
+        rejected_decision,
         Some(UpliftGateDecision::AcceptTeam)
     ));
+    let rejected_selection = crate::adaptive_collaboration_finalization::select_adaptive_guidance(
+        rejected_decision.as_ref(),
+        "final",
+        true,
+        Some("frontier".to_string()),
+    );
+    assert_eq!(
+        rejected_selection.0.as_deref(),
+        Some(DIRECT_ANCHOR_CANDIDATE_ID)
+    );
+    assert!(!rejected_selection.1);
+    let accepted_selection = crate::adaptive_collaboration_finalization::select_adaptive_guidance(
+        Some(&UpliftGateDecision::AcceptTeam),
+        "final",
+        true,
+        Some("frontier".to_string()),
+    );
+    assert_eq!(accepted_selection.0.as_deref(), Some("final"));
+    assert!(accepted_selection.1);
 
     let output = format!(
         "audit complete\nCINDX_VERIFICATION: {{\"schema\":\"{WORKFLOW_VERIFICATION_RECEIPT_SCHEMA}\",\"verdict\":\"passed\",\"reviewed_steps\":[\"root\"],\"evidence_refs\":[],\"unresolved\":[]}}"

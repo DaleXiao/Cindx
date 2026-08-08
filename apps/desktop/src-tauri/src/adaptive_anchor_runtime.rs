@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) enum AdaptiveAnchorOutcome {
     Continue(AdaptiveAnchorState),
-    Commit(String),
+    Commit,
 }
 
 pub(super) struct AdaptiveAnchorState {
@@ -122,7 +122,7 @@ pub(super) fn start_adaptive_anchor(
                 AnytimeDecision::Commit { .. }
             ) {
                 record_direct_anchor_commit(state, task_id, run_context, collaboration_id, effort);
-                return Ok(AdaptiveAnchorOutcome::Commit(output.clone()));
+                return Ok(AdaptiveAnchorOutcome::Commit);
             }
         }
     } else {

@@ -9,7 +9,6 @@ fn collaboration(execution_contract: Option<&str>) -> AgentCollaboration {
         execution_contract: execution_contract.map(str::to_string),
         evidence_packet: None,
         grounding_receipts: Vec::new(),
-        candidate_models: vec!["model-a".to_string(), "model-b".to_string()],
     }
 }
 

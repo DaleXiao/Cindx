@@ -342,6 +342,12 @@ for whether those segments require effects.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
   dependency order and runnable/resumable/degraded/exhausted states.
+- Workflow output is advisory until the independent uplift gate returns
+  `AcceptTeam`. Direct-anchor selection, missing comparison, failed repair,
+  blocked frontier, conductor failure, and all other unproven outcomes return
+  no collaboration context; the foreground Actor then runs through the same
+  full-capability loop as a direct decision. No deterministic fallback DAG or
+  partial best-known handoff is injected.
 - Workflow policy is an execution boundary rather than a prompt hint.
   `ReadOnlyEvidence` exposes only substantive statically read-only tools,
   `ReadOnlyExploration` may include bounded discovery tools, and `None` exposes
@@ -357,8 +363,9 @@ for whether those segments require effects.
   receipts remain `Inconclusive`, while explicit unresolved findings degrade the
   step.
 - `first_verified` requires an observed verified verdict before normal early
-  commit. Terminal reserve may still return a usable best-known fallback, but
-  the selection assessment keeps unmet verification as degradation. A prompt
+  commit. A workflow candidate that does not independently clear the uplift
+  gate cannot modify the foreground Actor's context, even when it remains useful
+  as diagnostic telemetry. A prompt
   genome using Minimal verification is raised to Evidence whenever the
   execution contract requires verification.
 - The conductor is told the actual worker capability boundary. Isolated workers
@@ -373,6 +380,9 @@ for whether those segments require effects.
   model when role capability or supported historical evidence justifies it.
 - Workflow output is a grounded handoff to the interactive loop; it does not
   bypass the final tool, permission, persistence, or terminal contracts.
+- The foreground Actor's completed answer is terminal input, not a draft for a
+  second collaboration reviewer/synthesizer chain. This preserves its tool and
+  evidence lineage and removes two unconditional post-Actor model calls.
 - Desktop conductor calls apply a 45-second no-progress boundary even when no
   alternate model exists. Alternate-model recovery remains a desktop transport
   concern; value admission and route calibration remain portable orchestrator

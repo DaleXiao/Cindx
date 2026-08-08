@@ -252,35 +252,6 @@ pub(crate) fn run_conductor_collaboration_stage(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_collaboration_stage_with_delta(
-    state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    collaboration_id: &str,
-    stage: &str,
-    role: ModelRole,
-    model: &str,
-    prompt: String,
-    on_delta: impl FnMut(&str),
-) -> Result<String, String> {
-    run_collaboration_stage_typed(
-        state,
-        config,
-        task_id,
-        run_context,
-        collaboration_id,
-        stage,
-        role,
-        model,
-        prompt,
-        CollaborationCallLimits::default(),
-        on_delta,
-    )
-    .map_err(CollaborationStageError::message)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn run_collaboration_stage_typed(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,

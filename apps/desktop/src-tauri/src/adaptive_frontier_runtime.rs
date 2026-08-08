@@ -312,10 +312,10 @@ pub(super) fn run_adaptive_frontier(
 }
 
 fn commit_adaptive_frontier(
-    output: String,
-    checkpoint: &WorkflowExecutionCheckpoint,
+    _output: String,
+    _checkpoint: &WorkflowExecutionCheckpoint,
 ) -> Result<AdaptiveFrontierOutcome, String> {
     Ok(AdaptiveFrontierOutcome::Commit(
-        AdaptiveCollaborationOutcome::from_checkpoint(output, checkpoint)?,
+        AdaptiveCollaborationOutcome::foreground_direct(),
     ))
 }

@@ -66,8 +66,8 @@ pub(crate) fn run_adaptive_collaboration(
         attempted: direct_anchor_attempted,
     } = match anchor_outcome {
         AdaptiveAnchorOutcome::Continue(state) => state,
-        AdaptiveAnchorOutcome::Commit(output) => {
-            return Ok(AdaptiveCollaborationOutcome::direct(output));
+        AdaptiveAnchorOutcome::Commit => {
+            return Ok(AdaptiveCollaborationOutcome::foreground_direct());
         }
     };
     let conductor_outcome = plan_adaptive_workflow(AdaptiveConductorContext {
@@ -100,8 +100,8 @@ pub(crate) fn run_adaptive_collaboration(
             workflow_plan,
             attempts,
         } => (*workflow_plan, attempts),
-        AdaptiveConductorOutcome::DirectCommit(output) => {
-            return Ok(AdaptiveCollaborationOutcome::direct(output));
+        AdaptiveConductorOutcome::DirectCommit => {
+            return Ok(AdaptiveCollaborationOutcome::foreground_direct());
         }
     };
     let workflow = workflow_plan.adaptive_workflow();
@@ -294,10 +294,10 @@ pub(crate) fn run_adaptive_collaboration(
                 )?;
             }
         }
-        if let Some((_candidate_id, output, _verdict)) =
+        if let Some((_candidate_id, _output, _verdict)) =
             anytime_best_known_output(&anytime_controller, &workflow_checkpoint)
         {
-            return AdaptiveCollaborationOutcome::from_checkpoint(output, &workflow_checkpoint);
+            return Ok(AdaptiveCollaborationOutcome::foreground_direct());
         }
         return Err("adaptive workflow final output is missing".to_string());
     };
@@ -382,7 +382,7 @@ pub(crate) fn run_adaptive_collaboration(
                         false,
                     );
                 }
-                return AdaptiveCollaborationOutcome::from_checkpoint(output, &workflow_checkpoint);
+                return Ok(AdaptiveCollaborationOutcome::foreground_direct());
             }
             return Err(error);
         }
@@ -407,7 +407,7 @@ pub(crate) fn run_adaptive_collaboration(
             )?;
         }
     }
-    let guidance = finalize_adaptive_collaboration(AdaptiveCollaborationFinalization {
+    finalize_adaptive_collaboration(AdaptiveCollaborationFinalization {
         state,
         config,
         task_id,
@@ -430,6 +430,5 @@ pub(crate) fn run_adaptive_collaboration(
         direct_anchor_verifier: direct_anchor_verifier.as_ref(),
         anytime_controller: &mut anytime_controller,
         workflow_checkpoint: &mut workflow_checkpoint,
-    })?;
-    AdaptiveCollaborationOutcome::from_checkpoint(guidance, &workflow_checkpoint)
+    })
 }

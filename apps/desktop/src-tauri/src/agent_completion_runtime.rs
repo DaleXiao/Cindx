@@ -150,101 +150,15 @@ pub(crate) fn finalize_agent_completion(
         true,
     );
 
-    let (mut final_answer, synthesized, delivery_request_id) = if delivery.is_finalizer() {
-        if !streamed_output && !answer.trim().is_empty() {
-            emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
-        }
-        (answer.clone(), false, request_id.to_string())
-    } else if let Some(collaboration) = collaboration {
-        let synthesis_objective = effective_agent_objective(run_context, prompt);
-        match synthesize_agent_answer(
-            app,
-            state,
-            config,
-            runtime,
-            synthesis_objective,
-            &answer,
-            run_context,
-            collaboration,
-            cancellation,
-            &grounded_completion_receipt.visible_evidence_sequences,
-        ) {
-            Ok(synthesized_answer) => {
-                match runtime.task_contract.rebind_grounded_completion_receipt(
-                    &grounded_completion_receipt,
-                    epoch_lease.epoch(),
-                    runtime.turn,
-                    &synthesized_answer.content,
-                    &synthesized_answer.visible_evidence_sequences,
-                ) {
-                    Ok(receipt) => {
-                        grounded_completion_receipt = receipt;
-                        (
-                            synthesized_answer.content,
-                            true,
-                            synthesized_answer.stream_request_id,
-                        )
-                    }
-                    Err(_) => {
-                        emit_agent_stream_delta(
-                            app,
-                            &synthesized_answer.stream_request_id,
-                            session_id,
-                            "",
-                            false,
-                            true,
-                            None,
-                        );
-                        emit_agent_stream_delta(
-                            app,
-                            &synthesized_answer.stream_request_id,
-                            session_id,
-                            &answer,
-                            false,
-                            false,
-                            None,
-                        );
-                        (answer.clone(), false, synthesized_answer.stream_request_id)
-                    }
-                }
-            }
-            Err(_)
-                if !cancellation.execution_epoch_lease_is_current(epoch_lease)
-                    && !agent_run_should_stop(cancellation) =>
-            {
-                emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
-                return Ok(AgentCompletionOutcome::RestartAfterSteer);
-            }
-            Err(_) if agent_run_should_stop(cancellation) => {
-                return Ok(AgentCompletionOutcome::Paused(
-                    pause_agent_loop_for_control_stop(
-                        app,
-                        state,
-                        workspace_root,
-                        runtime,
-                        prompt,
-                        run_context,
-                        Some(collaboration),
-                        cancellation,
-                    )?,
-                ));
-            }
-            Err(_) => {
-                emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
-                emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
-                (answer.clone(), false, request_id.to_string())
-            }
-        }
-    } else {
-        if !streamed_output && !answer.trim().is_empty() {
-            emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
-        }
-        (answer.clone(), false, request_id.to_string())
-    };
+    if !streamed_output && !answer.trim().is_empty() {
+        emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
+    }
+    let mut final_answer = answer.clone();
+    let delivery_request_id = request_id.to_string();
 
     let terminal_result_stage = if delivery.used_fallback() {
         "finalizer_fallback"
-    } else if delivery.is_finalizer() || synthesized {
+    } else if delivery.is_finalizer() {
         "finalizer"
     } else if grounded_completion_receipt.basis
         == agent_runtime::GroundedCompletionBasis::ConstraintObserved
@@ -274,7 +188,6 @@ pub(crate) fn finalize_agent_completion(
         true,
     );
     let exact_content_required = delivery.is_finalizer()
-        || synthesized
         || grounded_completion_receipt.basis
             != agent_runtime::GroundedCompletionBasis::SelfContained;
     let terminal_selection = cancellation.best_known_result().filter(|candidate| {
@@ -282,8 +195,7 @@ pub(crate) fn finalize_agent_completion(
     });
     let terminal_selection_override =
         terminal_selection_overrides(terminal_selection.as_ref(), &final_answer);
-    let persist_selected_terminal_message = synthesized
-        || terminal_selection_override
+    let persist_selected_terminal_message = terminal_selection_override
         || (delivery.is_finalizer() && !delivery.already_persisted());
     if let Some(selected) = terminal_selection
         .as_ref()
@@ -390,7 +302,7 @@ pub(crate) fn finalize_agent_completion(
         ),
         (
             "collaboration_synthesized".to_string(),
-            synthesized.to_string(),
+            "false".to_string(),
         ),
         (
             "completion_delivery".to_string(),
@@ -720,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_synthesis_is_not_replaced_by_a_different_executor_candidate() {
+    fn evidence_bound_actor_answer_is_not_replaced_by_a_different_candidate() {
         let longer_executor = candidate("a much longer executor draft", "executor");
         assert!(!terminal_selection_is_eligible(
             &longer_executor,
@@ -730,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesis_stage_never_inflates_epistemic_quality() {
+    fn delivery_stage_never_inflates_epistemic_quality() {
         assert_eq!(
             grounded_completion_quality(agent_runtime::GroundedCompletionBasis::SelfContained),
             ResultQuality::Substantive

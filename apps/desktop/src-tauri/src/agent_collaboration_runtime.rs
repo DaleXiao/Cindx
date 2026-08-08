@@ -8,6 +8,7 @@ use crate::{
         prioritize_collaboration_model, record_collaboration_stage_started,
         CollaborationCandidateSpec,
     },
+    collaboration_service::AdaptiveCollaborationDisposition,
     collaboration_stage_runtime::{record_collaboration_stage_finished, run_collaboration_stage},
     collaboration_worker_runtime::complete_collaboration_worker_with_tools,
     configuration_models::ProviderConfig,
@@ -443,7 +444,7 @@ pub(crate) fn prepare_agent_collaboration(
             false,
             bounded_profile.as_ref(),
         )
-        .map(AdaptiveCollaborationOutcome::direct)
+        .map(AdaptiveCollaborationOutcome::guidance)
     } else {
         run_adaptive_collaboration(
             app,
@@ -458,73 +459,11 @@ pub(crate) fn prepare_agent_collaboration(
             &models,
             agent_budget,
         )
-        .or_else(|error| {
-            if error == COLLABORATION_STEER_INTERRUPTED {
-                return Err(error);
-            }
-            if collaboration_error_blocks_executor(&error) {
-                return Err(error);
-            }
-            let control =
-                active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
-            if control
-                .as_ref()
-                .is_some_and(|control| control.should_stop())
-            {
-                return Err(error);
-            }
-            let fallback_allowed = control
-                .as_ref()
-                .is_none_or(|control| control.progress().remaining.as_secs() >= 90);
-            if let Ok(mut store) = state.store.lock() {
-                let _ = append_event(
-                    &mut store,
-                    task_id,
-                    EventKind::TaskStatusChanged,
-                    "Collaboration workflow failed",
-                    metadata_with_context(
-                        [
-                            ("collaboration_id".to_string(), id.clone()),
-                            (
-                                "workflow_schema".to_string(),
-                                WORKFLOW_IR_SCHEMA.to_string(),
-                            ),
-                            ("status".to_string(), "failed".to_string()),
-                            ("fallback_used".to_string(), fallback_allowed.to_string()),
-                            (
-                                "error".to_string(),
-                                truncate_for_collaboration(&error, 2_000),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect(),
-                        run_context,
-                    ),
-                );
-            }
-            if !fallback_allowed {
-                return Err(format!(
-                    "{error}; adaptive fallback skipped because less than 90 seconds remain"
-                ));
-            }
-            run_collaboration_candidates(
-                app,
-                state,
-                config,
-                task_id,
-                workspace_root,
-                run_context,
-                &id,
-                prompt,
-                history,
-                &fallback_models,
-                true,
-                None,
-            )
-            .map(AdaptiveCollaborationOutcome::direct)
-        })
     };
     let mut outcome = outcome_result?;
+    if outcome.disposition == AdaptiveCollaborationDisposition::ForegroundDirect {
+        return Ok(None);
+    }
     let steer_epoch = run_context_steer_epoch(run_context);
     outcome.grounding_receipts.retain(|receipt| {
         receipt.steer_epoch == steer_epoch
@@ -541,7 +480,6 @@ pub(crate) fn prepare_agent_collaboration(
         execution_contract: outcome.execution_contract,
         evidence_packet: outcome.evidence_packet,
         grounding_receipts: outcome.grounding_receipts,
-        candidate_models: models,
     }))
 }
 
@@ -577,20 +515,6 @@ pub(crate) fn prepare_agent_collaboration_or_degrade(
             if control.as_ref().is_some_and(agent_run_should_stop) {
                 return Err(error);
             }
-            let best_known = control
-                .as_ref()
-                .and_then(|control| control.best_guidance_result());
-            let guidance = best_known
-                .as_ref()
-                .filter(|result| !result.content.trim().is_empty())
-                .map(|result| {
-                    format!(
-                        "INTERNAL DEGRADED COLLABORATION HANDOFF: Team orchestration did not finish, but useful work was preserved from stage {} with quality {}. Independently verify it before use and do not expose this note to the user.\n\n{}",
-                        result.stage,
-                        result.quality.as_str(),
-                        result.content,
-                    )
-                });
             if let Ok(mut store) = state.store.lock() {
                 let _ = append_event(
                     &mut store,
@@ -603,13 +527,6 @@ pub(crate) fn prepare_agent_collaboration_or_degrade(
                             ("fallback_used".to_string(), "executor".to_string()),
                             ("policy".to_string(), policy.label().to_string()),
                             (
-                                "best_known_stage".to_string(),
-                                best_known
-                                    .as_ref()
-                                    .map(|result| result.stage.clone())
-                                    .unwrap_or_default(),
-                            ),
-                            (
                                 "error".to_string(),
                                 truncate_for_collaboration(&error, 2_000),
                             ),
@@ -620,15 +537,7 @@ pub(crate) fn prepare_agent_collaboration_or_degrade(
                     ),
                 );
             }
-            Ok(guidance.map(|guidance| AgentCollaboration {
-                id: unique_id("collab-degraded"),
-                policy: policy.label().to_string(),
-                guidance,
-                execution_contract: None,
-                evidence_packet: None,
-                grounding_receipts: Vec::new(),
-                candidate_models: Vec::new(),
-            }))
+            Ok(None)
         }
     }
 }

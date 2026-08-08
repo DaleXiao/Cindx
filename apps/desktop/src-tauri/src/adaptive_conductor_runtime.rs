@@ -1,12 +1,11 @@
 use super::*;
-use crate::conductor_fallback_runtime::deterministic_conductor_fallback;
 
 pub(super) enum AdaptiveConductorOutcome {
     Plan {
         workflow_plan: Box<WorkflowPlanIr>,
         attempts: usize,
     },
-    DirectCommit(String),
+    DirectCommit,
 }
 
 pub(super) struct AdaptiveConductorContext<'a, 'state> {
@@ -148,22 +147,7 @@ pub(super) fn plan_adaptive_workflow(
                 cancel_anytime_background(anchor_supervisor.as_ref(), None);
                 return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
             }
-            if effort != "fast" {
-                let workflow_plan = deterministic_conductor_fallback(
-                    &state.store,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    &harness,
-                    1,
-                    &format!("planning stage failed: {error}"),
-                )?;
-                return Ok(AdaptiveConductorOutcome::Plan {
-                    workflow_plan: Box::new(workflow_plan),
-                    attempts: 1,
-                });
-            }
-            if let Some(anchor) = await_direct_anchor_fallback(
+            if await_direct_anchor_fallback(
                 state,
                 task_id,
                 run_context,
@@ -174,8 +158,10 @@ pub(super) fn plan_adaptive_workflow(
                 anchor_supervisor,
                 direct_anchor_output,
                 Duration::from_millis(500),
-            )? {
-                return Ok(AdaptiveConductorOutcome::DirectCommit(anchor));
+            )?
+            .is_some()
+            {
+                return Ok(AdaptiveConductorOutcome::DirectCommit);
             }
             return Err(error);
         }
@@ -203,22 +189,7 @@ pub(super) fn plan_adaptive_workflow(
                         Ok(Some(_)) => {}
                         Ok(None) => return Err(COLLABORATION_STEER_INTERRUPTED.to_string()),
                         Err(reason) => {
-                            if effort != "fast" {
-                                let workflow_plan = deterministic_conductor_fallback(
-                                    &state.store,
-                                    task_id,
-                                    run_context,
-                                    collaboration_id,
-                                    &harness,
-                                    attempts,
-                                    &format!("repair budget exhausted: {}", reason.code()),
-                                )?;
-                                return Ok(AdaptiveConductorOutcome::Plan {
-                                    workflow_plan: Box::new(workflow_plan),
-                                    attempts,
-                                });
-                            }
-                            if let Some(anchor) = await_direct_anchor_fallback(
+                            if await_direct_anchor_fallback(
                                 state,
                                 task_id,
                                 run_context,
@@ -229,8 +200,10 @@ pub(super) fn plan_adaptive_workflow(
                                 anchor_supervisor,
                                 direct_anchor_output,
                                 Duration::from_millis(500),
-                            )? {
-                                return Ok(AdaptiveConductorOutcome::DirectCommit(anchor));
+                            )?
+                            .is_some()
+                            {
+                                return Ok(AdaptiveConductorOutcome::DirectCommit);
                             }
                             return Err(format!(
                                 "Conductor repair budget exhausted: {}",
@@ -266,22 +239,7 @@ pub(super) fn plan_adaptive_workflow(
                             cancel_anytime_background(anchor_supervisor.as_ref(), None);
                             return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
                         }
-                        if effort != "fast" {
-                            let workflow_plan = deterministic_conductor_fallback(
-                                &state.store,
-                                task_id,
-                                run_context,
-                                collaboration_id,
-                                &harness,
-                                attempts,
-                                &format!("repair stage failed: {repair_error}"),
-                            )?;
-                            return Ok(AdaptiveConductorOutcome::Plan {
-                                workflow_plan: Box::new(workflow_plan),
-                                attempts,
-                            });
-                        }
-                        if let Some(anchor) = await_direct_anchor_fallback(
+                        if await_direct_anchor_fallback(
                             state,
                             task_id,
                             run_context,
@@ -292,8 +250,10 @@ pub(super) fn plan_adaptive_workflow(
                             anchor_supervisor,
                             direct_anchor_output,
                             Duration::from_millis(500),
-                        )? {
-                            return Ok(AdaptiveConductorOutcome::DirectCommit(anchor));
+                        )?
+                        .is_some()
+                        {
+                            return Ok(AdaptiveConductorOutcome::DirectCommit);
                         }
                         return Err(format!(
                             "Conductor repair failed after {attempts} attempt(s): {repair_error}"
@@ -303,22 +263,7 @@ pub(super) fn plan_adaptive_workflow(
                 attempts += 1;
             }
             Err(error) => {
-                if effort != "fast" {
-                    let workflow_plan = deterministic_conductor_fallback(
-                        &state.store,
-                        task_id,
-                        run_context,
-                        collaboration_id,
-                        &harness,
-                        attempts,
-                        &format!("invalid workflow after repair: {error}"),
-                    )?;
-                    return Ok(AdaptiveConductorOutcome::Plan {
-                        workflow_plan: Box::new(workflow_plan),
-                        attempts,
-                    });
-                }
-                if let Some(anchor) = await_direct_anchor_fallback(
+                if await_direct_anchor_fallback(
                     state,
                     task_id,
                     run_context,
@@ -329,8 +274,10 @@ pub(super) fn plan_adaptive_workflow(
                     anchor_supervisor,
                     direct_anchor_output,
                     Duration::from_millis(500),
-                )? {
-                    return Ok(AdaptiveConductorOutcome::DirectCommit(anchor));
+                )?
+                .is_some()
+                {
+                    return Ok(AdaptiveConductorOutcome::DirectCommit);
                 }
                 return Err(format!(
                     "Conductor failed to produce a valid workflow after {attempts} attempts: {error}"

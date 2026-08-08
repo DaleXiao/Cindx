@@ -34,10 +34,12 @@ only the revision recorded in each report.
   requires them, and otherwise the existing permission-gated effect path remains
   allowed. Neither calibration nor a degraded fallback can weaken these
   constraints.
-- An invalid conductor response receives bounded repair. Exhausted conductor
-  attempts produce an explicit capability-compatible degraded fallback rather
-  than an unvalidated workflow. Strong matched direct-anchor evidence
-  calibrates an otherwise admissible workflow to direct execution without
+- An invalid conductor response receives bounded repair. If planning or repair
+  still fails, the workflow contributes no guidance and the shared foreground
+  Actor runs directly with its validated model, tools, retrieval, memory, and
+  permission path. Cindx does not manufacture a deterministic workflow or
+  inject a partial best-known handoff after failure. Strong matched
+  direct-anchor evidence likewise selects this foreground Direct path without
   spending repair or alternate-conductor calls. Every conductor request has a
   45-second no-progress boundary, including a configuration with only one
   conductor model; response progress retains the existing bounded recovery
@@ -89,8 +91,12 @@ A new run currently follows this sequence:
 6. Durable memory recall and workspace retrieval are prepared without mutating
    canonical conversation history. Independent retrieval channels may execute
    in parallel; graph walk expands from selected seeds.
-7. A workflow decision can run a bounded task graph and inject its grounded
-   handoff into the interactive loop. Contributions must represent different
+7. A workflow decision can run a bounded task graph. Its grounded handoff is
+   injected into the interactive loop only when the independent uplift gate
+   explicitly accepts the team candidate. A direct-anchor win, unavailable
+   comparison, unmet verification, failed repair, blocked frontier, or other
+   unproven outcome contributes no guidance and falls through to the ordinary
+   foreground Actor. Contributions must represent different
    work after case, punctuation, and whitespace normalization, while preserving
    word order so directionally different assignments remain distinct. Model
    reuse or diversity is selected dynamically from capability fit and supported
@@ -139,9 +145,12 @@ A new run currently follows this sequence:
    does not advance Actor turns or consume Actor tool or step budget. Empty,
    invalid, unavailable, or tool-calling Finalizer output falls back to the exact
    precomputed grounded candidate for the active epoch, or fails closed without
-   re-entering the Actor. A later unverified synthesis cannot replace a stronger
-   verified result. The stream completion event belongs to the same request
-   stream that delivered the selected text.
+   re-entering the Actor. Collaboration does not run a second reviewer or
+   synthesizer over a completed Actor answer; the byte sequence admitted by the
+   completion contract is the delivered answer unless the existing terminal
+   result selector chooses an independently eligible exact-lineage result. The
+   stream completion event belongs to the same request stream that delivered
+   the selected text.
 10. The completion transaction persists the result, artifacts, lifecycle state,
    learning evidence, and cleanup under one physical-run and steer-epoch terminal
    identity. Success and failure replay the existing terminal event; a new
