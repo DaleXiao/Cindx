@@ -11,8 +11,11 @@ use super::workflow_gepa_campaign_contract::{
 };
 use super::workflow_gepa_campaign_evidence::training_reflection_packets;
 use super::workflow_gepa_campaign_execution::{
-    execute_campaign_case, execute_product_pair, preflight_matched_workspaces, project_scope,
-    EvaluationDataEnvironment,
+    execute_journaled_campaign_case, execute_product_pair, preflight_matched_workspaces,
+    project_scope, EvaluationDataEnvironment,
+};
+use super::workflow_gepa_campaign_journal::{
+    CampaignBudgetReceipt, CampaignJournal, CampaignUsageReceipt,
 };
 use super::workflow_gepa_campaign_suite::{
     cases_for_split, training_dataset_sha256, validate_campaign_suite,
@@ -31,7 +34,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v6";
+const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v7";
 
 #[derive(Debug, Serialize)]
 struct WorkflowGepaCampaignReceipt {
@@ -43,6 +46,8 @@ struct WorkflowGepaCampaignReceipt {
     provider_id: String,
     provider_endpoint_sha256: String,
     configured_model_sha256: Vec<String>,
+    campaign_budget: CampaignBudgetReceipt,
+    campaign_usage: CampaignUsageReceipt,
     train_runs: Vec<ProductRunReceipt>,
     reflection_evidence_sha256: String,
     candidate_population: Vec<CandidateTrainingReceipt>,
@@ -71,7 +76,7 @@ pub(super) fn run() -> Result<(), String> {
     let source_commit = require_clean_source(&repo_root)?;
     let suite_path = std::env::var_os("CINDX_WORKFLOW_GEPA_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v6.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v7.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
@@ -89,12 +94,20 @@ pub(super) fn run() -> Result<(), String> {
         &repo_root,
         "workflow GEPA snapshot",
     )?;
-    if report_path == snapshot_path {
-        return Err("workflow GEPA report and snapshot paths must be distinct".to_string());
+    let journal_path = required_external_path(
+        "CINDX_WORKFLOW_GEPA_JOURNAL",
+        &repo_root,
+        "workflow GEPA journal",
+    )?;
+    if report_path == snapshot_path
+        || report_path == journal_path
+        || snapshot_path == journal_path
+    {
+        return Err("workflow GEPA report, snapshot, and journal paths must be distinct".to_string());
     }
-    if report_path.exists() || snapshot_path.exists() {
+    if report_path.exists() || snapshot_path.exists() || journal_path.exists() {
         return Err(
-            "workflow GEPA report and snapshot paths must be new for each authorized run"
+            "workflow GEPA report, snapshot, and journal paths must be new for each authorized run"
                 .to_string(),
         );
     }
@@ -110,9 +123,21 @@ pub(super) fn run() -> Result<(), String> {
             "Workflow GEPA campaign requires at least two distinct configured models".into(),
         );
     }
+    let provider_endpoint_sha256 = sha256_hex(provider.base_url.as_bytes());
+    let configured_model_sha256 = configured_models
+        .iter()
+        .map(|model| sha256_hex(model.as_bytes()))
+        .collect::<Vec<_>>();
+    let mut journal = CampaignJournal::create(
+        &journal_path,
+        source_commit.clone(),
+        suite_sha256.clone(),
+        provider_endpoint_sha256.clone(),
+        configured_model_sha256.clone(),
+    )?;
 
     let temp = tempfile::Builder::new()
-        .prefix("cindx-workflow-gepa-v6-")
+        .prefix("cindx-workflow-gepa-v7-")
         .tempdir()
         .map_err(|error| format!("failed to create campaign workspace: {error}"))?;
     let suite_root = temp.path();
@@ -136,12 +161,12 @@ pub(super) fn run() -> Result<(), String> {
     let mut train_raw = Vec::new();
     let mut train_runs = Vec::new();
     for case in cases_for_split(&suite, CampaignSplit::Train)? {
-        eprintln!("[workflow-gepa-v6] train seed: {}", case.id);
+        eprintln!("[workflow-gepa-v7] train seed: {}", case.id);
         let run_execution_index = execution_index;
         let root = suite_root.join(format!("train-{}", case.id));
         materialize_case(&root, case)?;
         let project_scope = project_scope(CampaignSplit::Train, case, 1, "seed");
-        let run = execute_campaign_case(
+        let (run, receipt) = execute_journaled_campaign_case(
             &app,
             &state,
             &runtime_provider,
@@ -155,13 +180,12 @@ pub(super) fn run() -> Result<(), String> {
             None,
             Treatment::Pro,
             &project_scope,
-        );
-        execution_index = execution_index.saturating_add(1);
-        train_runs.push(ProductRunReceipt::from_run(
-            &run,
             CampaignSplit::Train,
-            1,
-        )?);
+            &format!("{project_scope}-train-seed"),
+            &mut journal,
+        )?;
+        execution_index = execution_index.saturating_add(1);
+        train_runs.push(receipt);
         train_raw.push((run_execution_index, run));
     }
 
@@ -171,7 +195,8 @@ pub(super) fn run() -> Result<(), String> {
             .map_err(|error| format!("failed to encode reflection evidence: {error}"))?,
     );
     let run_context = mutation_run_context();
-    let candidates = generate_candidate_population(
+    journal.begin_mutation_search()?;
+    let generated_population = generate_candidate_population(
         &state,
         &provider,
         &run_context,
@@ -180,6 +205,12 @@ pub(super) fn run() -> Result<(), String> {
         &training_dataset_sha256,
         &reflection_evidence_sha256,
     )?;
+    journal.complete_mutation_search(
+        generated_population.model_calls,
+        generated_population.physical_attempts,
+        generated_population.total_tokens,
+    )?;
+    let candidates = generated_population.candidates;
     let candidate_snapshot_root = suite_root.join("candidate-snapshots");
     fs::create_dir_all(&candidate_snapshot_root).map_err(|error| {
         format!(
@@ -202,7 +233,7 @@ pub(super) fn run() -> Result<(), String> {
         let mut train_pairs = Vec::with_capacity(train_cases.len());
         for (case_index, case) in train_cases.iter().enumerate() {
             eprintln!(
-                "[workflow-gepa-v6] train candidate={}: {}",
+                "[workflow-gepa-v7] train candidate={}: {}",
                 candidate_index + 1,
                 case.id
             );
@@ -222,6 +253,7 @@ pub(super) fn run() -> Result<(), String> {
                 &internal_snapshot_path,
                 &generated.identity.snapshot_artifact_sha256,
                 &generated.snapshot,
+                &mut journal,
             )?);
         }
         candidate_population.push(build_training_receipt(generated, train_pairs)?);
@@ -237,11 +269,10 @@ pub(super) fn run() -> Result<(), String> {
                 suite_sha256,
                 training_dataset_sha256,
                 provider_id: provider.provider_id,
-                provider_endpoint_sha256: sha256_hex(provider.base_url.as_bytes()),
-                configured_model_sha256: configured_models
-                    .iter()
-                    .map(|model| sha256_hex(model.as_bytes()))
-                    .collect(),
+                provider_endpoint_sha256: provider_endpoint_sha256.clone(),
+                configured_model_sha256: configured_model_sha256.clone(),
+                campaign_budget: journal.budget(),
+                campaign_usage: journal.usage(),
                 train_runs,
                 reflection_evidence_sha256,
                 candidate_population,
@@ -260,7 +291,8 @@ pub(super) fn run() -> Result<(), String> {
                 production_promotion_claimed: false,
                 status: "valid_no_go_training".to_string(),
             };
-            write_report(&report_path, &receipt)?;
+            let report_sha256 = write_report(&report_path, &receipt)?;
+            journal.finish(&receipt.status, report_sha256)?;
             return Err(error);
         }
     };
@@ -287,7 +319,7 @@ pub(super) fn run() -> Result<(), String> {
         .into_iter()
         .enumerate()
     {
-        eprintln!("[workflow-gepa-v6] validation pair: {}", case.id);
+        eprintln!("[workflow-gepa-v7] validation pair: {}", case.id);
         validation_pairs.push(execute_product_pair(
             &app,
             &state,
@@ -304,6 +336,7 @@ pub(super) fn run() -> Result<(), String> {
             &selected_snapshot_path,
             &snapshot_artifact_sha256,
             snapshot,
+            &mut journal,
         )?);
     }
     let validation = aggregate_pairs(&validation_pairs, candidate_genome)?;
@@ -316,11 +349,10 @@ pub(super) fn run() -> Result<(), String> {
             suite_sha256,
             training_dataset_sha256,
             provider_id: provider.provider_id,
-            provider_endpoint_sha256: sha256_hex(provider.base_url.as_bytes()),
-            configured_model_sha256: configured_models
-                .iter()
-                .map(|model| sha256_hex(model.as_bytes()))
-                .collect(),
+            provider_endpoint_sha256: provider_endpoint_sha256.clone(),
+            configured_model_sha256: configured_model_sha256.clone(),
+            campaign_budget: journal.budget(),
+            campaign_usage: journal.usage(),
             train_runs,
             reflection_evidence_sha256,
             candidate_population,
@@ -339,7 +371,8 @@ pub(super) fn run() -> Result<(), String> {
             production_promotion_claimed: false,
             status: "valid_no_go_validation".to_string(),
         };
-        write_report(&report_path, &receipt)?;
+        let report_sha256 = write_report(&report_path, &receipt)?;
+        journal.finish(&receipt.status, report_sha256)?;
         return Err(error);
     }
 
@@ -351,7 +384,7 @@ pub(super) fn run() -> Result<(), String> {
     let grounded_root = suite_root.join("grounded-direct-control");
     materialize_case(&grounded_root, grounded_case)?;
     let grounded_scope = format!("{CAMPAIGN_PROJECT_ID}-grounded-control");
-    let grounded_raw = execute_campaign_case(
+    let (grounded_raw, grounded_receipt) = execute_journaled_campaign_case(
         &app,
         &state,
         &runtime_provider,
@@ -365,13 +398,11 @@ pub(super) fn run() -> Result<(), String> {
         None,
         Treatment::GroundedDirect,
         &grounded_scope,
-    );
-    execution_index = execution_index.saturating_add(1);
-    let grounded_receipt = ProductRunReceipt::from_run(
-        &grounded_raw,
         CampaignSplit::Train,
-        1,
+        &format!("{grounded_scope}-grounded-control"),
+        &mut journal,
     )?;
+    execution_index = execution_index.saturating_add(1);
     let grounded_result = validate_grounded_control(&grounded_raw);
 
     let mut test_pairs = Vec::new();
@@ -380,7 +411,7 @@ pub(super) fn run() -> Result<(), String> {
         for replicate in 1..=TEST_REPLICATES {
             for case in cases_for_split(&suite, CampaignSplit::Test)? {
                 eprintln!(
-                    "[workflow-gepa-v6] untouched test pair replicate={replicate}: {}",
+                    "[workflow-gepa-v7] untouched test pair replicate={replicate}: {}",
                     case.id
                 );
                 test_pairs.push(execute_product_pair(
@@ -399,6 +430,7 @@ pub(super) fn run() -> Result<(), String> {
                     &selected_snapshot_path,
                     &snapshot_artifact_sha256,
                     snapshot,
+                    &mut journal,
                 )?);
                 pair_index = pair_index.saturating_add(1);
             }
@@ -432,11 +464,10 @@ pub(super) fn run() -> Result<(), String> {
         suite_sha256,
         training_dataset_sha256,
         provider_id: provider.provider_id,
-        provider_endpoint_sha256: sha256_hex(provider.base_url.as_bytes()),
-        configured_model_sha256: configured_models
-            .iter()
-            .map(|model| sha256_hex(model.as_bytes()))
-            .collect(),
+        provider_endpoint_sha256,
+        configured_model_sha256,
+        campaign_budget: journal.budget(),
+        campaign_usage: journal.usage(),
         train_runs,
         reflection_evidence_sha256,
         candidate_population,
@@ -455,15 +486,12 @@ pub(super) fn run() -> Result<(), String> {
         production_promotion_claimed: false,
         status: status.to_string(),
     };
-    write_report(&report_path, &receipt)?;
-    if let Err(error) = grounded_result {
-        return Err(error);
-    }
-    if let Err(error) = test_result {
-        return Err(error);
-    }
+    let report_sha256 = write_report(&report_path, &receipt)?;
+    journal.finish(&receipt.status, report_sha256)?;
+    grounded_result?;
+    test_result?;
     eprintln!(
-        "[workflow-gepa-v6] passed report={} snapshot={}",
+        "[workflow-gepa-v7] passed report={} snapshot={}",
         report_path.display(),
         snapshot_path.display()
     );
@@ -475,7 +503,7 @@ fn mutation_run_context() -> Metadata {
         ("project_id".to_string(), CAMPAIGN_PROJECT_ID.to_string()),
         (
             "session_id".to_string(),
-            "session-workflow-gepa-v6".to_string(),
+            "session-workflow-gepa-v7".to_string(),
         ),
         ("effort".to_string(), AgentPolicy::Pro.label().to_string()),
         ("steer_epoch".to_string(), "0".to_string()),
@@ -484,9 +512,10 @@ fn mutation_run_context() -> Metadata {
     .collect()
 }
 
-fn write_report(path: &Path, receipt: &WorkflowGepaCampaignReceipt) -> Result<(), String> {
+fn write_report(path: &Path, receipt: &WorkflowGepaCampaignReceipt) -> Result<String, String> {
     let encoded = serde_json::to_vec_pretty(receipt)
         .map_err(|error| format!("failed to encode Workflow GEPA report: {error}"))?;
     tools::write_private_file_atomically(path, &encoded)
-        .map_err(|error| format!("failed to write Workflow GEPA report: {error}"))
+        .map_err(|error| format!("failed to write Workflow GEPA report: {error}"))?;
+    Ok(sha256_hex(&encoded))
 }

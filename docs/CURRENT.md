@@ -690,14 +690,14 @@ Therefore the current claim is:
   selected profile causally changed a training route and exercised Workflow,
   but two unseen validation pairs produced no quality win at `1.4337x` latency
   and `1.2966x` tokens. Control/test stayed sealed and no snapshot was published.
-- Current source freezes a separate Workflow GEPA V6 protocol. Route contrast
-  is causal evidence but no longer counts as product improvement. A train
-  candidate now needs either an externally verified quality win under bounded
-  resources or a Pareto-safe efficiency gain; validation must also exercise its
-  declared Workflow route and meet bounded quality/resource gates. Eight new
-  tasks replace every V5 case, with train-only selection, unseen validation,
-  four untouched test cases, and a sealed Grounded Direct control. Deterministic
-  V6 checks pass, but no V6 provider run has occurred, so the intelligence and
+- Current source freezes a separate Workflow GEPA V7 protocol. The task no
+  longer tells the Conductor whether to use Direct or Workflow, and route
+  changes earn no quality credit. Candidate search ranks observed trajectory
+  bottlenecks and admits only one-or-two-gene mutations. A durable external
+  journal reserves every provider action before execution, with bounded product
+  and campaign budgets. Train-only selection, unseen validation, four untouched
+  test cases, and the sealed Grounded Direct control remain. Deterministic V7
+  checks pass, but no V7 provider run has occurred, so the intelligence and
   promotion conclusions remain unchanged.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 

@@ -30,7 +30,7 @@ impl ResolvedBudgetReceipt {
         Self::from_budget(RunBudget::for_effort(effort))
     }
 
-    fn from_budget(budget: RunBudget) -> Self {
+    pub(super) fn from_budget(budget: RunBudget) -> Self {
         Self {
             max_duration_ms: duration_ms(budget.max_duration),
             model_call_timeout_ms: duration_ms(budget.model_call_timeout),
@@ -89,8 +89,11 @@ pub(crate) struct ModelReceipt {
 pub(super) fn resolved_budget_from_events(
     events: &[Event],
     treatment: Treatment,
+    run_budget: Option<RunBudget>,
 ) -> Result<ResolvedBudgetReceipt, String> {
-    let expected = ResolvedBudgetReceipt::for_treatment(treatment);
+    let expected = run_budget
+        .map(ResolvedBudgetReceipt::from_budget)
+        .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment));
     if treatment.is_oracle_reference() {
         return Ok(expected);
     }
@@ -417,6 +420,61 @@ mod tests {
         }
     }
 
+    fn budget_metadata(budget: &ResolvedBudgetReceipt) -> Metadata {
+        Metadata::from([
+            (
+                "run_budget_ms".to_string(),
+                budget.max_duration_ms.to_string(),
+            ),
+            (
+                "run_model_timeout_ms".to_string(),
+                budget.model_call_timeout_ms.to_string(),
+            ),
+            (
+                "run_tool_timeout_ms".to_string(),
+                budget.tool_call_timeout_ms.to_string(),
+            ),
+            (
+                "run_initial_model_calls".to_string(),
+                budget.initial_model_calls.to_string(),
+            ),
+            (
+                "run_model_call_budget".to_string(),
+                budget.max_model_calls.to_string(),
+            ),
+            (
+                "run_initial_tool_calls".to_string(),
+                budget.initial_tool_calls.to_string(),
+            ),
+            (
+                "run_tool_call_budget".to_string(),
+                budget.max_tool_calls.to_string(),
+            ),
+            (
+                "run_no_progress_ms".to_string(),
+                budget.no_progress_timeout_ms.to_string(),
+            ),
+            (
+                "run_total_token_budget".to_string(),
+                budget.max_total_tokens.to_string(),
+            ),
+            (
+                "run_physical_model_attempt_budget".to_string(),
+                budget.max_physical_model_attempts.to_string(),
+            ),
+            (
+                "run_terminal_token_reserve".to_string(),
+                budget.terminal_token_reserve.to_string(),
+            ),
+            (
+                "run_terminal_physical_model_attempt_reserve".to_string(),
+                budget
+                    .terminal_physical_model_attempt_reserve
+                    .to_string(),
+            ),
+        ])
+    }
+
     #[test]
     fn provider_receipt_hashes_upstream_identity_without_serializing_the_raw_id() {
         let raw_id = "upstream-response-private-123";
@@ -522,63 +580,14 @@ mod tests {
             budget,
             "grounded direct must remain iso-budget with Auto"
         );
-        let mut metadata = Metadata::from([
-            (
-                "run_budget_ms".to_string(),
-                budget.max_duration_ms.to_string(),
-            ),
-            (
-                "run_model_timeout_ms".to_string(),
-                budget.model_call_timeout_ms.to_string(),
-            ),
-            (
-                "run_tool_timeout_ms".to_string(),
-                budget.tool_call_timeout_ms.to_string(),
-            ),
-            (
-                "run_initial_model_calls".to_string(),
-                budget.initial_model_calls.to_string(),
-            ),
-            (
-                "run_model_call_budget".to_string(),
-                budget.max_model_calls.to_string(),
-            ),
-            (
-                "run_initial_tool_calls".to_string(),
-                budget.initial_tool_calls.to_string(),
-            ),
-            (
-                "run_tool_call_budget".to_string(),
-                budget.max_tool_calls.to_string(),
-            ),
-            (
-                "run_no_progress_ms".to_string(),
-                budget.no_progress_timeout_ms.to_string(),
-            ),
-            (
-                "run_total_token_budget".to_string(),
-                budget.max_total_tokens.to_string(),
-            ),
-            (
-                "run_physical_model_attempt_budget".to_string(),
-                budget.max_physical_model_attempts.to_string(),
-            ),
-            (
-                "run_terminal_token_reserve".to_string(),
-                budget.terminal_token_reserve.to_string(),
-            ),
-            (
-                "run_terminal_physical_model_attempt_reserve".to_string(),
-                budget.terminal_physical_model_attempt_reserve.to_string(),
-            ),
-        ]);
+        let mut metadata = budget_metadata(&budget);
         let events = vec![event(
             "Agent task started",
             EventKind::TaskStatusChanged,
             metadata.clone(),
         )];
         assert_eq!(
-            resolved_budget_from_events(&events, Treatment::Auto).expect("budget receipt"),
+            resolved_budget_from_events(&events, Treatment::Auto, None).expect("budget receipt"),
             budget
         );
 
@@ -588,7 +597,25 @@ mod tests {
             EventKind::TaskStatusChanged,
             metadata,
         )];
-        assert!(resolved_budget_from_events(&drifted, Treatment::Auto).is_err());
+        assert!(resolved_budget_from_events(&drifted, Treatment::Auto, None).is_err());
+
+        let mut custom = RunBudget::for_effort("fast");
+        custom.max_duration = std::time::Duration::from_secs(73);
+        custom.initial_model_calls = 3;
+        custom.max_model_calls = 5;
+        custom.initial_tool_calls = 7;
+        custom.max_tool_calls = 11;
+        let custom_receipt = ResolvedBudgetReceipt::from_budget(custom);
+        let custom_events = vec![event(
+            "Agent task started",
+            EventKind::TaskStatusChanged,
+            budget_metadata(&custom_receipt),
+        )];
+        assert_eq!(
+            resolved_budget_from_events(&custom_events, Treatment::Pro, Some(custom))
+                .expect("custom campaign budget receipt"),
+            custom_receipt
+        );
     }
 
     #[test]

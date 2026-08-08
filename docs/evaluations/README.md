@@ -154,6 +154,12 @@ revision and is no longer the current product decision.
   untouched-test tasks. It is `PROTOCOL_ONLY`: deterministic contract tests pass,
   but no V6 provider run, snapshot, promotion, or capability result exists.
 
+- [Cindx Workflow GEPA V7 frozen protocol 0.2.25](CINDX_WORKFLOW_GEPA_V7_PROTOCOL_0.2.25_2026-08-09.md)
+  replaces prescribed route labels and fixed mutation directions with measured
+  Conductor route choice and trajectory-grounded one-or-two-gene proposals. It
+  also adds a durable external action journal and strict product/campaign caps.
+  It is `PROTOCOL_ONLY`: no V7 provider result or capability claim exists.
+
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
   `2647daafae98e99d31c101886d2836e446d83d96`. It is

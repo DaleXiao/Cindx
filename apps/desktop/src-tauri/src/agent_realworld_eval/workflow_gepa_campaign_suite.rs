@@ -14,13 +14,16 @@ pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), Stri
     {
         return Err("Workflow GEPA suite identity or case count is invalid".to_string());
     }
+    if leaks_route_answer(&suite.description) {
+        return Err("Workflow GEPA suite description leaks a routing answer".to_string());
+    }
     let mut ids = BTreeSet::new();
     let mut paths = BTreeSet::new();
     let mut splits = Vec::new();
     for case in &suite.cases {
         let split = CampaignSplit::parse(case)?;
         splits.push((split, case.category.as_str()));
-        validate_route_contract(case)?;
+        validate_route_blind_case(case)?;
         if case.id.trim().is_empty()
             || !ids.insert(case.id.as_str())
             || case.objective.trim().is_empty()
@@ -104,19 +107,6 @@ pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), Stri
             return Err("Workflow GEPA train/validation/test strata are unbalanced".to_string());
         }
     }
-    let direct_routes = suite
-        .cases
-        .iter()
-        .filter(|case| case.expected_execution_mode.as_deref() == Some("direct"))
-        .count();
-    let workflow_routes = suite
-        .cases
-        .iter()
-        .filter(|case| case.expected_execution_mode.as_deref() == Some("workflow"))
-        .count();
-    if direct_routes != 4 || workflow_routes != 4 {
-        return Err("Workflow GEPA suite lacks balanced Direct and Workflow routes".to_string());
-    }
     Ok(())
 }
 
@@ -143,7 +133,6 @@ pub(super) fn training_dataset_sha256(suite: &RealworldSuite) -> Result<String, 
                 "id": case.id,
                 "category": case.category,
                 "objective": case.objective,
-                "expected_execution_mode": case.expected_execution_mode,
                 "files": case.files.iter().map(|file| serde_json::json!({
                     "path": file.path,
                     "content": file.content,
@@ -289,41 +278,27 @@ fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Resu
     Ok(())
 }
 
-fn validate_route_contract(case: &RealworldCase) -> Result<(), String> {
-    let expected = match case.id.as_str() {
-        "coding-reconcile-records"
-        | "coding-resolve-features"
-        | "coding-allocate-capacity"
-        | "research-current-retention" => Some("direct"),
-        "coding-deployment-layers"
-        | "research-release-decision"
-        | "research-maintenance-window"
-        | "research-vendor-award" => Some("workflow"),
-        _ => return Err(format!("unknown Workflow GEPA route case {}", case.id)),
-    };
-    if case.expected_execution_mode.as_deref() != expected {
+fn validate_route_blind_case(case: &RealworldCase) -> Result<(), String> {
+    if case.expected_execution_mode.is_some() || leaks_route_answer(&case.objective) {
         return Err(format!(
-            "Workflow GEPA case {} has an invalid route contract",
-            case.id
-        ));
-    }
-    let disclosed = match expected {
-        Some("direct") => case
-            .objective
-            .contains("directly without creating a multi-model workflow"),
-        Some("workflow") => case
-            .objective
-            .contains("Use independent multi-model collaboration"),
-        None => true,
-        Some(_) => false,
-    };
-    if !disclosed {
-        return Err(format!(
-            "Workflow GEPA case {} hides its route requirement",
+            "Workflow GEPA case {} leaks a routing answer",
             case.id
         ));
     }
     Ok(())
+}
+
+fn leaks_route_answer(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    [
+        "multi-model",
+        "multi model",
+        "workflow",
+        "solve this directly",
+        "single model",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 fn collect_scalar_values(value: &Value, values: &mut Vec<String>) {
@@ -356,7 +331,7 @@ mod tests {
     fn frozen_suite() -> RealworldSuite {
         serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v6.json"
+            "/../../../benchmarks/agent/workflow-gepa-v7.json"
         )))
         .unwrap()
     }
@@ -390,7 +365,7 @@ mod tests {
 
         let mut missing_contract: Value = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v6.json"
+            "/../../../benchmarks/agent/workflow-gepa-v7.json"
         )))
         .unwrap();
         missing_contract["cases"][1]["files"][0]["content"] =
@@ -403,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_suite_rejects_hidden_answer_or_route_requirements() {
+    fn frozen_suite_rejects_hidden_answers_and_route_leakage() {
         let mut hidden_answer = frozen_suite();
         let award = hidden_answer
             .cases
@@ -420,18 +395,24 @@ mod tests {
             .unwrap_err()
             .contains("lacks answer verification"));
 
-        let mut hidden_route = frozen_suite();
-        let collaboration = hidden_route
-            .cases
-            .iter_mut()
-            .find(|case| case.id == "research-vendor-award")
-            .unwrap();
-        collaboration.objective = collaboration
-            .objective
-            .replace("Use independent multi-model collaboration", "Investigate carefully");
-        assert!(validate_campaign_suite(&hidden_route)
+        let mut leaked_route = frozen_suite();
+        leaked_route.cases[0].objective =
+            format!("Solve this directly. {}", leaked_route.cases[0].objective);
+        assert!(validate_campaign_suite(&leaked_route)
             .unwrap_err()
-            .contains("hides its route requirement"));
+            .contains("leaks a routing answer"));
+
+        let mut leaked_field = frozen_suite();
+        leaked_field.cases[0].expected_execution_mode = Some("direct".to_string());
+        assert!(validate_campaign_suite(&leaked_field)
+            .unwrap_err()
+            .contains("leaks a routing answer"));
+
+        let mut leaked_description = frozen_suite();
+        leaked_description.description.push_str(" Workflow route contract.");
+        assert!(validate_campaign_suite(&leaked_description)
+            .unwrap_err()
+            .contains("description leaks a routing answer"));
     }
 
     #[test]
@@ -440,7 +421,7 @@ mod tests {
         let alternatives = [
             (
                 "coding-reconcile-records",
-                "wgv6_1/reconcile.mjs",
+                "wgv7_1/reconcile.mjs",
                 r#"export function reconcile(records) {
   if (!Array.isArray(records)) throw new TypeError('records');
   const selected = new Map(); let rejected = 0;
@@ -458,7 +439,7 @@ mod tests {
             ),
             (
                 "coding-resolve-features",
-                "wgv6_2/features.mjs",
+                "wgv7_2/features.mjs",
                 r#"export function resolveFeatures(base, overrides) {
   if (!Array.isArray(base) || !Array.isArray(overrides)) throw new TypeError('inputs');
   const chosen = new Map();
@@ -473,7 +454,7 @@ mod tests {
             ),
             (
                 "coding-allocate-capacity",
-                "wgv6_3/capacity.mjs",
+                "wgv7_3/capacity.mjs",
                 r#"export function allocateCapacity(requests, capacity) {
   if (!Array.isArray(requests) || !Number.isInteger(capacity) || capacity < 0) throw new TypeError('inputs');
   let rejected=0;
@@ -486,7 +467,7 @@ mod tests {
             ),
             (
                 "coding-deployment-layers",
-                "wgv6_4/layers.mjs",
+                "wgv7_4/layers.mjs",
                 r#"export function deploymentLayers(services, dependencies) {
   if (!Array.isArray(services) || !Array.isArray(dependencies) || services.some(v=>typeof v!=='string'||!v) || new Set(services).size!==services.length) throw new TypeError('inputs');
   const known=new Set(services), incoming=new Map(services.map(v=>[v,new Set()]));
