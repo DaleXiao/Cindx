@@ -30,8 +30,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
 
-const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v1";
-const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v1";
+const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v2";
+const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v2";
+const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v2";
 const MAX_PAIRWISE_ACTIONS: usize = 24;
 const MIN_TRAIN_EVIDENCE: usize = 6;
 const MIN_HOLDOUT_EVIDENCE: usize = 4;
@@ -182,7 +183,7 @@ pub(super) fn run() -> Result<(), String> {
     let source_commit = require_clean_source(&repo_root)?;
     let suite_path = std::env::var_os("CINDX_WORKFLOW_GEPA_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v1.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v2.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
@@ -225,16 +226,16 @@ pub(super) fn run() -> Result<(), String> {
     let workspace_prestate_sha256 = campaign_workspace_sha256(&workspace_root)?;
     let sidecars = SidecarConfig::default();
     super::apply_sidecar_env(&sidecars);
+    let mut seed_runtime_provider = provider.clone();
+    seed_runtime_provider.prompt_evolution_enabled = false;
     let app = build_evaluation_app(
-        provider.clone(),
+        seed_runtime_provider.clone(),
         sidecars,
         &workspace_root,
         &evaluation_database,
     )?;
     let state = app.state::<AppState>();
     let seed_profile = ConductorPromptGenome::seed_for_effort(policy.label());
-    let mut seed_runtime_provider = provider.clone();
-    seed_runtime_provider.prompt_evolution_enabled = false;
     let mut seed_runs = Vec::new();
     for (index, case) in suite.cases.iter().enumerate() {
         eprintln!(
@@ -541,8 +542,16 @@ fn validate_seed_run(run: &RawRun) -> Result<(), String> {
         || run.evidence_error.is_some()
     {
         return Err(format!(
-            "real product task {} failed its completion/evidence gate: status={}, failures={:?}, evidence={:?}",
-            run.case_id, run.terminal_status, run.verification.failures, run.evidence_error
+            "real product task {} failed its completion/evidence gate: status={}, failures={:?}, evidence={:?}, successful_tools={:?}, tool_statuses={:?}",
+            run.case_id,
+            run.terminal_status,
+            run.verification.failures,
+            run.evidence_error,
+            run.tools_used,
+            run.tool_receipts
+                .iter()
+                .map(|receipt| format!("{}:{:?}", receipt.tool, receipt.status))
+                .collect::<Vec<_>>()
         ));
     }
     Ok(())
@@ -817,8 +826,8 @@ fn route_exercise_receipt(
 
 fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), String> {
     if suite.schema != CAMPAIGN_SCHEMA
-        || suite.id != "cindx-workflow-gepa-v1"
-        || suite.version != 1
+        || suite.id != CAMPAIGN_SUITE_ID
+        || suite.version != 2
         || suite.cases.len() != 8
     {
         return Err("Workflow GEPA suite identity or case count is invalid".to_string());
@@ -857,10 +866,15 @@ mod tests {
     fn frozen_suite_has_balanced_classes_and_immutable_splits() {
         let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v1.json"
+            "/../../../benchmarks/agent/workflow-gepa-v2.json"
         )))
         .unwrap();
         validate_campaign_suite(&suite).unwrap();
+        assert!(suite.cases.iter().all(|case| {
+            case.verification.required_tools_all.len() == 1
+                && case.verification.required_tools_all[0] == "shell.run"
+                && !case.verification.required_tools_any.is_empty()
+        }));
 
         let planned = suite
             .cases
@@ -908,7 +922,7 @@ mod tests {
     fn campaign_workspace_reset_removes_treatment_outputs() {
         let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v1.json"
+            "/../../../benchmarks/agent/workflow-gepa-v2.json"
         )))
         .unwrap();
         let temp = tempfile::tempdir().unwrap();

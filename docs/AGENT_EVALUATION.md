@@ -30,7 +30,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
 | Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, behavior-only route phenotype, authority ceilings, and operation-count bounds | Proves learned-profile wiring from route through Task Graph, recoverable serving projection, and hard safety/budget boundaries only; provider-backed uplift remains unverified |
-| Workflow GEPA causal campaign | current source | 8 frozen effectful coding/research tasks; terminal-only learning admission; exact pre-treatment workspace restoration; paired seed/candidate train and holdout; fresh route/Task Graph exercise; Grounded Direct control | Feature-gated campaign contract only. No uplift is claimed until a clean-revision provider run passes every evidence and non-regression gate |
+| Workflow GEPA causal campaign V2 | current source | 8 frozen effectful coding/research tasks; deterministic file/JSON/command postconditions; capability-neutral read and verification receipts; terminal-only learning admission; exact pre-treatment workspace restoration; paired seed/candidate train and holdout; fresh route/Task Graph exercise; Grounded Direct control | Feature-gated campaign contract only. No uplift is claimed until a clean-revision provider run passes every evidence and non-regression gate |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, semantic-curation loss/retry/panic recovery, queue/steer, permission, restart recovery, process CPU/output/time budgets, projection, and performance contracts | Control-plane evidence only |
 
@@ -68,9 +68,12 @@ also reject candidate-only failure and absolute holdout quality, latency, or
 token regression against the stable profile, even if relative reviewer reward
 is positive. Those are mechanism checks, not answer-quality evidence.
 Historical transfer evidence did not execute the per-run route decision layer.
-The feature-gated Workflow GEPA campaign now requires a fresh frozen-profile
+The feature-gated Workflow GEPA V2 campaign now requires a fresh frozen-profile
 product run to prove that learned route semantics and the Task Graph were both
-exercised, but retrieval remains outside that treatment. Auto-to-Pro uplift
+exercised. Its external postconditions prove the requested workspace effect;
+tool receipts separately require successful evidence reading and command
+verification without prescribing `file.write` over another authorized mutation
+path. Retrieval remains outside that treatment. Auto-to-Pro uplift
 still requires a provider-backed comparison of the pre-transfer Pro profile
 with the promoted transfer-trained profile on frozen matched cases.
 
