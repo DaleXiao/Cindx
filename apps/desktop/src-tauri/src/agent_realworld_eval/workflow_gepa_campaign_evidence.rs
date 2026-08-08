@@ -1,4 +1,5 @@
 use super::workflow_gepa_campaign_contract::{CampaignSplit, ProductRunReceipt};
+use super::workflow_gepa_campaign_contract::{CAMPAIGN_SUITE_ID, CAMPAIGN_VERSION};
 use super::{RawRun, RealworldCase, RealworldSuite};
 use orchestrator::{
     sha256_hex, ActionableSideInformation, AgentEvaluationCheck,
@@ -148,8 +149,8 @@ fn reflection_packet(
         .collect::<Vec<_>>();
     let public_input = public_case_input(case);
     Ok(AgentEvaluationReflectionPacket {
-        suite_id: "cindx-workflow-gepa-v5".to_string(),
-        suite_version: 5,
+        suite_id: CAMPAIGN_SUITE_ID.to_string(),
+        suite_version: CAMPAIGN_VERSION,
         case_id: case.id.clone(),
         category: case.category.clone(),
         run_id: format!("train-{}-{seed}", case.id),

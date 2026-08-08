@@ -624,6 +624,14 @@ impl AgentRunDecision {
             _ => "auto",
         }
         .to_string();
+        let verification_required = self.verification != AgentVerificationPolicy::None;
+        let max_workflow_steps = self
+            .estimated_steps
+            .max(crate::minimum_workflow_steps(
+                self.distinct_contributions,
+                verification_required,
+            ))
+            .clamp(1, crate::MAX_ADAPTIVE_WORKFLOW_STEPS);
         ConductorExecutionContract {
             task_class: self.task_class.clone(),
             effort: effort.clone(),
@@ -631,8 +639,9 @@ impl AgentRunDecision {
             expected_uplift_bps: self.expected_uplift_bps,
             confidence_bps: self.confidence_bps,
             max_parallelism: self.max_parallelism,
+            max_workflow_steps,
             min_successful_branches: self.min_successful_branches,
-            verification_required: self.verification != AgentVerificationPolicy::None,
+            verification_required,
             terminal_model_call_reserve: match effort.as_str() {
                 "fast" => 1,
                 "pro" => 3,

@@ -1,12 +1,16 @@
 use crate::{
-    OrchestrationPolicy, PromptCommitStrategy, RoutingContext, TaskClass, WorkflowOutputKind,
-    WorkflowPlanIr,
+    OrchestrationPolicy, PromptCommitStrategy, RoutingContext, TaskClass, WorkflowBudget,
+    WorkflowOutputKind, WorkflowPlanIr, MAX_ADAPTIVE_WORKFLOW_STEPS,
 };
 use serde::{Deserialize, Serialize};
 
 pub const AUTO_COLLABORATION_MIN_UPLIFT_BPS: u16 = 3_000;
 pub const AUTO_COLLABORATION_MIN_CONFIDENCE_BPS: u16 = 5_500;
 pub const PRO_MIN_TEAM_UPLIFT_BPS: u16 = 250;
+
+fn default_max_workflow_steps() -> usize {
+    MAX_ADAPTIVE_WORKFLOW_STEPS
+}
 
 pub fn minimum_team_uplift_bps(effort: &str) -> u16 {
     if normalize_effort(effort) == "pro" {
@@ -39,6 +43,8 @@ pub struct ConductorExecutionContract {
     pub expected_uplift_bps: u16,
     pub confidence_bps: u16,
     pub max_parallelism: usize,
+    #[serde(default = "default_max_workflow_steps")]
+    pub max_workflow_steps: usize,
     pub min_successful_branches: usize,
     pub verification_required: bool,
     pub terminal_model_call_reserve: usize,
@@ -127,8 +133,14 @@ impl ConductorExecutionContract {
                 min_distinct_contributions.max(1)
             }
         };
+        let verification_required = context.verification_required || context.high_stakes;
         let min_team_uplift_bps = minimum_team_uplift_bps(&effort);
         let requires_synthesis = min_distinct_contributions >= 2;
+        let minimum_workflow_steps =
+            minimum_workflow_steps(min_distinct_contributions, verification_required);
+        let max_workflow_steps = usize::from(context.estimated_steps)
+            .max(minimum_workflow_steps)
+            .clamp(1, MAX_ADAPTIVE_WORKFLOW_STEPS);
 
         Self {
             task_class: context.task_class.clone(),
@@ -137,8 +149,9 @@ impl ConductorExecutionContract {
             expected_uplift_bps: uplift.min(10_000),
             confidence_bps: confidence,
             max_parallelism,
+            max_workflow_steps,
             min_successful_branches,
-            verification_required: context.verification_required || context.high_stakes,
+            verification_required,
             terminal_model_call_reserve,
             stop_policy,
             fallback_policy: if context.needs_tools || context.needs_retrieval {
@@ -155,6 +168,23 @@ impl ConductorExecutionContract {
     pub fn should_auto_collaborate(&self) -> bool {
         self.expected_uplift_bps >= AUTO_COLLABORATION_MIN_UPLIFT_BPS
             && self.confidence_bps >= AUTO_COLLABORATION_MIN_CONFIDENCE_BPS
+    }
+
+    pub fn effective_max_workflow_steps(&self) -> usize {
+        self.max_workflow_steps
+            .max(minimum_workflow_steps(
+                self.min_distinct_contributions,
+                self.verification_required,
+            ))
+            .clamp(1, MAX_ADAPTIVE_WORKFLOW_STEPS)
+    }
+
+    pub fn constrain_workflow_budget(&self, mut hard_limit: WorkflowBudget) -> WorkflowBudget {
+        hard_limit.max_steps = hard_limit
+            .max_steps
+            .min(self.effective_max_workflow_steps());
+        hard_limit.max_models = hard_limit.max_models.min(self.max_parallelism.max(1));
+        hard_limit
     }
 
     pub fn with_prompt_commit_strategy(mut self, strategy: PromptCommitStrategy) -> Self {
@@ -199,6 +229,14 @@ impl ConductorExecutionContract {
         };
         if plan_policy.as_ref().map(OrchestrationPolicy::label) != Some(self.policy.label()) {
             return Err("workflow policy does not match its execution contract".to_string());
+        }
+        let max_workflow_steps = self.effective_max_workflow_steps();
+        if plan.steps.len() > max_workflow_steps {
+            return Err(format!(
+                "workflow has {} steps but its execution contract allows {}",
+                plan.steps.len(),
+                max_workflow_steps
+            ));
         }
         let root_branches = plan
             .steps
@@ -266,6 +304,17 @@ impl ConductorExecutionContract {
     }
 }
 
+pub fn minimum_workflow_steps(distinct_contributions: usize, verification_required: bool) -> usize {
+    if distinct_contributions == 0 {
+        1
+    } else {
+        distinct_contributions
+            .saturating_add(1)
+            .saturating_add(usize::from(verification_required))
+            .min(MAX_ADAPTIVE_WORKFLOW_STEPS)
+    }
+}
+
 fn normalize_effort(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "fast" => "fast",
@@ -326,6 +375,7 @@ mod tests {
 
         assert_eq!(contract.stop_policy, ConductorStopPolicy::Quorum);
         assert_eq!(contract.max_parallelism, 3);
+        assert_eq!(contract.max_workflow_steps, 4);
         assert_eq!(contract.min_successful_branches, 2);
         assert_eq!(contract.required_successes_for_layer(2), 2);
         assert_eq!(contract.required_successes_for_layer(3), 2);
@@ -344,10 +394,60 @@ mod tests {
         );
 
         assert_eq!(contract.max_parallelism, 3);
+        assert_eq!(contract.max_workflow_steps, 1);
         assert_eq!(contract.min_successful_branches, 1);
         assert_eq!(contract.min_distinct_contributions, 0);
         assert!(!contract.requires_synthesis);
         assert_eq!(contract.min_team_uplift_bps, PRO_MIN_TEAM_UPLIFT_BPS);
+    }
+
+    #[test]
+    fn task_contract_narrows_runtime_budget_without_widening_other_limits() {
+        let contract = ConductorExecutionContract::from_routing(
+            &context("Investigate two independent hypotheses and verify the result"),
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        );
+        let narrowed = contract.constrain_workflow_budget(WorkflowBudget {
+            max_steps: MAX_ADAPTIVE_WORKFLOW_STEPS,
+            max_models: 3,
+            max_model_turns_per_step: 4,
+            max_tool_calls_per_step: 8,
+            max_output_tokens_per_step: 4_096,
+        });
+
+        assert_eq!(narrowed.max_steps, contract.max_workflow_steps);
+        assert_eq!(narrowed.max_models, contract.max_parallelism);
+        assert_eq!(narrowed.max_model_turns_per_step, 4);
+        assert_eq!(narrowed.max_tool_calls_per_step, 8);
+        assert_eq!(narrowed.max_output_tokens_per_step, 4_096);
+
+        let already_narrow = contract.constrain_workflow_budget(WorkflowBudget {
+            max_steps: 2,
+            max_models: 1,
+            max_model_turns_per_step: 2,
+            max_tool_calls_per_step: 3,
+            max_output_tokens_per_step: 1_024,
+        });
+        assert_eq!(already_narrow.max_steps, 2);
+        assert_eq!(already_narrow.max_models, 1);
+        assert_eq!(already_narrow.max_model_turns_per_step, 2);
+        assert_eq!(already_narrow.max_tool_calls_per_step, 3);
+        assert_eq!(already_narrow.max_output_tokens_per_step, 1_024);
+    }
+
+    #[test]
+    fn legacy_contract_without_task_step_limit_keeps_the_outer_ceiling() {
+        let contract = ConductorExecutionContract::from_routing(
+            &context("Compare two independent implementation strategies"),
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 2 },
+        );
+        let mut value = serde_json::to_value(contract).unwrap();
+        value.as_object_mut().unwrap().remove("max_workflow_steps");
+
+        let restored: ConductorExecutionContract = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.max_workflow_steps, MAX_ADAPTIVE_WORKFLOW_STEPS);
     }
 
     #[test]

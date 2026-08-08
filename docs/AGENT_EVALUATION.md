@@ -26,6 +26,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Workflow GEPA V4 invalid attempt](evaluations/CINDX_WORKFLOW_GEPA_V4_INVALID_0.2.25_2026-08-08.md) | `0.2.25` | One authorized provider attempt; both training tasks completed and produced a candidate snapshot before the first validation pair | `INVALID_EVALUATOR`: the matched gate compared path-bound revisions for separate isolated roots, so no validation or test arm ran; the snapshot was not admitted or promoted and supports no capability conclusion |
 | [Workflow GEPA V4 invalid task-spec attempt](evaluations/CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.md) | `0.2.25` | Second authorized provider attempt; 2 training runs and 2 matched validation pairs on clean source `ee408db`; untouched test and Grounded Direct control remained gated | `INVALID_TASK_SPEC`: the failed research case hid lower-case identifier and exact-phrase requirements absent from its public contract, so the raw tie, quality, and efficiency receipts are diagnostic only and support no capability or regression conclusion; no production profile changed |
 | [Workflow GEPA V5 provider evaluation](evaluations/CINDX_WORKFLOW_GEPA_V5_0.2.25_2026-08-08.md) | `0.2.25` | First authorized V5 run; 3 train candidates, 6 matched train pairs, and 2 unseen validation pairs on clean source `86f7dd6`; control and test remained sealed | `VALID_TARGETED_EVIDENCE`, `NO_GO_VALIDATION`: the selected profile causally changed the train route and exercised Workflow, but validation produced 0 wins and 2 ties at `1.4337x` latency and `1.2966x` tokens; no snapshot or production profile was published |
+| [Workflow GEPA V6 frozen protocol](evaluations/CINDX_WORKFLOW_GEPA_V6_PROTOCOL_0.2.25_2026-08-08.md) | current source | 8 new frozen tasks; quality-or-Pareto-safe train admission; unseen validation; untouched test; exact causal receipts and task-level workflow budgets | `PROTOCOL_ONLY`: deterministic contract tests pass, but no V6 provider run exists and no quality, efficiency, promotion, or frontier claim is admitted |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
@@ -35,7 +36,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
 | Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, behavior-only route phenotype, authority ceilings, and operation-count bounds | Proves learned-profile wiring from route through Task Graph, recoverable serving projection, and hard safety/budget boundaries only; provider-backed uplift remains unverified |
-| Workflow GEPA product campaign V5 | current source | 2 seed reflection runs; 3 distinct route-phenotype candidates; 2 matched full-product train pairs per candidate; train-only Pareto selection; 2 validation-only matched pairs; 4 untouched test tasks with 2 counterbalanced repeats; exact learned-profile, route-contract, and Task Graph receipts; Grounded Direct control | Deterministic protocol and contract tests pass. The first provider run is valid targeted no-go evidence: learned routing was causal, but the candidate failed unseen validation with no quality win and material resource regression; control/test remained sealed and no snapshot was published |
+| Workflow GEPA product campaign V6 | current source | 8 new tasks split 2 train/2 validation/4 untouched test; 3 route-phenotype candidates; matched full-product pairs; quality-or-Pareto-safe train admission; exact learned-profile, route-contract, and Task Graph receipts; Grounded Direct control | Deterministic protocol and contract tests pass. No V6 provider run exists; V5 remains separate valid targeted no-go evidence and no snapshot or profile is promoted |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, semantic-curation loss/retry/panic recovery, queue/steer, permission, restart recovery, process CPU/output/time budgets, projection, and performance contracts | Control-plane evidence only |
 
@@ -89,18 +90,21 @@ latency, token, and terminal receipts remain diagnostic, but its quality result
 cannot reject or admit the candidate. The gate stopped before untouched test
 and Grounded Direct control, and no profile was promoted.
 
-The feature-gated Workflow GEPA V5 campaign separates search, validation, and
-untouched product test. Two public training tasks first produce redacted seed
-reflection evidence. The same frozen evidence generates three candidates with
-distinct route phenotypes; each candidate then receives matched full-product
-train pairs on one publicly Direct task and one publicly Workflow task. A
-candidate is train-eligible only if every cell completes with full quality and
-zero safety violations, exact learned-profile and route receipts appear in both
-cells, both public route contracts pass, the Workflow path and its profile are
-actually exercised, and the candidate records a quality, route, latency, or
-token improvement without a loss. Instance-wise Pareto selection ranks quality
-and verified success first, using latency and token count only to break equal
-quality. Validation and test evidence cannot select a candidate.
+The feature-gated Workflow GEPA V6 campaign separates search, validation, and
+untouched product test. It does not reuse V5 task content or observed validation
+outcomes. Two public training tasks first produce redacted seed reflection
+evidence. The same frozen evidence generates three candidates with distinct
+route phenotypes; each candidate then receives matched full-product train pairs
+on one publicly Direct task and one publicly Workflow task. A candidate is
+train-eligible only if every cell completes with full quality and zero safety
+violations, exact learned-profile and route receipts appear in both cells, both
+public route contracts pass, the Workflow path and its profile are actually
+exercised, and it records either an externally verified quality win with both
+resource ratios at most `1.25`, or a Pareto-safe 5% improvement in one resource
+while the other remains at most `1.05`. Route contrast is required causal
+evidence but is not itself product improvement. Instance-wise Pareto selection
+ranks quality and verified success first, using latency and token count only to
+break equal quality. Validation and test evidence cannot select a candidate.
 
 The train-selected frozen snapshot remains in the campaign's private temporary
 directory while it must pass two unseen validation pairs before four untouched
@@ -112,7 +116,9 @@ cell, quality wins on at least two distinct unseen cases, zero quality losses or
 safety violations, no completion regression, bounded latency and token ratios,
 exact candidate profile and route receipts on every candidate run, every public
 route contract satisfied, at least one exercised Task Graph, and a passing
-Grounded Direct control. Provider-backed semantic-memory extraction and cloud
+Grounded Direct control. Validation additionally requires the declared Workflow
+route to execute, both resource ratios at most `1.25`, and either a quality win
+or a Pareto-safe 10% resource gain. Provider-backed semantic-memory extraction and cloud
 embedding are disabled only inside this isolated campaign; deterministic local
 memory projection remains. The campaign emits an external candidate snapshot
 but does not claim or perform production promotion. The first provider-backed
@@ -121,6 +127,8 @@ candidate profile changed the training research route from Direct to Workflow,
 but unseen validation produced two quality ties, no Workflow execution,
 `1.4337x` latency, and `1.2966x` tokens. Control and untouched test remained
 sealed, no snapshot was published, and no uplift or promotion claim is admitted.
+The V6 protocol is frozen and passes deterministic checks, but has not contacted
+a provider. It therefore changes no measured capability conclusion.
 
 The Pro-to-Auto path additionally replays the current Pro champion's two gates,
 transfers only the complete bounded structural delta relative to the stable Pro

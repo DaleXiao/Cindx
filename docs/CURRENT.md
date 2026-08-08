@@ -23,9 +23,11 @@ only the revision recorded in each report.
   becomes direct or grounded-direct without another conductor call while
   preserving its selected model, tools, vision, risk, retrieval, and memory.
 - **Pro** uses the same decision contract with a maximum requested parallelism
-  of three and a larger workflow budget. It passes the same Router v2 contract
-  with Pro's cost/latency policy; a low-value Pro workflow also downshifts
-  without a repair call.
+  of three and a larger outer workflow budget. The validated task contract
+  narrows that ceiling to the conductor's task estimate while retaining the
+  structural minimum for required independent contributions, verification, and
+  synthesis. It passes the same Router v2 contract with Pro's cost/latency
+  policy; a low-value Pro workflow also downshifts without a repair call.
 - Runtime-derived tool and image-input requirements remain hard postconditions
   on the decision and selected model. Effect authority is independent and
   tri-state: explicit no-change language forbids effects, an explicit effect
@@ -659,15 +661,19 @@ Therefore the current claim is:
   absent from the public contract. Its execution receipts are diagnostic only;
   it supports no quality, regression, learned-workflow, or promotion claim.
   Untouched test and control stayed sealed and no profile was promoted.
-- Current source replaces that protocol with Workflow GEPA V5: three distinct
-  route candidates receive matched full-product train comparisons, selection is
-  train-only and quality-first, every route requirement is public, and no
-  candidate reaches validation without measured train-side improvement and
-  exact causal receipts. Its first provider run is valid targeted no-go
-  evidence: the selected profile causally changed a training route and exercised
-  Workflow, but two unseen validation pairs produced no quality win at `1.4337x`
-  latency and `1.2966x` tokens. Control/test stayed sealed, no snapshot was
-  published, and the intelligence or promotion conclusion does not change.
+- The first Workflow GEPA V5 provider run is valid targeted no-go evidence: the
+  selected profile causally changed a training route and exercised Workflow,
+  but two unseen validation pairs produced no quality win at `1.4337x` latency
+  and `1.2966x` tokens. Control/test stayed sealed and no snapshot was published.
+- Current source freezes a separate Workflow GEPA V6 protocol. Route contrast
+  is causal evidence but no longer counts as product improvement. A train
+  candidate now needs either an externally verified quality win under bounded
+  resources or a Pareto-safe efficiency gain; validation must also exercise its
+  declared Workflow route and meet bounded quality/resource gates. Eight new
+  tasks replace every V5 case, with train-only selection, unseen validation,
+  four untouched test cases, and a sealed Grounded Direct control. Deterministic
+  V6 checks pass, but no V6 provider run has occurred, so the intelligence and
+  promotion conclusions remain unchanged.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits

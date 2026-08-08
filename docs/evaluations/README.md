@@ -149,6 +149,11 @@ revision and is no longer the current product decision.
   published, and no production profile changed. The sanitized report is
   [retained here](CINDX_WORKFLOW_GEPA_V5_0.2.25_2026-08-08.json).
 
+- [Cindx Workflow GEPA V6 frozen protocol 0.2.25](CINDX_WORKFLOW_GEPA_V6_PROTOCOL_0.2.25_2026-08-08.md)
+  records the successor protocol and its eight fresh train, validation, and
+  untouched-test tasks. It is `PROTOCOL_ONLY`: deterministic contract tests pass,
+  but no V6 provider run, snapshot, promotion, or capability result exists.
+
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
   `2647daafae98e99d31c101886d2836e446d83d96`. It is

@@ -1,5 +1,5 @@
 use super::workflow_gepa_campaign_contract::{
-    CampaignSplit, CAMPAIGN_SCHEMA, CAMPAIGN_SUITE_ID,
+    CampaignSplit, CAMPAIGN_SCHEMA, CAMPAIGN_SUITE_ID, CAMPAIGN_VERSION,
 };
 use super::{RealworldCase, RealworldSuite};
 use orchestrator::sha256_hex;
@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), String> {
     if suite.schema != CAMPAIGN_SCHEMA
         || suite.id != CAMPAIGN_SUITE_ID
-        || suite.version != 5
+        || suite.version != CAMPAIGN_VERSION
         || suite.cases.len() != 8
     {
         return Err("Workflow GEPA suite identity or case count is invalid".to_string());
@@ -34,8 +34,12 @@ pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), Stri
         if case.verification.immutable_files.is_empty()
             || !case.verification.exact_files.is_empty()
             || !case.verification.file_contains.is_empty()
-            || case.verification.commands.len() != 1
-            || case.verification.commands[0].program != "node"
+            || case.verification.commands.len() != 4
+            || case
+                .verification
+                .commands
+                .iter()
+                .any(|command| command.program != "node")
             || case.verification.required_tools_all.as_slice() != ["shell.run"]
             || case.verification.required_tools_any.is_empty()
         {
@@ -100,8 +104,18 @@ pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), Stri
             return Err("Workflow GEPA train/validation/test strata are unbalanced".to_string());
         }
     }
-    if !ids.contains("route-collaboration-proof") {
-        return Err("Workflow GEPA suite lacks its route exercise case".to_string());
+    let direct_routes = suite
+        .cases
+        .iter()
+        .filter(|case| case.expected_execution_mode.as_deref() == Some("direct"))
+        .count();
+    let workflow_routes = suite
+        .cases
+        .iter()
+        .filter(|case| case.expected_execution_mode.as_deref() == Some("workflow"))
+        .count();
+    if direct_routes != 4 || workflow_routes != 4 {
+        return Err("Workflow GEPA suite lacks balanced Direct and Workflow routes".to_string());
     }
     Ok(())
 }
@@ -148,20 +162,34 @@ fn validate_coding_contract(case: &RealworldCase) -> Result<(), String> {
         .iter()
         .find(|fixture| fixture.path.ends_with("/spec.md"))
         .ok_or_else(|| format!("Workflow GEPA coding case {} has no public spec", case.id))?;
+    let check = case
+        .files
+        .iter()
+        .find(|fixture| fixture.path.ends_with("/check.mjs"))
+        .ok_or_else(|| format!("Workflow GEPA coding case {} has no public check", case.id))?;
     let markers: &[&str] = match case.id.as_str() {
-        "coding-calculate-total" => &["price * quantity", "empty array", "Do not mutate"],
-        "coding-parse-port" => &["base-10 number", "not a string", "exactly one colon"],
-        "coding-normalize-tags" => &[
-            "trim surrounding whitespace",
-            "lowercase",
-            "duplicate",
-            "sorted",
+        "coding-reconcile-records" => &[
+            "greatest revision",
+            "later input record",
+            "winning `void`",
+            "without mutating",
+        ],
+        "coding-resolve-features" => &[
+            "Equal revisions prefer an override",
+            "later record within the same source",
+            "without mutating",
+        ],
+        "coding-allocate-capacity" => &[
+            "descending priority",
+            "original input order",
+            "omit zero-unit allocations",
             "Do not mutate",
         ],
-        "coding-select-latest" => &[
-            "greatest revision",
-            "original record",
-            "Do not mutate or reorder",
+        "coding-deployment-layers" => &[
+            "topological layers",
+            "sorted lexicographically",
+            "Include isolated services",
+            "contains `cycle`",
         ],
         _ => return Err(format!("unknown Workflow GEPA coding case {}", case.id)),
     };
@@ -173,13 +201,14 @@ fn validate_coding_contract(case: &RealworldCase) -> Result<(), String> {
             .any(|path| path == &spec.path)
         || markers.iter().any(|marker| !spec.content.contains(marker))
         || !case.verification.json_files.is_empty()
-        || !case.verification.commands[0]
-            .args
-            .iter()
-            .any(|argument| argument == "--eval")
+        || case.verification.commands[0].args.as_slice() != [check.path.as_str()]
         || !case.verification.commands[0]
             .stdout_contains
-            .ends_with("-hidden-verified")
+            .ends_with("-check-passed")
+        || case.verification.commands[1..].iter().any(|command| {
+            !command.args.iter().any(|argument| argument == "--eval")
+                || !command.stdout_contains.ends_with("-verified")
+        })
     {
         return Err(format!(
             "Workflow GEPA coding case {} does not disclose its complete behavior contract",
@@ -191,28 +220,25 @@ fn validate_coding_contract(case: &RealworldCase) -> Result<(), String> {
 
 fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Result<(), String> {
     let public_contract_markers: &[&str] = match case.id.as_str() {
-        "research-authoritative-threshold" => &[
-            "exactly keys owner, threshold, and authority",
-            "Copy the approved owner name",
-            "approved percentage",
-            "superseding decision identifier",
-            "exactly as written",
+        "research-release-decision" => &[
+            "exactly keys release, limit_ms, rollback_owner, authority, and rejected",
+            "signed-record precedence",
+            "preserve metrics-file order in rejected",
         ],
-        "research-measurement-choice" => &[
-            "exactly keys winner, margin, and basis",
-            "lower-case candidate label",
-            "numeric difference",
-            "exact string validated score",
+        "research-maintenance-window" => &[
+            "exactly keys window, region, start_utc, approver, authority, and rejected",
+            "signed-record precedence",
+            "preserve windows-file order in rejected",
         ],
-        "research-approved-region" => &[
-            "exactly keys region, expiry, and approver",
-            "Copy all three values exactly as written",
+        "research-current-retention" => &[
+            "exactly keys dataset, days, owner, authority, and basis",
+            "publication and legal-hold precedence",
         ],
-        "route-collaboration-proof" => &[
-            "exactly keys choice, rejected, and reason",
-            "candidate label in lower case",
-            "input-file order",
-            "exact string lowest verified error rate among approved candidates",
+        "research-vendor-award" => &[
+            "exactly keys choice, rejected, authority, owner, and reason",
+            "compliance, signed-addendum precedence, reliability, and cost rules",
+            "preserve scorecard order in rejected",
+            "highest reliability among compliant vendors",
         ],
         _ => {
             return Err(format!(
@@ -233,6 +259,10 @@ fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Resu
         || !case.verification.commands[0]
             .stdout_contains
             .ends_with("-check-passed")
+        || case.verification.commands[1..].iter().any(|command| {
+            !command.args.iter().any(|argument| argument == "--eval")
+                || !command.stdout_contains.ends_with("-verified")
+        })
         || public_contract_markers
             .iter()
             .any(|marker| !case.objective.contains(marker))
@@ -261,9 +291,15 @@ fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Resu
 
 fn validate_route_contract(case: &RealworldCase) -> Result<(), String> {
     let expected = match case.id.as_str() {
-        "coding-calculate-total" => Some("direct"),
-        "research-authoritative-threshold" | "route-collaboration-proof" => Some("workflow"),
-        _ => None,
+        "coding-reconcile-records"
+        | "coding-resolve-features"
+        | "coding-allocate-capacity"
+        | "research-current-retention" => Some("direct"),
+        "coding-deployment-layers"
+        | "research-release-decision"
+        | "research-maintenance-window"
+        | "research-vendor-award" => Some("workflow"),
+        _ => return Err(format!("unknown Workflow GEPA route case {}", case.id)),
     };
     if case.expected_execution_mode.as_deref() != expected {
         return Err(format!(
@@ -320,7 +356,7 @@ mod tests {
     fn frozen_suite() -> RealworldSuite {
         serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v5.json"
+            "/../../../benchmarks/agent/workflow-gepa-v6.json"
         )))
         .unwrap()
     }
@@ -354,7 +390,7 @@ mod tests {
 
         let mut missing_contract: Value = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v5.json"
+            "/../../../benchmarks/agent/workflow-gepa-v6.json"
         )))
         .unwrap();
         missing_contract["cases"][1]["files"][0]["content"] =
@@ -367,17 +403,20 @@ mod tests {
     }
 
     #[test]
-    fn frozen_suite_rejects_hidden_output_normalization_or_route_requirements() {
-        let mut hidden_normalization = frozen_suite();
-        let measurement = hidden_normalization
+    fn frozen_suite_rejects_hidden_answer_or_route_requirements() {
+        let mut hidden_answer = frozen_suite();
+        let award = hidden_answer
             .cases
             .iter_mut()
-            .find(|case| case.id == "research-measurement-choice")
+            .find(|case| case.id == "research-vendor-award")
             .unwrap();
-        measurement.objective = measurement
+        award.objective = award
             .objective
-            .replace("lower-case candidate label", "candidate label");
-        assert!(validate_campaign_suite(&hidden_normalization)
+            .replace(
+                "highest reliability among compliant vendors",
+                "best compliant vendor",
+            );
+        assert!(validate_campaign_suite(&hidden_answer)
             .unwrap_err()
             .contains("lacks answer verification"));
 
@@ -385,7 +424,7 @@ mod tests {
         let collaboration = hidden_route
             .cases
             .iter_mut()
-            .find(|case| case.id == "route-collaboration-proof")
+            .find(|case| case.id == "research-vendor-award")
             .unwrap();
         collaboration.objective = collaboration
             .objective
@@ -400,24 +439,63 @@ mod tests {
         let suite = frozen_suite();
         let alternatives = [
             (
-                "coding-calculate-total",
-                "wg1/calc.mjs",
-                "export function total(items) { let value = 0; for (const item of items) value += item.price * item.quantity; return value; }\n",
+                "coding-reconcile-records",
+                "wgv6_1/reconcile.mjs",
+                r#"export function reconcile(records) {
+  if (!Array.isArray(records)) throw new TypeError('records');
+  const selected = new Map(); let rejected = 0;
+  records.forEach((record, index) => {
+    const valid = record && typeof record.id === 'string' && record.id.trim() && typeof record.account === 'string' && record.account.trim() && Number.isInteger(record.amount) && Number.isInteger(record.revision) && record.revision >= 0 && (record.status === 'posted' || record.status === 'void');
+    if (!valid) { rejected += 1; return; }
+    const prior = selected.get(record.id);
+    if (!prior || record.revision > prior.record.revision || record.revision === prior.record.revision && index > prior.index) selected.set(record.id, { record, index });
+  });
+  const totals = new Map();
+  for (const { record } of selected.values()) if (record.status === 'posted') { const account = record.account.trim(); totals.set(account, (totals.get(account) ?? 0) + record.amount); }
+  return { accounts: [...totals].sort(([a],[b]) => a.localeCompare(b)).map(([account,total]) => ({account,total})), rejected };
+}
+"#,
             ),
             (
-                "coding-parse-port",
-                "wg2/parser.mjs",
-                "export function parseEndpoint(value) { const [host, port] = value.split(':'); return { host, port: parseInt(port, 10) }; }\n",
+                "coding-resolve-features",
+                "wgv6_2/features.mjs",
+                r#"export function resolveFeatures(base, overrides) {
+  if (!Array.isArray(base) || !Array.isArray(overrides)) throw new TypeError('inputs');
+  const chosen = new Map();
+  for (const [source, values] of [[0,base],[1,overrides]]) values.forEach((entry,index) => {
+    if (!entry || typeof entry.key !== 'string' || !entry.key.trim() || typeof entry.enabled !== 'boolean' || !Number.isInteger(entry.revision) || entry.revision < 0) return;
+    const key=entry.key.trim(), prior=chosen.get(key), rank=[entry.revision,source,index];
+    if (!prior || rank[0] > prior.rank[0] || rank[0] === prior.rank[0] && (rank[1] > prior.rank[1] || rank[1] === prior.rank[1] && rank[2] > prior.rank[2])) chosen.set(key,{rank,value:{key,enabled:entry.enabled,revision:entry.revision}});
+  });
+  return [...chosen.values()].map(item=>item.value).sort((a,b)=>a.key.localeCompare(b.key));
+}
+"#,
             ),
             (
-                "coding-normalize-tags",
-                "wg3/normalize.mjs",
-                "export function normalizeTags(values) { const clean = values.map((value) => value.trim().toLowerCase()).filter(Boolean); return [...new Set(clean)].sort(); }\n",
+                "coding-allocate-capacity",
+                "wgv6_3/capacity.mjs",
+                r#"export function allocateCapacity(requests, capacity) {
+  if (!Array.isArray(requests) || !Number.isInteger(capacity) || capacity < 0) throw new TypeError('inputs');
+  let rejected=0;
+  const valid=requests.map((request,index)=>({request,index})).filter(({request})=>{ const ok=request && typeof request.id==='string' && request.id.trim() && Number.isInteger(request.units) && request.units>0 && Number.isInteger(request.priority); if(!ok) rejected+=1; return ok; }).sort((a,b)=>b.request.priority-a.request.priority || a.index-b.index);
+  let remaining=capacity; const allocations=[];
+  for (const {request} of valid) { const units=Math.min(request.units,remaining); if(units>0) allocations.push({id:request.id,units}); remaining-=units; }
+  return {allocations,remaining,rejected};
+}
+"#,
             ),
             (
-                "coding-select-latest",
-                "wg4/select.mjs",
-                "export function latest(records) { return records.reduce((best, value) => value.revision > best.revision ? value : best); }\n",
+                "coding-deployment-layers",
+                "wgv6_4/layers.mjs",
+                r#"export function deploymentLayers(services, dependencies) {
+  if (!Array.isArray(services) || !Array.isArray(dependencies) || services.some(v=>typeof v!=='string'||!v) || new Set(services).size!==services.length) throw new TypeError('inputs');
+  const known=new Set(services), incoming=new Map(services.map(v=>[v,new Set()]));
+  for(const edge of dependencies){ if(!edge || !known.has(edge.before) || !known.has(edge.after) || edge.before===edge.after) throw new TypeError('edge'); incoming.get(edge.after).add(edge.before); }
+  const remaining=new Set(services), layers=[];
+  while(remaining.size){ const layer=[...remaining].filter(v=>[...incoming.get(v)].every(dep=>!remaining.has(dep))).sort(); if(!layer.length) throw new Error('cycle'); layers.push(layer); for(const value of layer) remaining.delete(value); }
+  return layers;
+}
+"#,
             ),
         ];
         let receipts = [successful_tool("file.read"), successful_tool("shell.run")];
