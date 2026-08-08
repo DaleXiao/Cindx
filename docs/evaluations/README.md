@@ -118,8 +118,15 @@ revision and is no longer the current product decision.
   `2b5f5351eba42da18d99d1cbd2fda74129b6ac0d`. It is
   `INVALID_TASK_SPEC`: the second task required a numeric port without
   disclosing that behavior, and the audit also found holdout selection and
-  prompt-simulation confounds. V4 replaces the protocol; it has not yet
-  received a provider run.
+  prompt-simulation confounds. V4 replaces that protocol.
+
+- [Cindx Workflow GEPA V4 invalid attempt 0.2.25](CINDX_WORKFLOW_GEPA_V4_INVALID_0.2.25_2026-08-08.md)
+  records the authorized provider attempt on source commit
+  `f4553200c5eb7278a9e52b303e07b3b620fc1298`. It is `INVALID_EVALUATOR`:
+  both training tasks completed and generated a candidate snapshot, but a
+  path-bound revision comparison rejected separate isolated roots before any
+  validation arm ran. The snapshot was not admitted or promoted, and the
+  attempt provides no uplift or regression evidence.
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit

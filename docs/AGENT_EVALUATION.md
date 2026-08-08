@@ -23,6 +23,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Direct-finalizer GEPA calibration](evaluations/CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md) | `0.2.23` | Four preregistered Gate A pairs; exact prompt-only parent/candidate treatment; 16 retained provider receipts and 20 conservative call reservations | `VALID_TARGETED_EVIDENCE`, `NO_GO_FOR_PROMOTION`: the candidate regressed deterministic verification on one preservation case, so GEPA, holdout, snapshot creation, deployment, and transfer did not run |
 | [Workflow GEPA V2 invalid attempt](evaluations/CINDX_WORKFLOW_GEPA_V2_INVALID_0.2.25_2026-08-08.md) | `0.2.25` | One authorized provider attempt; one seed task completed before the second was rejected by a source-spelling assertion | `INVALID_EVALUATOR`: coding checks prescribed implementation text and research checks exposed expected answers; no candidate, holdout, learned route, Task Graph, control, report, or snapshot exists |
 | [Workflow GEPA V3 invalid attempt](evaluations/CINDX_WORKFLOW_GEPA_V3_INVALID_0.2.25_2026-08-08.md) | `0.2.25` | One authorized provider attempt; one seed passed before the second was rejected by an undisclosed numeric-port requirement | `INVALID_TASK_SPEC`: no mutation, validation, untouched product test, control, report, or snapshot exists; the attempt supports no capability or regression conclusion |
+| [Workflow GEPA V4 invalid attempt](evaluations/CINDX_WORKFLOW_GEPA_V4_INVALID_0.2.25_2026-08-08.md) | `0.2.25` | One authorized provider attempt; both training tasks completed and produced a candidate snapshot before the first validation pair | `INVALID_EVALUATOR`: the matched gate compared path-bound revisions for separate isolated roots, so no validation or test arm ran; the snapshot was not admitted or promoted and supports no capability conclusion |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
@@ -70,11 +71,12 @@ also reject candidate-only failure and absolute holdout quality, latency, or
 token regression against the stable profile, even if relative reviewer reward
 is positive. Those are mechanism checks, not answer-quality evidence.
 Historical transfer evidence did not execute the per-run route decision layer.
-The authorized Workflow GEPA V2 attempt is `INVALID_EVALUATOR`; the authorized
-V3 attempt is independently `INVALID_TASK_SPEC`. V3 hid required behavior from
+The authorized Workflow GEPA V2 and V4 attempts are `INVALID_EVALUATOR`; the
+authorized V3 attempt is independently `INVALID_TASK_SPEC`. V3 hid required behavior from
 the Agent, used holdout observations while selecting a candidate, and relied on
 read-only prompt-evaluation outcomes rather than matched complete product runs.
-Neither attempt supports a capability or regression claim.
+V4 reached candidate generation, but a path-bound workspace comparison stopped
+before validation. None of these attempts supports a capability or regression claim.
 
 The feature-gated Workflow GEPA V4 campaign separates two training runs, two
 validation cases, and four untouched test cases. Coding requirements are public;
