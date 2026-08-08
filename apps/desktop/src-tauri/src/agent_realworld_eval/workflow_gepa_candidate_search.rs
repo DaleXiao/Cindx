@@ -1,5 +1,6 @@
 use super::workflow_gepa_campaign_contract::{
     aggregate_pairs, PairAggregateReceipt, ProductPairReceipt, CAMPAIGN_SUITE_ID,
+    CAMPAIGN_VERSION,
 };
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
@@ -19,6 +20,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub(super) const TARGET_CANDIDATE_POPULATION: usize = 3;
+const TRAIN_RESOURCE_RATIO_CEILING: f64 = 1.25;
 
 const SEARCH_HYPOTHESES: [&str; 4] = [
     "Improve dynamic route and topology choices while preserving correct direct execution.",
@@ -80,8 +82,8 @@ pub(super) fn generate_candidate_population(
             SEARCH_HYPOTHESES.len(),
             hypothesis,
         ));
-        let mutation_id = format!("workflow-gepa-v5-mutation-{}", index + 1);
-        let stage = format!("workflow_gepa_v5_mutation_{}", index + 1);
+        let mutation_id = format!("workflow-gepa-v6-mutation-{}", index + 1);
+        let stage = format!("workflow_gepa_v6_mutation_{}", index + 1);
         let response = run_background_prompt_mutation_stage(
             state,
             provider,
@@ -155,12 +157,12 @@ fn parse_candidate_response(
     control: &Arc<AgentRunControl>,
 ) -> Result<(ConductorPromptGenome, String, bool), String> {
     let response_sha256 = sha256_hex(response.as_bytes());
-    let candidate_id = format!("learned-pro-v5-{}", &response_sha256[..16]);
+    let candidate_id = format!("learned-pro-v6-{}", &response_sha256[..16]);
     match parent.learned_reflective_mutation_from_response(response, candidate_id, packets) {
         Ok(candidate) => Ok((candidate, response_sha256, false)),
         Err(initial_error) => {
-            let mutation_id = format!("workflow-gepa-v5-mutation-repair-{}", index + 1);
-            let stage = format!("workflow_gepa_v5_mutation_repair_{}", index + 1);
+            let mutation_id = format!("workflow-gepa-v6-mutation-repair-{}", index + 1);
+            let stage = format!("workflow_gepa_v6_mutation_repair_{}", index + 1);
             let repaired = run_background_prompt_mutation_stage(
                 state,
                 provider,
@@ -172,7 +174,7 @@ fn parse_candidate_response(
                 control,
             )?;
             let repaired_sha256 = sha256_hex(repaired.as_bytes());
-            let repaired_id = format!("learned-pro-v5-{}", &repaired_sha256[..16]);
+            let repaired_id = format!("learned-pro-v6-{}", &repaired_sha256[..16]);
             let candidate = parent.learned_reflective_mutation_from_response(
                 &repaired,
                 repaired_id,
@@ -222,10 +224,15 @@ fn training_ineligibility(aggregate: &PairAggregateReceipt) -> Option<&'static s
     {
         return Some("route_contrast_not_exercised");
     }
-    let measured_gain = aggregate.candidate_wins > 0
-        || aggregate.candidate_route_contract_passes > aggregate.seed_route_contract_passes
-        || aggregate.latency_ratio <= 0.95
-        || aggregate.token_ratio <= 0.95;
+    let resource_bounded = aggregate.latency_ratio <= TRAIN_RESOURCE_RATIO_CEILING
+        && aggregate.token_ratio <= TRAIN_RESOURCE_RATIO_CEILING;
+    let quality_gain = aggregate.candidate_wins > 0
+        && aggregate.behavior_delta > f64::EPSILON
+        && resource_bounded;
+    let efficiency_gain = (aggregate.latency_ratio <= 0.95
+        && aggregate.token_ratio <= 1.05)
+        || (aggregate.token_ratio <= 0.95 && aggregate.latency_ratio <= 1.05);
+    let measured_gain = quality_gain || efficiency_gain;
     if !measured_gain {
         return Some("no_train_side_improvement");
     }
@@ -253,7 +260,7 @@ pub(super) fn select_training_candidate(
             let seed = u64::from_str_radix(&digest[..16], 16).unwrap_or_default();
             scores.push(AgentEvaluationCaseScore {
                 suite_id: CAMPAIGN_SUITE_ID.to_string(),
-                suite_version: 5,
+                suite_version: CAMPAIGN_VERSION,
                 case_id: pair.case_id.clone(),
                 category: pair.category.clone(),
                 split: AgentEvaluationSplit::Pareto,
@@ -334,6 +341,39 @@ mod tests {
         no_gain.latency_ratio = 1.0;
         assert_eq!(
             training_ineligibility(&no_gain),
+            Some("no_train_side_improvement")
+        );
+
+        let mut route_only = aggregate();
+        route_only.latency_ratio = 1.20;
+        route_only.token_ratio = 1.20;
+        assert_eq!(
+            training_ineligibility(&route_only),
+            Some("no_train_side_improvement")
+        );
+
+        let mut one_sided_efficiency = aggregate();
+        one_sided_efficiency.latency_ratio = 0.90;
+        one_sided_efficiency.token_ratio = 1.20;
+        assert_eq!(
+            training_ineligibility(&one_sided_efficiency),
+            Some("no_train_side_improvement")
+        );
+
+        let mut quality_gain = aggregate();
+        quality_gain.candidate_wins = 1;
+        quality_gain.candidate_win_cases = 1;
+        quality_gain.ties = 1;
+        quality_gain.seed_behavior_score = 0.8;
+        quality_gain.candidate_behavior_score = 0.9;
+        quality_gain.behavior_delta = 0.1;
+        quality_gain.latency_ratio = 1.20;
+        quality_gain.token_ratio = 1.20;
+        assert_eq!(training_ineligibility(&quality_gain), None);
+
+        quality_gain.latency_ratio = 1.30;
+        assert_eq!(
+            training_ineligibility(&quality_gain),
             Some("no_train_side_improvement")
         );
     }

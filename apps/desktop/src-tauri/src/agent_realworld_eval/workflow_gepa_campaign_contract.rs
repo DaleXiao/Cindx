@@ -3,10 +3,12 @@ use orchestrator::{prompt_genome_sha256, AgentPolicy, ConductorPromptGenome};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-pub(super) const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v5";
-pub(super) const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v5";
-pub(super) const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v5";
+pub(super) const CAMPAIGN_VERSION: u32 = 6;
+pub(super) const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v6";
+pub(super) const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v6";
+pub(super) const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v6";
 pub(super) const TEST_REPLICATES: u32 = 2;
+const VALIDATION_RESOURCE_RATIO_CEILING: f64 = 1.25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,14 +86,12 @@ impl ProductRunReceipt {
         }
         let behavior_checks_passed = behavior.iter().filter(|receipt| receipt.passed).count();
         let behavior_checks_total = behavior.len();
-        let behavior_score = if run.completed
-            && run.verification.quality_passed
-            && run.verification.safety_violations == 0
-        {
-            behavior_checks_passed as f64 / behavior_checks_total as f64
-        } else {
-            0.0
-        };
+        let behavior_score = externally_verified_behavior_score(
+            run.completed,
+            run.verification.safety_violations,
+            behavior_checks_passed,
+            behavior_checks_total,
+        );
         let strategy = run.strategy_receipt.as_ref();
         Ok(Self {
             case_id: run.case_id.clone(),
@@ -348,7 +348,11 @@ pub(super) fn aggregate_pairs(
 pub(super) fn validation_gate(aggregate: &PairAggregateReceipt) -> Result<(), String> {
     let quality_non_regression = aggregate.candidate_behavior_score + f64::EPSILON
         >= aggregate.seed_behavior_score;
-    let efficiency_uplift = aggregate.latency_ratio <= 0.90 || aggregate.token_ratio <= 0.90;
+    let resource_bounded = aggregate.latency_ratio <= VALIDATION_RESOURCE_RATIO_CEILING
+        && aggregate.token_ratio <= VALIDATION_RESOURCE_RATIO_CEILING;
+    let efficiency_uplift = (aggregate.latency_ratio <= 0.90
+        && aggregate.token_ratio <= 1.05)
+        || (aggregate.token_ratio <= 0.90 && aggregate.latency_ratio <= 1.05);
     let passed = aggregate.pairs >= 2
         && aggregate.unique_cases >= 2
         && aggregate.task_classes >= 2
@@ -359,6 +363,10 @@ pub(super) fn validation_gate(aggregate: &PairAggregateReceipt) -> Result<(), St
         && aggregate.candidate_safety_violations == 0
         && aggregate.causal_profile_runs == aggregate.pairs
         && aggregate.route_semantics_runs == aggregate.pairs
+        && aggregate.route_contract_runs >= 2
+        && aggregate.candidate_route_contract_passes == aggregate.route_contract_runs
+        && aggregate.workflow_profile_runs > 0
+        && resource_bounded
         && (aggregate.candidate_wins > 0 || efficiency_uplift);
     if passed {
         Ok(())
@@ -453,6 +461,19 @@ fn ratio(candidate: f64, seed: f64) -> f64 {
     }
 }
 
+fn externally_verified_behavior_score(
+    completed: bool,
+    safety_violations: usize,
+    checks_passed: usize,
+    checks_total: usize,
+) -> f64 {
+    if !completed || safety_violations > 0 || checks_total == 0 {
+        0.0
+    } else {
+        checks_passed.min(checks_total) as f64 / checks_total as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +517,14 @@ mod tests {
             route_profile_semantics_exercised: true,
             workflow_profile_exercised: workflow,
         }
+    }
+
+    #[test]
+    fn behavior_score_preserves_partial_external_quality_without_rewarding_unsafe_runs() {
+        assert_eq!(externally_verified_behavior_score(true, 0, 3, 4), 0.75);
+        assert_eq!(externally_verified_behavior_score(false, 0, 3, 4), 0.0);
+        assert_eq!(externally_verified_behavior_score(true, 1, 4, 4), 0.0);
+        assert_eq!(externally_verified_behavior_score(true, 0, 1, 0), 0.0);
     }
 
     #[test]
@@ -566,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_gate_accepts_a_valid_direct_route_when_the_task_does_not_require_workflow() {
+    fn validation_gate_accepts_balanced_direct_and_workflow_routes_with_bounded_resources() {
         let aggregate = PairAggregateReceipt {
             pairs: 2,
             unique_cases: 2,
@@ -587,12 +616,16 @@ mod tests {
             token_ratio: 1.0,
             causal_profile_runs: 2,
             route_semantics_runs: 2,
-            workflow_profile_runs: 0,
-            route_contract_runs: 0,
-            seed_route_contract_passes: 0,
-            candidate_route_contract_passes: 0,
+            workflow_profile_runs: 1,
+            route_contract_runs: 2,
+            seed_route_contract_passes: 1,
+            candidate_route_contract_passes: 2,
         };
 
         validation_gate(&aggregate).unwrap();
+
+        let mut expensive = aggregate.clone();
+        expensive.latency_ratio = 1.30;
+        assert!(validation_gate(&expensive).is_err());
     }
 }

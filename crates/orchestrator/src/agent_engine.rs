@@ -245,6 +245,7 @@ mod tests {
             expected_uplift_bps: 4_000,
             confidence_bps: 7_000,
             max_parallelism: 2,
+            max_workflow_steps: 4,
             min_successful_branches: 2,
             verification_required: true,
             terminal_model_call_reserve: 2,

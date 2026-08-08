@@ -1400,6 +1400,15 @@ fn conductor_harness_applies_evolved_topology_and_role_strategies() {
 
     let mut flexible_request = conductor_request();
     flexible_request.budget.max_steps = 5;
+    let verified_role_routing = RoutingContext::from_prompt(
+        "Investigate three independent hypotheses and verify the strongest answer",
+        Vec::new(),
+    );
+    flexible_request.execution_contract = ConductorExecutionContract::from_routing(
+        &verified_role_routing,
+        "pro",
+        OrchestrationPolicy::BestOfN { candidates: 2 },
+    );
     flexible_request.prompt_genome.role_strategy = PromptRoleStrategy::Flexible;
     let flexible = ConductorHarness::new(flexible_request);
     flexible
@@ -1411,6 +1420,11 @@ fn conductor_harness_applies_evolved_topology_and_role_strategies() {
     let diverse = ConductorHarness::new({
         let mut request = conductor_request();
         request.budget.max_steps = 5;
+        request.execution_contract = ConductorExecutionContract::from_routing(
+            &verified_role_routing,
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 2 },
+        );
         request
     });
     let diversity_error = diverse

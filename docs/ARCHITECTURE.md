@@ -514,7 +514,7 @@ route dynamically, but a candidate cannot collapse or relabel its own
 generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
-The feature-gated Workflow GEPA V5 campaign exercises this causal chain through
+The feature-gated Workflow GEPA V6 campaign exercises this causal chain through
 six modules with one-way responsibilities: the runner owns protocol order, the
 suite module validates public requirements and frozen strata, the evidence
 module converts external product verification into redacted reflection packets,
@@ -522,9 +522,11 @@ the candidate-search module generates and selects only from train evidence, the
 execution module isolates and counterbalances matched cells, and the contract
 module computes gates from sanitized receipts. V2 and the first V4 attempt are
 retained only as `INVALID_EVALUATOR` history; V3 and the second V4 attempt remain
-`INVALID_TASK_SPEC` history.
+`INVALID_TASK_SPEC` history. V5 remains valid targeted no-go evidence and is not
+reused as V6 selection or validation data.
 
-V5 uses two training tasks, two validation tasks, and four untouched test tasks.
+V6 uses two new training tasks, two new validation tasks, and four new untouched
+test tasks.
 The Agent receives every behavior and route requirement; only concrete host test
 inputs remain unseen. External postconditions override an internally completed
 status when producing GEPA reflection. Three distinct route phenotypes are
@@ -532,14 +534,19 @@ generated from the same frozen training reflection. Each receives matched
 full-product train pairs on a Direct and a Workflow contract. Train eligibility
 requires complete quality, zero loss or safety violation, exact causal profile
 receipts, correct route contrast, actual Workflow-profile execution, and a
-measured quality, route, latency, or token gain. Instance-wise Pareto selection
-prioritizes quality and verified success; performance only breaks equal-quality
-ties. Validation and final test observations cannot select or alter the
-candidate.
+measured product gain. Route contrast alone is not a gain. Eligibility requires
+either an externally verified quality win while both latency and token ratios
+remain at most `1.25`, or at least a 5% improvement in one resource while the
+other remains at most `1.05`. Instance-wise Pareto selection prioritizes quality
+and verified success; performance only breaks equal-quality ties. Validation and
+final test observations cannot select or alter the candidate.
 
 Seed and candidate runs use separately materialized workspaces with equal
 prestate fingerprints, candidate-specific project scopes, and alternating pair
-order. Two final repeats per case must show quality wins on multiple distinct
+order. Validation requires complete candidate quality, no losses, exact causal
+and route receipts, actual Workflow execution, both resource ratios at most
+`1.25`, and either a quality win or a Pareto-safe 10% resource improvement. Two
+final repeats per case must show quality wins on multiple distinct
 cases without losses, safety, completion, latency, or token regression. Every
 candidate cell must bind the exact learned profile and route phenotype, every
 declared route contract must pass, and at least one must exercise its Task

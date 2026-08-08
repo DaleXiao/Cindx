@@ -348,7 +348,7 @@ mod tests {
     fn campaign_preflights_every_matched_case_before_provider_work() {
         let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v5.json"
+            "/../../../benchmarks/agent/workflow-gepa-v6.json"
         )))
         .unwrap();
         let root = tempfile::tempdir().unwrap();

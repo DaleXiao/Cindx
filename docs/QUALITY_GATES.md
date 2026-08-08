@@ -269,10 +269,11 @@ reached both validation pairs, but the failed research case required lower-case
 identifiers and an exact phrase that the public task did not disclose. Its raw
 route and resource receipts are diagnostic only; the quality, tie, and
 validation decision are not capability evidence. The untouched test matrix and
-Grounded Direct control were not run. The current Workflow GEPA V5 product
-campaign replaces V4 and is a separate explicit, billable run. Its deterministic
+Grounded Direct control were not run. The Workflow GEPA V5 product campaign
+replaced V4 and its first run produced valid targeted no-go evidence. The current
+Workflow GEPA V6 protocol is a separate explicit, billable run. Its deterministic
 contract checks are part of the Rust suite, but they do not call a provider and
-cannot prove learned-profile uplift. A valid V5 run must start from a clean exact
+cannot prove learned-profile uplift. A valid V6 run must start from a clean exact
 revision and external report/snapshot paths. It uses two public training tasks
 to generate three distinct route phenotypes, executes two matched full-product
 train pairs for each, and selects only a candidate that clears train quality,
@@ -283,10 +284,18 @@ and validation remains sealed. A selected snapshot stays inside the private
 campaign directory until validation, Grounded Direct control, and untouched
 test all pass; no failed candidate is published to the external snapshot path.
 
+V6 no longer counts a route-contract change as product improvement. Train
+admission requires either an externally verified quality win while both latency
+and token ratios are at most `1.25`, or at least a 5% improvement in one resource
+while the other ratio remains at most `1.05`.
+
 The selected candidate must next clear two validation-only matched product pairs
 before four untouched tasks run with two counterbalanced repeats. Every candidate
 cell must carry the exact profile and route-phenotype receipts, all declared route
-contracts must pass, and at least one final-test cell must prove Task Graph use.
+contracts must pass, and validation plus final test must prove Task Graph use.
+Validation requires complete candidate quality, zero losses, both resource
+ratios at most `1.25`, and either a quality win or a Pareto-safe 10% resource
+gain.
 The final gate requires complete quality acceptance for every candidate cell,
 quality wins on at least two unseen tasks, zero quality losses, no completion or
 safety regression, and aggregate latency and token ratios no greater than
@@ -302,7 +311,8 @@ provider run is `VALID_TARGETED_EVIDENCE`, `NO_GO_VALIDATION`: its selected
 profile changed a public training route, but unseen validation had no quality
 win and materially regressed resources. The fail-closed gate withheld control,
 test, and snapshot publication. Any successor campaign requires a new frozen
-protocol and separate explicit authorization.
+protocol and separate explicit authorization. V6 is that frozen successor
+protocol, but no V6 provider run has occurred.
 
 For provenance, the first V5 campaign used a clean exact revision and a fresh
 outside-Git directory. The command is retained to document that run, not to

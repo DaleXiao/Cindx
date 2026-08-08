@@ -58,7 +58,10 @@ struct ConductorStepSemantics {
 }
 
 impl ConductorHarness {
-    pub fn new(request: ConductorRequest) -> Self {
+    pub fn new(mut request: ConductorRequest) -> Self {
+        request.budget = request
+            .execution_contract
+            .constrain_workflow_budget(request.budget);
         Self { request }
     }
 
@@ -439,12 +442,6 @@ impl ConductorHarness {
     }
 
     fn validate_shape(&self, workflow: &AdaptiveWorkflow) -> Result<(), String> {
-        if workflow.steps.len() > self.request.budget.max_steps {
-            return Err(format!(
-                "conductor workflow exceeds the {}-step budget",
-                self.request.budget.max_steps
-            ));
-        }
         let selected_models = workflow
             .steps
             .iter()
@@ -489,6 +486,12 @@ impl ConductorHarness {
         if independent_branches.len() > branch_limit {
             return Err(format!(
                 "conductor workflow exceeds the selected prompt profile's {branch_limit}-branch limit"
+            ));
+        }
+        if workflow.steps.len() > self.request.budget.max_steps {
+            return Err(format!(
+                "conductor workflow exceeds the {}-step budget",
+                self.request.budget.max_steps
             ));
         }
         let distinct_branch_subtasks = independent_branches
