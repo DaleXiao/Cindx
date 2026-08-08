@@ -670,33 +670,56 @@ pub(crate) fn prompt_workspace_revision_sha256(
     hasher.update(b"cindx.prompt-workspace.v2\0");
     hasher.update(canonical.to_string_lossy().as_bytes());
     hasher.update(b"\0");
+    hasher.update(prompt_workspace_content_digest(&canonical, &guard)?);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(feature = "realworld-eval")]
+pub(crate) fn prompt_workspace_content_sha256(
+    workspace_root: &Path,
+    control: &AgentRunControl,
+) -> Result<String, String> {
+    let guard = WorkspaceFingerprintGuard::new(control);
+    guard.check()?;
+    let canonical = workspace_root
+        .canonicalize()
+        .map_err(|error| format!("prompt workspace cannot be canonicalized: {error}"))?;
+    Ok(format!(
+        "{:x}",
+        prompt_workspace_content_digest(&canonical, &guard)?
+    ))
+}
+
+fn prompt_workspace_content_digest(
+    canonical: &Path,
+    guard: &WorkspaceFingerprintGuard<'_>,
+) -> Result<sha2::digest::Output<Sha256>, String> {
     let mut content_hasher = Sha256::new();
     let mut byte_count = 0_u64;
-    if hash_git_workspace(&canonical, &mut content_hasher, &mut byte_count, &guard).is_err() {
+    if hash_git_workspace(canonical, &mut content_hasher, &mut byte_count, guard).is_err() {
         guard.check()?;
         content_hasher = Sha256::new();
         byte_count = 0;
         let mut files = Vec::new();
         let mut entry_count = 0;
         collect_bounded_workspace_files(
-            &canonical,
+            canonical,
             &mut files,
             &mut entry_count,
             PROMPT_WORKSPACE_FINGERPRINT_MAX_ENTRIES,
-            &guard,
+            guard,
         )?;
         for file in files {
             hash_workspace_file(
-                &canonical,
+                canonical,
                 &file,
                 &mut content_hasher,
                 &mut byte_count,
-                &guard,
+                guard,
             )?;
         }
     }
-    hasher.update(content_hasher.finalize());
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(content_hasher.finalize())
 }
 
 fn hash_git_workspace(

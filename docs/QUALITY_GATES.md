@@ -260,7 +260,12 @@ orchestration-uplift decision are therefore `NO-GO`. Current source repairs the
 deterministic identity/projection boundary, but the historical matrix remains
 unchanged and a newly frozen provider run is required for any revised decision.
 
-The Workflow GEPA V4 product campaign is a separate explicit, billable run. Its
+The first authorized Workflow GEPA V4 attempt is `INVALID_EVALUATOR`: both
+training tasks completed, but a path-bound revision comparison rejected the
+separate isolated roots before validation. Current source uses a bounded
+path-independent content fingerprint for this matched check; a new provider
+run is required for evidence. The Workflow GEPA V4 product campaign is a
+separate explicit, billable run. Its
 deterministic contract checks are part of the Rust suite, but they do not call a
 provider and cannot prove learned-profile uplift. A valid V4 run must start from
 a clean exact revision and external report/snapshot paths. It uses two public

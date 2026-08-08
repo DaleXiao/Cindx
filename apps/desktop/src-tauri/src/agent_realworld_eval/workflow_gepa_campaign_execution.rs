@@ -6,7 +6,7 @@ use super::{materialize_case, ExecutionCell, RawRun, RealworldCase, Treatment};
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
 use crate::prompt_learning_runtime::{
-    prompt_evaluation_parent_budget, prompt_workspace_revision_sha256,
+    prompt_evaluation_parent_budget, prompt_workspace_content_sha256,
 };
 use agent_runtime::AgentRunControl;
 use orchestrator::{sha256_hex, FrozenPromptProfileSnapshot};
@@ -238,7 +238,7 @@ pub(super) fn execute_campaign_case(
 
 pub(super) fn campaign_workspace_sha256(root: &Path) -> Result<String, String> {
     let control = AgentRunControl::with_budget(prompt_evaluation_parent_budget());
-    prompt_workspace_revision_sha256(root, &control)
+    prompt_workspace_content_sha256(root, &control)
 }
 
 pub(super) fn project_scope(
@@ -252,4 +252,29 @@ pub(super) fn project_scope(
         split.label(),
         case.id
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn campaign_workspace_fingerprint_ignores_root_path_but_detects_content_changes() {
+        let seed = tempfile::tempdir().unwrap();
+        let candidate = tempfile::tempdir().unwrap();
+        fs::write(seed.path().join("fixture.txt"), "same content\n").unwrap();
+        fs::write(candidate.path().join("fixture.txt"), "same content\n").unwrap();
+
+        assert_eq!(
+            campaign_workspace_sha256(seed.path()).unwrap(),
+            campaign_workspace_sha256(candidate.path()).unwrap()
+        );
+
+        fs::write(candidate.path().join("fixture.txt"), "changed content\n").unwrap();
+        assert_ne!(
+            campaign_workspace_sha256(seed.path()).unwrap(),
+            campaign_workspace_sha256(candidate.path()).unwrap()
+        );
+    }
 }
