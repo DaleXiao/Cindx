@@ -28,6 +28,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Workflow GEPA V5 provider evaluation](evaluations/CINDX_WORKFLOW_GEPA_V5_0.2.25_2026-08-08.md) | `0.2.25` | First authorized V5 run; 3 train candidates, 6 matched train pairs, and 2 unseen validation pairs on clean source `86f7dd6`; control and test remained sealed | `VALID_TARGETED_EVIDENCE`, `NO_GO_VALIDATION`: the selected profile causally changed the train route and exercised Workflow, but validation produced 0 wins and 2 ties at `1.4337x` latency and `1.2966x` tokens; no snapshot or production profile was published |
 | [Workflow GEPA V6 frozen protocol](evaluations/CINDX_WORKFLOW_GEPA_V6_PROTOCOL_0.2.25_2026-08-08.md) | current source | 8 new frozen tasks; quality-or-Pareto-safe train admission; unseen validation; untouched test; exact causal receipts and task-level workflow budgets | `PROTOCOL_ONLY`: deterministic contract tests pass, but no V6 provider run exists and no quality, efficiency, promotion, or frontier claim is admitted |
 | [Workflow GEPA V7 frozen protocol](evaluations/CINDX_WORKFLOW_GEPA_V7_PROTOCOL_0.2.25_2026-08-09.md) | current source | Same 8 behavior contracts without prescribed routes; observation-driven one-or-two-gene proposals; external action journal; strict product and campaign caps | `PROTOCOL_ONLY`: deterministic contract tests pass, but no V7 provider run exists and no quality, efficiency, promotion, or frontier claim is admitted |
+| [Workflow GEPA V7 interrupted campaign](evaluations/CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.md) | `0.2.25` | One authorized clean-source run; 2 completed train seeds followed by one bounded mutation-search reservation | `INTERRUPTED_CAMPAIGN`: mutation stopped on `no_progress` before a candidate population existed; no matched candidate pair, validation, test, control, snapshot, profile change, or capability conclusion |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
@@ -133,8 +134,11 @@ sealed, no snapshot was published, and no uplift or promotion claim is admitted.
 The V7 protocol adds a private external hash-chained journal before every
 provider action, a 20-call/10-minute product cap, and campaign caps of two hours,
 35 product runs, 700 product model calls, and 12 mutation calls. Shipping
-Fast/Auto/Pro budgets are unchanged. V7 passes deterministic checks but has not
-contacted a provider, so it changes no measured capability conclusion.
+Fast/Auto/Pro budgets are unchanged. The one authorized V7 campaign completed
+both training seeds, then stopped on `no_progress` during mutation search before
+any candidate population existed. Its pending journal action blocks replay, and
+validation, test, control, and publication stayed sealed. The run therefore
+changes no measured capability conclusion.
 
 The Pro-to-Auto path additionally replays the current Pro champion's two gates,
 transfers only the complete bounded structural delta relative to the stable Pro
