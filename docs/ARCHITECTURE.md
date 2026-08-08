@@ -80,7 +80,7 @@ stored as a second trajectory blob.
 
 | Crate | Owns | Does not own |
 | --- | --- | --- |
-| `agent-core` | Shared ids, logical-run/physical-attempt lineage, messages, events, permission capability policy, tool and model contracts | Persistence or side effects |
+| `agent-core` | Shared ids, logical-run/physical-attempt lineage, messages, events, permission capability policy, tool contracts, and transport-free model request/response/failure contracts | Persistence, provider transport, or side effects |
 | `agent-runtime` | `AgentKernel`, typed prepared task/checkpoint state, loop state, bounded cognitive projection and adaptive cursor, task-contract Goal Delta and denial/replan policy, run control, budgets, authoritative context compilation, grounding scope/tool policy, model transport retry/progress policy, tool admission, terminal semantics | Provider HTTP, permission UI, actual tool execution |
 | `agent-harness` | Active-run registry and exclusive-key leases over `AgentRunControl` | Agent policy or workflow planning |
 | `orchestrator` | Typed run decisions, workflow/task graph, role assignment, verification, frontier selection, recovery policy, prompt-genome evaluation | Tool side effects, Tauri state, provider wire protocol |
@@ -98,9 +98,13 @@ stored as a second trajectory blob.
 The root workspace excludes `orchestrator-eval` from default members so the
 research harness does not enter ordinary product builds.
 
-Within `model-provider`, immutable prepared streaming payloads own encoded
-request bytes and their canonical request digest. Transport execution remains
-separate from provider-identity and semantic-response receipt construction.
+`agent-runtime` depends on the transport-free model contracts in `agent-core`;
+it does not depend on `model-provider` or pull HTTP, WebSocket, and Tokio
+transport code into kernel-only builds. `model-provider` re-exports those
+contracts for source compatibility. Within `model-provider`, immutable prepared
+streaming payloads own encoded request bytes and their canonical request digest.
+Transport execution remains separate from provider-identity and
+semantic-response receipt construction.
 
 The desktop default feature set includes `lancedb-store`; production, CI, and
 release builds therefore retain the complete vector-store implementation. The
@@ -773,9 +777,9 @@ Portable crates depend inward on contracts, not on Tauri:
 
 ```text
 agent-core
-  <- model-provider, agent-storage, agent-memory, agent-mcp, agent-skills
+  <- model-provider, agent-storage, agent-memory, agent-mcp, agent-skills, agent-runtime
 model-provider + agent-core
-  <- agent-runtime, tools
+  <- tools
 agent-runtime
   <- agent-harness
 agent-rag

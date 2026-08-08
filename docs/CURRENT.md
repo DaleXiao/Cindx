@@ -691,6 +691,11 @@ Therefore the current claim is:
   dedicated crates, but provider calls, permission UI, tool side effects,
   persistence coordination, and several workflow adapters still meet in the
   desktop integration layer.
+- The portable runtime no longer depends on the provider transport crate:
+  request, response, tool-call, and provider-failure contracts live in
+  `agent-core`, while `model-provider` keeps HTTP/WebSocket execution and
+  compatibility re-exports. Kernel-only checks therefore do not compile the
+  provider network stack.
 - `agent-rag` and parts of the desktop adapter remain large modules. Structure
   checks prevent some regressions but do not prove ideal boundaries.
 - `agent-application` owns the portable run/reprepare driver, lifecycle,

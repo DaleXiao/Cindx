@@ -1,4 +1,6 @@
-use agent_core::{Message, Metadata, ModelRole, ToolSpec};
+use agent_core::Metadata;
+#[cfg(test)]
+use agent_core::{Message, ModelRole, ToolSpec};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::{header, redirect, Client, RequestBuilder, Response, StatusCode};
@@ -11,7 +13,6 @@ mod dashscope_asr_task_provider;
 mod dashscope_realtime_config;
 mod dashscope_realtime_guard;
 mod dashscope_realtime_provider;
-mod error;
 mod image_provider;
 mod json_wire;
 mod prepared_payload;
@@ -44,10 +45,14 @@ use streaming_finish::{finish_streaming_response, StreamingResponseParts};
 use streaming_response::consume_streaming_body;
 use streaming_response::consume_streaming_response;
 
+pub use agent_core::{
+    classify_provider_failure, tool_function_name, ModelCallMode, ModelError, ModelRequest,
+    ModelResponse, ModelResponseAssessment, ModelResponseDisposition, ModelResponseTermination,
+    ModelToolCall, ProviderFailureClass,
+};
 pub use dashscope_realtime_provider::{
     DashScopeRealtimeTranscriptionConfig, DashScopeRealtimeTranscriptionProvider,
 };
-pub use error::{classify_provider_failure, ProviderFailureClass};
 pub use image_provider::{
     build_image_generation_request_json, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
 };
@@ -63,7 +68,7 @@ pub use request_builder::{
 pub use request_vision::model_supports_vision_content;
 pub use response_parser::{
     parse_chat_response, parse_model_response, parse_provider_error, parse_tool_calls,
-    tool_arguments_to_key_value_input, tool_function_name,
+    tool_arguments_to_key_value_input,
 };
 pub use streaming_wire::parse_stream_line;
 pub use usage::{
@@ -84,104 +89,6 @@ const DSML_PARAMETER_CLOSE: &str = "</｜DSML｜parameter>";
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 static AZURE_API_KEY_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 static HTTP_RUNTIME: OnceLock<Runtime> = OnceLock::new();
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelCallMode {
-    NonStreaming,
-    Streaming,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelRequest {
-    pub role: ModelRole,
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolSpec>,
-    pub mode: ModelCallMode,
-    pub metadata: Metadata,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelResponse {
-    pub message: Message,
-    pub raw_tool_calls_json: Option<String>,
-    pub tool_calls: Vec<ModelToolCall>,
-    pub metadata: Metadata,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelResponseTermination {
-    Complete,
-    ToolCalls,
-    OutputLimit,
-    ContentFiltered,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelResponseDisposition {
-    Usable,
-    ToolCalls,
-    Empty,
-    IncompleteOutput,
-    Filtered,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModelResponseAssessment {
-    pub termination: ModelResponseTermination,
-    pub disposition: ModelResponseDisposition,
-}
-
-impl ModelResponse {
-    pub fn assessment(&self) -> ModelResponseAssessment {
-        let finish_reason = self
-            .metadata
-            .get("finish_reason")
-            .map(|value| value.trim().to_ascii_lowercase());
-        let termination = if !self.tool_calls.is_empty()
-            || matches!(
-                finish_reason.as_deref(),
-                Some("tool_calls" | "function_call")
-            ) {
-            ModelResponseTermination::ToolCalls
-        } else {
-            match finish_reason.as_deref() {
-                Some("stop" | "end_turn" | "completed") => ModelResponseTermination::Complete,
-                Some("length" | "max_tokens" | "max_output_tokens") => {
-                    ModelResponseTermination::OutputLimit
-                }
-                Some("content_filter" | "safety" | "blocked") => {
-                    ModelResponseTermination::ContentFiltered
-                }
-                _ => ModelResponseTermination::Unknown,
-            }
-        };
-        let disposition = match termination {
-            ModelResponseTermination::ToolCalls => ModelResponseDisposition::ToolCalls,
-            ModelResponseTermination::OutputLimit => ModelResponseDisposition::IncompleteOutput,
-            ModelResponseTermination::ContentFiltered => ModelResponseDisposition::Filtered,
-            ModelResponseTermination::Complete | ModelResponseTermination::Unknown => {
-                if self.message.content.trim().is_empty() {
-                    ModelResponseDisposition::Empty
-                } else {
-                    ModelResponseDisposition::Usable
-                }
-            }
-        };
-
-        ModelResponseAssessment {
-            termination,
-            disposition,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments_json: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingRequest {
@@ -231,54 +138,6 @@ pub struct ProviderCapabilities {
     pub supports_vision: bool,
     pub supports_embeddings: bool,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelError {
-    pub message: String,
-    pub class: ProviderFailureClass,
-    pub status_code: Option<u16>,
-    pub retryable: bool,
-}
-
-impl ModelError {
-    pub fn new(message: impl Into<String>) -> Self {
-        let message = message.into();
-        let class = classify_provider_failure(&message, None);
-        Self {
-            message,
-            class,
-            status_code: None,
-            retryable: class.is_retryable(),
-        }
-    }
-
-    pub fn with_status(status_code: u16, message: impl Into<String>) -> Self {
-        let message = message.into();
-        let class = classify_provider_failure(&message, Some(status_code));
-        Self {
-            message,
-            class,
-            status_code: Some(status_code),
-            retryable: class.is_retryable(),
-        }
-    }
-
-    pub fn is_retryable(&self) -> bool {
-        self.retryable
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.class == ProviderFailureClass::Cancelled
-    }
-}
-
-impl std::fmt::Display for ModelError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.message)
-    }
-}
-
-impl std::error::Error for ModelError {}
 
 pub trait ModelProvider {
     fn name(&self) -> &str;

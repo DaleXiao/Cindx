@@ -1,12 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod event_contract;
+mod model_contract;
 mod permission_policy;
 mod run_identity;
 
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
+};
+pub use model_contract::{
+    classify_provider_failure, tool_function_name, ModelCallMode, ModelError, ModelRequest,
+    ModelResponse, ModelResponseAssessment, ModelResponseDisposition, ModelResponseTermination,
+    ModelToolCall, ProviderFailureClass,
 };
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,

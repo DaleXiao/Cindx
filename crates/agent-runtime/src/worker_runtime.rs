@@ -5,8 +5,9 @@ use crate::{
     AgentTurnPreparationError, ContextGovernorReport, PreparedAgentTurn, WorkerTurnPhase,
     WorkerTurnPolicy, MAX_IDENTICAL_TOOL_FAILURES,
 };
-use agent_core::{Metadata, TaskId, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec};
-use model_provider::ModelResponse;
+use agent_core::{
+    Metadata, ModelResponse, TaskId, ToolInvocation, ToolOutcomeStatus, ToolRisk, ToolSpec,
+};
 
 const WORKER_TURN_BUDGET_EXHAUSTED: &str = "worker_turn_budget_exhausted";
 const WORKER_FINALIZATION_TOOL_CALL: &str = "worker_tool_calls_after_evidence_phase";
@@ -551,7 +552,7 @@ fn substantive_evidence_tool(tool: &ToolSpec) -> bool {
 mod tests {
     use super::*;
     use agent_core::{Message, MessageRole, ToolCallId};
-    use model_provider::{ModelResponseTermination, ModelToolCall};
+    use agent_core::{ModelResponseTermination, ModelToolCall};
 
     fn read_tool() -> ToolSpec {
         ToolSpec::builtin(

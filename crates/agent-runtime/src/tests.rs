@@ -1,6 +1,5 @@
 use super::*;
-use agent_core::{ToolRisk, ToolSpec};
-use model_provider::{ModelResponse, ModelToolCall};
+use agent_core::{ModelResponse, ModelToolCall, ToolRisk, ToolSpec};
 
 #[test]
 fn default_turn_budget_supports_multi_step_agent_runs() {

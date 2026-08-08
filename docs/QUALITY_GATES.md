@@ -44,6 +44,9 @@ quality-gate profile. It deliberately avoids frontend bundle resources and the
 heavy LanceDB dependency graph so Rust adapter edits can receive fast type
 feedback. It does not validate vector persistence, frontend behavior, or a
 shipping bundle; the default-feature full and release gates remain required.
+The structure gate also enforces that `agent-runtime` consumes transport-free
+model contracts from `agent-core` and cannot regain a direct dependency on the
+HTTP/WebSocket `model-provider` crate.
 
 `scripts/check-rust-quality.sh` is the mandatory static Rust gate in CI and
 release. It rejects formatting drift in the portable workspace and Clippy

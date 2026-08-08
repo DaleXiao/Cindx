@@ -250,7 +250,7 @@ fn successful_provider_responses_keep_runtime_and_control_turn_ledgers_aligned()
         control.finish_model_call();
         assert_eq!(control.record_agent_turn("executor"), Ok(expected_turn));
 
-        let response = model_provider::ModelResponse {
+        let response = agent_core::ModelResponse {
             message: agent_core::Message {
                 role: agent_core::MessageRole::Assistant,
                 content: String::new(),
