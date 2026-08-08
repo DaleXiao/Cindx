@@ -651,14 +651,14 @@ Therefore the current claim is:
 - The current targeted calibration identifies one evolved candidate only to
   reject it before GEPA and holdout; no provider-backed result proves a GEPA,
   deployed learned-profile, transfer, or self-distillation gain.
-- Three Workflow GEPA provider attempts remain invalid evidence: V2 prescribed
+- Four Workflow GEPA provider attempts remain invalid evidence: V2 prescribed
   source spelling and exposed answers, V3 omitted a required behavior from the
   public task, and the first V4 attempt compared path-bound revisions for
-  separate matched roots. The second V4 attempt is valid targeted evidence but
-  a validation `NO-GO`: the candidate had no quality win, exercised route
-  semantics but no learned workflow, and exceeded latency and token bounds.
-  Untouched test and control stayed sealed, no profile was promoted, and the
-  result supports no learned-workflow uplift claim.
+  separate matched roots. The second V4 attempt reached validation, but its
+  failed research case hid lower-case identifier and exact-phrase requirements
+  absent from the public contract. Its execution receipts are diagnostic only;
+  it supports no quality, regression, learned-workflow, or promotion claim.
+  Untouched test and control stayed sealed and no profile was promoted.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
