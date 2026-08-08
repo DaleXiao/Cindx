@@ -55,6 +55,7 @@ pub(crate) fn schedule_semantic_memory_refresh(
             return;
         }
         Ok(SemanticMemoryEnqueueOutcome::CapacityExceeded { job, metrics }) => {
+            let job = *job;
             record_semantic_memory_queue_event(
                 &app,
                 &job.run_context,
@@ -73,11 +74,12 @@ pub(crate) fn schedule_semantic_memory_refresh(
             return;
         }
         Err(error) => {
+            let job = *error.job;
             recover_semantic_memory_without_model(
                 &app.state::<AppState>(),
-                error.job.workspace_root,
-                error.job.config,
-                &error.job.run_context,
+                job.workspace_root,
+                job.config,
+                &job.run_context,
                 &error.reason,
             );
             return;
