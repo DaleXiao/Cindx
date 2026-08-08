@@ -1,0 +1,503 @@
+use super::{RawRun, RealworldCase};
+use orchestrator::{prompt_genome_sha256, AgentPolicy, ConductorPromptGenome};
+use serde::Serialize;
+use std::collections::BTreeSet;
+
+pub(super) const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v4";
+pub(super) const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v4";
+pub(super) const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v4";
+pub(super) const TEST_REPLICATES: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CampaignSplit {
+    Train,
+    Validation,
+    Test,
+}
+
+impl CampaignSplit {
+    pub(super) fn parse(case: &RealworldCase) -> Result<Self, String> {
+        match case.campaign_split.as_deref() {
+            Some("train") => Ok(Self::Train),
+            Some("validation") => Ok(Self::Validation),
+            Some("test") => Ok(Self::Test),
+            other => Err(format!(
+                "Workflow GEPA case {} has invalid campaign split {:?}",
+                case.id, other
+            )),
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Train => "train",
+            Self::Validation => "validation",
+            Self::Test => "test",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ProductRunReceipt {
+    pub(super) case_id: String,
+    pub(super) category: String,
+    pub(super) split: CampaignSplit,
+    pub(super) replicate: u32,
+    pub(super) treatment: String,
+    pub(super) completed: bool,
+    pub(super) terminal_status: String,
+    pub(super) behavior_checks_passed: usize,
+    pub(super) behavior_checks_total: usize,
+    pub(super) behavior_score: f64,
+    pub(super) quality_passed: bool,
+    pub(super) safety_violations: usize,
+    pub(super) latency_ms: u64,
+    pub(super) total_tokens: u64,
+    pub(super) output_sha256: String,
+    pub(super) profile_id: Option<String>,
+    pub(super) profile_sha256: Option<String>,
+    pub(super) route_profile_sha256: Option<String>,
+    pub(super) route_profile_semantics_exercised: bool,
+    pub(super) workflow_profile_exercised: bool,
+}
+
+impl ProductRunReceipt {
+    pub(super) fn from_run(
+        run: &RawRun,
+        split: CampaignSplit,
+        replicate: u32,
+    ) -> Result<Self, String> {
+        validate_run_evidence(run)?;
+        let behavior = run
+            .verification
+            .postcondition_receipts
+            .iter()
+            .filter(|receipt| receipt.kind != "immutable_fixture")
+            .collect::<Vec<_>>();
+        if behavior.is_empty() {
+            return Err(format!(
+                "real product task {} has no external behavior postcondition",
+                run.case_id
+            ));
+        }
+        let behavior_checks_passed = behavior.iter().filter(|receipt| receipt.passed).count();
+        let behavior_checks_total = behavior.len();
+        let behavior_score = if run.completed && run.verification.safety_violations == 0 {
+            behavior_checks_passed as f64 / behavior_checks_total as f64
+        } else {
+            0.0
+        };
+        let strategy = run.strategy_receipt.as_ref();
+        Ok(Self {
+            case_id: run.case_id.clone(),
+            category: run.category.clone(),
+            split,
+            replicate,
+            treatment: run.treatment.label().to_string(),
+            completed: run.completed,
+            terminal_status: run.terminal_status.clone(),
+            behavior_checks_passed,
+            behavior_checks_total,
+            behavior_score,
+            quality_passed: run.verification.quality_passed,
+            safety_violations: run.verification.safety_violations,
+            latency_ms: run.metrics.latency_ms,
+            total_tokens: run.metrics.total_tokens,
+            output_sha256: run.output_sha256.clone(),
+            profile_id: strategy.map(|receipt| receipt.profile_id.clone()),
+            profile_sha256: strategy.map(|receipt| receipt.profile_sha256.clone()),
+            route_profile_sha256: strategy.map(|receipt| receipt.route_profile_sha256.clone()),
+            route_profile_semantics_exercised: strategy
+                .is_some_and(|receipt| receipt.route_profile_semantics_exercised),
+            workflow_profile_exercised: strategy
+                .is_some_and(|receipt| receipt.workflow_profile_exercised),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ProductPairReceipt {
+    pub(super) evaluation_id: String,
+    pub(super) case_id: String,
+    pub(super) category: String,
+    pub(super) split: CampaignSplit,
+    pub(super) replicate: u32,
+    pub(super) execution_order: String,
+    pub(super) workspace_prestate_sha256: String,
+    pub(super) seed: ProductRunReceipt,
+    pub(super) candidate: ProductRunReceipt,
+    pub(super) behavior_delta: f64,
+    pub(super) outcome: String,
+}
+
+impl ProductPairReceipt {
+    pub(super) fn new(
+        evaluation_id: String,
+        execution_order: String,
+        workspace_prestate_sha256: String,
+        seed: ProductRunReceipt,
+        candidate: ProductRunReceipt,
+    ) -> Result<Self, String> {
+        if seed.case_id != candidate.case_id
+            || seed.category != candidate.category
+            || seed.split != candidate.split
+            || seed.replicate != candidate.replicate
+        {
+            return Err("matched product pair identity is inconsistent".to_string());
+        }
+        let behavior_delta = candidate.behavior_score - seed.behavior_score;
+        let outcome = if behavior_delta > f64::EPSILON
+            || behavior_delta.abs() <= f64::EPSILON && candidate.completed && !seed.completed
+        {
+            "candidate_win"
+        } else if behavior_delta < -f64::EPSILON
+            || behavior_delta.abs() <= f64::EPSILON && seed.completed && !candidate.completed
+        {
+            "candidate_loss"
+        } else {
+            "tie"
+        };
+        Ok(Self {
+            evaluation_id,
+            case_id: seed.case_id.clone(),
+            category: seed.category.clone(),
+            split: seed.split,
+            replicate: seed.replicate,
+            execution_order,
+            workspace_prestate_sha256,
+            seed,
+            candidate,
+            behavior_delta,
+            outcome: outcome.to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub(super) struct PairAggregateReceipt {
+    pub(super) pairs: usize,
+    pub(super) unique_cases: usize,
+    pub(super) task_classes: usize,
+    pub(super) candidate_wins: usize,
+    pub(super) candidate_win_cases: usize,
+    pub(super) candidate_losses: usize,
+    pub(super) ties: usize,
+    pub(super) seed_behavior_score: f64,
+    pub(super) candidate_behavior_score: f64,
+    pub(super) behavior_delta: f64,
+    pub(super) seed_completed: usize,
+    pub(super) candidate_completed: usize,
+    pub(super) candidate_safety_violations: usize,
+    pub(super) latency_ratio: f64,
+    pub(super) token_ratio: f64,
+    pub(super) causal_profile_runs: usize,
+    pub(super) route_semantics_runs: usize,
+    pub(super) workflow_profile_runs: usize,
+}
+
+pub(super) fn aggregate_pairs(
+    pairs: &[ProductPairReceipt],
+    candidate: &ConductorPromptGenome,
+) -> Result<PairAggregateReceipt, String> {
+    if pairs.is_empty() {
+        return Ok(PairAggregateReceipt::default());
+    }
+    let candidate_sha256 = prompt_genome_sha256(candidate)?;
+    let candidate_route_sha256 =
+        candidate.route_decision_profile_sha256(AgentPolicy::Pro.label())?;
+    let denominator = pairs.len() as f64;
+    let seed_behavior_score = pairs
+        .iter()
+        .map(|pair| pair.seed.behavior_score)
+        .sum::<f64>()
+        / denominator;
+    let candidate_behavior_score = pairs
+        .iter()
+        .map(|pair| pair.candidate.behavior_score)
+        .sum::<f64>()
+        / denominator;
+    let seed_latency = pairs
+        .iter()
+        .map(|pair| pair.seed.latency_ms as f64)
+        .sum::<f64>();
+    let candidate_latency = pairs
+        .iter()
+        .map(|pair| pair.candidate.latency_ms as f64)
+        .sum::<f64>();
+    let seed_tokens = pairs
+        .iter()
+        .map(|pair| pair.seed.total_tokens as f64)
+        .sum::<f64>();
+    let candidate_tokens = pairs
+        .iter()
+        .map(|pair| pair.candidate.total_tokens as f64)
+        .sum::<f64>();
+    Ok(PairAggregateReceipt {
+        pairs: pairs.len(),
+        unique_cases: pairs
+            .iter()
+            .map(|pair| pair.case_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        task_classes: pairs
+            .iter()
+            .map(|pair| pair.category.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        candidate_wins: pairs
+            .iter()
+            .filter(|pair| pair.outcome == "candidate_win")
+            .count(),
+        candidate_win_cases: pairs
+            .iter()
+            .filter(|pair| pair.outcome == "candidate_win")
+            .map(|pair| pair.case_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        candidate_losses: pairs
+            .iter()
+            .filter(|pair| pair.outcome == "candidate_loss")
+            .count(),
+        ties: pairs.iter().filter(|pair| pair.outcome == "tie").count(),
+        seed_behavior_score,
+        candidate_behavior_score,
+        behavior_delta: candidate_behavior_score - seed_behavior_score,
+        seed_completed: pairs.iter().filter(|pair| pair.seed.completed).count(),
+        candidate_completed: pairs
+            .iter()
+            .filter(|pair| pair.candidate.completed)
+            .count(),
+        candidate_safety_violations: pairs
+            .iter()
+            .map(|pair| pair.candidate.safety_violations)
+            .sum(),
+        latency_ratio: ratio(candidate_latency, seed_latency),
+        token_ratio: ratio(candidate_tokens, seed_tokens),
+        causal_profile_runs: pairs
+            .iter()
+            .filter(|pair| {
+                pair.candidate.profile_id.as_deref() == Some(candidate.id.as_str())
+                    && pair.candidate.profile_sha256.as_deref() == Some(candidate_sha256.as_str())
+                    && pair.candidate.route_profile_sha256.as_deref()
+                        == Some(candidate_route_sha256.as_str())
+            })
+            .count(),
+        route_semantics_runs: pairs
+            .iter()
+            .filter(|pair| pair.candidate.route_profile_semantics_exercised)
+            .count(),
+        workflow_profile_runs: pairs
+            .iter()
+            .filter(|pair| pair.candidate.workflow_profile_exercised)
+            .count(),
+    })
+}
+
+pub(super) fn validation_gate(aggregate: &PairAggregateReceipt) -> Result<(), String> {
+    let quality_non_regression = aggregate.candidate_behavior_score + f64::EPSILON
+        >= aggregate.seed_behavior_score;
+    let efficiency_uplift = aggregate.latency_ratio <= 0.90 || aggregate.token_ratio <= 0.90;
+    let passed = aggregate.pairs >= 2
+        && aggregate.unique_cases >= 2
+        && aggregate.task_classes >= 2
+        && quality_non_regression
+        && aggregate.candidate_losses == 0
+        && aggregate.candidate_completed >= aggregate.seed_completed
+        && aggregate.candidate_safety_violations == 0
+        && aggregate.causal_profile_runs == aggregate.pairs
+        && aggregate.route_semantics_runs == aggregate.pairs
+        && aggregate.workflow_profile_runs > 0
+        && (aggregate.candidate_wins > 0 || efficiency_uplift);
+    if passed {
+        Ok(())
+    } else {
+        Err(format!(
+            "candidate failed the validation-only admission gate: {}",
+            serde_json::to_string(aggregate)
+                .unwrap_or_else(|_| "aggregate unavailable".to_string())
+        ))
+    }
+}
+
+pub(super) fn test_gate(aggregate: &PairAggregateReceipt) -> Result<(), String> {
+    let passed = aggregate.pairs >= 8
+        && aggregate.unique_cases >= 4
+        && aggregate.task_classes >= 2
+        && aggregate.candidate_wins >= 2
+        && aggregate.candidate_win_cases >= 2
+        && aggregate.candidate_losses == 0
+        && aggregate.behavior_delta > f64::EPSILON
+        && aggregate.candidate_completed >= aggregate.seed_completed
+        && aggregate.candidate_safety_violations == 0
+        && aggregate.latency_ratio <= 1.05
+        && aggregate.token_ratio <= 1.05
+        && aggregate.causal_profile_runs == aggregate.pairs
+        && aggregate.route_semantics_runs == aggregate.pairs
+        && aggregate.workflow_profile_runs > 0;
+    if passed {
+        Ok(())
+    } else {
+        Err(format!(
+            "candidate failed the untouched product-test gate: {}",
+            serde_json::to_string(aggregate)
+                .unwrap_or_else(|_| "aggregate unavailable".to_string())
+        ))
+    }
+}
+
+pub(super) fn validate_grounded_control(run: &RawRun) -> Result<(), String> {
+    validate_run_evidence(run)?;
+    let direct = run
+        .strategy_receipt
+        .as_ref()
+        .is_some_and(|receipt| receipt.execution_mode == "direct");
+    if run.completed
+        && run.verification.quality_passed
+        && run.verification.external_effect_passed == Some(true)
+        && run.verification.safety_violations == 0
+        && direct
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Grounded Direct control {} failed its completion/evidence gate",
+            run.case_id
+        ))
+    }
+}
+
+fn validate_run_evidence(run: &RawRun) -> Result<(), String> {
+    if run.setup_failure.is_some()
+        || run.evidence_error.is_some()
+        || run.verification.total_checks == 0
+        || run.strategy_receipt.is_none()
+        || run.model_receipts.is_empty()
+    {
+        return Err(format!(
+            "real product task {} produced invalid evaluation evidence: setup={:?}, evidence={:?}, checks={}, strategy={}, models={}",
+            run.case_id,
+            run.setup_failure,
+            run.evidence_error,
+            run.verification.total_checks,
+            run.strategy_receipt.is_some(),
+            run.model_receipts.len(),
+        ));
+    }
+    Ok(())
+}
+
+fn ratio(candidate: f64, seed: f64) -> f64 {
+    if seed <= f64::EPSILON {
+        if candidate <= f64::EPSILON {
+            1.0
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        candidate / seed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(
+        case_id: &str,
+        category: &str,
+        score: f64,
+        latency_ms: u64,
+        profile: &ConductorPromptGenome,
+        workflow: bool,
+    ) -> ProductRunReceipt {
+        ProductRunReceipt {
+            case_id: case_id.to_string(),
+            category: category.to_string(),
+            split: CampaignSplit::Test,
+            replicate: 1,
+            treatment: "pro".to_string(),
+            completed: true,
+            terminal_status: "completed".to_string(),
+            behavior_checks_passed: usize::from(score > 0.0),
+            behavior_checks_total: 1,
+            behavior_score: score,
+            quality_passed: score == 1.0,
+            safety_violations: 0,
+            latency_ms,
+            total_tokens: 100,
+            output_sha256: "a".repeat(64),
+            profile_id: Some(profile.id.clone()),
+            profile_sha256: Some(prompt_genome_sha256(profile).unwrap()),
+            route_profile_sha256: Some(
+                profile
+                    .route_decision_profile_sha256(AgentPolicy::Pro.label())
+                    .unwrap(),
+            ),
+            route_profile_semantics_exercised: true,
+            workflow_profile_exercised: workflow,
+        }
+    }
+
+    #[test]
+    fn test_gate_requires_quality_wins_on_multiple_unseen_cases() {
+        let candidate = ConductorPromptGenome::seed_for_effort("pro")
+            .mutations()
+            .into_iter()
+            .find(|profile| profile.custom_directive != "")
+            .unwrap_or_else(|| {
+                let mut profile = ConductorPromptGenome::seed_for_effort("pro");
+                profile.id = "learned-test".to_string();
+                profile.generation = 1;
+                profile.parents = vec!["seed-pro-v1".to_string()];
+                profile.custom_directive = "Verify the public contract.".to_string();
+                profile
+            });
+        let mut pairs = Vec::new();
+        for replicate in 1..=2 {
+            for (index, (case_id, category)) in [
+                ("a", "coding"),
+                ("b", "coding"),
+                ("c", "research"),
+                ("d", "research"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut seed = run(case_id, category, 1.0, 100, &candidate, index == 0);
+                seed.profile_id = Some("seed-pro-v1".to_string());
+                let candidate_score = if index < 2 && replicate == 1 { 1.0 } else { 1.0 };
+                let candidate_run = run(
+                    case_id,
+                    category,
+                    candidate_score,
+                    100,
+                    &candidate,
+                    index == 0,
+                );
+                pairs.push(
+                    ProductPairReceipt::new(
+                        format!("{case_id}-{replicate}"),
+                        "seed_then_candidate".to_string(),
+                        "f".repeat(64),
+                        seed,
+                        candidate_run,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        let aggregate = aggregate_pairs(&pairs, &candidate).unwrap();
+        assert!(test_gate(&aggregate).is_err());
+
+        for pair in pairs.iter_mut().filter(|pair| {
+            pair.replicate == 1 && matches!(pair.case_id.as_str(), "a" | "b")
+        }) {
+            pair.seed.behavior_score = 0.0;
+            pair.behavior_delta = 1.0;
+            pair.outcome = "candidate_win".to_string();
+        }
+        let aggregate = aggregate_pairs(&pairs, &candidate).unwrap();
+        test_gate(&aggregate).unwrap();
+    }
+}

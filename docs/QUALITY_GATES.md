@@ -260,6 +260,21 @@ orchestration-uplift decision are therefore `NO-GO`. Current source repairs the
 deterministic identity/projection boundary, but the historical matrix remains
 unchanged and a newly frozen provider run is required for any revised decision.
 
+The Workflow GEPA V4 product campaign is a separate explicit, billable run. Its
+deterministic contract checks are part of the Rust suite, but they do not call a
+provider and cannot prove learned-profile uplift. A valid V4 run must start from
+a clean exact revision and external report/snapshot paths. It uses two public
+training tasks to create one frozen candidate, admits that candidate on two
+validation-only matched product pairs, and evaluates it on four untouched tasks
+with two counterbalanced repeats. Every candidate cell must carry the exact
+profile and route-phenotype receipts; at least one must prove Task Graph use.
+The final gate requires quality wins on at least two unseen tasks, zero quality
+losses, no completion or safety regression, and aggregate latency and token
+ratios no greater than `1.05`. A Grounded Direct product control must also pass.
+V2 is `INVALID_EVALUATOR` and V3 is `INVALID_TASK_SPEC`; neither is a baseline
+or evidence of capability change. The V4 campaign must not be launched without
+separate explicit provider authorization.
+
 The memory-effect provider matrix is a separate explicit, billable run. Its
 deterministic analyzer is exercised with:
 

@@ -111,7 +111,15 @@ revision and is no longer the current product decision.
   `INVALID_EVALUATOR`: V2 rejected a behaviorally valid implementation based on
   source spelling and exposed exact research answers in workspace fixtures. The
   run stopped before candidate generation and provides no uplift or regression
-  evidence. V3 replaces those checks; it has not yet received a provider run.
+  evidence.
+
+- [Cindx Workflow GEPA V3 invalid attempt 0.2.25](CINDX_WORKFLOW_GEPA_V3_INVALID_0.2.25_2026-08-08.md)
+  records the authorized provider attempt on source commit
+  `2b5f5351eba42da18d99d1cbd2fda74129b6ac0d`. It is
+  `INVALID_TASK_SPEC`: the second task required a numeric port without
+  disclosing that behavior, and the audit also found holdout selection and
+  prompt-simulation confounds. V4 replaces the protocol; it has not yet
+  received a provider run.
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit

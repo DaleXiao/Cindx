@@ -22,6 +22,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Memory-effect V1](evaluations/CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md) | `0.2.19` | 3 frozen cases; matched direct memory-on/off; 3 repeats; 18 provider-backed cells and 9 pairs | `INVALID_EVIDENCE`: 18/18 completed, but one required memory-off cell invoked `skill.search` outside the frozen allowlist, leaving 8/9 pairs evaluable; five evaluable required pairs descriptively favored memory-on and all three controls passed, but no causal memory-uplift claim is admitted |
 | [Direct-finalizer GEPA calibration](evaluations/CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md) | `0.2.23` | Four preregistered Gate A pairs; exact prompt-only parent/candidate treatment; 16 retained provider receipts and 20 conservative call reservations | `VALID_TARGETED_EVIDENCE`, `NO_GO_FOR_PROMOTION`: the candidate regressed deterministic verification on one preservation case, so GEPA, holdout, snapshot creation, deployment, and transfer did not run |
 | [Workflow GEPA V2 invalid attempt](evaluations/CINDX_WORKFLOW_GEPA_V2_INVALID_0.2.25_2026-08-08.md) | `0.2.25` | One authorized provider attempt; one seed task completed before the second was rejected by a source-spelling assertion | `INVALID_EVALUATOR`: coding checks prescribed implementation text and research checks exposed expected answers; no candidate, holdout, learned route, Task Graph, control, report, or snapshot exists |
+| [Workflow GEPA V3 invalid attempt](evaluations/CINDX_WORKFLOW_GEPA_V3_INVALID_0.2.25_2026-08-08.md) | `0.2.25` | One authorized provider attempt; one seed passed before the second was rejected by an undisclosed numeric-port requirement | `INVALID_TASK_SPEC`: no mutation, validation, untouched product test, control, report, or snapshot exists; the attempt supports no capability or regression conclusion |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
@@ -31,7 +32,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
 | Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, behavior-only route phenotype, authority ceilings, and operation-count bounds | Proves learned-profile wiring from route through Task Graph, recoverable serving projection, and hard safety/budget boundaries only; provider-backed uplift remains unverified |
-| Workflow GEPA causal campaign V3 | current source | 8 frozen effectful coding/research tasks; answer-free workspace checks; host-owned hidden behavior/JSON postconditions; immutable evidence/check receipts; terminal-only learning admission; independent pre-decision learning strata; exact pre-treatment workspace restoration; paired seed/candidate train and holdout; fresh route/Task Graph exercise; Grounded Direct control | Feature-gated campaign contract only. V2 is invalid evidence; no uplift is claimed until a separately authorized clean-revision V3 provider run passes every evidence and non-regression gate |
+| Workflow GEPA product campaign V4 | current source | 2 full-product training runs; external-verifier reflection; 2 validation-only matched pairs; 4 untouched test tasks with 2 counterbalanced repeats; isolated identical workspaces; exact learned-profile route/Task Graph receipts; Grounded Direct control | Feature-gated campaign contract only. V2 and V3 are invalid evidence; no uplift is claimed until a separately authorized clean-revision V4 provider run passes validation, untouched quality wins on at least two test tasks, safety, completion, latency, token, causality, and control gates |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, semantic-curation loss/retry/panic recovery, queue/steer, permission, restart recovery, process CPU/output/time budgets, projection, and performance contracts | Control-plane evidence only |
 
@@ -69,21 +70,25 @@ also reject candidate-only failure and absolute holdout quality, latency, or
 token regression against the stable profile, even if relative reviewer reward
 is positive. Those are mechanism checks, not answer-quality evidence.
 Historical transfer evidence did not execute the per-run route decision layer.
-The authorized Workflow GEPA V2 attempt is `INVALID_EVALUATOR`: it rejected a
-behaviorally correct implementation for omitting a prescribed source spelling,
-and its research verifier fixtures exposed exact answers. It stopped before
-candidate generation and supports no capability or regression claim.
+The authorized Workflow GEPA V2 attempt is `INVALID_EVALUATOR`; the authorized
+V3 attempt is independently `INVALID_TASK_SPEC`. V3 hid required behavior from
+the Agent, used holdout observations while selecting a candidate, and relied on
+read-only prompt-evaluation outcomes rather than matched complete product runs.
+Neither attempt supports a capability or regression claim.
 
-The feature-gated Workflow GEPA V3 campaign requires a fresh frozen-profile
-product run to prove that learned route semantics and the Task Graph were both
-exercised. Agent-visible checks contain no expected answer. Host-owned hidden
-behavior or JSON postconditions determine correctness, while immutable fixture
-receipts reject changes to evidence and checks. Tool receipts separately require
-successful evidence reading and command verification without prescribing
-`file.write` over another authorized mutation path. Retrieval remains outside
-that treatment. Auto-to-Pro uplift
-still requires a provider-backed comparison of the pre-transfer Pro profile
-with the promoted transfer-trained profile on frozen matched cases.
+The feature-gated Workflow GEPA V4 campaign separates two training runs, two
+validation cases, and four untouched test cases. Coding requirements are public;
+only concrete host test inputs remain unseen. External deterministic results,
+including failure despite an internal `completed` terminal, become the GEPA
+reflection input. A single generated candidate may reach the final test only by
+passing validation without using test evidence. Final evidence consists of two
+counterbalanced seed/candidate product repeats per test case on separately
+materialized identical workspaces. Promotion evidence requires quality wins on
+at least two distinct unseen cases, zero quality losses or safety violations,
+no completion regression, bounded latency and token ratios, exact candidate
+profile and route receipts on every candidate run, at least one exercised Task
+Graph, and a passing Grounded Direct control. The campaign emits an external
+candidate snapshot but does not claim or perform production promotion.
 
 The Pro-to-Auto path additionally replays the current Pro champion's two gates,
 transfers only the complete bounded structural delta relative to the stable Pro

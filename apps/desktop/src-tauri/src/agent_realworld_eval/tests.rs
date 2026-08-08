@@ -155,6 +155,7 @@ fn setup_failure_is_typed_and_preserves_spent_setup_latency() {
         id: "rag-memory".to_string(),
         category: "rag_memory".to_string(),
         objective: "recall the seeded requirement".to_string(),
+        campaign_split: None,
         seed_memory_prompt: None,
         index_workspace: false,
         files: Vec::new(),
