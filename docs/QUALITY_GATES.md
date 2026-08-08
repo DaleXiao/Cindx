@@ -268,8 +268,9 @@ training tasks to create one frozen candidate, admits that candidate on two
 validation-only matched product pairs, and evaluates it on four untouched tasks
 with two counterbalanced repeats. Every candidate cell must carry the exact
 profile and route-phenotype receipts; at least one must prove Task Graph use.
-The final gate requires quality wins on at least two unseen tasks, zero quality
-losses, no completion or safety regression, and aggregate latency and token
+The final gate requires complete quality acceptance for every candidate cell,
+quality wins on at least two unseen tasks, zero quality losses, no completion
+or safety regression, and aggregate latency and token
 ratios no greater than `1.05`. A Grounded Direct product control must also pass.
 V2 is `INVALID_EVALUATOR` and V3 is `INVALID_TASK_SPEC`; neither is a baseline
 or evidence of capability change. The V4 campaign must not be launched without
