@@ -190,7 +190,7 @@ impl PromptInstanceParetoArchive {
             repeats.insert(repeat_identity, score);
         }
 
-        let mut averages = BTreeMap::<(String, String), (f64, f64, usize)>::new();
+        let mut averages = BTreeMap::<(String, String), (f64, f64, usize, f64, f64)>::new();
         for ((profile_id, case_id), entries) in grouped {
             let entries = entries.into_values().collect::<Vec<_>>();
             if entries.len() < minimum_repeats_per_case
@@ -209,6 +209,16 @@ impl PromptInstanceParetoArchive {
                         .count() as f64
                         / divisor,
                     entries.len(),
+                    entries
+                        .iter()
+                        .map(|entry| entry.latency_ms as f64)
+                        .sum::<f64>()
+                        / divisor,
+                    entries
+                        .iter()
+                        .map(|entry| entry.total_tokens as f64)
+                        .sum::<f64>()
+                        / divisor,
                 ),
             );
         }
@@ -223,11 +233,11 @@ impl PromptInstanceParetoArchive {
             let best = averages
                 .iter()
                 .filter(|((_, candidate_case), _)| candidate_case == &case_id)
-                .map(|(_, (average, _, _))| *average)
+                .map(|(_, (average, _, _, _, _))| *average)
                 .max_by(f64::total_cmp)
                 .unwrap_or_default();
             case_best_scores.insert(case_id.clone(), best);
-            for ((profile_id, candidate_case), (average, _, _)) in &averages {
+            for ((profile_id, candidate_case), (average, _, _, _, _)) in &averages {
                 if candidate_case == &case_id && (*average - best).abs() <= f64::EPSILON * 8.0 {
                     leading_cases
                         .entry(profile_id.clone())
@@ -249,7 +259,7 @@ impl PromptInstanceParetoArchive {
                     genome.id.clone(),
                     profile_entries
                         .iter()
-                        .map(|(average, _, _)| *average)
+                        .map(|(average, _, _, _, _)| *average)
                         .sum::<f64>()
                         / profile_entries.len() as f64,
                 );
@@ -268,11 +278,21 @@ impl PromptInstanceParetoArchive {
                     .collect::<Vec<_>>();
                 let evaluations = profile_entries
                     .iter()
-                    .map(|(_, _, evaluations)| *evaluations)
+                    .map(|(_, _, evaluations, _, _)| *evaluations)
                     .sum();
                 let verified_success_rate = profile_entries
                     .iter()
-                    .map(|(_, success_rate, _)| *success_rate)
+                    .map(|(_, success_rate, _, _, _)| *success_rate)
+                    .sum::<f64>()
+                    / profile_entries.len().max(1) as f64;
+                let average_latency_ms = profile_entries
+                    .iter()
+                    .map(|(_, _, _, latency_ms, _)| *latency_ms)
+                    .sum::<f64>()
+                    / profile_entries.len().max(1) as f64;
+                let average_total_tokens = profile_entries
+                    .iter()
+                    .map(|(_, _, _, _, total_tokens)| *total_tokens)
                     .sum::<f64>()
                     / profile_entries.len().max(1) as f64;
                 Some(PromptInstanceParetoCandidate {
@@ -283,6 +303,8 @@ impl PromptInstanceParetoArchive {
                         .copied()
                         .unwrap_or_default(),
                     verified_success_rate,
+                    average_latency_ms,
+                    average_total_tokens,
                     evaluations,
                 })
             })
@@ -322,6 +344,12 @@ impl PromptInstanceParetoArchive {
                 .then_with(|| {
                     left.verified_success_rate
                         .total_cmp(&right.verified_success_rate)
+                })
+                .then_with(|| right.average_latency_ms.total_cmp(&left.average_latency_ms))
+                .then_with(|| {
+                    right
+                        .average_total_tokens
+                        .total_cmp(&left.average_total_tokens)
                 })
                 .then_with(|| left.evaluations.cmp(&right.evaluations))
                 .then_with(|| right.profile_id.cmp(&left.profile_id))

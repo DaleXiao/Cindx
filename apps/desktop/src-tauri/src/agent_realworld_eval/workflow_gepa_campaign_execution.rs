@@ -18,6 +18,7 @@ use std::path::Path;
 pub(super) struct EvaluationDataEnvironment {
     prior_requested_root: Option<OsString>,
     prior_active_root: Option<OsString>,
+    prior_background_memory_setting: Option<OsString>,
 }
 
 struct EvaluationProfileEnvironment {
@@ -29,10 +30,14 @@ impl EvaluationDataEnvironment {
     pub(super) fn install(root: &Path) -> Self {
         let prior_requested_root = std::env::var_os("CINDX_AGENT_REALWORLD_DATA_DIR");
         let prior_active_root = std::env::var_os("CINDX_DATA_DIR");
+        let prior_background_memory_setting =
+            std::env::var_os("CINDX_AGENT_REALWORLD_DISABLE_BACKGROUND_MEMORY");
         std::env::set_var("CINDX_AGENT_REALWORLD_DATA_DIR", root.join("data"));
+        std::env::set_var("CINDX_AGENT_REALWORLD_DISABLE_BACKGROUND_MEMORY", "1");
         Self {
             prior_requested_root,
             prior_active_root,
+            prior_background_memory_setting,
         }
     }
 }
@@ -44,6 +49,10 @@ impl Drop for EvaluationDataEnvironment {
             self.prior_requested_root.take(),
         );
         restore_environment("CINDX_DATA_DIR", self.prior_active_root.take());
+        restore_environment(
+            "CINDX_AGENT_REALWORLD_DISABLE_BACKGROUND_MEMORY",
+            self.prior_background_memory_setting.take(),
+        );
     }
 }
 
@@ -88,6 +97,7 @@ pub(super) fn execute_product_pair(
     provider: &ProviderConfig,
     evaluation_database: &Path,
     suite_root: &Path,
+    comparison_scope: &str,
     case: &RealworldCase,
     split: CampaignSplit,
     replicate: u32,
@@ -98,13 +108,20 @@ pub(super) fn execute_product_pair(
     snapshot_artifact_sha256: &str,
     snapshot: &FrozenPromptProfileSnapshot,
 ) -> Result<ProductPairReceipt, String> {
+    if comparison_scope.is_empty()
+        || !comparison_scope
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err("matched product pair has an invalid comparison scope".to_string());
+    }
     let seed_root = suite_root.join(format!(
-        "{}-{}-r{replicate}-seed",
+        "{}-{}-r{replicate}-{comparison_scope}-seed",
         split.label(),
         case.id
     ));
     let candidate_root = suite_root.join(format!(
-        "{}-{}-r{replicate}-candidate",
+        "{}-{}-r{replicate}-{comparison_scope}-candidate",
         split.label(),
         case.id
     ));
@@ -118,14 +135,24 @@ pub(super) fn execute_product_pair(
             case.id
         ));
     }
-    let candidate_first = pair_index % 2 == 1;
+    let candidate_first = candidate_executes_first(pair_index, replicate);
     let order = if candidate_first {
         "candidate_then_seed"
     } else {
         "seed_then_candidate"
     };
-    let seed_scope = project_scope(split, case, replicate, "seed");
-    let candidate_scope = project_scope(split, case, replicate, "candidate");
+    let seed_scope = project_scope(
+        split,
+        case,
+        replicate,
+        &format!("{comparison_scope}-seed"),
+    );
+    let candidate_scope = project_scope(
+        split,
+        case,
+        replicate,
+        &format!("{comparison_scope}-candidate"),
+    );
     let run_seed = |index: usize, position: usize| {
         execute_campaign_case(
             app,
@@ -181,11 +208,12 @@ pub(super) fn execute_product_pair(
         "product-pair-{}",
         &sha256_hex(
             format!(
-                "{}\0{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}\0{}",
                 suite_sha256,
                 case.id,
                 split.label(),
                 replicate,
+                comparison_scope,
                 order
             )
             .as_bytes()
@@ -195,9 +223,14 @@ pub(super) fn execute_product_pair(
         evaluation_id,
         order.to_string(),
         seed_prestate,
+        case.expected_execution_mode.clone(),
         seed_receipt,
         candidate_receipt,
     )
+}
+
+fn candidate_executes_first(pair_index: usize, replicate: u32) -> bool {
+    (pair_index + replicate.saturating_sub(1) as usize) % 2 == 1
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -249,9 +282,6 @@ pub(super) fn preflight_matched_workspaces(
 ) -> Result<(), String> {
     let preflight_root = suite_root.join("matched-workspace-preflight");
     for case in &suite.cases {
-        if CampaignSplit::parse(case)? == CampaignSplit::Train {
-            continue;
-        }
         let seed_root = preflight_root.join(format!("{}-seed", case.id));
         let candidate_root = preflight_root.join(format!("{}-candidate", case.id));
         materialize_case(&seed_root, case)?;
@@ -285,6 +315,17 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn repeated_test_pairs_reverse_arm_order_for_each_case() {
+        for first_replicate_index in 0..4 {
+            let second_replicate_index = first_replicate_index + 4;
+            assert_ne!(
+                candidate_executes_first(first_replicate_index, 1),
+                candidate_executes_first(second_replicate_index, 2),
+            );
+        }
+    }
+
+    #[test]
     fn campaign_workspace_fingerprint_ignores_root_path_but_detects_content_changes() {
         let seed = tempfile::tempdir().unwrap();
         let candidate = tempfile::tempdir().unwrap();
@@ -307,7 +348,7 @@ mod tests {
     fn campaign_preflights_every_matched_case_before_provider_work() {
         let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v4.json"
+            "/../../../benchmarks/agent/workflow-gepa-v5.json"
         )))
         .unwrap();
         let root = tempfile::tempdir().unwrap();

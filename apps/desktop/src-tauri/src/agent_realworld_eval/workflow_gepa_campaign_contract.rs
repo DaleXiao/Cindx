@@ -3,9 +3,9 @@ use orchestrator::{prompt_genome_sha256, AgentPolicy, ConductorPromptGenome};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-pub(super) const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v4";
-pub(super) const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v4";
-pub(super) const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v4";
+pub(super) const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v5";
+pub(super) const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v5";
+pub(super) const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v5";
 pub(super) const TEST_REPLICATES: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -45,6 +45,7 @@ pub(super) struct ProductRunReceipt {
     pub(super) split: CampaignSplit,
     pub(super) replicate: u32,
     pub(super) treatment: String,
+    pub(super) execution_mode: String,
     pub(super) completed: bool,
     pub(super) terminal_status: String,
     pub(super) behavior_checks_passed: usize,
@@ -98,6 +99,9 @@ impl ProductRunReceipt {
             split,
             replicate,
             treatment: run.treatment.label().to_string(),
+            execution_mode: strategy
+                .map(|receipt| receipt.execution_mode.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
             completed: run.completed,
             terminal_status: run.terminal_status.clone(),
             behavior_checks_passed,
@@ -128,6 +132,9 @@ pub(super) struct ProductPairReceipt {
     pub(super) replicate: u32,
     pub(super) execution_order: String,
     pub(super) workspace_prestate_sha256: String,
+    pub(super) expected_execution_mode: Option<String>,
+    pub(super) seed_route_contract_passed: Option<bool>,
+    pub(super) candidate_route_contract_passed: Option<bool>,
     pub(super) seed: ProductRunReceipt,
     pub(super) candidate: ProductRunReceipt,
     pub(super) behavior_delta: f64,
@@ -139,6 +146,7 @@ impl ProductPairReceipt {
         evaluation_id: String,
         execution_order: String,
         workspace_prestate_sha256: String,
+        expected_execution_mode: Option<String>,
         seed: ProductRunReceipt,
         candidate: ProductRunReceipt,
     ) -> Result<Self, String> {
@@ -149,6 +157,18 @@ impl ProductPairReceipt {
         {
             return Err("matched product pair identity is inconsistent".to_string());
         }
+        if expected_execution_mode
+            .as_deref()
+            .is_some_and(|mode| !matches!(mode, "direct" | "workflow"))
+        {
+            return Err("matched product pair has an invalid route contract".to_string());
+        }
+        let seed_route_contract_passed = expected_execution_mode
+            .as_deref()
+            .map(|expected| seed.execution_mode == expected);
+        let candidate_route_contract_passed = expected_execution_mode
+            .as_deref()
+            .map(|expected| candidate.execution_mode == expected);
         let behavior_delta = candidate.behavior_score - seed.behavior_score;
         let outcome = if behavior_delta > f64::EPSILON
             || behavior_delta.abs() <= f64::EPSILON && candidate.completed && !seed.completed
@@ -169,6 +189,9 @@ impl ProductPairReceipt {
             replicate: seed.replicate,
             execution_order,
             workspace_prestate_sha256,
+            expected_execution_mode,
+            seed_route_contract_passed,
+            candidate_route_contract_passed,
             seed,
             candidate,
             behavior_delta,
@@ -199,6 +222,9 @@ pub(super) struct PairAggregateReceipt {
     pub(super) causal_profile_runs: usize,
     pub(super) route_semantics_runs: usize,
     pub(super) workflow_profile_runs: usize,
+    pub(super) route_contract_runs: usize,
+    pub(super) seed_route_contract_passes: usize,
+    pub(super) candidate_route_contract_passes: usize,
 }
 
 pub(super) fn aggregate_pairs(
@@ -304,6 +330,18 @@ pub(super) fn aggregate_pairs(
             .iter()
             .filter(|pair| pair.candidate.workflow_profile_exercised)
             .count(),
+        route_contract_runs: pairs
+            .iter()
+            .filter(|pair| pair.expected_execution_mode.is_some())
+            .count(),
+        seed_route_contract_passes: pairs
+            .iter()
+            .filter(|pair| pair.seed_route_contract_passed == Some(true))
+            .count(),
+        candidate_route_contract_passes: pairs
+            .iter()
+            .filter(|pair| pair.candidate_route_contract_passed == Some(true))
+            .count(),
     })
 }
 
@@ -321,7 +359,6 @@ pub(super) fn validation_gate(aggregate: &PairAggregateReceipt) -> Result<(), St
         && aggregate.candidate_safety_violations == 0
         && aggregate.causal_profile_runs == aggregate.pairs
         && aggregate.route_semantics_runs == aggregate.pairs
-        && aggregate.workflow_profile_runs > 0
         && (aggregate.candidate_wins > 0 || efficiency_uplift);
     if passed {
         Ok(())
@@ -349,6 +386,8 @@ pub(super) fn test_gate(aggregate: &PairAggregateReceipt) -> Result<(), String> 
         && aggregate.token_ratio <= 1.05
         && aggregate.causal_profile_runs == aggregate.pairs
         && aggregate.route_semantics_runs == aggregate.pairs
+        && aggregate.route_contract_runs > 0
+        && aggregate.candidate_route_contract_passes == aggregate.route_contract_runs
         && aggregate.workflow_profile_runs > 0;
     if passed {
         Ok(())
@@ -432,6 +471,11 @@ mod tests {
             split: CampaignSplit::Test,
             replicate: 1,
             treatment: "pro".to_string(),
+            execution_mode: if workflow {
+                "workflow".to_string()
+            } else {
+                "direct".to_string()
+            },
             completed: true,
             terminal_status: "completed".to_string(),
             behavior_checks_passed: usize::from(score > 0.0),
@@ -495,6 +539,7 @@ mod tests {
                         format!("{case_id}-{replicate}"),
                         "seed_then_candidate".to_string(),
                         "f".repeat(64),
+                        (case_id == "a").then(|| "workflow".to_string()),
                         seed,
                         candidate_run,
                     )
@@ -518,5 +563,36 @@ mod tests {
         pairs[0].candidate.quality_passed = false;
         let aggregate = aggregate_pairs(&pairs, &candidate).unwrap();
         assert!(test_gate(&aggregate).is_err());
+    }
+
+    #[test]
+    fn validation_gate_accepts_a_valid_direct_route_when_the_task_does_not_require_workflow() {
+        let aggregate = PairAggregateReceipt {
+            pairs: 2,
+            unique_cases: 2,
+            task_classes: 2,
+            candidate_wins: 1,
+            candidate_win_cases: 1,
+            candidate_losses: 0,
+            ties: 1,
+            seed_behavior_score: 0.5,
+            candidate_behavior_score: 1.0,
+            behavior_delta: 0.5,
+            seed_completed: 1,
+            candidate_completed: 2,
+            seed_quality_passed: 1,
+            candidate_quality_passed: 2,
+            candidate_safety_violations: 0,
+            latency_ratio: 1.0,
+            token_ratio: 1.0,
+            causal_profile_runs: 2,
+            route_semantics_runs: 2,
+            workflow_profile_runs: 0,
+            route_contract_runs: 0,
+            seed_route_contract_passes: 0,
+            candidate_route_contract_passes: 0,
+        };
+
+        validation_gate(&aggregate).unwrap();
     }
 }

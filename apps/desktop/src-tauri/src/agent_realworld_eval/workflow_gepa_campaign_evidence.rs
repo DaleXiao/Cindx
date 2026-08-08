@@ -148,8 +148,8 @@ fn reflection_packet(
         .collect::<Vec<_>>();
     let public_input = public_case_input(case);
     Ok(AgentEvaluationReflectionPacket {
-        suite_id: "cindx-workflow-gepa-v4".to_string(),
-        suite_version: 4,
+        suite_id: "cindx-workflow-gepa-v5".to_string(),
+        suite_version: 5,
         case_id: case.id.clone(),
         category: case.category.clone(),
         run_id: format!("train-{}-{seed}", case.id),

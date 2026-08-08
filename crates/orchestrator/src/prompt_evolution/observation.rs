@@ -723,6 +723,8 @@ pub struct PromptInstanceParetoCandidate {
     pub leading_cases: Vec<String>,
     pub average_score: f64,
     pub verified_success_rate: f64,
+    pub average_latency_ms: f64,
+    pub average_total_tokens: f64,
     pub evaluations: usize,
 }
 

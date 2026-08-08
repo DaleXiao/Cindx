@@ -269,25 +269,47 @@ reached both validation pairs, but the failed research case required lower-case
 identifiers and an exact phrase that the public task did not disclose. Its raw
 route and resource receipts are diagnostic only; the quality, tie, and
 validation decision are not capability evidence. The untouched test matrix and
-Grounded Direct control were not run. The Workflow GEPA V4 product campaign is a
-separate explicit, billable run. Its
-deterministic contract checks are part of the Rust suite, but they do not call a
-provider and cannot prove learned-profile uplift. A valid V4 run must start from
-a clean exact revision and external report/snapshot paths. It uses two public
-training tasks to create one frozen candidate, admits that candidate on two
-validation-only matched product pairs, and evaluates it on four untouched tasks
-with two counterbalanced repeats. Every candidate cell must carry the exact
-profile and route-phenotype receipts; at least one must prove Task Graph use.
+Grounded Direct control were not run. The current Workflow GEPA V5 product
+campaign replaces V4 and is a separate explicit, billable run. Its deterministic
+contract checks are part of the Rust suite, but they do not call a provider and
+cannot prove learned-profile uplift. A valid V5 run must start from a clean exact
+revision and external report/snapshot paths. It uses two public training tasks
+to generate three distinct route phenotypes, executes two matched full-product
+train pairs for each, and selects only a candidate that clears train quality,
+safety, causal-profile, public-route, Workflow-exercise, and measured-gain gates.
+The train-only instance Pareto archive prioritizes quality and verified success;
+latency and tokens are tie-breakers only. No candidate means `valid_no_go_training`
+and validation remains sealed.
+
+The selected candidate must next clear two validation-only matched product pairs
+before four untouched tasks run with two counterbalanced repeats. Every candidate
+cell must carry the exact profile and route-phenotype receipts, all declared route
+contracts must pass, and at least one final-test cell must prove Task Graph use.
 The final gate requires complete quality acceptance for every candidate cell,
-quality wins on at least two unseen tasks, zero quality losses, no completion
-or safety regression, and aggregate latency and token
-ratios no greater than `1.05`. A Grounded Direct product control must also pass.
+quality wins on at least two unseen tasks, zero quality losses, no completion or
+safety regression, and aggregate latency and token ratios no greater than
+`1.05`. A Grounded Direct product control must also pass. During the isolated
+campaign, semantic-memory model extraction and cloud embedding are disabled;
+deterministic local memory projection remains so background provider work cannot
+contaminate matched resource measurements.
 V2 and the first V4 attempt are `INVALID_EVALUATOR`; V3 and the second V4
 attempt are `INVALID_TASK_SPEC`. None is a baseline or evidence of capability
 change. The V4 candidate is not reusable as promotion evidence, and untouched
-test evidence must not be used to select its successor. V4 must be replaced by
-a new preregistered suite version rather than rerun unchanged; any provider
-campaign still requires separate explicit authorization.
+test evidence must not be used to select its successor. V5 is preregistered in
+current source but has not run provider-backed; any provider campaign still
+requires separate explicit authorization.
+
+After that separate authorization, use a clean exact revision and a fresh
+outside-Git directory. The campaign rejects reused or identical output paths:
+
+```sh
+run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v5.XXXXXX)"
+CINDX_WORKFLOW_GEPA_REPORT="$run_dir/report.json" \
+CINDX_WORKFLOW_GEPA_SNAPSHOT="$run_dir/snapshot.json" \
+cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --no-default-features --features realworld-eval \
+  --bin cindx-workflow-gepa-eval
+```
 
 The memory-effect provider matrix is a separate explicit, billable run. Its
 deterministic analyzer is exercised with:

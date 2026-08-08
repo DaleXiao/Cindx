@@ -48,7 +48,7 @@ pub(crate) fn semantic_memory_model_is_warranted(run_context: &Metadata, events:
         || decision.tool_requirement == AgentToolRequirement::Effects
 }
 
-fn refresh_deterministic_memory_projection(
+pub(crate) fn refresh_deterministic_memory_projection(
     state: &tauri::State<'_, AppState>,
     workspace_root: &Path,
     config: &ProviderConfig,

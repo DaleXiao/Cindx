@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), String> {
     if suite.schema != CAMPAIGN_SCHEMA
         || suite.id != CAMPAIGN_SUITE_ID
-        || suite.version != 4
+        || suite.version != 5
         || suite.cases.len() != 8
     {
         return Err("Workflow GEPA suite identity or case count is invalid".to_string());
@@ -20,6 +20,7 @@ pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), Stri
     for case in &suite.cases {
         let split = CampaignSplit::parse(case)?;
         splits.push((split, case.category.as_str()));
+        validate_route_contract(case)?;
         if case.id.trim().is_empty()
             || !ids.insert(case.id.as_str())
             || case.objective.trim().is_empty()
@@ -128,6 +129,7 @@ pub(super) fn training_dataset_sha256(suite: &RealworldSuite) -> Result<String, 
                 "id": case.id,
                 "category": case.category,
                 "objective": case.objective,
+                "expected_execution_mode": case.expected_execution_mode,
                 "files": case.files.iter().map(|file| serde_json::json!({
                     "path": file.path,
                     "content": file.content,
@@ -188,6 +190,37 @@ fn validate_coding_contract(case: &RealworldCase) -> Result<(), String> {
 }
 
 fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Result<(), String> {
+    let public_contract_markers: &[&str] = match case.id.as_str() {
+        "research-authoritative-threshold" => &[
+            "exactly keys owner, threshold, and authority",
+            "Copy the approved owner name",
+            "approved percentage",
+            "superseding decision identifier",
+            "exactly as written",
+        ],
+        "research-measurement-choice" => &[
+            "exactly keys winner, margin, and basis",
+            "lower-case candidate label",
+            "numeric difference",
+            "exact string validated score",
+        ],
+        "research-approved-region" => &[
+            "exactly keys region, expiry, and approver",
+            "Copy all three values exactly as written",
+        ],
+        "route-collaboration-proof" => &[
+            "exactly keys choice, rejected, and reason",
+            "candidate label in lower case",
+            "input-file order",
+            "exact string lowest verified error rate among approved candidates",
+        ],
+        _ => {
+            return Err(format!(
+                "unknown Workflow GEPA research case {}",
+                case.id
+            ));
+        }
+    };
     if case.verification.json_files.len() != 1
         || case.verification.immutable_files.len() != case.files.len()
         || case.verification.commands[0].args.as_slice()
@@ -200,6 +233,9 @@ fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Resu
         || !case.verification.commands[0]
             .stdout_contains
             .ends_with("-check-passed")
+        || public_contract_markers
+            .iter()
+            .any(|marker| !case.objective.contains(marker))
     {
         return Err(format!(
             "Workflow GEPA research case {} lacks answer verification",
@@ -217,6 +253,37 @@ fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Resu
     {
         return Err(format!(
             "Workflow GEPA case {} leaks an expected answer into its public check",
+            case.id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_route_contract(case: &RealworldCase) -> Result<(), String> {
+    let expected = match case.id.as_str() {
+        "coding-calculate-total" => Some("direct"),
+        "research-authoritative-threshold" | "route-collaboration-proof" => Some("workflow"),
+        _ => None,
+    };
+    if case.expected_execution_mode.as_deref() != expected {
+        return Err(format!(
+            "Workflow GEPA case {} has an invalid route contract",
+            case.id
+        ));
+    }
+    let disclosed = match expected {
+        Some("direct") => case
+            .objective
+            .contains("directly without creating a multi-model workflow"),
+        Some("workflow") => case
+            .objective
+            .contains("Use independent multi-model collaboration"),
+        None => true,
+        Some(_) => false,
+    };
+    if !disclosed {
+        return Err(format!(
+            "Workflow GEPA case {} hides its route requirement",
             case.id
         ));
     }
@@ -253,7 +320,7 @@ mod tests {
     fn frozen_suite() -> RealworldSuite {
         serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v4.json"
+            "/../../../benchmarks/agent/workflow-gepa-v5.json"
         )))
         .unwrap()
     }
@@ -287,7 +354,7 @@ mod tests {
 
         let mut missing_contract: Value = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v4.json"
+            "/../../../benchmarks/agent/workflow-gepa-v5.json"
         )))
         .unwrap();
         missing_contract["cases"][1]["files"][0]["content"] =
@@ -297,6 +364,35 @@ mod tests {
         assert!(validate_campaign_suite(&missing_contract)
             .unwrap_err()
             .contains("complete behavior contract"));
+    }
+
+    #[test]
+    fn frozen_suite_rejects_hidden_output_normalization_or_route_requirements() {
+        let mut hidden_normalization = frozen_suite();
+        let measurement = hidden_normalization
+            .cases
+            .iter_mut()
+            .find(|case| case.id == "research-measurement-choice")
+            .unwrap();
+        measurement.objective = measurement
+            .objective
+            .replace("lower-case candidate label", "candidate label");
+        assert!(validate_campaign_suite(&hidden_normalization)
+            .unwrap_err()
+            .contains("lacks answer verification"));
+
+        let mut hidden_route = frozen_suite();
+        let collaboration = hidden_route
+            .cases
+            .iter_mut()
+            .find(|case| case.id == "route-collaboration-proof")
+            .unwrap();
+        collaboration.objective = collaboration
+            .objective
+            .replace("Use independent multi-model collaboration", "Investigate carefully");
+        assert!(validate_campaign_suite(&hidden_route)
+            .unwrap_err()
+            .contains("hides its route requirement"));
     }
 
     #[test]
