@@ -57,6 +57,7 @@ struct WorkflowGepaCampaignReceipt {
     grounded_direct_control_passed: bool,
     final_test_was_untouched_during_learning: bool,
     candidate_selected_from_train_only: bool,
+    candidate_snapshot_published: bool,
     production_promotion_claimed: bool,
     status: String,
 }
@@ -255,6 +256,7 @@ pub(super) fn run() -> Result<(), String> {
                 grounded_direct_control_passed: false,
                 final_test_was_untouched_during_learning: true,
                 candidate_selected_from_train_only: false,
+                candidate_snapshot_published: false,
                 production_promotion_claimed: false,
                 status: "valid_no_go_training".to_string(),
             };
@@ -271,8 +273,13 @@ pub(super) fn run() -> Result<(), String> {
     let selected_candidate = selected.identity.clone();
     let snapshot_bytes = serde_json::to_vec_pretty(snapshot)
         .map_err(|error| format!("failed to encode selected Workflow GEPA snapshot: {error}"))?;
-    tools::write_private_file_atomically(&snapshot_path, &snapshot_bytes)
-        .map_err(|error| format!("failed to write selected Workflow GEPA snapshot: {error}"))?;
+    let selected_snapshot_path = candidate_snapshot_root.join(format!(
+        "selected-{}.json",
+        &selected_candidate.snapshot_artifact_sha256[..16]
+    ));
+    tools::write_private_file_atomically(&selected_snapshot_path, &snapshot_bytes).map_err(
+        |error| format!("failed to write internal selected Workflow GEPA snapshot: {error}"),
+    )?;
     let snapshot_artifact_sha256 = selected_candidate.snapshot_artifact_sha256.clone();
 
     let mut validation_pairs = Vec::new();
@@ -294,7 +301,7 @@ pub(super) fn run() -> Result<(), String> {
             pair_index,
             &mut execution_index,
             &suite_sha256,
-            &snapshot_path,
+            &selected_snapshot_path,
             &snapshot_artifact_sha256,
             snapshot,
         )?);
@@ -328,6 +335,7 @@ pub(super) fn run() -> Result<(), String> {
             grounded_direct_control_passed: false,
             final_test_was_untouched_during_learning: true,
             candidate_selected_from_train_only: true,
+            candidate_snapshot_published: false,
             production_promotion_claimed: false,
             status: "valid_no_go_validation".to_string(),
         };
@@ -388,7 +396,7 @@ pub(super) fn run() -> Result<(), String> {
                     pair_index,
                     &mut execution_index,
                     &suite_sha256,
-                    &snapshot_path,
+                    &selected_snapshot_path,
                     &snapshot_artifact_sha256,
                     snapshot,
                 )?);
@@ -413,6 +421,10 @@ pub(super) fn run() -> Result<(), String> {
     } else {
         "valid_no_go_product_test"
     };
+    if passed {
+        tools::write_private_file_atomically(&snapshot_path, &snapshot_bytes)
+            .map_err(|error| format!("failed to publish passed Workflow GEPA snapshot: {error}"))?;
+    }
     let receipt = WorkflowGepaCampaignReceipt {
         schema: REPORT_SCHEMA,
         source_commit,
@@ -439,6 +451,7 @@ pub(super) fn run() -> Result<(), String> {
         grounded_direct_control_passed: grounded_result.is_ok(),
         final_test_was_untouched_during_learning: true,
         candidate_selected_from_train_only: true,
+        candidate_snapshot_published: passed,
         production_promotion_claimed: false,
         status: status.to_string(),
     };

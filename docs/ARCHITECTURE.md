@@ -543,8 +543,9 @@ order. Two final repeats per case must show quality wins on multiple distinct
 cases without losses, safety, completion, latency, or token regression. Every
 candidate cell must bind the exact learned profile and route phenotype, every
 declared route contract must pass, and at least one must exercise its Task
-Graph. A Grounded Direct product control must also pass. The campaign writes
-only the train-selected external snapshot and does not deploy it. Product prompt
+Graph. A Grounded Direct product control must also pass. The train-selected
+snapshot remains private until every gate passes; only then does the campaign
+publish the external snapshot, and it still does not deploy it. Product prompt
 evolution and provider-backed background memory work are disabled inside the
 campaign app; deterministic local memory projection remains, so only the
 bounded campaign driver spends provider budget during matched execution.
