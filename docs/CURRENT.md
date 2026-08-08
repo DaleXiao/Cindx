@@ -663,8 +663,11 @@ Therefore the current claim is:
   route candidates receive matched full-product train comparisons, selection is
   train-only and quality-first, every route requirement is public, and no
   candidate reaches validation without measured train-side improvement and
-  exact causal receipts. V5 has not run provider-backed, so it does not yet
-  change the intelligence or promotion conclusion.
+  exact causal receipts. Its first provider run is valid targeted no-go
+  evidence: the selected profile causally changed a training route and exercised
+  Workflow, but two unseen validation pairs produced no quality win at `1.4337x`
+  latency and `1.2966x` tokens. Control/test stayed sealed, no snapshot was
+  published, and the intelligence or promotion conclusion does not change.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
