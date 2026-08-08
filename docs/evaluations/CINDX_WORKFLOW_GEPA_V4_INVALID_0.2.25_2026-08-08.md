@@ -37,6 +37,7 @@ profile changed.
 The production workspace revision remains path-bound because it identifies a
 specific workspace. The matched evaluator now uses a separate bounded content
 fingerprint when comparing isolated seed and candidate roots. A deterministic
-test proves that equal contents under different roots match and that a content
+preflight materializes every validation and test case before any provider work;
+tests prove that equal contents under different roots match and that a content
 change does not. A new clean-revision provider run is required before V4 can
 support any quality conclusion.
