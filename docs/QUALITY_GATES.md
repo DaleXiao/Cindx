@@ -279,7 +279,9 @@ train pairs for each, and selects only a candidate that clears train quality,
 safety, causal-profile, public-route, Workflow-exercise, and measured-gain gates.
 The train-only instance Pareto archive prioritizes quality and verified success;
 latency and tokens are tie-breakers only. No candidate means `valid_no_go_training`
-and validation remains sealed.
+and validation remains sealed. A selected snapshot stays inside the private
+campaign directory until validation, Grounded Direct control, and untouched
+test all pass; no failed candidate is published to the external snapshot path.
 
 The selected candidate must next clear two validation-only matched product pairs
 before four untouched tasks run with two counterbalanced repeats. Every candidate

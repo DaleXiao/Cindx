@@ -101,9 +101,10 @@ token improvement without a loss. Instance-wise Pareto selection ranks quality
 and verified success first, using latency and token count only to break equal
 quality. Validation and test evidence cannot select a candidate.
 
-Only the train-selected frozen snapshot is written to the external candidate
-path. It must then pass two unseen validation pairs before four untouched test
-tasks are opened. Final evidence consists of two counterbalanced seed/candidate
+The train-selected frozen snapshot remains in the campaign's private temporary
+directory while it must pass two unseen validation pairs before four untouched
+test tasks are opened. The external snapshot is published only after validation,
+Grounded Direct control, and the final test all pass. Final evidence consists of two counterbalanced seed/candidate
 product repeats per test case on separately materialized identical workspaces.
 Promotion evidence requires complete quality acceptance for every candidate
 cell, quality wins on at least two distinct unseen cases, zero quality losses or
