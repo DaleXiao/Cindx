@@ -1,5 +1,5 @@
 use crate::RunStopReason;
-use model_provider::{ModelError, ProviderFailureClass};
+use agent_core::{ModelError, ProviderFailureClass};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -479,6 +479,9 @@ const permissionServiceSource = read(
 const agentCorePermissionPolicySource = read(
   "crates/agent-core/src/permission_policy.rs"
 );
+const agentCoreModelContractSource = read(
+  "crates/agent-core/src/model_contract.rs"
+);
 const queueServiceSource = read("apps/desktop/src-tauri/src/queue_service.rs");
 const agentRunEngineSource = read(
   "apps/desktop/src-tauri/src/agent_run_engine.rs"
@@ -545,6 +548,7 @@ const ragSource = read("crates/agent-rag/src/lib.rs");
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = readRustCrateSource("agent-memory");
 const agentRuntimeSource = readRustCrateSource("agent-runtime");
+const agentRuntimeCargo = read("crates/agent-runtime/Cargo.toml");
 const agentToolRuntimeSource = read("crates/agent-runtime/src/tool_runtime.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
@@ -955,7 +959,6 @@ const modelProviderModuleBudgets = new Map([
   ["dashscope_realtime_config.rs", 100],
   ["dashscope_realtime_guard.rs", 80],
   ["dashscope_realtime_provider.rs", 300],
-  ["error.rs", 160],
   ["image_provider.rs", 430],
   ["json_wire.rs", 320],
   ["lib.rs", 900],
@@ -3538,6 +3541,15 @@ assert(
         "pin_evidence_scope_tools(&completion_intent.evidence_scopes"
       )),
   "Grounding and model transport policy must remain portable agent-runtime ownership"
+);
+assert(
+  !/\bmodel-provider\s*=/.test(agentRuntimeCargo) &&
+    !/\bmodel_provider\s*::/.test(agentRuntimeSource) &&
+    agentCoreModelContractSource.includes("pub struct ModelRequest") &&
+    agentCoreModelContractSource.includes("pub struct ModelResponse") &&
+    agentCoreModelContractSource.includes("pub struct ModelError") &&
+    modelProviderSource.includes("pub use agent_core::{"),
+  "The portable agent runtime must depend on core model contracts, not the provider transport stack"
 );
 assert(
   rustLib.includes("execute_agent_tool_invocation") &&

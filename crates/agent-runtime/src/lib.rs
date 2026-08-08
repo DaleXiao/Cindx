@@ -1,10 +1,7 @@
 use agent_core::{
-    Message, MessageRole, Metadata, ModelRole, TaskId, ToolCallId, ToolInvocation,
-    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
-    TOOL_OBSERVATION_V2_SCHEMA,
-};
-use model_provider::{
-    tool_function_name, ModelCallMode, ModelRequest, ModelResponse, ModelResponseDisposition,
+    tool_function_name, Message, MessageRole, Metadata, ModelCallMode, ModelRequest, ModelResponse,
+    ModelResponseDisposition, ModelRole, TaskId, ToolCallId, ToolInvocation, ToolOutcomeStatus,
+    ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec, TOOL_OBSERVATION_V2_SCHEMA,
 };
 use std::collections::{BTreeMap, BTreeSet};
 

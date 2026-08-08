@@ -10,10 +10,9 @@ use crate::{
     PostconditionVerificationReceipt, WorkspaceVerificationPolicy,
 };
 use agent_core::{
-    Message, MessageRole, Metadata, ToolCallId, ToolEffectSemantics, ToolInvocation,
-    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
+    Message, MessageRole, Metadata, ModelRequest, ModelResponse, ToolCallId, ToolEffectSemantics,
+    ToolInvocation, ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
 };
-use model_provider::{ModelRequest, ModelResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKernelInstructionKind {

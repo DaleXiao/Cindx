@@ -5,7 +5,8 @@ use crate::json_wire::{
 };
 use crate::request_tool_calls::{assistant_tool_calls_json, tool_call_ids_from_json};
 use crate::request_vision::{image_data_url, model_supports_vision_content};
-use crate::response_parser::{parse_provider_error, tool_function_name};
+use crate::response_parser::parse_provider_error;
+use agent_core::tool_function_name;
 use agent_core::{Message, MessageRole, Metadata, ToolSpec};
 use std::collections::BTreeSet;
 use std::sync::Arc;

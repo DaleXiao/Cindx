@@ -2,8 +2,7 @@ use crate::{
     start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentKernel, AgentRuntimeConfig,
     AgentTurnPreparationError,
 };
-use agent_core::{Message, MessageRole, Metadata, TaskId};
-use model_provider::{ModelRequest, ModelResponse};
+use agent_core::{Message, MessageRole, Metadata, ModelRequest, ModelResponse, TaskId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -441,7 +440,7 @@ fn merge_usage(total: &mut Metadata, update: &Metadata) {
 mod tests {
     use super::*;
     use agent_core::Metadata;
-    use model_provider::ModelResponse;
+    use agent_core::ModelResponse;
 
     fn response(content: &str) -> ModelResponse {
         ModelResponse {
@@ -664,13 +663,11 @@ mod tests {
     #[test]
     fn no_tool_driver_rejects_tool_calls_instead_of_silently_dropping_them() {
         let mut tool_response = response("");
-        tool_response
-            .tool_calls
-            .push(model_provider::ModelToolCall {
-                id: "call-1".to_string(),
-                name: "shell.run".to_string(),
-                arguments_json: r#"{"command":"pwd"}"#.to_string(),
-            });
+        tool_response.tool_calls.push(agent_core::ModelToolCall {
+            id: "call-1".to_string(),
+            name: "shell.run".to_string(),
+            arguments_json: r#"{"command":"pwd"}"#.to_string(),
+        });
 
         let failure = run_no_tool_agent(request(Vec::new()), |_| Ok(tool_response.clone()))
             .expect_err("tool calls must violate the no-tool contract");

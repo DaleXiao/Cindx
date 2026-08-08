@@ -1,5 +1,5 @@
 use crate::control::{AgentRunControl, RunStopReason};
-use model_provider::{ModelError, ModelResponse, ModelResponseDisposition};
+use agent_core::{ModelError, ModelResponse, ModelResponseDisposition};
 use std::time::{Duration, Instant};
 
 pub fn exhausted_model_transport_error_stop_reason(error: &ModelError) -> Option<RunStopReason> {

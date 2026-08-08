@@ -289,22 +289,6 @@ pub fn parse_tool_calls(text: &str) -> Result<Vec<ModelToolCall>, ModelError> {
     Ok(calls)
 }
 
-pub fn tool_function_name(tool_name: &str) -> String {
-    let mut name = String::with_capacity(tool_name.len());
-    for character in tool_name.chars() {
-        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
-            name.push(character);
-        } else {
-            name.push('_');
-        }
-    }
-    if name.is_empty() {
-        "local_tool".to_string()
-    } else {
-        name
-    }
-}
-
 pub fn tool_arguments_to_key_value_input(arguments_json: &str) -> String {
     let trimmed = arguments_json.trim();
     if trimmed.is_empty() {
