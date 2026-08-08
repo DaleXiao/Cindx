@@ -514,29 +514,40 @@ route dynamically, but a candidate cannot collapse or relabel its own
 generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
-The feature-gated Workflow GEPA V4 campaign exercises this causal chain through
-five modules with one-way responsibilities: the runner owns protocol order, the
+The feature-gated Workflow GEPA V5 campaign exercises this causal chain through
+six modules with one-way responsibilities: the runner owns protocol order, the
 suite module validates public requirements and frozen strata, the evidence
 module converts external product verification into redacted reflection packets,
-the execution module isolates and counterbalances matched cells, and the
-contract module computes gates from sanitized receipts. V2 is retained only as
-`INVALID_EVALUATOR` history and V3 as `INVALID_TASK_SPEC` history.
+the candidate-search module generates and selects only from train evidence, the
+execution module isolates and counterbalances matched cells, and the contract
+module computes gates from sanitized receipts. V2 and the first V4 attempt are
+retained only as `INVALID_EVALUATOR` history; V3 and the second V4 attempt remain
+`INVALID_TASK_SPEC` history.
 
-V4 uses two training tasks, two validation tasks, and four untouched test tasks.
-The Agent receives every behavior requirement; only concrete host test inputs
-remain unseen. External postconditions override an internally completed status
-when producing GEPA reflection. One mutation is generated from training only,
-validation alone determines whether it may enter the final test, and no final
-test observation can select or alter that candidate. Seed and candidate runs
-use separately materialized workspaces with equal prestate fingerprints and
-separate project scopes, while order alternates across pairs. Two final repeats
-per case must show quality wins on multiple distinct cases without losses,
-safety, completion, latency, or token regression. Every candidate cell must
-bind the exact learned profile and route phenotype, and at least one must
-exercise its Task Graph. A Grounded Direct product control must also pass. The
-campaign writes an external candidate snapshot but does not deploy it. Product
-background evolution is disabled inside the campaign app, so only the bounded
-driver can mutate the candidate during the protocol.
+V5 uses two training tasks, two validation tasks, and four untouched test tasks.
+The Agent receives every behavior and route requirement; only concrete host test
+inputs remain unseen. External postconditions override an internally completed
+status when producing GEPA reflection. Three distinct route phenotypes are
+generated from the same frozen training reflection. Each receives matched
+full-product train pairs on a Direct and a Workflow contract. Train eligibility
+requires complete quality, zero loss or safety violation, exact causal profile
+receipts, correct route contrast, actual Workflow-profile execution, and a
+measured quality, route, latency, or token gain. Instance-wise Pareto selection
+prioritizes quality and verified success; performance only breaks equal-quality
+ties. Validation and final test observations cannot select or alter the
+candidate.
+
+Seed and candidate runs use separately materialized workspaces with equal
+prestate fingerprints, candidate-specific project scopes, and alternating pair
+order. Two final repeats per case must show quality wins on multiple distinct
+cases without losses, safety, completion, latency, or token regression. Every
+candidate cell must bind the exact learned profile and route phenotype, every
+declared route contract must pass, and at least one must exercise its Task
+Graph. A Grounded Direct product control must also pass. The campaign writes
+only the train-selected external snapshot and does not deploy it. Product prompt
+evolution and provider-backed background memory work are disabled inside the
+campaign app; deterministic local memory projection remains, so only the
+bounded campaign driver spends provider budget during matched execution.
 
 Direct-finalizer evolution is a separate one-gene surface, not an extension of
 the workflow phenotype. The feature-gated evaluator materializes one canonical

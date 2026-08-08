@@ -139,6 +139,11 @@ revision and is no longer the current product decision.
   The unmodified evaluator output is
   [retained here](CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.json).
 
+Current source defines Workflow GEPA V5, but no provider-backed V5 report exists.
+Its deterministic contract and train-only population-selection tests are not
+capability evidence; this index must not list a V5 result until an explicitly
+authorized run completes on a clean exact revision.
+
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
   `2647daafae98e99d31c101886d2836e446d83d96`. It is

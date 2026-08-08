@@ -659,6 +659,12 @@ Therefore the current claim is:
   absent from the public contract. Its execution receipts are diagnostic only;
   it supports no quality, regression, learned-workflow, or promotion claim.
   Untouched test and control stayed sealed and no profile was promoted.
+- Current source replaces that protocol with Workflow GEPA V5: three distinct
+  route candidates receive matched full-product train comparisons, selection is
+  train-only and quality-first, every route requirement is public, and no
+  candidate reaches validation without measured train-side improvement and
+  exact causal receipts. V5 has not run provider-backed, so it does not yet
+  change the intelligence or promotion conclusion.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits

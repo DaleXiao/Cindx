@@ -34,7 +34,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
 | Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, behavior-only route phenotype, authority ceilings, and operation-count bounds | Proves learned-profile wiring from route through Task Graph, recoverable serving projection, and hard safety/budget boundaries only; provider-backed uplift remains unverified |
-| Workflow GEPA product campaign V4 | current source | 2 full-product training runs; one reflective mutation; 2 validation-only matched pairs; 4 untouched test tasks with 2 counterbalanced repeats; isolated identical workspaces; exact learned-profile route/Task Graph receipts; Grounded Direct control | Both V4 attempts are invalid evidence: the first had an evaluator defect and the second had an undisclosed output-normalization contract. V4 also generates only one mutation without train-side candidate comparison, so it is not sufficient promotion evidence and must be replaced rather than rerun unchanged |
+| Workflow GEPA product campaign V5 | current source | 2 seed reflection runs; 3 distinct route-phenotype candidates; 2 matched full-product train pairs per candidate; train-only Pareto selection; 2 validation-only matched pairs; 4 untouched test tasks with 2 counterbalanced repeats; exact learned-profile, route-contract, and Task Graph receipts; Grounded Direct control | Deterministic protocol and contract tests pass. V5 discloses every output-normalization and route requirement, selects only from train evidence, and fails closed before validation when no candidate improves. It has not yet run provider-backed, so it proves no learned-profile uplift or promotion |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Deterministic quality gates | current source | Runtime, memory, semantic-curation loss/retry/panic recovery, queue/steer, permission, restart recovery, process CPU/output/time budgets, projection, and performance contracts | Control-plane evidence only |
 
@@ -88,20 +88,33 @@ latency, token, and terminal receipts remain diagnostic, but its quality result
 cannot reject or admit the candidate. The gate stopped before untouched test
 and Grounded Direct control, and no profile was promoted.
 
-The feature-gated Workflow GEPA V4 campaign separates two training runs, two
-validation cases, and four untouched test cases. Coding requirements are public;
-only concrete host test inputs remain unseen. External deterministic results,
-including failure despite an internal `completed` terminal, become the GEPA
-reflection input. A single generated candidate may reach the final test only by
-passing validation without using test evidence. Final evidence consists of two
-counterbalanced seed/candidate product repeats per test case on separately
-materialized identical workspaces. Promotion evidence requires complete quality
-acceptance for every candidate cell, quality wins on at least two distinct
-unseen cases, zero quality losses or safety violations, no completion regression,
-bounded latency and token ratios, exact candidate
-profile and route receipts on every candidate run, at least one exercised Task
-Graph, and a passing Grounded Direct control. The campaign emits an external
-candidate snapshot but does not claim or perform production promotion.
+The feature-gated Workflow GEPA V5 campaign separates search, validation, and
+untouched product test. Two public training tasks first produce redacted seed
+reflection evidence. The same frozen evidence generates three candidates with
+distinct route phenotypes; each candidate then receives matched full-product
+train pairs on one publicly Direct task and one publicly Workflow task. A
+candidate is train-eligible only if every cell completes with full quality and
+zero safety violations, exact learned-profile and route receipts appear in both
+cells, both public route contracts pass, the Workflow path and its profile are
+actually exercised, and the candidate records a quality, route, latency, or
+token improvement without a loss. Instance-wise Pareto selection ranks quality
+and verified success first, using latency and token count only to break equal
+quality. Validation and test evidence cannot select a candidate.
+
+Only the train-selected frozen snapshot is written to the external candidate
+path. It must then pass two unseen validation pairs before four untouched test
+tasks are opened. Final evidence consists of two counterbalanced seed/candidate
+product repeats per test case on separately materialized identical workspaces.
+Promotion evidence requires complete quality acceptance for every candidate
+cell, quality wins on at least two distinct unseen cases, zero quality losses or
+safety violations, no completion regression, bounded latency and token ratios,
+exact candidate profile and route receipts on every candidate run, every public
+route contract satisfied, at least one exercised Task Graph, and a passing
+Grounded Direct control. Provider-backed semantic-memory extraction and cloud
+embedding are disabled only inside this isolated campaign; deterministic local
+memory projection remains. The campaign emits an external candidate snapshot
+but does not claim or perform production promotion. No V5 provider-backed run
+exists yet, so these statements are protocol facts rather than uplift evidence.
 
 The Pro-to-Auto path additionally replays the current Pro champion's two gates,
 transfers only the complete bounded structural delta relative to the stable Pro

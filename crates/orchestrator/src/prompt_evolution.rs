@@ -740,6 +740,53 @@ mod tests {
     }
 
     #[test]
+    fn instance_wise_pareto_uses_performance_only_after_quality_and_success_tie() {
+        let ancestor = ConductorPromptGenome::seed_for_effort("pro");
+        let mut lower_latency = ancestor.clone();
+        lower_latency.id = "lower-latency".to_string();
+        lower_latency.generation = 1;
+        lower_latency.parents = vec![ancestor.id.clone()];
+        let mut lower_tokens = ancestor.clone();
+        lower_tokens.id = "lower-tokens".to_string();
+        lower_tokens.generation = 1;
+        lower_tokens.parents = vec![ancestor.id.clone()];
+
+        let mut latency_score = instance_score(&lower_latency.id, "case-a", 0, 1.0);
+        latency_score.latency_ms = 80;
+        latency_score.total_tokens = 120;
+        let mut token_score = instance_score(&lower_tokens.id, "case-a", 0, 1.0);
+        token_score.latency_ms = 100;
+        token_score.total_tokens = 60;
+        let archive = PromptInstanceParetoArchive::build(
+            &[lower_latency.clone(), lower_tokens.clone()],
+            &[latency_score, token_score],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            archive.best_aggregate().unwrap().profile_id,
+            lower_latency.id
+        );
+
+        let mut latency_score = instance_score(&lower_latency.id, "case-a", 0, 1.0);
+        latency_score.latency_ms = 100;
+        latency_score.total_tokens = 120;
+        let mut token_score = instance_score(&lower_tokens.id, "case-a", 0, 1.0);
+        token_score.latency_ms = 100;
+        token_score.total_tokens = 60;
+        let archive = PromptInstanceParetoArchive::build(
+            &[lower_latency, lower_tokens.clone()],
+            &[latency_score, token_score],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            archive.best_aggregate().unwrap().profile_id,
+            lower_tokens.id
+        );
+    }
+
+    #[test]
     fn promotion_confidence_deduplicates_replayed_observations() {
         let entry = observation("candidate", PromptEvaluationSplit::Holdout, 0.9, 100, 100);
         let observations = [entry.clone(), entry.clone(), entry];

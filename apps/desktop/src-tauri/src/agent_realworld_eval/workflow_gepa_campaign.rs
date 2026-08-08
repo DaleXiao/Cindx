@@ -1,5 +1,9 @@
 use super::direct_finalizer_campaign_support::{require_clean_source, required_external_path};
 use super::setup::{activate_evaluation_data_root, build_evaluation_app};
+use super::workflow_gepa_candidate_search::{
+    build_training_receipt, generate_candidate_population, select_training_candidate,
+    CandidateIdentityReceipt, CandidateTrainingReceipt,
+};
 use super::workflow_gepa_campaign_contract::{
     aggregate_pairs, test_gate, validate_grounded_control, validation_gate, CampaignSplit,
     PairAggregateReceipt, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
@@ -16,36 +20,18 @@ use super::workflow_gepa_campaign_suite::{
 use super::{materialize_case, RealworldSuite, Treatment};
 use crate::app_state::AppState;
 use crate::collaboration_execution::collaboration_candidate_models;
-use crate::configuration_models::{ProviderConfig, SidecarConfig};
+use crate::configuration_models::SidecarConfig;
 use crate::configuration_persistence::load_provider_config;
-use crate::phase16_task_id;
-use crate::prompt_learning_runtime::prompt_evaluation_parent_budget;
-use crate::prompt_mutation_runtime::run_background_prompt_mutation_stage;
 use agent_core::Metadata;
-use agent_runtime::AgentRunControl;
 use orchestrator::{
-    prompt_genome_sha256, sha256_hex, AgentEvaluationReflectionPacket, AgentPolicy,
-    ConductorPromptGenome, FrozenPromptProfileSnapshot,
+    sha256_hex, AgentPolicy, ConductorPromptGenome,
 };
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tauri::Manager;
 
-const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v4";
-
-#[derive(Debug, Serialize)]
-struct CandidateReceipt {
-    profile_id: String,
-    profile_sha256: String,
-    route_profile_sha256: String,
-    parent_profile_id: String,
-    generation: u32,
-    mutation_response_sha256: String,
-    mutation_repaired: bool,
-    snapshot_artifact_sha256: String,
-}
+const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v5";
 
 #[derive(Debug, Serialize)]
 struct WorkflowGepaCampaignReceipt {
@@ -59,9 +45,10 @@ struct WorkflowGepaCampaignReceipt {
     configured_model_sha256: Vec<String>,
     train_runs: Vec<ProductRunReceipt>,
     reflection_evidence_sha256: String,
-    candidate: CandidateReceipt,
+    candidate_population: Vec<CandidateTrainingReceipt>,
+    selected_candidate: Option<CandidateIdentityReceipt>,
     validation_pairs: Vec<ProductPairReceipt>,
-    validation: PairAggregateReceipt,
+    validation: Option<PairAggregateReceipt>,
     validation_gate_passed: bool,
     test_pairs: Vec<ProductPairReceipt>,
     test: Option<PairAggregateReceipt>,
@@ -69,7 +56,7 @@ struct WorkflowGepaCampaignReceipt {
     grounded_direct_control: Option<ProductRunReceipt>,
     grounded_direct_control_passed: bool,
     final_test_was_untouched_during_learning: bool,
-    candidate_selected_without_test_evidence: bool,
+    candidate_selected_from_train_only: bool,
     production_promotion_claimed: bool,
     status: String,
 }
@@ -83,7 +70,7 @@ pub(super) fn run() -> Result<(), String> {
     let source_commit = require_clean_source(&repo_root)?;
     let suite_path = std::env::var_os("CINDX_WORKFLOW_GEPA_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v4.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v5.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
@@ -101,6 +88,15 @@ pub(super) fn run() -> Result<(), String> {
         &repo_root,
         "workflow GEPA snapshot",
     )?;
+    if report_path == snapshot_path {
+        return Err("workflow GEPA report and snapshot paths must be distinct".to_string());
+    }
+    if report_path.exists() || snapshot_path.exists() {
+        return Err(
+            "workflow GEPA report and snapshot paths must be new for each authorized run"
+                .to_string(),
+        );
+    }
 
     let provider = load_provider_config();
     if !provider.is_ready() {
@@ -115,7 +111,7 @@ pub(super) fn run() -> Result<(), String> {
     }
 
     let temp = tempfile::Builder::new()
-        .prefix("cindx-workflow-gepa-v4-")
+        .prefix("cindx-workflow-gepa-v5-")
         .tempdir()
         .map_err(|error| format!("failed to create campaign workspace: {error}"))?;
     let suite_root = temp.path();
@@ -139,7 +135,7 @@ pub(super) fn run() -> Result<(), String> {
     let mut train_raw = Vec::new();
     let mut train_runs = Vec::new();
     for case in cases_for_split(&suite, CampaignSplit::Train)? {
-        eprintln!("[workflow-gepa-v4] train seed: {}", case.id);
+        eprintln!("[workflow-gepa-v5] train seed: {}", case.id);
         let run_execution_index = execution_index;
         let root = suite_root.join(format!("train-{}", case.id));
         materialize_case(&root, case)?;
@@ -174,53 +170,124 @@ pub(super) fn run() -> Result<(), String> {
             .map_err(|error| format!("failed to encode reflection evidence: {error}"))?,
     );
     let run_context = mutation_run_context();
-    let (candidate_genome, mutation_response_sha256, mutation_repaired) = generate_candidate(
+    let candidates = generate_candidate_population(
         &state,
         &provider,
         &run_context,
         &seed_profile,
         &reflection_packets,
+        &training_dataset_sha256,
+        &reflection_evidence_sha256,
     )?;
-    let seed_route_sha256 = seed_profile.route_decision_profile_sha256(policy.label())?;
-    let candidate_route_sha256 = candidate_genome.route_decision_profile_sha256(policy.label())?;
-    if candidate_route_sha256 == seed_route_sha256 {
-        return Err("GEPA mutation did not change the route-decision phenotype".to_string());
+    let candidate_snapshot_root = suite_root.join("candidate-snapshots");
+    fs::create_dir_all(&candidate_snapshot_root).map_err(|error| {
+        format!(
+            "failed to create candidate snapshot root {}: {error}",
+            candidate_snapshot_root.display()
+        )
+    })?;
+    let train_cases = cases_for_split(&suite, CampaignSplit::Train)?;
+    let mut candidate_population = Vec::with_capacity(candidates.len());
+    for (candidate_index, generated) in candidates.iter().enumerate() {
+        let internal_snapshot_path = candidate_snapshot_root.join(format!(
+            "candidate-{}-{}.json",
+            candidate_index + 1,
+            &generated.identity.profile_sha256[..16]
+        ));
+        let snapshot_bytes = serde_json::to_vec_pretty(&generated.snapshot)
+            .map_err(|error| format!("failed to encode train candidate snapshot: {error}"))?;
+        tools::write_private_file_atomically(&internal_snapshot_path, &snapshot_bytes)
+            .map_err(|error| format!("failed to write train candidate snapshot: {error}"))?;
+        let mut train_pairs = Vec::with_capacity(train_cases.len());
+        for (case_index, case) in train_cases.iter().enumerate() {
+            eprintln!(
+                "[workflow-gepa-v5] train candidate={}: {}",
+                candidate_index + 1,
+                case.id
+            );
+            train_pairs.push(execute_product_pair(
+                &app,
+                &state,
+                &runtime_provider,
+                &evaluation_database,
+                suite_root,
+                &format!("candidate-{}", candidate_index + 1),
+                case,
+                CampaignSplit::Train,
+                1,
+                candidate_index * train_cases.len() + case_index,
+                &mut execution_index,
+                &suite_sha256,
+                &internal_snapshot_path,
+                &generated.identity.snapshot_artifact_sha256,
+                &generated.snapshot,
+            )?);
+        }
+        candidate_population.push(build_training_receipt(generated, train_pairs)?);
     }
-    let snapshot = FrozenPromptProfileSnapshot::new_gepa(
-        policy.label(),
-        candidate_genome.clone(),
-        seed_profile.id.clone(),
-        training_dataset_sha256.clone(),
-        reflection_evidence_sha256.clone(),
-    )?;
-    let snapshot_bytes = serde_json::to_vec_pretty(&snapshot)
-        .map_err(|error| format!("failed to encode Workflow GEPA snapshot: {error}"))?;
-    tools::write_private_file_atomically(&snapshot_path, &snapshot_bytes)
-        .map_err(|error| format!("failed to write Workflow GEPA snapshot: {error}"))?;
-    let snapshot_artifact_sha256 = snapshot.artifact_sha256()?;
-    let candidate = CandidateReceipt {
-        profile_id: candidate_genome.id.clone(),
-        profile_sha256: prompt_genome_sha256(&candidate_genome)?,
-        route_profile_sha256: candidate_route_sha256,
-        parent_profile_id: seed_profile.id.clone(),
-        generation: candidate_genome.generation,
-        mutation_response_sha256,
-        mutation_repaired,
-        snapshot_artifact_sha256: snapshot_artifact_sha256.clone(),
+    let selected_profile_id = match select_training_candidate(&candidates, &mut candidate_population)
+    {
+        Ok(profile_id) => profile_id,
+        Err(error) => {
+            let receipt = WorkflowGepaCampaignReceipt {
+                schema: REPORT_SCHEMA,
+                source_commit,
+                suite_id: suite.id,
+                suite_sha256,
+                training_dataset_sha256,
+                provider_id: provider.provider_id,
+                provider_endpoint_sha256: sha256_hex(provider.base_url.as_bytes()),
+                configured_model_sha256: configured_models
+                    .iter()
+                    .map(|model| sha256_hex(model.as_bytes()))
+                    .collect(),
+                train_runs,
+                reflection_evidence_sha256,
+                candidate_population,
+                selected_candidate: None,
+                validation_pairs: Vec::new(),
+                validation: None,
+                validation_gate_passed: false,
+                test_pairs: Vec::new(),
+                test: None,
+                test_gate_passed: false,
+                grounded_direct_control: None,
+                grounded_direct_control_passed: false,
+                final_test_was_untouched_during_learning: true,
+                candidate_selected_from_train_only: false,
+                production_promotion_claimed: false,
+                status: "valid_no_go_training".to_string(),
+            };
+            write_report(&report_path, &receipt)?;
+            return Err(error);
+        }
     };
+    let selected = candidates
+        .iter()
+        .find(|candidate| candidate.genome.id == selected_profile_id)
+        .ok_or_else(|| "selected train candidate is missing from the population".to_string())?;
+    let candidate_genome = &selected.genome;
+    let snapshot = &selected.snapshot;
+    let selected_candidate = selected.identity.clone();
+    let snapshot_bytes = serde_json::to_vec_pretty(snapshot)
+        .map_err(|error| format!("failed to encode selected Workflow GEPA snapshot: {error}"))?;
+    tools::write_private_file_atomically(&snapshot_path, &snapshot_bytes)
+        .map_err(|error| format!("failed to write selected Workflow GEPA snapshot: {error}"))?;
+    let snapshot_artifact_sha256 = selected_candidate.snapshot_artifact_sha256.clone();
 
     let mut validation_pairs = Vec::new();
     for (pair_index, case) in cases_for_split(&suite, CampaignSplit::Validation)?
         .into_iter()
         .enumerate()
     {
-        eprintln!("[workflow-gepa-v4] validation pair: {}", case.id);
+        eprintln!("[workflow-gepa-v5] validation pair: {}", case.id);
         validation_pairs.push(execute_product_pair(
             &app,
             &state,
             &runtime_provider,
             &evaluation_database,
             suite_root,
+            "selected",
             case,
             CampaignSplit::Validation,
             1,
@@ -229,10 +296,10 @@ pub(super) fn run() -> Result<(), String> {
             &suite_sha256,
             &snapshot_path,
             &snapshot_artifact_sha256,
-            &snapshot,
+            snapshot,
         )?);
     }
-    let validation = aggregate_pairs(&validation_pairs, &candidate_genome)?;
+    let validation = aggregate_pairs(&validation_pairs, candidate_genome)?;
     let validation_result = validation_gate(&validation);
     if let Err(error) = validation_result {
         let receipt = WorkflowGepaCampaignReceipt {
@@ -249,9 +316,10 @@ pub(super) fn run() -> Result<(), String> {
                 .collect(),
             train_runs,
             reflection_evidence_sha256,
-            candidate,
+            candidate_population,
+            selected_candidate: Some(selected_candidate),
             validation_pairs,
-            validation,
+            validation: Some(validation),
             validation_gate_passed: false,
             test_pairs: Vec::new(),
             test: None,
@@ -259,7 +327,7 @@ pub(super) fn run() -> Result<(), String> {
             grounded_direct_control: None,
             grounded_direct_control_passed: false,
             final_test_was_untouched_during_learning: true,
-            candidate_selected_without_test_evidence: true,
+            candidate_selected_from_train_only: true,
             production_promotion_claimed: false,
             status: "valid_no_go_validation".to_string(),
         };
@@ -304,7 +372,7 @@ pub(super) fn run() -> Result<(), String> {
         for replicate in 1..=TEST_REPLICATES {
             for case in cases_for_split(&suite, CampaignSplit::Test)? {
                 eprintln!(
-                    "[workflow-gepa-v4] untouched test pair replicate={replicate}: {}",
+                    "[workflow-gepa-v5] untouched test pair replicate={replicate}: {}",
                     case.id
                 );
                 test_pairs.push(execute_product_pair(
@@ -313,6 +381,7 @@ pub(super) fn run() -> Result<(), String> {
                     &runtime_provider,
                     &evaluation_database,
                     suite_root,
+                    "selected",
                     case,
                     CampaignSplit::Test,
                     replicate,
@@ -321,7 +390,7 @@ pub(super) fn run() -> Result<(), String> {
                     &suite_sha256,
                     &snapshot_path,
                     &snapshot_artifact_sha256,
-                    &snapshot,
+                    snapshot,
                 )?);
                 pair_index = pair_index.saturating_add(1);
             }
@@ -330,7 +399,7 @@ pub(super) fn run() -> Result<(), String> {
     let test = if test_pairs.is_empty() {
         None
     } else {
-        Some(aggregate_pairs(&test_pairs, &candidate_genome)?)
+        Some(aggregate_pairs(&test_pairs, candidate_genome)?)
     };
     let test_result = test
         .as_ref()
@@ -358,9 +427,10 @@ pub(super) fn run() -> Result<(), String> {
             .collect(),
         train_runs,
         reflection_evidence_sha256,
-        candidate,
+        candidate_population,
+        selected_candidate: Some(selected_candidate),
         validation_pairs,
-        validation,
+        validation: Some(validation),
         validation_gate_passed: true,
         test_pairs,
         test,
@@ -368,7 +438,7 @@ pub(super) fn run() -> Result<(), String> {
         grounded_direct_control: Some(grounded_receipt),
         grounded_direct_control_passed: grounded_result.is_ok(),
         final_test_was_untouched_during_learning: true,
-        candidate_selected_without_test_evidence: true,
+        candidate_selected_from_train_only: true,
         production_promotion_claimed: false,
         status: status.to_string(),
     };
@@ -380,59 +450,11 @@ pub(super) fn run() -> Result<(), String> {
         return Err(error);
     }
     eprintln!(
-        "[workflow-gepa-v4] passed report={} snapshot={}",
+        "[workflow-gepa-v5] passed report={} snapshot={}",
         report_path.display(),
         snapshot_path.display()
     );
     Ok(())
-}
-
-fn generate_candidate(
-    state: &tauri::State<'_, AppState>,
-    provider: &ProviderConfig,
-    run_context: &Metadata,
-    parent: &ConductorPromptGenome,
-    packets: &[AgentEvaluationReflectionPacket],
-) -> Result<(ConductorPromptGenome, String, bool), String> {
-    let control = Arc::new(AgentRunControl::with_budget(
-        prompt_evaluation_parent_budget(),
-    ));
-    let prompt = parent.reflective_mutation_prompt(packets)?;
-    let response = run_background_prompt_mutation_stage(
-        state,
-        provider,
-        &phase16_task_id(),
-        run_context,
-        "workflow-gepa-v4-mutation",
-        "workflow_gepa_v4_mutation",
-        prompt,
-        &control,
-    )?;
-    let initial_sha256 = sha256_hex(response.as_bytes());
-    let initial_id = format!("learned-pro-v4-{}", &initial_sha256[..16]);
-    match parent.learned_reflective_mutation_from_response(&response, initial_id, packets) {
-        Ok(candidate) => Ok((candidate, initial_sha256, false)),
-        Err(initial_error) => {
-            let repaired = run_background_prompt_mutation_stage(
-                state,
-                provider,
-                &phase16_task_id(),
-                run_context,
-                "workflow-gepa-v4-mutation-repair",
-                "workflow_gepa_v4_mutation_repair",
-                parent.mutation_repair_prompt(&response, &initial_error),
-                &control,
-            )?;
-            let repaired_sha256 = sha256_hex(repaired.as_bytes());
-            let repaired_id = format!("learned-pro-v4-{}", &repaired_sha256[..16]);
-            let candidate = parent.learned_reflective_mutation_from_response(
-                &repaired,
-                repaired_id,
-                packets,
-            )?;
-            Ok((candidate, repaired_sha256, true))
-        }
-    }
 }
 
 fn mutation_run_context() -> Metadata {
@@ -440,7 +462,7 @@ fn mutation_run_context() -> Metadata {
         ("project_id".to_string(), CAMPAIGN_PROJECT_ID.to_string()),
         (
             "session_id".to_string(),
-            "session-workflow-gepa-v4".to_string(),
+            "session-workflow-gepa-v5".to_string(),
         ),
         ("effort".to_string(), AgentPolicy::Pro.label().to_string()),
         ("steer_epoch".to_string(), "0".to_string()),
