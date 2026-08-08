@@ -318,18 +318,24 @@ for whether those segments require effects.
 - Auto and Pro ask configured conductor candidates for this schema.
 - After validation, Causal Router v2 freezes a pre-decision feature snapshot from
   digests of the actual objective, bounded recent context and prompt profile,
-  plus runtime task demand, route requirements, model capability sources, model
-  pool, and run budget. It evaluates at most the workflow candidate and its
-  strongest direct counterfactual. Each action identity binds the model, tool,
-  vision, risk, retrieval, memory, verification, quorum, parallelism, step and
-  stop policy actually executed. Admission requires structural independent demand and a
-  non-negative conservative lower value after coordination, critical-path
-  latency, and uncertainty. Browser/computer or effectful work remains serial
-  unless a high-stakes read-only independent verification exception applies.
-- Exact context-and-action matched evidence may reduce the conservative benefit;
-  legacy action-only evidence is labeled separately and cannot increase it.
-  Ranked top-eight evidence is only prompt context. Router admission uses at most
-  one exact and one explicit-legacy index lookup, performs no linear history-row
+  plus route requirements, model capability sources, model pool, and run budget.
+  Typed task demand comes from the validated Conductor decision; the router does
+  not reclassify the prompt with keywords. It evaluates at most the workflow
+  candidate and its strongest direct counterfactual. Each action identity binds
+  the model, tool, vision, risk, retrieval, memory, verification, quorum,
+  parallelism, step and stop policy actually executed. Admission requires real
+  independent contributions or independent verification and a non-negative
+  confidence-weighted uplift above the mode's declared quality floor. Capability,
+  safety, effect authority, and run budgets remain deterministic hard boundaries.
+  A deterministic pre-decision task label is recorded separately for unbiased
+  evaluation grouping and never feeds route selection.
+- Exact context-and-action matched evidence has priority. A second bounded index
+  can supply sufficiently supported evidence for the same model and route shape
+  on a new request. Both positive and failed team trajectories are retained when
+  the matched scores and provenance are complete. Only route-shape aggregates are
+  shown to the Conductor; opaque exact-request hashes are not useful planning
+  context. Router admission uses at most one exact and one route-shape lookup,
+  performs no linear history-row
   scan after index construction, evaluates at most two actions, and serializes a
   receipt no larger than 4 KiB. It assigns no propensity to the deterministic
   policy.

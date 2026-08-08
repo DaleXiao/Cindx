@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{
     matching_collaboration_evidence_for_context, AgentExecutionMode, AgentRiskLevel,
@@ -26,6 +25,29 @@ fn requirements() -> AgentRouteRequirements {
     }
 }
 
+fn feature_snapshot(
+    decision: &AgentRunDecision,
+    objective: &str,
+    recent_context: &str,
+    effort: &str,
+    requirements: AgentRouteRequirements,
+    budget_fingerprint: Option<&str>,
+    prompt_profile_sha256: &str,
+) -> RouteFeatureSnapshotV2 {
+    RouteFeatureSnapshotV2::from_decision_request(
+        decision,
+        RouteFeatureRequest {
+            objective,
+            recent_context,
+            effort,
+            requirements,
+            budget_fingerprint,
+            prompt_profile_sha256,
+        },
+        &candidates(),
+    )
+}
+
 fn workflow_decision() -> AgentRunDecision {
     let mut decision = AgentRunDecision::direct("executor");
     decision.task_class = TaskClass::Research;
@@ -43,14 +65,14 @@ fn workflow_decision() -> AgentRunDecision {
 }
 
 fn parallel_snapshot() -> RouteFeatureSnapshotV2 {
-    RouteFeatureSnapshotV2::from_request(
+    feature_snapshot(
+        &workflow_decision(),
         "Compare independent architecture alternatives and cross-check sources",
         "",
         "auto",
         requirements(),
-        &candidates(),
-        Some("1".repeat(64)),
-        "2".repeat(64),
+        Some(&"1".repeat(64)),
+        &"2".repeat(64),
     )
 }
 
@@ -84,15 +106,16 @@ fn matched_evidence(
 
 #[test]
 fn feature_identity_binds_exact_inputs_without_persisting_their_text() {
+    let decision = workflow_decision();
     let build = |objective: &str, recent: &str| {
-        RouteFeatureSnapshotV2::from_request(
+        feature_snapshot(
+            &decision,
             objective,
             recent,
             "auto",
             requirements(),
-            &candidates(),
-            Some("1".repeat(64)),
-            "2".repeat(64),
+            Some(&"1".repeat(64)),
+            &"2".repeat(64),
         )
     };
     let first = build("Compare alpha_marker option A", "recent_marker one");
@@ -110,6 +133,8 @@ fn feature_identity_binds_exact_inputs_without_persisting_their_text() {
     let encoded = serde_json::to_string(&first).unwrap();
     assert!(!encoded.contains("alpha_marker"));
     assert!(!encoded.contains("recent_marker"));
+    assert_eq!(first.task_class, decision.task_class);
+    assert!(first.parallelizable);
 }
 
 #[test]
@@ -179,17 +204,20 @@ fn receipt_is_deterministic_bounded_and_keeps_the_counterfactual() {
 }
 
 #[test]
-fn independent_demand_and_serial_interaction_are_structural_gates() {
+fn independent_contributions_or_verification_are_structural_gates() {
     let mut decision = workflow_decision();
     decision.verification = AgentVerificationPolicy::SelfCheck;
-    let snapshot = RouteFeatureSnapshotV2::from_request(
+    decision.max_parallelism = 1;
+    decision.min_successful_branches = 1;
+    decision.distinct_contributions = 1;
+    let snapshot = feature_snapshot(
+        &decision,
         "Explain why the sky is blue",
         "",
         "auto",
         requirements(),
-        &candidates(),
         None,
-        "2".repeat(64),
+        &"2".repeat(64),
     );
     let direct = select_causal_route_v2(&decision, &snapshot, &candidates(), None, 0).unwrap();
     assert_eq!(direct.reason, CausalRouteReason::NoIndependentDemand);
@@ -202,7 +230,9 @@ fn independent_demand_and_serial_interaction_are_structural_gates() {
     decision.verification = AgentVerificationPolicy::Independent;
     decision.task_class = TaskClass::Browser;
     decision.tool_requirement = AgentToolRequirement::ReadOnly;
-    let browser_snapshot = RouteFeatureSnapshotV2::from_request(
+    decision.estimated_steps = 2;
+    let browser_snapshot = feature_snapshot(
+        &decision,
         "Use multiple models to open the browser and click the current page",
         "",
         "auto",
@@ -210,18 +240,17 @@ fn independent_demand_and_serial_interaction_are_structural_gates() {
             minimum_tool_requirement: AgentToolRequirement::ReadOnly,
             ..requirements()
         },
-        &candidates(),
         None,
-        "2".repeat(64),
+        &"2".repeat(64),
     );
-    let serial =
+    let verified =
         select_causal_route_v2(&decision, &browser_snapshot, &candidates(), None, 0).unwrap();
-    assert_eq!(serial.reason, CausalRouteReason::SerialInteraction);
-    assert_eq!(serial.selected_route, AgentRouteTier::Direct);
+    assert_eq!(verified.reason, CausalRouteReason::AdmitPositiveValue);
+    assert_eq!(verified.selected_route, AgentRouteTier::Workflow);
 }
 
 #[test]
-fn only_exact_context_and_action_evidence_adjusts_benefit() {
+fn exact_and_route_shape_evidence_adjust_conductor_estimates() {
     let decision = workflow_decision();
     let snapshot = parallel_snapshot();
     let exact = matched_evidence(&decision, snapshot.context_fingerprint.clone(), 300);
@@ -231,19 +260,48 @@ fn only_exact_context_and_action_evidence_adjusts_benefit() {
         exact_receipt.support.basis,
         CausalRouteEvidenceBasis::MatchedContextAction
     );
-    assert_eq!(exact_receipt.evidence_adjusted_benefit_bps, 300);
+    assert_eq!(exact_receipt.evidence_adjusted_benefit_bps, 1_800);
 
-    let legacy = matched_evidence(&decision, String::new(), 300);
-    let legacy_receipt =
-        select_causal_route_v2(&decision, &snapshot, &candidates(), Some(&legacy), 1).unwrap();
+    let route_shape = matched_evidence(&decision, String::new(), 300);
+    let route_shape_receipt =
+        select_causal_route_v2(&decision, &snapshot, &candidates(), Some(&route_shape), 1).unwrap();
     assert_eq!(
-        legacy_receipt.support.basis,
-        CausalRouteEvidenceBasis::LegacyMatchedAction
+        route_shape_receipt.support.basis,
+        CausalRouteEvidenceBasis::MatchedRouteShape
     );
-    assert_eq!(
-        legacy_receipt.evidence_adjusted_benefit_bps,
-        legacy_receipt.predicted_benefit_bps
+    assert_eq!(route_shape_receipt.evidence_adjusted_benefit_bps, 1_800);
+}
+
+#[test]
+fn conductor_estimates_control_admission_without_keyword_reclassification() {
+    let mut decision = workflow_decision();
+    decision.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS - 1;
+    let low_snapshot = feature_snapshot(
+        &decision,
+        "compare independent evidence with cross-checks",
+        "",
+        "auto",
+        requirements(),
+        None,
+        &"2".repeat(64),
     );
+    let low = select_causal_route_v2(&decision, &low_snapshot, &candidates(), None, 0).unwrap();
+    assert_eq!(low.reason, CausalRouteReason::BelowPredictionFloor);
+
+    decision.expected_uplift_bps = 6_000;
+    let high_snapshot = feature_snapshot(
+        &decision,
+        "hello",
+        "",
+        "auto",
+        requirements(),
+        None,
+        &"2".repeat(64),
+    );
+    let high = select_causal_route_v2(&decision, &high_snapshot, &candidates(), None, 0).unwrap();
+    assert_eq!(high_snapshot.task_class, TaskClass::Research);
+    assert_eq!(high.reason, CausalRouteReason::AdmitPositiveValue);
+    assert_eq!(high.predicted_benefit_bps, 4_800);
 }
 
 #[test]
@@ -317,14 +375,17 @@ fn causal_router_v2_contract_gate() {
 
     let mut non_independent = decision.clone();
     non_independent.verification = AgentVerificationPolicy::SelfCheck;
-    let direct_snapshot = RouteFeatureSnapshotV2::from_request(
+    non_independent.max_parallelism = 1;
+    non_independent.min_successful_branches = 1;
+    non_independent.distinct_contributions = 1;
+    let direct_snapshot = feature_snapshot(
+        &non_independent,
         "Explain why the sky is blue",
         "",
         "pro",
         requirements(),
-        &candidates(),
         None,
-        "2".repeat(64),
+        &"2".repeat(64),
     );
     let direct =
         select_causal_route_v2(&non_independent, &direct_snapshot, &candidates(), None, 0).unwrap();
@@ -338,7 +399,7 @@ fn causal_router_v2_contract_gate() {
         exact_receipt.support.basis,
         CausalRouteEvidenceBasis::MatchedContextAction
     );
-    assert_eq!(exact_receipt.evidence_adjusted_benefit_bps, 250);
+    assert_eq!(exact_receipt.evidence_adjusted_benefit_bps, 1_766);
     exact_receipt.validate().unwrap();
 
     println!(

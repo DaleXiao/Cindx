@@ -140,11 +140,13 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
 - The exact `causal-router-v2-contract` gate requires one
   `cindx.causal-router-v2-contract.v1` marker. It proves a stable pre-decision
   fingerprint, explicit workflow/direct counterfactual, deterministic policy,
-  capability and effect-authority checks, and exact context-and-action evidence
-  semantics. The paired `causal-router-v2-scaling` gate requires one
+  capability and effect-authority checks, Conductor-owned typed demand, and
+  exact-context plus route-shape matched-evidence semantics. Complete failed
+  team comparisons remain negative evidence. The paired
+  `causal-router-v2-scaling` gate requires one
   `cindx.causal-router-v2-scaling.v1` marker and proves identical selection when
   the exact record is after the prompt's top eight in both 32- and 2,048-row
-  inputs. Selection performs at most one exact and one explicit-legacy key
+  inputs. Selection performs at most one exact and one route-shape key
   lookup, scans no history rows after index construction, evaluates at most two
   actions, and keeps its receipt within 4 KiB. These are routing-control
   contracts, not provider-backed quality or intelligence evidence.

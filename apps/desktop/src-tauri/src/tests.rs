@@ -31,8 +31,8 @@ use orchestrator::{
     AgentRunDecisionRequest, AgentToolRequirement, AgentVerificationPolicy, CausalRouteReason,
     CausalRouteSelectionV2, ModelCapabilitySource, PromptDatasetCaseIdentityV1,
     PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1, PromptTransferProvenance,
-    RouteFeatureSnapshotV2, CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
-    PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
+    RouteFeatureRequest, RouteFeatureSnapshotV2, CAUSAL_ROUTE_MAX_RECEIPT_BYTES,
+    PROMPT_EXECUTION_CONTEXT_SCHEMA_V1, PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -276,14 +276,17 @@ fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -
         cost_tier: 1,
         latency_tier: 1,
     }];
-    let snapshot = RouteFeatureSnapshotV2::from_request(
-        "update the workspace",
-        "",
-        effort.label(),
-        route_requirements,
+    let snapshot = RouteFeatureSnapshotV2::from_decision_request(
+        &decision,
+        RouteFeatureRequest {
+            objective: "update the workspace",
+            recent_context: "",
+            effort: effort.label(),
+            requirements: route_requirements,
+            budget_fingerprint: None,
+            prompt_profile_sha256: &"1".repeat(64),
+        },
         &candidates,
-        None,
-        "1".repeat(64),
     );
     let mut receipt = match decision.causal_route.take() {
         Some(receipt) => receipt,
@@ -5922,14 +5925,17 @@ fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
     candidate.expected_uplift_bps = 2_500;
     candidate.confidence_bps = 7_000;
     candidate.stop_policy = ConductorStopPolicy::Quorum;
-    let snapshot = RouteFeatureSnapshotV2::from_request(
-        "update the workspace",
-        "",
-        "auto",
-        route_requirements,
+    let snapshot = RouteFeatureSnapshotV2::from_decision_request(
+        &candidate,
+        RouteFeatureRequest {
+            objective: "update the workspace",
+            recent_context: "",
+            effort: "auto",
+            requirements: route_requirements,
+            budget_fingerprint: None,
+            prompt_profile_sha256: &"1".repeat(64),
+        },
         &candidates,
-        None,
-        "1".repeat(64),
     );
     let mut receipt = select_causal_route_v2(&candidate, &snapshot, &candidates, None, 0)
         .expect("workflow candidate should produce a causal route receipt");

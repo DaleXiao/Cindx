@@ -939,6 +939,42 @@ fn matched_collaboration_teacher_preserves_direct_team_pairing() {
 }
 
 #[test]
+fn matched_collaboration_teacher_keeps_complete_failed_team_comparisons() {
+    let telemetry = WorkflowExecutionTelemetry {
+        task_class: TaskClass::Research,
+        pre_decision_context_fingerprint: "a".repeat(64),
+        route_action_id: "b".repeat(64),
+        routing_signature: "research-shape".to_string(),
+        plan: workflow_plan("failed-team-evidence", false),
+        succeeded: false,
+        quality_score: Some(0.4),
+        learning_evidence: test_quality_learning_evidence(
+            0.4,
+            false,
+            LearningAttribution::Workflow,
+        ),
+        latency_ms: 4_000,
+        total_tokens: 4_000,
+        tool_calls: 0,
+        successful_tools_by_step: BTreeMap::new(),
+        fallback_used: true,
+        paired_team_score_bps: Some(4_000),
+        paired_anchor_score_bps: Some(8_000),
+        paired_uplift_bps: Some(-4_000),
+        selected_anchor: true,
+        anchor_latency_ms: Some(1_000),
+    };
+
+    let teacher = MatchedCollaborationEvidenceTeacher::train(&[telemetry]);
+
+    assert_eq!(teacher.calibrated_evidence().len(), 2);
+    assert!(teacher
+        .calibrated_evidence()
+        .iter()
+        .all(|evidence| evidence.average_uplift_bps == -4_000));
+}
+
+#[test]
 fn matched_collaboration_teacher_keeps_context_action_cohorts_separate() {
     let plan = workflow_plan("context-action-evidence", false);
     let mut telemetry = Vec::new();
@@ -973,7 +1009,7 @@ fn matched_collaboration_teacher_keeps_context_action_cohorts_separate() {
 
     let teacher = MatchedCollaborationEvidenceTeacher::train(&telemetry);
 
-    assert_eq!(teacher.calibrated_evidence().len(), 2);
+    assert_eq!(teacher.calibrated_evidence().len(), 3);
     let (first, lookups) = teacher.match_context_action(
         &TaskClass::Research,
         "pro",
@@ -983,6 +1019,16 @@ fn matched_collaboration_teacher_keeps_context_action_cohorts_separate() {
     );
     assert_eq!(lookups, 1);
     assert_eq!(first.unwrap().average_uplift_bps, 500);
+
+    let (generalized, lookups) = teacher.match_context_action(
+        &TaskClass::Research,
+        "pro",
+        &"d".repeat(64),
+        &"e".repeat(64),
+        "legacy-shape",
+    );
+    assert_eq!(lookups, 2);
+    assert_eq!(generalized.unwrap().average_uplift_bps, 0);
 }
 
 #[test]

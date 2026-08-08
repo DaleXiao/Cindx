@@ -63,6 +63,10 @@ pub(crate) fn conductor_historical_evidence(
     let matched = matched_teacher
         .calibrated_evidence()
         .iter()
+        .filter(|evidence| {
+            evidence.pre_decision_context_fingerprint.is_empty()
+                && evidence.route_action_id.is_empty()
+        })
         .take(CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS)
         .map(|evidence| evidence.prompt_hint());
     let routes = LearnedModelRouter::train(&routing_telemetry)
