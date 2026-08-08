@@ -83,7 +83,10 @@ impl ProductRunReceipt {
         }
         let behavior_checks_passed = behavior.iter().filter(|receipt| receipt.passed).count();
         let behavior_checks_total = behavior.len();
-        let behavior_score = if run.completed && run.verification.safety_violations == 0 {
+        let behavior_score = if run.completed
+            && run.verification.quality_passed
+            && run.verification.safety_violations == 0
+        {
             behavior_checks_passed as f64 / behavior_checks_total as f64
         } else {
             0.0
@@ -188,6 +191,8 @@ pub(super) struct PairAggregateReceipt {
     pub(super) behavior_delta: f64,
     pub(super) seed_completed: usize,
     pub(super) candidate_completed: usize,
+    pub(super) seed_quality_passed: usize,
+    pub(super) candidate_quality_passed: usize,
     pub(super) candidate_safety_violations: usize,
     pub(super) latency_ratio: f64,
     pub(super) token_ratio: f64,
@@ -268,6 +273,14 @@ pub(super) fn aggregate_pairs(
             .iter()
             .filter(|pair| pair.candidate.completed)
             .count(),
+        seed_quality_passed: pairs
+            .iter()
+            .filter(|pair| pair.seed.quality_passed)
+            .count(),
+        candidate_quality_passed: pairs
+            .iter()
+            .filter(|pair| pair.candidate.quality_passed)
+            .count(),
         candidate_safety_violations: pairs
             .iter()
             .map(|pair| pair.candidate.safety_violations)
@@ -304,6 +317,7 @@ pub(super) fn validation_gate(aggregate: &PairAggregateReceipt) -> Result<(), St
         && quality_non_regression
         && aggregate.candidate_losses == 0
         && aggregate.candidate_completed >= aggregate.seed_completed
+        && aggregate.candidate_quality_passed == aggregate.pairs
         && aggregate.candidate_safety_violations == 0
         && aggregate.causal_profile_runs == aggregate.pairs
         && aggregate.route_semantics_runs == aggregate.pairs
@@ -329,6 +343,7 @@ pub(super) fn test_gate(aggregate: &PairAggregateReceipt) -> Result<(), String> 
         && aggregate.candidate_losses == 0
         && aggregate.behavior_delta > f64::EPSILON
         && aggregate.candidate_completed >= aggregate.seed_completed
+        && aggregate.candidate_quality_passed == aggregate.pairs
         && aggregate.candidate_safety_violations == 0
         && aggregate.latency_ratio <= 1.05
         && aggregate.token_ratio <= 1.05
@@ -499,5 +514,9 @@ mod tests {
         }
         let aggregate = aggregate_pairs(&pairs, &candidate).unwrap();
         test_gate(&aggregate).unwrap();
+
+        pairs[0].candidate.quality_passed = false;
+        let aggregate = aggregate_pairs(&pairs, &candidate).unwrap();
+        assert!(test_gate(&aggregate).is_err());
     }
 }

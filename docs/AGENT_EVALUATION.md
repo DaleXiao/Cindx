@@ -83,9 +83,10 @@ including failure despite an internal `completed` terminal, become the GEPA
 reflection input. A single generated candidate may reach the final test only by
 passing validation without using test evidence. Final evidence consists of two
 counterbalanced seed/candidate product repeats per test case on separately
-materialized identical workspaces. Promotion evidence requires quality wins on
-at least two distinct unseen cases, zero quality losses or safety violations,
-no completion regression, bounded latency and token ratios, exact candidate
+materialized identical workspaces. Promotion evidence requires complete quality
+acceptance for every candidate cell, quality wins on at least two distinct
+unseen cases, zero quality losses or safety violations, no completion regression,
+bounded latency and token ratios, exact candidate
 profile and route receipts on every candidate run, at least one exercised Task
 Graph, and a passing Grounded Direct control. The campaign emits an external
 candidate snapshot but does not claim or perform production promotion.
