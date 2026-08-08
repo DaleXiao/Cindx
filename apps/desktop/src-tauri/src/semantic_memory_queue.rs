@@ -41,13 +41,13 @@ pub(crate) enum SemanticMemoryEnqueueOutcome {
         metrics: WorkQueueMetrics,
     },
     CapacityExceeded {
-        job: SemanticMemoryJob,
+        job: Box<SemanticMemoryJob>,
         metrics: WorkQueueMetrics,
     },
 }
 
 pub(crate) struct SemanticMemoryEnqueueError {
-    pub(crate) job: SemanticMemoryJob,
+    pub(crate) job: Box<SemanticMemoryJob>,
     pub(crate) reason: String,
 }
 
@@ -86,7 +86,7 @@ impl SemanticMemoryQueue {
             Ok(state) => state,
             Err(error) => {
                 return Err(SemanticMemoryEnqueueError {
-                    job,
+                    job: Box::new(job),
                     reason: format!("semantic memory queue lock poisoned: {error}"),
                 });
             }
@@ -104,9 +104,11 @@ impl SemanticMemoryQueue {
             }),
             WorkEnqueueOutcome::CapacityExceeded => {
                 Ok(SemanticMemoryEnqueueOutcome::CapacityExceeded {
-                    job: result
-                        .into_rejected()
-                        .expect("capacity rejection must return the job"),
+                    job: Box::new(
+                        result
+                            .into_rejected()
+                            .expect("capacity rejection must return the job"),
+                    ),
                     metrics,
                 })
             }
