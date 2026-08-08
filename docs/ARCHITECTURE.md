@@ -351,7 +351,11 @@ for whether those segments require effects.
   policy and receipt schema remain in the `orchestrator` crate.
 - A direct decision enters the interactive loop without collaboration.
 - A workflow decision creates a bounded adaptive workflow. The task graph owns
-  dependency order and runnable/resumable/degraded/exhausted states.
+  dependency order and runnable/resumable/degraded/exhausted states. The
+  production frontier intersects runnable work with the dependency ancestry of
+  the synthesis or verification delivery target and stops when that target is
+  complete. Disconnected speculative nodes remain in the checkpoint for audit
+  but consume no further model work.
 - Workflow output is advisory until the independent uplift gate returns
   `AcceptTeam`. Direct-anchor selection, missing comparison, failed repair,
   blocked frontier, conductor failure, and all other unproven outcomes return
@@ -422,6 +426,15 @@ verified current-turn requirements suppress conflicting historical
 requirements. Completed self-contained direct text-only runs still refresh
 deterministic memory state but do not spend a second model call on semantic
 curation.
+
+The ledger separates audit history from recall eligibility. A non-authoritative
+record with a current matched-regression utility receipt stays visible but is
+excluded from lexical and semantic recall until the receipt expires. Verified
+user requirements are not silently overruled by downstream utility inference.
+At the hard record bound, deterministic retention prioritizes explicit pins,
+verified requirements, causally helpful records, and records observed in a
+terminal result; recall frequency alone cannot keep a record alive. Inactive,
+superseded, harmful, and unused records are discarded first under pressure.
 
 Semantic curation is scheduled through the application layer's bounded
 loss-aware queue. The desktop adapter supplies provider, Tauri, SQLite, and

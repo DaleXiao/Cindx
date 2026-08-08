@@ -1168,7 +1168,7 @@ impl WorkflowExecutionCheckpoint {
     }
 
     pub fn is_complete(&self) -> bool {
-        self.finalized && self.resolved_step_count() == self.plan.steps.len()
+        self.finalized && self.delivery_is_complete()
     }
 
     pub fn continue_with_budget(&mut self, additional_turns_per_step: usize, now_ms: u64) {
@@ -1180,17 +1180,15 @@ impl WorkflowExecutionCheckpoint {
     }
 
     pub fn finalize(&mut self, final_output: String, now_ms: u64) -> Result<(), String> {
-        let final_step = self
-            .plan
-            .steps
-            .last()
-            .ok_or_else(|| "workflow checkpoint has no final step".to_string())?;
+        let final_step_id = self.delivery_target_step_id()?;
         let checkpoint = self
             .steps
-            .get_mut(&final_step.id)
-            .ok_or_else(|| "workflow checkpoint is missing its final step".to_string())?;
+            .get_mut(&final_step_id)
+            .ok_or_else(|| "workflow checkpoint is missing its delivery target".to_string())?;
         if checkpoint.status != WorkflowStepStatus::Completed {
-            return Err("workflow checkpoint cannot finalize before its final step".to_string());
+            return Err(
+                "workflow checkpoint cannot finalize before its delivery target".to_string(),
+            );
         }
         checkpoint.output = Some(final_output);
         checkpoint.updated_at_ms = now_ms;

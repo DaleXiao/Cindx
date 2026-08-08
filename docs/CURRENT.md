@@ -107,7 +107,10 @@ A new run currently follows this sequence:
    work after case, punctuation, and whitespace normalization, while preserving
    word order so directionally different assignments remain distinct. Model
    reuse or diversity is selected dynamically from capability fit and supported
-   evidence. `ReadOnlyEvidence` exposes only substantive statically read-only
+   evidence. Production scheduling follows only the dependency ancestry of the
+   graph's synthesis or verification delivery target; disconnected speculative
+   nodes remain auditable in the checkpoint but are not executed after the
+   delivery target is satisfied. `ReadOnlyEvidence` exposes only substantive statically read-only
    tools; `ReadOnlyExploration` may additionally expose bounded discovery tools;
    `None` exposes no tools. Analysis and verification follow their validated
    policy, while synthesis is always tool-free. Tool effects remain exclusive to the
@@ -300,8 +303,14 @@ loops from unlocking the maximum Auto or Pro budget.
   logical run, while their physical attempt identities remain auditable.
 - Recall combines lexical and semantic evidence with trust, typed matched
   utility, deduplication, supersession, current-request conflict suppression,
-  and session-diversity controls. Legacy lexical use counters remain readable
-  but no longer affect ranking. Semantic curation is reserved for workflow,
+  and session-diversity controls. A current matched-regression receipt excludes
+  non-authoritative memory from both lexical and semantic recall until that
+  evidence expires; verified user requirements remain authoritative. Capacity
+  retention protects explicit pins and verified user requirements, then
+  causally helpful and actually observed memories. It evicts harmful, inactive,
+  superseded, and unobserved records before stronger evidence. Raw recall count
+  is not retention evidence. Legacy lexical use counters remain readable but no
+  longer affect ranking. Semantic curation is reserved for workflow,
   workspace-evidence, or durable-effect runs; direct self-contained text runs
   use deterministic projection.
 - Semantic curation uses one bounded, duplicate-coalescing background queue.

@@ -39,6 +39,36 @@ pub(super) struct AdaptiveFrontierContext<'a, 'state> {
     pub(super) direct_anchor_verifier_attempted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AdaptiveDeliverySchedule {
+    pub(super) target_step_id: String,
+    pub(super) runnable_steps: BTreeSet<String>,
+    pub(super) complete: bool,
+}
+
+pub(super) fn adaptive_delivery_schedule(
+    checkpoint: &WorkflowExecutionCheckpoint,
+    max_step_attempts: usize,
+) -> Result<AdaptiveDeliverySchedule, String> {
+    let delivery = checkpoint.delivery_frontier(max_step_attempts)?;
+    let target_step_id = delivery
+        .target_step_id
+        .ok_or_else(|| "adaptive workflow has no delivery target".to_string())?;
+    let complete = delivery.remaining_steps.is_empty();
+    let mut runnable_steps = delivery
+        .runnable_steps
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if runnable_steps.contains(&target_step_id) {
+        runnable_steps.retain(|step_id| step_id == &target_step_id);
+    }
+    Ok(AdaptiveDeliverySchedule {
+        target_step_id,
+        runnable_steps,
+        complete,
+    })
+}
+
 pub(super) fn run_adaptive_frontier(
     context: AdaptiveFrontierContext<'_, '_>,
 ) -> Result<AdaptiveFrontierOutcome, String> {
@@ -90,21 +120,17 @@ pub(super) fn run_adaptive_frontier(
         let current_layer_count = adaptive_workflow_layers(&current_workflow)?.len();
         let max_model_turns_per_step =
             effective_workflow_model_turn_budget(&current_plan, &workflow_checkpoint);
-        let final_step_id = current_workflow
-            .steps
-            .last()
-            .map(|step| step.id.clone())
-            .ok_or_else(|| "adaptive workflow has no final step".to_string())?;
-        let graph_frontier = workflow_checkpoint.execution_frontier(max_step_attempts)?;
-        let graph_runnable = graph_frontier
-            .runnable_steps()
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let delivery_schedule =
+            adaptive_delivery_schedule(&workflow_checkpoint, max_step_attempts)?;
+        if delivery_schedule.complete {
+            break;
+        }
+        let final_step_id = delivery_schedule.target_step_id;
         let ready_ids = anytime_controller
             .ready_candidates()
             .into_iter()
             .filter(|candidate| candidate.id != DIRECT_ANCHOR_CANDIDATE_ID)
-            .filter(|candidate| graph_runnable.contains(&candidate.id))
+            .filter(|candidate| delivery_schedule.runnable_steps.contains(&candidate.id))
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
         let layer = ready_ids
@@ -128,9 +154,6 @@ pub(super) fn run_adaptive_frontier(
             })
             .collect::<Vec<_>>();
         if layer.is_empty() {
-            if graph_frontier.is_complete(current_plan.steps.len()) {
-                break;
-            }
             while (direct_anchor_output.is_none()
                 && anchor_supervisor
                     .as_ref()
@@ -200,6 +223,7 @@ pub(super) fn run_adaptive_frontier(
                 }
                 return commit_adaptive_frontier(output, &workflow_checkpoint);
             }
+            let graph_frontier = workflow_checkpoint.execution_frontier(max_step_attempts)?;
             return Err(format!(
                 "anytime workflow frontier is blocked without runnable candidates; exhausted=[{}] blocked=[{}]",
                 graph_frontier.exhausted_steps.join(","),
@@ -318,4 +342,92 @@ fn commit_adaptive_frontier(
     Ok(AdaptiveFrontierOutcome::Commit(
         AdaptiveCollaborationOutcome::foreground_direct(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(
+        id: &str,
+        role: &str,
+        access: Vec<String>,
+        output_kind: WorkflowOutputKind,
+    ) -> orchestrator::WorkflowPlanStep {
+        orchestrator::WorkflowPlanStep {
+            id: id.to_string(),
+            role: role.to_string(),
+            model: role.to_string(),
+            subtask: id.to_string(),
+            access: access.clone(),
+            tool_policy: WorkflowToolPolicy::None,
+            contract: orchestrator::WorkflowStepContract {
+                input_steps: access,
+                output_kind,
+                ..orchestrator::WorkflowStepContract::default()
+            },
+        }
+    }
+
+    #[test]
+    fn delivery_schedule_stops_before_disconnected_speculation() {
+        let plan = WorkflowPlanIr {
+            schema: WORKFLOW_IR_SCHEMA.to_string(),
+            workflow_id: "delivery-pruning".to_string(),
+            objective: "deliver a grounded answer".to_string(),
+            effort: "pro".to_string(),
+            policy: "adaptive".to_string(),
+            coordinator_model: "planner".to_string(),
+            prompt_profile: "baseline".to_string(),
+            steps: vec![
+                step("candidate", "worker", Vec::new(), WorkflowOutputKind::Evidence),
+                step(
+                    "final",
+                    "synthesizer",
+                    vec!["candidate".to_string()],
+                    WorkflowOutputKind::Synthesis,
+                ),
+                step("orphan", "worker", Vec::new(), WorkflowOutputKind::Analysis),
+            ],
+            budget: WorkflowBudget {
+                max_steps: 3,
+                max_models: 3,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 0,
+                max_output_tokens_per_step: 1_000,
+            },
+        };
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("delivery-pruning", plan, 1);
+
+        let initial = adaptive_delivery_schedule(&checkpoint, 1).unwrap();
+        assert_eq!(initial.target_step_id, "final");
+        assert_eq!(initial.runnable_steps, BTreeSet::from(["candidate".to_string()]));
+        assert!(!initial.complete);
+
+        checkpoint
+            .complete_step(
+                "candidate",
+                "worker",
+                "evidence".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+        let final_only = adaptive_delivery_schedule(&checkpoint, 1).unwrap();
+        assert_eq!(final_only.runnable_steps, BTreeSet::from(["final".to_string()]));
+
+        checkpoint
+            .complete_step(
+                "final",
+                "synthesizer",
+                "answer".to_string(),
+                "[]".to_string(),
+                3,
+            )
+            .unwrap();
+        let complete = adaptive_delivery_schedule(&checkpoint, 1).unwrap();
+        assert!(complete.complete);
+        assert!(complete.runnable_steps.is_empty());
+        assert_eq!(checkpoint.steps["orphan"].status, WorkflowStepStatus::Pending);
+    }
 }

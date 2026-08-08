@@ -2,7 +2,7 @@ use crate::memory_text::{memory_terms, normalize_memory_text};
 use crate::requirement_scope::{contains_instruction_override, contains_sensitive_value};
 use crate::{
     memory_content_sha256, MemoryControlAction, MemoryKind, MemoryLedger, MemoryMergeStats,
-    MemoryRecord, MemoryTrust, QuarantinedMemoryRecord,
+    MemoryRecord, MemoryTrust, MemoryUtilityDisposition, QuarantinedMemoryRecord,
 };
 
 const MAX_QUARANTINED_MEMORY_RECORDS: usize = 256;
@@ -279,13 +279,17 @@ pub fn merge_memory_records(
         stats.inserted += 1;
     }
 
+    let retention_now_ms = memory_retention_now_ms(ledger);
+    let controls = &ledger.controls;
+    let project_id = ledger.project_id.as_str();
     ledger.records.sort_by(|left, right| {
-        left.superseded_by
-            .is_some()
-            .cmp(&right.superseded_by.is_some())
-            .then_with(|| right.importance.cmp(&left.importance))
-            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
-            .then_with(|| right.recall_count.cmp(&left.recall_count))
+        memory_retention_order(right, controls.get(&right.id), project_id, retention_now_ms)
+            .cmp(&memory_retention_order(
+                left,
+                controls.get(&left.id),
+                project_id,
+                retention_now_ms,
+            ))
             .then_with(|| left.id.cmp(&right.id))
     });
     let limit = max_records.max(1);
@@ -294,6 +298,72 @@ pub fn merge_memory_records(
         ledger.records.truncate(limit);
     }
     stats
+}
+
+fn memory_retention_now_ms(ledger: &MemoryLedger) -> u64 {
+    ledger
+        .records
+        .iter()
+        .flat_map(|record| {
+            [
+                record.provenance.timestamp_ms,
+                record.created_at_ms,
+                record.updated_at_ms,
+                record.last_recalled_at_ms.unwrap_or_default(),
+                record.last_observed_use_at_ms.unwrap_or_default(),
+                record.superseded_at_ms.unwrap_or_default(),
+                record
+                    .utility
+                    .attributions()
+                    .iter()
+                    .map(|attribution| attribution.recorded_at_ms)
+                    .max()
+                    .unwrap_or_default(),
+            ]
+        })
+        .chain(
+            ledger
+                .controls
+                .values()
+                .map(|control| control.updated_at_ms),
+        )
+        .max()
+        .unwrap_or(1)
+}
+
+fn memory_retention_order(
+    record: &MemoryRecord,
+    control: Option<&crate::MemoryControl>,
+    project_id: &str,
+    now_ms: u64,
+) -> (bool, u8, u64, u64, u64, u8, u64) {
+    let active = record.provenance.project_id == project_id
+        && record.superseded_by.is_none()
+        && record.is_recall_eligible()
+        && control.is_none_or(|control| !control.disabled && !control.deleted);
+    let tier = if active && control.is_some_and(|control| control.pinned) {
+        5
+    } else if active && record.has_verified_user_requirement() {
+        4
+    } else if active {
+        match record.utility.disposition_for_at(record, now_ms) {
+            MemoryUtilityDisposition::Helpful => 3,
+            MemoryUtilityDisposition::Unknown if record.observed_use_count > 0 => 2,
+            MemoryUtilityDisposition::Unknown => 1,
+            MemoryUtilityDisposition::Harmful => 0,
+        }
+    } else {
+        0
+    };
+    (
+        active,
+        tier,
+        record.last_observed_use_at_ms.unwrap_or_default(),
+        record.observed_use_count,
+        record.updated_at_ms,
+        record.importance,
+        record.provenance.sequence,
+    )
 }
 
 fn merge_unique_bounded<T: Clone + PartialEq>(
@@ -518,6 +588,21 @@ mod tests {
             .expect("fixture must be a durable requirement")
     }
 
+    fn tool_evidence(sequence: u64, content: &str) -> MemoryRecord {
+        let mut record = verified_requirement(
+            sequence,
+            "project-a",
+            "Always preserve verified tool evidence across sessions",
+        );
+        record.id = format!("evidence-{sequence}");
+        record.fingerprint = record.id.clone();
+        record.kind = MemoryKind::Evidence;
+        record.trust = MemoryTrust::ToolVerified;
+        record.content = content.to_string();
+        record.user_requirement_evidence.clear();
+        record
+    }
+
     #[test]
     fn supersession_is_scoped_and_conservative() {
         assert!(requirements_conflict("Call me Dale", "Call me Alex"));
@@ -606,6 +691,53 @@ mod tests {
         apply_memory_control(&mut ledger, MemoryControlAction::Pin, &memory_id, 2, 20)
             .expect("pin should apply");
         assert!(recall_memories_at(&ledger, query, Some("session-b"), 2, 20).is_empty());
+    }
+
+    #[test]
+    fn capacity_retains_explicit_pins_and_verified_user_requirements() {
+        let pinned = tool_evidence(1, "Release verification passed for revision alpha");
+        let pinned_id = pinned.id.clone();
+        let mut ledger = MemoryLedger::new("project-a");
+        merge_memory_records(&mut ledger, [pinned], 8);
+        apply_memory_control(&mut ledger, MemoryControlAction::Pin, &pinned_id, 2, 20)
+            .expect("pin should apply");
+
+        let requirement = verified_requirement(
+            3,
+            "project-a",
+            "Always keep the release verification receipt",
+        );
+        let requirement_id = requirement.id.clone();
+        let mut recent = tool_evidence(4, "Recent unproven workspace observation");
+        recent.importance = 100;
+        let stats = merge_memory_records(&mut ledger, [requirement, recent], 2);
+
+        assert_eq!(stats.evicted, 1);
+        assert_eq!(ledger.records.len(), 2);
+        assert!(ledger.records.iter().any(|record| record.id == pinned_id));
+        assert!(ledger
+            .records
+            .iter()
+            .any(|record| record.id == requirement_id));
+    }
+
+    #[test]
+    fn observed_use_beats_recall_frequency_and_unproven_recency_at_capacity() {
+        let mut observed = tool_evidence(1, "Verified dependency lock remained stable");
+        observed.observed_use_count = 1;
+        observed.last_observed_use_at_ms = Some(10);
+        let observed_id = observed.id.clone();
+        let mut merely_recalled = tool_evidence(2, "Recent dependency scan looked plausible");
+        merely_recalled.importance = 100;
+        merely_recalled.recall_count = 500;
+        merely_recalled.last_recalled_at_ms = Some(20);
+
+        let mut ledger = MemoryLedger::new("project-a");
+        let stats = merge_memory_records(&mut ledger, [observed, merely_recalled], 1);
+
+        assert_eq!(stats.evicted, 1);
+        assert_eq!(ledger.records.len(), 1);
+        assert_eq!(ledger.records[0].id, observed_id);
     }
 
     #[test]

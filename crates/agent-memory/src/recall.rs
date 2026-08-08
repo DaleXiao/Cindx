@@ -60,7 +60,7 @@ pub fn recall_memories_at(
     let mut recalls = ledger
         .records
         .iter()
-        .filter(|record| ledger.record_is_active_for_recall(record))
+        .filter(|record| ledger.record_is_active_for_recall_at(record, now_ms))
         .filter_map(|record| {
             let terms = memory_terms(&record.content);
             let overlap = query_terms.intersection(&terms).count();
@@ -159,7 +159,7 @@ pub fn fuse_memory_recalls_at(
 ) -> Vec<MemoryRecall> {
     let lexical_recalls = lexical_recalls
         .into_iter()
-        .filter(|recall| ledger.record_is_active_for_recall(&recall.record))
+        .filter(|recall| ledger.record_is_active_for_recall_at(&recall.record, now_ms))
         .collect::<Vec<_>>();
     let lexical_scores = calibrated_memory_channel_scores(
         lexical_recalls
@@ -174,7 +174,7 @@ pub fn fuse_memory_recalls_at(
     let mut semantic_candidates = Vec::new();
 
     for record in &ledger.records {
-        if !ledger.record_is_active_for_recall(record) {
+        if !ledger.record_is_active_for_recall_at(record, now_ms) {
             continue;
         }
         let Some(semantic_score) = semantic_scores
@@ -214,7 +214,7 @@ pub fn fuse_memory_recalls_at(
     let semantic_scores = calibrated_memory_channel_scores(semantic_candidates);
 
     for record in &ledger.records {
-        if !ledger.record_is_active_for_recall(record) {
+        if !ledger.record_is_active_for_recall_at(record, now_ms) {
             continue;
         }
         let lexical_score = lexical_scores.get(&record.id).copied();
@@ -352,7 +352,8 @@ pub fn record_memory_recalls(
         .records
         .iter()
         .filter(|record| {
-            recalled_ids.contains(record.id.as_str()) && ledger.record_is_active_for_recall(record)
+            recalled_ids.contains(record.id.as_str())
+                && ledger.record_is_active_for_recall_at(record, recalled_at_ms)
         })
         .map(|record| record.id.clone())
         .collect::<BTreeSet<_>>();
@@ -379,7 +380,7 @@ pub fn record_memory_observed_uses(
     let active = ledger
         .records
         .iter()
-        .filter(|record| ledger.record_is_active_for_recall(record))
+        .filter(|record| ledger.record_is_active_for_recall_at(record, observed_at_ms))
         .map(|record| record.id.clone())
         .collect::<BTreeSet<_>>();
     let mut used = Vec::new();

@@ -264,11 +264,11 @@ pub(crate) fn run_adaptive_collaboration(
     }
     let final_plan = workflow_checkpoint.plan.clone();
     let final_workflow = final_plan.adaptive_workflow();
-    let final_step_id = final_plan
-        .steps
-        .last()
-        .map(|step| step.id.clone())
-        .ok_or_else(|| "adaptive workflow has no final step".to_string())?;
+    let final_step_id = adaptive_delivery_schedule(
+        &workflow_checkpoint,
+        effective_workflow_step_attempt_budget(&prompt_genome, &workflow_checkpoint),
+    )?
+    .target_step_id;
     let final_layer_count = adaptive_workflow_layers(&final_workflow)?.len();
     let final_role_coverage = workflow_contract_coverage(&final_plan, &role_hints);
     let final_output = if let Some(output) = outputs.remove(&final_step_id) {
