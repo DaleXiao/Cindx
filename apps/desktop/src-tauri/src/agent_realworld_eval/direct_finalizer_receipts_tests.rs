@@ -206,9 +206,37 @@ fn fallback_terminal_keeps_the_route_receipt_without_claiming_finalizer_executio
     events[3]
         .metadata
         .insert("finalizer_fallback".to_string(), "true".to_string());
+    events[3]
+        .metadata
+        .remove("direct_finalizer_profile_exercised");
 
     let receipt = strategy_receipt_from_events(&events, Treatment::Auto, None)
         .unwrap()
         .expect("strategy receipt");
     assert!(receipt.direct_finalizer_execution.is_none());
+}
+
+#[test]
+fn assigned_but_unexercised_finalizer_keeps_the_route_receipt() {
+    let mut events = strategy_events();
+    events[3]
+        .metadata
+        .remove("direct_finalizer_profile_exercised");
+
+    let receipt = strategy_receipt_from_events(&events, Treatment::Auto, None)
+        .unwrap()
+        .expect("strategy receipt");
+    assert!(receipt.direct_finalizer_execution.is_none());
+}
+
+#[test]
+fn exercised_finalizer_cannot_claim_a_fallback_terminal() {
+    let mut events = strategy_events();
+    events[3]
+        .metadata
+        .insert("finalizer_fallback".to_string(), "true".to_string());
+
+    assert!(strategy_receipt_from_events(&events, Treatment::Auto, None)
+        .unwrap_err()
+        .contains("execution claim is attached to a fallback terminal"));
 }
