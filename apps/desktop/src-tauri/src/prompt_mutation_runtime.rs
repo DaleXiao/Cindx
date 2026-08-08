@@ -11,6 +11,31 @@ pub(crate) fn run_background_prompt_mutation_stage(
     prompt: String,
     control: &Arc<AgentRunControl>,
 ) -> Result<String, String> {
+    run_background_prompt_mutation_stage_with_liveness(
+        state,
+        config,
+        task_id,
+        run_context,
+        mutation_id,
+        stage,
+        prompt,
+        control,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_background_prompt_mutation_stage_with_liveness(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    mutation_id: &str,
+    stage: &str,
+    prompt: String,
+    control: &Arc<AgentRunControl>,
+    response_start_timeout: Option<std::time::Duration>,
+) -> Result<String, String> {
     if control.should_stop() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
@@ -37,6 +62,7 @@ pub(crate) fn run_background_prompt_mutation_stage(
         prompt,
         Some(control.clone()),
         CollaborationCallLimits {
+            no_progress_timeout: response_start_timeout,
             objective_epoch: Some(run_context_steer_epoch(run_context)),
             ..CollaborationCallLimits::default()
         },

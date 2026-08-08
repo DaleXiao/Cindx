@@ -28,6 +28,11 @@ name = "cindx-workflow-gepa-eval"
 path = "src/bin/workflow_gepa_eval.rs"
 required-features = ["realworld-eval"]
 
+[[bin]]
+name = "cindx-workflow-gepa-candidate-probe"
+path = "src/bin/workflow_gepa_candidate_probe.rs"
+required-features = ["realworld-eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
