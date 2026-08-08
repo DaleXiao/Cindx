@@ -297,12 +297,16 @@ contaminate matched resource measurements.
 V2 and the first V4 attempt are `INVALID_EVALUATOR`; V3 and the second V4
 attempt are `INVALID_TASK_SPEC`. None is a baseline or evidence of capability
 change. The V4 candidate is not reusable as promotion evidence, and untouched
-test evidence must not be used to select its successor. V5 is preregistered in
-current source but has not run provider-backed; any provider campaign still
-requires separate explicit authorization.
+test evidence must not be used to select its successor. The first authorized V5
+provider run is `VALID_TARGETED_EVIDENCE`, `NO_GO_VALIDATION`: its selected
+profile changed a public training route, but unseen validation had no quality
+win and materially regressed resources. The fail-closed gate withheld control,
+test, and snapshot publication. Any successor campaign requires a new frozen
+protocol and separate explicit authorization.
 
-After that separate authorization, use a clean exact revision and a fresh
-outside-Git directory. The campaign rejects reused or identical output paths:
+For provenance, the first V5 campaign used a clean exact revision and a fresh
+outside-Git directory. The command is retained to document that run, not to
+authorize a repeat after validation evidence has been observed:
 
 ```sh
 run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v5.XXXXXX)"

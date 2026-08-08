@@ -139,10 +139,15 @@ revision and is no longer the current product decision.
   The unmodified evaluator output is
   [retained here](CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.json).
 
-Current source defines Workflow GEPA V5, but no provider-backed V5 report exists.
-Its deterministic contract and train-only population-selection tests are not
-capability evidence; this index must not list a V5 result until an explicitly
-authorized run completes on a clean exact revision.
+- [Cindx Workflow GEPA V5 provider evaluation 0.2.25](CINDX_WORKFLOW_GEPA_V5_0.2.25_2026-08-08.md)
+  records the first authorized V5 provider run on clean source commit
+  `86f7dd61b0ee42d265b656425957b1a4550a4700`. It is
+  `VALID_TARGETED_EVIDENCE`, `NO_GO_VALIDATION`: the train-selected learned
+  profile causally changed routing and exercised Workflow, but both unseen
+  validation cases tied the seed on quality while aggregate latency and tokens
+  regressed. Control and untouched test stayed sealed, no snapshot was
+  published, and no production profile changed. The sanitized report is
+  [retained here](CINDX_WORKFLOW_GEPA_V5_0.2.25_2026-08-08.json).
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
