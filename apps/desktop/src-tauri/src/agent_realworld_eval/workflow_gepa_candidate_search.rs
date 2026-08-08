@@ -5,7 +5,7 @@ use super::workflow_gepa_campaign_contract::{
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
 use crate::phase16_task_id;
-use crate::prompt_mutation_runtime::run_background_prompt_mutation_stage;
+use crate::prompt_mutation_runtime::run_background_prompt_mutation_stage_with_liveness;
 use agent_core::Metadata;
 use agent_runtime::AgentRunControl;
 use orchestrator::{
@@ -20,6 +20,13 @@ use std::sync::Arc;
 
 pub(super) const TARGET_CANDIDATE_POPULATION: usize = 3;
 const MAX_CANDIDATE_PROPOSALS: usize = 6;
+const MODEL_CALLS_PER_PROPOSAL: usize = 2;
+const CANDIDATE_SEARCH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+const CANDIDATE_MODEL_CALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+const CANDIDATE_RESPONSE_START_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
 const TRAIN_RESOURCE_RATIO_CEILING: f64 = 1.25;
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,7 +80,7 @@ pub(super) fn generate_candidate_population(
     let seed_route_sha256 = parent.route_decision_profile_sha256(AgentPolicy::Pro.label())?;
     let mut seen_routes = BTreeSet::from([seed_route_sha256]);
     let mut population = Vec::new();
-    let mut model_calls = 0usize;
+    let mut rejections = Vec::new();
     for index in 0..MAX_CANDIDATE_PROPOSALS {
         let mut prompt = parent.reflective_mutation_prompt(packets)?;
         prompt.push_str(&format!(
@@ -83,39 +90,59 @@ pub(super) fn generate_candidate_population(
         ));
         let mutation_id = format!("workflow-gepa-v7-mutation-{}", index + 1);
         let stage = format!("workflow_gepa_v7_mutation_{}", index + 1);
-        model_calls = model_calls.saturating_add(1);
-        let response = run_background_prompt_mutation_stage(
-            state,
-            provider,
-            &phase16_task_id(),
-            run_context,
-            &mutation_id,
-            &stage,
-            prompt,
-            &control,
-        )?;
-        let (genome, response_sha256, repaired, repair_calls) = parse_candidate_response(
-            state,
-            provider,
-            run_context,
-            parent,
-            packets,
-            index,
-            &response,
-            &control,
-        )?;
-        model_calls = model_calls.saturating_add(repair_calls);
+        let proposal_control = candidate_proposal_control(&control)?;
+        let proposal = (|| {
+            let response = run_background_prompt_mutation_stage_with_liveness(
+                state,
+                provider,
+                &phase16_task_id(),
+                run_context,
+                &mutation_id,
+                &stage,
+                prompt,
+                &proposal_control,
+                Some(CANDIDATE_RESPONSE_START_TIMEOUT),
+            )?;
+            parse_candidate_response(
+                state,
+                provider,
+                run_context,
+                parent,
+                packets,
+                index,
+                &response,
+                &proposal_control,
+            )
+        })();
+        control
+            .absorb_isolated_treatments(&[proposal_control.as_ref()])
+            .map_err(|reason| {
+                format!(
+                    "GEPA proposal {} resource accounting failed: {}",
+                    index + 1,
+                    reason.code()
+                )
+            })?;
+        let (genome, response_sha256, repaired) = match proposal {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                rejections.push(format!("proposal {}: {error}", index + 1));
+                continue;
+            }
+        };
         let mutated_genes = mutated_gene_names(parent, &genome);
         if !(1..=2).contains(&mutated_genes.len()) {
-            return Err(format!(
-                "GEPA proposal {} changed {} genes after normalization",
+            rejections.push(format!(
+                "proposal {}: changed {} genes after normalization",
                 index + 1,
-                mutated_genes.len()
+                mutated_genes.len(),
             ));
+            continue;
         }
         let route_profile_sha256 =
             genome.route_decision_profile_sha256(AgentPolicy::Pro.label())?;
         if !seen_routes.insert(route_profile_sha256.clone()) {
+            rejections.push(format!("proposal {}: duplicate route phenotype", index + 1));
             continue;
         }
         let snapshot = FrozenPromptProfileSnapshot::new_gepa(
@@ -148,11 +175,13 @@ pub(super) fn generate_candidate_population(
     }
     if population.len() != TARGET_CANDIDATE_POPULATION {
         return Err(format!(
-            "GEPA population search produced {} distinct route phenotypes; {} required",
+            "GEPA population search produced {} distinct route phenotypes; {} required; {}",
             population.len(),
             TARGET_CANDIDATE_POPULATION,
+            rejections.join(" | "),
         ));
     }
+    let model_calls = control.progress().model_calls;
     let resources = control.resource_usage().segment;
     Ok(GeneratedCandidatePopulation {
         candidates: population,
@@ -172,15 +201,15 @@ fn parse_candidate_response(
     index: usize,
     response: &str,
     control: &Arc<AgentRunControl>,
-) -> Result<(ConductorPromptGenome, String, bool, usize), String> {
+) -> Result<(ConductorPromptGenome, String, bool), String> {
     let response_sha256 = sha256_hex(response.as_bytes());
     let candidate_id = format!("learned-pro-v7-{}", &response_sha256[..16]);
     match parent.learned_reflective_mutation_from_response(response, candidate_id, packets) {
-        Ok(candidate) => Ok((candidate, response_sha256, false, 0)),
+        Ok(candidate) => Ok((candidate, response_sha256, false)),
         Err(initial_error) => {
             let mutation_id = format!("workflow-gepa-v7-mutation-repair-{}", index + 1);
             let stage = format!("workflow_gepa_v7_mutation_repair_{}", index + 1);
-            let repaired = run_background_prompt_mutation_stage(
+            let repaired = run_background_prompt_mutation_stage_with_liveness(
                 state,
                 provider,
                 &phase16_task_id(),
@@ -189,6 +218,7 @@ fn parse_candidate_response(
                 &stage,
                 parent.mutation_repair_prompt(response, &initial_error),
                 control,
+                Some(CANDIDATE_RESPONSE_START_TIMEOUT),
             )?;
             let repaired_sha256 = sha256_hex(repaired.as_bytes());
             let repaired_id = format!("learned-pro-v7-{}", &repaired_sha256[..16]);
@@ -197,29 +227,54 @@ fn parse_candidate_response(
                 repaired_id,
                 packets,
             )?;
-            Ok((candidate, repaired_sha256, true, 1))
+            Ok((candidate, repaired_sha256, true))
         }
     }
 }
 
+fn candidate_proposal_control(
+    aggregate: &Arc<AgentRunControl>,
+) -> Result<Arc<AgentRunControl>, String> {
+    let progress = aggregate.progress();
+    let remaining_calls = aggregate
+        .budget()
+        .max_model_calls
+        .saturating_sub(progress.model_calls);
+    if remaining_calls == 0 {
+        return Err("GEPA candidate-search model-call budget is exhausted".to_string());
+    }
+    let allocation_divisor = (remaining_calls / MODEL_CALLS_PER_PROPOSAL).max(1);
+    aggregate
+        .isolated_treatment(allocation_divisor)
+        .map(Arc::new)
+        .map_err(|reason| {
+            format!(
+                "GEPA candidate proposal could not reserve an isolated lane: {}",
+                reason.code()
+            )
+        })
+}
+
 fn candidate_search_budget() -> agent_runtime::RunBudget {
     let mut budget = agent_runtime::RunBudget::for_effort("fast");
-    budget.max_duration = std::time::Duration::from_secs(20 * 60);
+    budget.max_duration = CANDIDATE_SEARCH_TIMEOUT;
+    budget.model_call_timeout = CANDIDATE_MODEL_CALL_TIMEOUT;
+    budget.no_progress_timeout = CANDIDATE_MODEL_CALL_TIMEOUT;
     budget.initial_model_calls = 12;
     budget.max_model_calls = 12;
     budget.model_calls_per_extension = 1;
     budget.initial_agent_turns = 12;
     budget.max_agent_turns = 12;
     budget.agent_turns_per_extension = 1;
+    budget.max_repair_attempts = 12;
     budget.max_physical_model_attempts = 48;
     budget.max_total_tokens = 48_u64.saturating_mul(
         agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
     );
-    budget.terminal_model_call_reserve = 1;
-    budget.terminal_physical_model_attempt_reserve = 4;
-    budget.terminal_token_reserve = 4_u64.saturating_mul(
-        agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
-    );
+    budget.terminal_model_call_reserve = 0;
+    budget.terminal_time_reserve = std::time::Duration::ZERO;
+    budget.terminal_physical_model_attempt_reserve = 0;
+    budget.terminal_token_reserve = 0;
     budget
 }
 
@@ -464,5 +519,52 @@ mod tests {
         candidate.max_step_attempts += 1;
         candidate.custom_directive = "Use the strongest observed evidence.".to_string();
         assert_eq!(mutated_gene_names(&parent, &candidate).len(), 3);
+    }
+
+    #[test]
+    fn candidate_search_uses_a_bounded_mutation_specific_liveness_budget() {
+        let fast = agent_runtime::RunBudget::for_effort("fast");
+        let candidate = candidate_search_budget();
+
+        assert_eq!(fast.model_call_timeout, std::time::Duration::from_secs(180));
+        assert_eq!(candidate.max_duration, CANDIDATE_SEARCH_TIMEOUT);
+        assert_eq!(candidate.model_call_timeout, CANDIDATE_MODEL_CALL_TIMEOUT);
+        assert_eq!(
+            candidate.no_progress_timeout,
+            CANDIDATE_MODEL_CALL_TIMEOUT
+        );
+        assert!(CANDIDATE_RESPONSE_START_TIMEOUT < candidate.model_call_timeout);
+        assert_eq!(candidate.max_model_calls, 12);
+        assert_eq!(candidate.max_physical_model_attempts, 48);
+        assert_eq!(candidate.terminal_model_call_reserve, 0);
+        assert_eq!(candidate.terminal_physical_model_attempt_reserve, 0);
+        assert_eq!(candidate.terminal_token_reserve, 0);
+    }
+
+    #[test]
+    fn failed_proposal_lane_does_not_poison_later_candidates() {
+        let aggregate = Arc::new(AgentRunControl::with_budget(candidate_search_budget()));
+        let failed = candidate_proposal_control(&aggregate).unwrap();
+        assert_eq!(failed.budget().max_model_calls, MODEL_CALLS_PER_PROPOSAL);
+        failed.begin_model_call("mutation-1").unwrap();
+        failed.request_stop(agent_runtime::RunStopReason::NoProgress);
+        failed.finish_model_call();
+        aggregate
+            .absorb_isolated_treatments(&[failed.as_ref()])
+            .unwrap();
+
+        assert_eq!(aggregate.stop_reason(), None);
+        assert_eq!(aggregate.progress().model_calls, 1);
+
+        let next = candidate_proposal_control(&aggregate).unwrap();
+        assert_eq!(next.stop_reason(), None);
+        next.begin_model_call("mutation-2").unwrap();
+        next.finish_model_call();
+        aggregate
+            .absorb_isolated_treatments(&[next.as_ref()])
+            .unwrap();
+
+        assert_eq!(aggregate.stop_reason(), None);
+        assert_eq!(aggregate.progress().model_calls, 2);
     }
 }

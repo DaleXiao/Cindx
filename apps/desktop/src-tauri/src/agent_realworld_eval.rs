@@ -39,6 +39,7 @@ mod workflow_gepa_campaign_evidence;
 mod workflow_gepa_campaign_execution;
 mod workflow_gepa_campaign_journal;
 mod workflow_gepa_campaign_suite;
+mod workflow_gepa_candidate_probe;
 
 use execution::{execute_case, CaseExecutionInput};
 use http_fixture::HttpFixtureReceipt;
@@ -500,6 +501,10 @@ pub fn run_direct_finalizer_gepa_eval() -> Result<(), String> {
 
 pub fn run_workflow_gepa_eval() -> Result<(), String> {
     workflow_gepa_campaign::run()
+}
+
+pub fn run_workflow_gepa_candidate_probe() -> Result<(), String> {
+    workflow_gepa_candidate_probe::run()
 }
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
