@@ -13,7 +13,6 @@ use crate::{
     configuration_models::ProviderConfig,
     event_persistence::append_event,
     project_session_persistence::metadata_with_context,
-    prompt_pairwise_runtime::schedule_prompt_pairwise_evaluation,
     runtime_constants::COLLABORATION_MAX_OUTPUT_TOKENS,
     runtime_values::{run_context_steer_epoch, unique_id},
 };
@@ -373,10 +372,6 @@ pub(crate) fn prepare_agent_collaboration(
         .get("agent_effort")
         .cloned()
         .unwrap_or_else(|| "auto".to_string());
-    let policy_label = run_context
-        .get("collaboration_policy")
-        .cloned()
-        .unwrap_or_else(|| policy.label().to_string());
     let bounded_profile = (bounded && config.prompt_evolution_enabled && effort != "fast")
         .then(|| run_context.get("prompt_genome"))
         .flatten()
@@ -539,20 +534,6 @@ pub(crate) fn prepare_agent_collaboration(
     outcome
         .grounding_receipts
         .truncate(crate::collaboration_service::COLLABORATION_GROUNDING_RECEIPT_MAX_ENTRIES);
-    if bounded {
-        if let Some(profile) = bounded_profile {
-            schedule_prompt_pairwise_evaluation(
-                app.clone(),
-                task_id.clone(),
-                run_context.clone(),
-                effort,
-                policy_label,
-                models.clone(),
-                agent_budget,
-                profile,
-            );
-        }
-    }
     Ok(Some(AgentCollaboration {
         id,
         policy: policy.label().to_string(),

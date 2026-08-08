@@ -6,16 +6,38 @@ use agent_core::{
 use orchestrator::{
     causal_route_action_id_v2, prompt_genome_sha256, select_causal_route_v2, AgentExecutionMode,
     AgentRiskLevel, AgentVerificationPolicy, CausalRouteEvidenceBasis, ConductorStopPolicy,
-    MatchedCollaborationEvidence, ModelCapabilitySource, RouteFeatureSnapshotV2,
+    MatchedCollaborationEvidence, ModelCapabilitySource, PromptVerification,
+    RouteFeatureSnapshotV2,
 };
 
 #[test]
-fn run_decision_prompt_excludes_the_workflow_prompt_genome() {
-    let marker = "learned-workflow-directive-must-not-route";
+fn run_decision_prompt_applies_only_learned_workflow_behavior() {
+    let marker = "learned-workflow-directive-must-route";
+    let seed = ConductorPromptGenome::seed_for_effort("auto");
+    let neutral_route_sha256 = seed.route_decision_profile_sha256("auto").unwrap();
+    assert!(run_decision_evolved_directive(&seed, AgentPolicy::Auto)
+        .unwrap()
+        .is_empty());
+
+    let mut finalizer_only = seed.clone();
+    finalizer_only.id = "finalizer-only".to_string();
+    finalizer_only.direct_finalizer_verification = PromptVerification::Adversarial;
+    assert_eq!(
+        finalizer_only
+            .route_decision_profile_sha256("auto")
+            .unwrap(),
+        neutral_route_sha256
+    );
+    assert!(
+        run_decision_evolved_directive(&finalizer_only, AgentPolicy::Auto)
+            .unwrap()
+            .is_empty()
+    );
+
     let mut profile = ConductorPromptGenome::seed_for_effort("auto");
     profile.custom_directive = marker.to_string();
     let actual_profile_sha256 = prompt_genome_sha256(&profile).expect("profile should hash");
-    let route_profile_sha256 = causal_route::neutral_prompt_profile_sha256(AgentPolicy::Auto);
+    let route_profile_sha256 = profile.route_decision_profile_sha256("auto").unwrap();
     let request = AgentRunDecisionRequest {
         objective: "Answer directly or use a workflow".to_string(),
         recent_context: String::new(),
@@ -24,7 +46,7 @@ fn run_decision_prompt_excludes_the_workflow_prompt_genome() {
         allowed_models: Vec::new(),
         model_candidates: Vec::new(),
         max_parallelism: 2,
-        evolved_directive: run_decision_evolved_directive(&profile),
+        evolved_directive: run_decision_evolved_directive(&profile, AgentPolicy::Auto).unwrap(),
         historical_evidence: String::new(),
         matched_collaboration_evidence: std::sync::Arc::new(Default::default()),
         execution_constraints: String::new(),
@@ -33,31 +55,36 @@ fn run_decision_prompt_excludes_the_workflow_prompt_genome() {
         prompt_profile_sha256: route_profile_sha256.clone(),
     };
 
+    assert_ne!(request.prompt_profile_sha256, neutral_route_sha256);
     assert_ne!(request.prompt_profile_sha256, actual_profile_sha256);
-    assert_eq!(request.prompt_profile_sha256, route_profile_sha256);
     let prompt = AgentRunDecisionHarness::new(request).planning_prompt();
-    assert!(!prompt.contains(marker));
-    assert!(prompt.contains("Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: (none)"));
+    assert!(prompt.contains(marker));
+    assert!(prompt.contains("cannot override schema, configured models, safety, or budgets"));
 }
 
 #[test]
-fn learned_profile_identity_is_neutral_to_route_and_matched_admission() {
+fn learned_profile_provenance_is_neutral_to_route_and_matched_admission() {
     let mut profile_a = ConductorPromptGenome::seed_for_effort("auto");
     profile_a.id = "learned-a".to_string();
-    profile_a.custom_directive = "learned directive a".to_string();
+    profile_a.custom_directive =
+        "prefer independent verification when evidence conflicts".to_string();
     let mut profile_b = profile_a.clone();
     profile_b.id = "learned-b".to_string();
-    profile_b.custom_directive = "learned directive b".to_string();
+    profile_b.generation = profile_a.generation.saturating_add(1);
     let actual_a = prompt_genome_sha256(&profile_a).unwrap();
     let actual_b = prompt_genome_sha256(&profile_b).unwrap();
     assert_ne!(actual_a, actual_b);
 
-    let route_a = causal_route::neutral_prompt_profile_sha256(AgentPolicy::Auto);
-    let route_b = causal_route::neutral_prompt_profile_sha256(AgentPolicy::Auto);
+    let route_a = profile_a.route_decision_profile_sha256("auto").unwrap();
+    let route_b = profile_b.route_decision_profile_sha256("auto").unwrap();
     assert_eq!(route_a, route_b);
-    assert_eq!(
+    assert_ne!(
         route_a,
         prompt_genome_sha256(&ConductorPromptGenome::seed_for_effort("auto")).unwrap()
+    );
+    assert_eq!(
+        run_decision_evolved_directive(&profile_a, AgentPolicy::Auto).unwrap(),
+        run_decision_evolved_directive(&profile_b, AgentPolicy::Auto).unwrap()
     );
     let candidates = vec![ModelCandidate {
         name: "executor".to_string(),

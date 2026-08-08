@@ -455,6 +455,9 @@ const promptProfileSelectionSource = read(
 const agentStrategyPreparationSource = read(
   "apps/desktop/src-tauri/src/agent_strategy_preparation.rs"
 );
+const agentStrategyCausalRouteSource = read(
+  "apps/desktop/src-tauri/src/agent_strategy_causal_route.rs"
+);
 const agentStrategyRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_strategy_runtime.rs"
 );
@@ -3855,9 +3858,10 @@ assert(
     !promptProfileSelectionSource.includes("append_event") &&
     !promptProfileSelectionSource.includes("reconcile_prompt_rollout") &&
     !promptProfileSelectionSource.includes("prompt_learning_outbox") &&
-    /fn run_decision_evolved_directive\([^)]*\)[\s\S]*?String::new\(\)/.test(
-      agentStrategyRuntimeSource
-    ) &&
+    !agentStrategyPreparationSource.includes("route_decision_directive") &&
+    agentStrategyRuntimeSource.includes("route_decision_profile_sha256") &&
+    agentStrategyCausalRouteSource.includes("run_decision_evolved_directive") &&
+    agentStrategyCausalRouteSource.includes("route_decision_directive") &&
     orchestratorSource.includes("tool_policy.limited_by(step.tool_policy)") &&
     promptProfileServingSource.includes("LOGICAL_AGENT_RUN_ID_METADATA_KEY") &&
     promptProfileServingSource.includes("MAX_ASSIGNMENT_RECEIPT_BYTES") &&

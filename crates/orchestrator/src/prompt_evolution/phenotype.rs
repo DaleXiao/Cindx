@@ -2,6 +2,7 @@ use super::*;
 use serde::Serialize;
 
 pub const DIRECT_FINALIZER_PHENOTYPE_SCHEMA: &str = "cindx.prompt-direct-finalizer-phenotype.v1";
+const ROUTE_DECISION_PHENOTYPE_SCHEMA: &str = "cindx.prompt-route-decision-phenotype.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DirectFinalizerPromptPhenotype {
@@ -29,7 +30,7 @@ impl DirectFinalizerPromptPhenotype {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(super) struct PromptGenomeExecutionPhenotype {
     graph_depth: PromptGraphDepth,
     verification: PromptVerification,
@@ -45,6 +46,13 @@ pub(super) struct PromptGenomeExecutionPhenotype {
     max_tool_calls_per_step: usize,
     require_final_synthesis: bool,
     custom_directive: String,
+}
+
+#[derive(Serialize)]
+struct RouteDecisionPromptPhenotype<'a> {
+    schema: &'static str,
+    effort: &'a str,
+    workflow: PromptGenomeExecutionPhenotype,
 }
 
 impl ConductorPromptGenome {
@@ -77,6 +85,45 @@ impl ConductorPromptGenome {
             require_final_synthesis: self.require_final_synthesis,
             custom_directive: self.custom_directive.trim().to_string(),
         }
+    }
+
+    pub fn route_decision_directive(&self, effort: &str) -> Result<Option<String>, String> {
+        let effort = normalized_route_effort(effort)?;
+        self.validate()?;
+        let seed = Self::seed_for_effort(effort);
+        if self.execution_phenotype() == seed.execution_phenotype() {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "Learned collaboration policy for route and Task Graph construction. {}",
+            self.workflow_behavior_directive()
+        )))
+    }
+
+    pub fn route_decision_profile_sha256(&self, effort: &str) -> Result<String, String> {
+        let effort = normalized_route_effort(effort)?;
+        self.validate()?;
+        let seed = Self::seed_for_effort(effort);
+        let workflow = self.execution_phenotype();
+        if workflow == seed.execution_phenotype() {
+            return prompt_genome_sha256(&seed);
+        }
+        serde_json::to_vec(&RouteDecisionPromptPhenotype {
+            schema: ROUTE_DECISION_PHENOTYPE_SCHEMA,
+            effort,
+            workflow,
+        })
+        .map(|encoded| crate::sha256_hex(&encoded))
+        .map_err(|error| format!("route decision phenotype serialization failed: {error}"))
+    }
+}
+
+fn normalized_route_effort(effort: &str) -> Result<&'static str, String> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "fast" => Ok("fast"),
+        "auto" => Ok("auto"),
+        "pro" => Ok("pro"),
+        _ => Err("route decision prompt effort must be fast, auto, or pro".to_string()),
     }
 }
 
@@ -121,5 +168,41 @@ mod direct_finalizer_tests {
             .direct_finalizer_phenotype()
             .directive()
             .is_some());
+    }
+
+    #[test]
+    fn route_identity_changes_only_with_workflow_behavior() {
+        let seed = ConductorPromptGenome::seed_for_effort("auto");
+        let seed_route = seed.route_decision_profile_sha256("auto").unwrap();
+        assert_eq!(seed_route, prompt_genome_sha256(&seed).unwrap());
+        assert_eq!(seed.route_decision_directive("auto").unwrap(), None);
+
+        let mut finalizer_only = seed.clone();
+        finalizer_only.id = "finalizer-only".to_string();
+        finalizer_only.direct_finalizer_verification = PromptVerification::Adversarial;
+        assert_eq!(
+            finalizer_only
+                .route_decision_profile_sha256("auto")
+                .unwrap(),
+            seed_route
+        );
+        assert_eq!(
+            finalizer_only.route_decision_directive("auto").unwrap(),
+            None
+        );
+
+        let mut workflow = seed;
+        workflow.id = "workflow-candidate".to_string();
+        workflow.graph_depth = PromptGraphDepth::Deep;
+        let directive = workflow
+            .route_decision_directive("auto")
+            .unwrap()
+            .expect("workflow mutation should affect routing");
+        assert!(directive.contains("independent specialist branches"));
+        assert!(!directive.contains("workflow-candidate"));
+        assert_ne!(
+            workflow.route_decision_profile_sha256("auto").unwrap(),
+            seed_route
+        );
     }
 }

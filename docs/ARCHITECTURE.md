@@ -488,14 +488,34 @@ genome, source/deployment revisions, and optional distillation evidence lease
 before recording an outcome. Fast and disabled evolution bypass the deployment
 store.
 
-Prompt genomes are causally restricted to the matched workflow surface. The
-pre-workflow `AgentRunDecision` receives a route-neutral profile identity and no
-evolved directive; the actual fingerprint remains in the assignment and
-strategy attribution records. Inside `ConductorHarness`, model-returned tool
-policy is intersected with the genome ceiling. The normalized genome phenotype
-removes behaviorally duplicate mutations, while the plan and every runner take
-the minimum of that phenotype and the outer hard budget. Thus profile defaults
-cannot expand a zero/one runtime limit.
+Prompt genomes have one normalized execution phenotype shared by route and
+workflow construction. When that phenotype differs from the effort's seed,
+`AgentRunDecision` receives its behavior-only directive and a semantic hash;
+profile id, generation, and Direct-finalizer-only genes are omitted. The route
+receipt persists that exact hash, while assignment receipts retain full lineage.
+Inside `ConductorHarness`, model-returned tool policy is intersected with the
+genome ceiling. The normalized phenotype removes behaviorally duplicate
+mutations, while route schema validation, effect authority, configured model
+constraints, the plan, and every runner retain their deterministic hard limits.
+Thus learned guidance can change decomposition and collaboration but cannot
+expand a zero/one runtime limit or grant tool authority.
+
+Learning requests enter the durable prompt-evolution queue only after the
+terminal commit has produced qualified `LearningEvidenceV1`. Collaboration
+preparation and finalization do not enqueue speculative evaluations. Restored
+assignment receipts bind the evaluation to the profile that actually ran, and
+tampered or missing assignments fail closed.
+
+The feature-gated Workflow GEPA campaign exercises this causal chain on eight
+frozen real-agent coding and research tasks. Seed Pro runs must complete their
+effectful tool postconditions before their terminal evidence becomes the
+dataset. The temporary workspace is then deleted and reconstructed; its content
+fingerprint must equal the pre-treatment fingerprint before either paired
+candidate receives the read-only view. Train and holdout evidence are matched,
+the learned candidate must beat seed without quality, safety, completion,
+latency, or token regression, and a fresh full-product run must prove both route
+semantics and Task Graph execution. This campaign is exploratory evidence and
+does not publish a production deployment.
 
 Direct-finalizer evolution is a separate one-gene surface, not an extension of
 the workflow phenotype. The feature-gated evaluator materializes one canonical

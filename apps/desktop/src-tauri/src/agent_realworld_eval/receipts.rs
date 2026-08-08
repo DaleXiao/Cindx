@@ -60,6 +60,8 @@ pub(super) struct StrategyReceipt {
     pub(super) profile_source: String,
     pub(super) profile_id: String,
     pub(super) profile_sha256: String,
+    pub(super) route_profile_sha256: String,
+    pub(super) route_profile_semantics_exercised: bool,
     pub(super) profile_generation: u32,
     pub(super) parent_profile_ids: Vec<String>,
     pub(super) learned_artifact_sha256: Option<String>,
@@ -170,6 +172,17 @@ pub(super) fn strategy_receipt_from_events(
         .map_err(|error| format!("agent strategy profile receipt is invalid: {error}"))?;
     genome.validate()?;
     let profile_sha256 = prompt_genome_sha256(&genome)?;
+    let profile_effort = treatment
+        .product_effort()
+        .ok_or_else(|| "product strategy receipt is missing its route effort".to_string())?;
+    let route_profile_sha256 =
+        required_metadata(&event.metadata, "route_prompt_profile_sha256")?.to_string();
+    let expected_route_profile_sha256 = genome.route_decision_profile_sha256(profile_effort)?;
+    if route_profile_sha256 != expected_route_profile_sha256 {
+        return Err("agent strategy route profile receipt does not match its genome".to_string());
+    }
+    let seed_route_profile_sha256 = ConductorPromptGenome::seed_for_effort(profile_effort)
+        .route_decision_profile_sha256(profile_effort)?;
     let profile_source = required_metadata_any(
         &event.metadata,
         &["profile_source", "prompt_profile_source"],
@@ -239,6 +252,8 @@ pub(super) fn strategy_receipt_from_events(
         profile_source,
         profile_id: genome.id.clone(),
         profile_sha256,
+        route_profile_semantics_exercised: route_profile_sha256 != seed_route_profile_sha256,
+        route_profile_sha256,
         profile_generation: genome.generation,
         parent_profile_ids: genome.parents.clone(),
         learned_artifact_sha256: learned
@@ -589,6 +604,10 @@ mod tests {
                 "prompt_genome".to_string(),
                 serde_json::to_string(&genome).unwrap(),
             ),
+            (
+                "route_prompt_profile_sha256".to_string(),
+                genome.route_decision_profile_sha256("fast").unwrap(),
+            ),
             ("profile_source".to_string(), "seed_fallback".to_string()),
             ("requested_policy".to_string(), "single".to_string()),
             ("collaboration_policy".to_string(), "single".to_string()),
@@ -633,6 +652,10 @@ mod tests {
                 "prompt_genome".to_string(),
                 serde_json::to_string(&genome).unwrap(),
             ),
+            (
+                "route_prompt_profile_sha256".to_string(),
+                genome.route_decision_profile_sha256("auto").unwrap(),
+            ),
             ("profile_source".to_string(), "seed_fallback".to_string()),
             ("requested_policy".to_string(), "auto_router".to_string()),
             ("collaboration_policy".to_string(), "single".to_string()),
@@ -675,6 +698,10 @@ mod tests {
             (
                 "prompt_genome".to_string(),
                 serde_json::to_string(&genome).unwrap(),
+            ),
+            (
+                "route_prompt_profile_sha256".to_string(),
+                genome.route_decision_profile_sha256("auto").unwrap(),
             ),
             ("profile_source".to_string(), "seed_fallback".to_string()),
             ("requested_policy".to_string(), "auto_router".to_string()),

@@ -118,6 +118,7 @@ mod prompt_learning_outbox_projection;
 mod prompt_learning_runtime;
 mod prompt_mutation_runtime;
 mod prompt_pairwise_runtime;
+mod prompt_terminal_learning_runtime;
 mod prompt_profile_serving;
 mod prompt_rollout_runtime;
 mod prompt_teacher_attestation_runtime;
@@ -168,7 +169,7 @@ use agent_loop_runtime::*;
 use agent_query_commands::*;
 use agent_read_model::*;
 #[cfg(feature = "realworld-eval")]
-pub use agent_realworld_eval::{run_agent_realworld_eval, run_direct_finalizer_gepa_eval};
+pub use agent_realworld_eval::{run_agent_realworld_eval, run_direct_finalizer_gepa_eval, run_workflow_gepa_eval};
 use agent_recovery_service::*;
 #[cfg(test)]
 use agent_resource_snapshot::*;
@@ -215,7 +216,6 @@ use prompt_evolution_runtime::*;
 use prompt_evolution_worker::*;
 use prompt_instance_evolution_runtime::*;
 use prompt_mutation_runtime::*;
-use prompt_pairwise_runtime::*;
 use prompt_rollout_runtime::*;
 use provider_profiles::*;
 use rag_operation_runtime::*;

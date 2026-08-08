@@ -362,7 +362,12 @@ function validateStrategyReceipt(run, key, profileArtifacts, suite) {
   ]) {
     requireFact(typeof receipt[field] === "string" && receipt[field].length > 0, `${key}: strategy ${field} is missing`);
   }
-  for (const field of ["decision_sha256", "routing_signature_sha256", "profile_sha256"]) {
+  for (const field of [
+    "decision_sha256",
+    "routing_signature_sha256",
+    "profile_sha256",
+    "route_profile_sha256"
+  ]) {
     requireFact(sha256Pattern.test(receipt[field]), `${key}: strategy ${field} is invalid`);
   }
   requireFact(
@@ -373,6 +378,10 @@ function validateStrategyReceipt(run, key, profileArtifacts, suite) {
   requireFact(
     typeof receipt.workflow_profile_exercised === "boolean",
     `${key}: workflow profile receipt is missing`
+  );
+  requireFact(
+    typeof receipt.route_profile_semantics_exercised === "boolean",
+    `${key}: route profile semantics receipt is missing`
   );
   requireFact(
     !run.completed || receipt.execution_mode !== "workflow" || receipt.workflow_profile_exercised,

@@ -408,17 +408,13 @@ pub(crate) fn run_adaptive_collaboration(
         }
     }
     let guidance = finalize_adaptive_collaboration(AdaptiveCollaborationFinalization {
-        app,
         state,
         config,
         task_id,
         run_context,
         collaboration_id,
         prompt,
-        models,
-        agent_budget,
         effort,
-        policy,
         prompt_genome,
         workflow_started_at_ms,
         final_step_id,

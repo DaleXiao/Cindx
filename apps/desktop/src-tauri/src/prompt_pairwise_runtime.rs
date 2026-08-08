@@ -65,21 +65,16 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
     worker_models: Vec<String>,
     agent_budget: usize,
     current_profile: ConductorPromptGenome,
-) {
+) -> Result<(), String> {
     let schedule_auto_transfer = effort == "auto";
     if schedule_auto_transfer {
-        if let Err(error) =
-            crate::prompt_evolution_transfer_outbox::persist_prompt_auto_transfer_intent(
-                &app,
-                &task_id,
-                &run_context,
-            )
-        {
-            eprintln!("prompt Auto transfer intent could not be persisted: {error}");
-            return;
-        }
+        crate::prompt_evolution_transfer_outbox::persist_prompt_auto_transfer_intent(
+            &app,
+            &task_id,
+            &run_context,
+        )?;
     }
-    if let Err(error) = enqueue_prompt_pairwise_evaluation(
+    enqueue_prompt_pairwise_evaluation(
         &app,
         &task_id,
         &run_context,
@@ -89,9 +84,7 @@ pub(crate) fn schedule_prompt_pairwise_evaluation(
         worker_models,
         agent_budget,
         current_profile,
-    ) {
-        eprintln!("prompt evaluation request could not be persisted: {error}");
-    }
+    )
 }
 
 fn prompt_auto_transfer_request(

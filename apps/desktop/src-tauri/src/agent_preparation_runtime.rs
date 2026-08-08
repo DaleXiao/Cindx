@@ -176,6 +176,7 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "pre_decision_context_fingerprint",
         "route_requirements_fingerprint",
         "causal_route_policy",
+        "route_prompt_profile_sha256",
         "causal_route_candidate",
         "causal_route_selected",
         "causal_route_selected_action_id",

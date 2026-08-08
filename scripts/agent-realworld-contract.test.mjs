@@ -199,6 +199,7 @@ function fixture({ current = false } = {}) {
               : {}),
             decision_sha256: hash(`decision-${entry.executionIndex}`),
             routing_signature_sha256: hash(`routing-${entry.executionIndex}`),
+            route_profile_sha256: hash("seed-route-phenotype"),
             profile_source: "built_in_seed",
             profile_id:
               entry.treatment === "grounded_direct" ? "auto-seed" : `${entry.treatment}-seed`,
@@ -213,7 +214,8 @@ function fixture({ current = false } = {}) {
             dataset_sha256: null,
             paired_evidence_sha256: null,
             promotion_gate_protocol: null,
-            workflow_profile_exercised: false
+            workflow_profile_exercised: false,
+            route_profile_semantics_exercised: false
           },
     model_receipts: [
       {

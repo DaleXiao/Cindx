@@ -60,6 +60,13 @@ fn strategy_events() -> Vec<Event> {
         serde_json::to_string(&selection.genome).unwrap(),
     );
     context.insert(
+        "route_prompt_profile_sha256".to_string(),
+        selection
+            .genome
+            .route_decision_profile_sha256("auto")
+            .unwrap(),
+    );
+    context.insert(
         "prompt_profile_assignment_receipt".to_string(),
         assignment_receipt,
     );

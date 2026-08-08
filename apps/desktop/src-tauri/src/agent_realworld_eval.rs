@@ -32,6 +32,7 @@ mod tests;
 mod tool_receipts;
 mod treatments;
 mod verification;
+mod workflow_gepa_campaign;
 
 use execution::{execute_case, CaseExecutionInput};
 use http_fixture::HttpFixtureReceipt;
@@ -465,6 +466,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                         root: &run_root,
                         execution: &execution,
                         frozen_profile: frozen_profile.as_ref(),
+                        project_scope: None,
                     },
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;
@@ -481,6 +483,10 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
 
 pub fn run_direct_finalizer_gepa_eval() -> Result<(), String> {
     direct_finalizer_campaign::run()
+}
+
+pub fn run_workflow_gepa_eval() -> Result<(), String> {
+    workflow_gepa_campaign::run()
 }
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {

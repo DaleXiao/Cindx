@@ -237,9 +237,17 @@ pub(super) fn build_evaluation_app(
         .map_err(|error| format!("failed to build headless evaluation app: {error}"))
 }
 
-fn isolated_project_config(root: &Path, key: &str) -> ProjectSessionConfig {
+fn isolated_project_config_with_scope(
+    root: &Path,
+    key: &str,
+    project_scope: Option<&str>,
+) -> ProjectSessionConfig {
     let mut config = ProjectSessionConfig::default_for_root(root);
-    let project_id = format!("project-realworld-{key}");
+    let project_id = project_scope
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("project-realworld-{key}"));
     let session_id = format!("session-realworld-{key}");
     config.active_project_id = project_id.clone();
     config.active_session_id = session_id.clone();
@@ -252,12 +260,17 @@ fn isolated_project_config(root: &Path, key: &str) -> ProjectSessionConfig {
     config
 }
 
+fn isolated_project_config(root: &Path, key: &str) -> ProjectSessionConfig {
+    isolated_project_config_with_scope(root, key, None)
+}
+
 pub(super) fn configure_run_project(
     state: &tauri::State<'_, AppState>,
     root: &Path,
     key: &str,
+    project_scope: Option<&str>,
 ) -> Result<(String, String), String> {
-    let config = isolated_project_config(root, key);
+    let config = isolated_project_config_with_scope(root, key, project_scope);
     let project_id = config.active_project_id.clone();
     let session_id = config.active_session_id.clone();
     *state
