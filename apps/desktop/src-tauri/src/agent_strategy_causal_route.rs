@@ -71,6 +71,10 @@ pub(super) fn apply_causal_route_to_context(
             receipt.context_fingerprint.clone(),
         ),
         (
+            "pre_decision_task_class",
+            receipt.feature_snapshot.task_class.label().to_string(),
+        ),
+        (
             "route_requirements_fingerprint",
             receipt.requirements_fingerprint.clone(),
         ),

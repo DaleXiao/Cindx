@@ -174,6 +174,7 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "route_image_input_required",
         "route_effect_authority",
         "pre_decision_context_fingerprint",
+        "pre_decision_task_class",
         "route_requirements_fingerprint",
         "causal_route_policy",
         "route_prompt_profile_sha256",

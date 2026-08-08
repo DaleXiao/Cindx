@@ -880,8 +880,19 @@ mod tests {
             .cases
             .iter()
             .map(|case| {
+                let independent_task_class = orchestrator::classify_task(&case.objective);
+                assert_eq!(
+                    independent_task_class.label(),
+                    case.category,
+                    "frozen category must match the pre-decision classifier for {}",
+                    case.id
+                );
                 let objective_sha256 = sha256_hex(case.objective.as_bytes());
-                let id = format!("runtime-{}-{}", case.category, &objective_sha256[..16]);
+                let id = format!(
+                    "runtime-{}-{}",
+                    independent_task_class.label(),
+                    &objective_sha256[..16]
+                );
                 let split_sha256 = sha256_hex(id.as_bytes());
                 let bucket = u8::from_str_radix(&split_sha256[..2], 16).unwrap();
                 (
