@@ -216,9 +216,6 @@ export const inspectDesktopIntegrationBoundary = (root) => {
   const adaptiveConductor = read(
     "apps/desktop/src-tauri/src/adaptive_conductor_runtime.rs"
   );
-  const conductorFallback = read(
-    "apps/desktop/src-tauri/src/conductor_fallback_runtime.rs"
-  );
 
   const integrationFiles = rustFiles.filter(
     ({ entry }) =>
@@ -240,14 +237,6 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     .filter((statement) => /\bintegration_commands\b/.test(statement))
     .map(normalizedRustUseStatement);
   const rootGlobImports = rustGlobImports(compositionRoot);
-  const rootConductorFallbackImports = rustUseStatements(compositionRoot).filter(
-    (statement) => /\bconductor_fallback_runtime\b/.test(statement)
-  );
-  const adaptiveConductorFallbackImports = rustUseStatements(adaptiveConductor)
-    .filter((statement) => /\bconductor_fallback_runtime\b/.test(statement))
-    .map(normalizedRustUseStatement);
-  const conductorFallbackGlobs = rustGlobImports(conductorFallback);
-  const conductorFallbackCode = rustCodeWithoutCommentsAndLiterals(conductorFallback);
   const productionSuperGlobModules = rustFiles
     .filter(
       ({ entry }) =>
@@ -369,13 +358,9 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     !sameNames(INTEGRATION_COMMAND_HANDLERS, registeredIntegrationHandlers) &&
       "command_registration",
     unexpectedPreludeGlobs.length > 0 && "new_prelude_consumer",
-    conductorFallbackGlobs.length > 0 && "conductor_fallback_glob",
-    rootConductorFallbackImports.length > 0 && "conductor_fallback_root_reexport",
-    !sameNames(adaptiveConductorFallbackImports, [
-      "use crate::conductor_fallback_runtime::deterministic_conductor_fallback;",
-    ]) && "conductor_fallback_implicit_consumer",
-    /\b(?:AppState|tauri\s*::\s*State)\b/.test(conductorFallbackCode) &&
-      "conductor_fallback_app_state",
+    /\bdeterministic_conductor_fallback\b|\bfallback_plan\s*\(/.test(
+      rustCodeWithoutCommentsAndLiterals(adaptiveConductor)
+    ) && "conductor_fallback_reintroduced",
     rootGlobImports.length > ROOT_GLOB_IMPORT_BUDGET && "root_glob_budget",
     productionSuperGlobModules.length > PRODUCTION_SUPER_GLOB_MODULE_BUDGET &&
       "production_super_glob_budget",

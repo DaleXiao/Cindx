@@ -127,7 +127,9 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   `cindx.agent-collaboration-contract.v1` marker. It proves distinct evidence and
   exploration catalogs, static read-only effect filtering, current
   collaboration/epoch evidence projection, typed verifier receipts, and
-  target-bound collaboration grounding. The combined 4,096-token fixture keeps
+  target-bound collaboration grounding. It also proves that only an explicit
+  `AcceptTeam` uplift decision admits workflow guidance; every unproven decision
+  selects the Direct control path without applying frontier text. The combined 4,096-token fixture keeps
   three independent grounding domains, trust policy, and bounded cognitive
   overlay dispatchable together. These are deterministic execution-plane
   contracts, not provider-backed evidence of collaboration quality or

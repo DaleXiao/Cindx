@@ -1,6 +1,23 @@
 use super::collaboration_service::WorkflowRoleCoverage;
 use super::*;
 
+pub(crate) fn select_adaptive_guidance(
+    decision: Option<&UpliftGateDecision>,
+    team_candidate_id: &str,
+    anchor_available: bool,
+    frontier_candidate: Option<String>,
+) -> (Option<String>, bool) {
+    if matches!(decision, Some(UpliftGateDecision::AcceptTeam)) {
+        return (Some(team_candidate_id.to_string()), true);
+    }
+    (
+        anchor_available
+            .then(|| DIRECT_ANCHOR_CANDIDATE_ID.to_string())
+            .or(frontier_candidate),
+        false,
+    )
+}
+
 pub(super) struct AdaptiveCollaborationFinalization<'a, 'state> {
     pub(super) state: &'a tauri::State<'state, AppState>,
     pub(super) config: &'a ProviderConfig,
@@ -28,7 +45,7 @@ pub(super) struct AdaptiveCollaborationFinalization<'a, 'state> {
 
 pub(super) fn finalize_adaptive_collaboration(
     context: AdaptiveCollaborationFinalization<'_, '_>,
-) -> Result<String, String> {
+) -> Result<AdaptiveCollaborationOutcome, String> {
     let AdaptiveCollaborationFinalization {
         state,
         config,
@@ -206,25 +223,21 @@ pub(super) fn finalize_adaptive_collaboration(
         .map_or(final_step_id.as_str(), |repair| {
             repair.candidate_id.as_str()
         });
-    let selected_candidate = match adaptive_uplift_selection_decision(
+    let uplift_decision = adaptive_uplift_selection_decision(
         anytime_controller,
         team_frontier_candidate_id,
         direct_anchor_output,
-    ) {
-        Some(UpliftGateDecision::AcceptTeam) => Some(team_frontier_candidate_id.to_string()),
-        Some(UpliftGateDecision::SelectAnchor { .. })
-            if workflow_checkpoint
-                .anytime_outputs
-                .get(DIRECT_ANCHOR_CANDIDATE_ID)
-                .is_some_and(|output| !output.trim().is_empty()) =>
-        {
-            Some(DIRECT_ANCHOR_CANDIDATE_ID.to_string())
-        }
-        Some(UpliftGateDecision::RepairTeam { .. })
-        | Some(UpliftGateDecision::ReturnBestKnown { .. })
-        | Some(UpliftGateDecision::SelectAnchor { .. })
-        | None => frontier_candidate,
-    };
+    );
+    let anchor_available = workflow_checkpoint
+        .anytime_outputs
+        .get(DIRECT_ANCHOR_CANDIDATE_ID)
+        .is_some_and(|output| !output.trim().is_empty());
+    let (selected_candidate, guidance_admitted) = select_adaptive_guidance(
+        uplift_decision.as_ref(),
+        team_frontier_candidate_id,
+        anchor_available,
+        frontier_candidate,
+    );
     let mut selected_candidate_id = final_step_id.clone();
     if let Some(candidate_id) = selected_candidate.as_deref() {
         if let Some(output) = workflow_checkpoint
@@ -236,6 +249,7 @@ pub(super) fn finalize_adaptive_collaboration(
             selected_candidate_id = candidate_id.to_string();
         }
     }
+    let apply_guidance = guidance_admitted && selected_candidate_id == team_frontier_candidate_id;
     let selected_verdict = anytime_controller.verdict(&selected_candidate_id).cloned();
     let (selected_quality_gate, selected_pairwise_comparison) = if let Some(repair) = uplift_repair
         .as_ref()
@@ -453,6 +467,10 @@ pub(super) fn finalize_adaptive_collaboration(
                         selected_verified.to_string(),
                     ),
                     (
+                        "anytime_guidance_applied".to_string(),
+                        apply_guidance.to_string(),
+                    ),
+                    (
                         "anytime_native_effort_success".to_string(),
                         native_effort_success.to_string(),
                     ),
@@ -529,5 +547,54 @@ pub(super) fn finalize_adaptive_collaboration(
         )
         .map_err(|error| error.to_string())?;
     }
-    Ok(final_output)
+    if apply_guidance {
+        AdaptiveCollaborationOutcome::from_checkpoint(final_output, workflow_checkpoint)
+    } else {
+        Ok(AdaptiveCollaborationOutcome::foreground_direct())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_accepted_team_candidate_can_be_applied_as_guidance() {
+        let accepted = select_adaptive_guidance(
+            Some(&UpliftGateDecision::AcceptTeam),
+            "team",
+            true,
+            Some("frontier".to_string()),
+        );
+        assert_eq!(accepted.0.as_deref(), Some("team"));
+        assert!(accepted.1);
+
+        for decision in [
+            None,
+            Some(&UpliftGateDecision::SelectAnchor { gaps: Vec::new() }),
+            Some(&UpliftGateDecision::RepairTeam { gaps: Vec::new() }),
+            Some(&UpliftGateDecision::ReturnBestKnown { gaps: Vec::new() }),
+        ] {
+            let rejected = select_adaptive_guidance(
+                decision,
+                "team",
+                true,
+                Some("frontier".to_string()),
+            );
+            assert_eq!(rejected.0.as_deref(), Some(DIRECT_ANCHOR_CANDIDATE_ID));
+            assert!(!rejected.1);
+        }
+    }
+
+    #[test]
+    fn missing_anchor_still_fails_closed_to_foreground_direct() {
+        let selection = select_adaptive_guidance(
+            Some(&UpliftGateDecision::ReturnBestKnown { gaps: Vec::new() }),
+            "team",
+            false,
+            Some("frontier".to_string()),
+        );
+        assert_eq!(selection.0.as_deref(), Some("frontier"));
+        assert!(!selection.1);
+    }
 }

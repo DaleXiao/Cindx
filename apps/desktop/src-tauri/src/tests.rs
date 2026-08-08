@@ -7453,35 +7453,6 @@ fn routing_telemetry_excludes_unverified_anytime_delivery() {
 }
 
 #[test]
-fn collaboration_result_frontier_brief_is_bounded_and_excludes_executor_duplicate() {
-    let control = AgentRunControl::new("pro");
-    control.record_best_known_result(
-        "executor",
-        "executor answer",
-        ResultQuality::Grounded,
-        2,
-        false,
-        true,
-    );
-    for index in 0..5 {
-        control.record_best_known_result(
-            &format!("candidate_{index}"),
-            &format!("candidate proposal {index}"),
-            ResultQuality::Substantive,
-            index,
-            false,
-            false,
-        );
-    }
-
-    let brief = collaboration_result_frontier_brief(&control, "executor answer");
-
-    assert!(!brief.contains("executor answer"));
-    assert_eq!(brief.matches("Candidate ").count(), 3);
-    assert!(brief.contains("candidate proposal 4"));
-}
-
-#[test]
 fn completion_learning_signal_requires_post_mutation_verification() {
     let mut runtime = start_agent_loop(
         phase16_task_id(),

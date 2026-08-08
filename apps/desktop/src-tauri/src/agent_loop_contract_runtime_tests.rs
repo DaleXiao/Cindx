@@ -1012,7 +1012,6 @@ fn current_collaboration_tool_receipt_satisfies_but_stale_receipt_does_not() {
             input_fingerprint: "fingerprint".to_string(),
             observation: "runtime observation".to_string(),
         }],
-        candidate_models: vec!["model-a".to_string()],
     };
     let context = run_context("Audit this repository", 4);
 
@@ -1101,7 +1100,6 @@ fn combined_collaboration_receipts_become_independent_bounded_grounding_capsules
                 },
             )
             .collect(),
-        candidate_models: vec!["model-a".to_string()],
     };
     let mut runtime = start_agent_loop(
         TaskId("combined-collaboration-grounding".to_string()),
