@@ -1,0 +1,71 @@
+{
+  "schema": "cindx.workflow-gepa-v7-sanitized-result.v1",
+  "application_version": "0.2.25",
+  "status": "INTERRUPTED_CAMPAIGN",
+  "decision": "NO_CAPABILITY_CONCLUSION",
+  "source_commit": "8be0fb1070635ecaaedb344be3f043494cebd0c5",
+  "suite": {
+    "id": "cindx-workflow-gepa-v7",
+    "sha256": "7f289521669a612f2577888c84c5b364b0cd076179f4776ca20b0bf7c97fcdab"
+  },
+  "provider_provenance": {
+    "endpoint_sha256": "5891aed827c4e67b2d7c0c73ea819327ce3f2b6ef72213cd79669486a26b1ead",
+    "configured_model_sha256": [
+      "bc33b81a67813da0dfd8575c51a19be04fb85737e5df6e29a2f054aa3d620b7e",
+      "52f67337446f94537db166a2d380bbc9c2806a634566f9cbf5e9b3881e1eeb4e",
+      "f9794aec68e9b0040c1ef578dcad90ccafb375d0c02daa46a77c0406c1572aac"
+    ]
+  },
+  "campaign_budget": {
+    "max_campaign_duration_ms": 7200000,
+    "max_product_runs": 35,
+    "max_product_model_calls": 700,
+    "max_mutation_model_calls": 12
+  },
+  "observed_usage": {
+    "reserved_product_runs": 2,
+    "completed_product_runs": 2,
+    "product_model_calls": 15,
+    "product_tokens": 116781,
+    "reserved_mutation_model_calls": 12,
+    "completed_mutation_model_calls": 0,
+    "mutation_physical_attempts_recorded": 0,
+    "mutation_tokens_recorded": 0
+  },
+  "completed_actions": [
+    {
+      "kind": "product_run",
+      "model_calls": 7,
+      "total_tokens": 59374,
+      "terminal_status": "completed",
+      "output_sha256": "c29e8066388effe451cfdf5cfd57faabab3e64bf6eab5367a4235ee3e7cb0658",
+      "chain_sha256": "7cee85c060bdec359d3f63cf59fcbcb464e8c4f44f4c0999ea34a6af4054316d"
+    },
+    {
+      "kind": "product_run",
+      "model_calls": 8,
+      "total_tokens": 57407,
+      "terminal_status": "completed",
+      "output_sha256": "f81b2a3f114dbad7cbf8c1ddf648de94f8d7f08bc0b2546a5d0cfac1ee0529bb",
+      "chain_sha256": "0b69d8aac29d448b374fe962fcde6ee06018e8fbd15da4fceba5e96ad1c4dd01"
+    }
+  ],
+  "interruption": {
+    "stage": "mutation_search",
+    "class": "no_progress",
+    "message": "Run stopped during model call: no_progress",
+    "pending_action_sha256": "c6b2912d1b7af886167a81aabab6d9ebe590e9d6b77339444ff74299fbef4da7",
+    "journal_status_at_process_exit": "running",
+    "journal_replay_allowed": false
+  },
+  "evidence_boundary": {
+    "candidate_population_generated": false,
+    "matched_candidate_pairs_run": 0,
+    "validation_opened": false,
+    "untouched_test_opened": false,
+    "grounded_direct_control_opened": false,
+    "snapshot_published": false,
+    "production_profile_changed": false,
+    "mutation_usage_is_complete": false
+  }
+}

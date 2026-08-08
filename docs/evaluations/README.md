@@ -160,6 +160,13 @@ revision and is no longer the current product decision.
   also adds a durable external action journal and strict product/campaign caps.
   It is `PROTOCOL_ONLY`: no V7 provider result or capability claim exists.
 
+- [Cindx Workflow GEPA V7 interrupted campaign 0.2.25](CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.md)
+  records the one authorized run on clean source `8be0fb1`. Both training seed
+  runs completed, but candidate mutation stopped on `no_progress` before a
+  population existed. It is `INTERRUPTED_CAMPAIGN` and supports no capability
+  conclusion, snapshot, or production-profile change. The sanitized evidence is
+  [retained here](CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.json).
+
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
   `2647daafae98e99d31c101886d2836e446d83d96`. It is
