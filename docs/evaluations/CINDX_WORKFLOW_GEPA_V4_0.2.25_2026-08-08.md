@@ -1,21 +1,23 @@
-# Cindx Workflow GEPA V4 validation 0.2.25
+# Cindx Workflow GEPA V4 invalid task-spec attempt 0.2.25
 
 ## Decision
 
-`VALID_TARGETED_EVIDENCE`; `NO_GO_FOR_PROMOTION`.
+`INVALID_TASK_SPEC`. This attempt is not capability, regression, admission, or
+promotion evidence.
 
 The second authorized provider-backed V4 campaign completed both training
-tasks and both matched validation pairs on the frozen source revision. The
-candidate passed the causal route-receipt checks, but it produced no quality
-win, did not exercise its learned workflow profile, failed one of two quality
-contracts together with the seed, and exceeded both validation efficiency
-bounds. The fail-closed validation gate therefore stopped the campaign before
-the untouched test set and Grounded Direct control.
+tasks and both matched validation pairs on the frozen source revision. The raw
+evaluator emitted `valid_no_go_validation`, and its execution receipts remain
+useful diagnostics. A post-run protocol audit found that the failed research
+case was not a valid quality contract: the public task required only string and
+number types, while the hidden verifier additionally required lower-case
+identifiers and an exact phrase that the public task never specified.
 
-This is valid negative evidence for this candidate and frozen validation
-cohort. It is not evidence of a general Pro regression, Agent-quality uplift,
-or Fugu Ultra parity. The candidate snapshot was not promoted and no production
-profile changed.
+Because both seed and candidate can satisfy the disclosed task while failing
+that hidden normalization contract, the recorded quality failure, tie count,
+and validation decision cannot support a candidate-quality conclusion. The
+candidate snapshot was not promoted, the untouched test set and Grounded Direct
+control were not run, and no production profile changed.
 
 ## Provenance
 
@@ -48,14 +50,14 @@ The external reflection produced one unrepaired generation-1 candidate. The
 candidate was selected without validation or test evidence, and the final test
 set remained untouched.
 
-## Validation result
+## Diagnostic validation result
 
 | Case | Seed quality | Candidate quality | Outcome | Seed latency | Candidate latency | Seed tokens | Candidate tokens |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
 | `coding-parse-port` | pass | pass | tie | `60,115 ms` | `73,578 ms` | `68,247` | `78,726` |
 | `research-measurement-choice` | fail | fail | tie | `58,778 ms` | `96,901 ms` | `57,715` | `56,784` |
 
-Aggregate validation evidence:
+Raw evaluator diagnostics:
 
 - `0` candidate wins, `0` losses, and `2` ties across two task classes.
 - Both arms completed `2/2`; each passed quality on only `1/2` cases.
@@ -65,10 +67,12 @@ Aggregate validation evidence:
 - Exact candidate profile and route semantics were observed on `2/2` candidate
   runs, but learned workflow-profile execution was observed on `0/2`.
 
-The result rejects the candidate for three independent reasons: incomplete
-candidate quality, no demonstrated quality gain, and efficiency regressions.
-The absent workflow-profile execution additionally means this campaign did not
-demonstrate a learned change to multi-step collaboration.
+The coding case has a valid quality contract. The research case does not,
+because its hidden exact-value contract was not publicly derivable. Consequently
+the aggregate win/loss/tie and efficiency ratios are retained only as
+diagnostics for these executions, not as admission or regression evidence. The
+absent workflow-profile execution also means this attempt did not demonstrate a
+learned change to multi-step collaboration.
 
 ## Boundaries and follow-up
 
@@ -79,16 +83,16 @@ the candidate snapshot stay outside Git; the retained JSON contains bounded
 receipts and hashes only.
 
 The evaluator also emitted repeated semantic-memory shutdown warnings while
-isolated runs were closing. Every scored validation arm still reached a
-completed terminal state, so the warnings do not invalidate this report, but
-they should be diagnosed before another provider campaign.
+isolated runs were closing. Every validation arm reached a completed terminal
+state, but the warnings should be diagnosed before another provider campaign.
 
-Before a separately authorized follow-up campaign, engineering work must target
-the measured failures rather than loosen the gate: ensure learned workflow
-decisions are actually exercised, repair the shared research-quality miss, and
-reduce collaboration latency and token overhead. Reusing this rejected
-candidate or inspecting the untouched test set for candidate selection would
-invalidate the next comparison.
+Before a separately authorized follow-up campaign, a new suite version must
+make output normalization and semantic fields explicit without disclosing the
+answer, then prove that every hidden expected value is uniquely derivable from
+the public contract. The campaign must also select among multiple candidates on
+training evidence instead of accepting one reflective mutation without a
+train-side comparison. Reusing this inadmissible candidate or inspecting the
+untouched test set for candidate selection would invalidate the next comparison.
 
 Machine-readable evidence:
 [CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.json](CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.json).

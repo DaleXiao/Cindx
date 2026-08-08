@@ -128,14 +128,15 @@ revision and is no longer the current product decision.
   validation arm ran. The snapshot was not admitted or promoted, and the
   attempt provides no uplift or regression evidence.
 
-- [Cindx Workflow GEPA V4 validation 0.2.25](CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.md)
+- [Cindx Workflow GEPA V4 invalid task-spec attempt 0.2.25](CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.md)
   records the second authorized provider attempt on clean source commit
-  `ee408db59112757ef356fefd25bda9eb3a42dc47`. It is
-  `VALID_TARGETED_EVIDENCE` and `NO_GO_FOR_PROMOTION`: the candidate reached
-  matched validation and exercised its learned route receipts, but had no
-  quality win, no learned workflow execution, incomplete candidate quality,
-  and latency/token regressions. Untouched test and control stayed sealed, and
-  no production profile changed. The bounded machine-readable report is
+  `ee408db59112757ef356fefd25bda9eb3a42dc47`. It is `INVALID_TASK_SPEC`:
+  the candidate reached matched validation and exercised its learned route
+  receipts, but the failed research case hid lower-case identifier and
+  exact-phrase requirements absent from the public contract. The raw execution
+  receipts are diagnostic only and support no quality or regression conclusion.
+  Untouched test and control stayed sealed and no production profile changed.
+  The unmodified evaluator output is
   [retained here](CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.json).
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)

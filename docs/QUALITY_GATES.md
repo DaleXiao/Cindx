@@ -264,12 +264,12 @@ The first authorized Workflow GEPA V4 attempt is `INVALID_EVALUATOR`: both
 training tasks completed, but a path-bound revision comparison rejected the
 separate isolated roots before validation. Current source uses a bounded
 path-independent content fingerprint and preflights every matched case before
-provider work. The second authorized run is `VALID_TARGETED_EVIDENCE` but
-`NO_GO_FOR_PROMOTION`: its candidate reached both validation pairs, had no
-quality win, passed candidate quality on only one pair, exercised route
-semantics but no learned workflow, and exceeded both efficiency bounds. The
-untouched test matrix and Grounded Direct control were not run. The Workflow
-GEPA V4 product campaign is a
+provider work. The second authorized run is `INVALID_TASK_SPEC`: its candidate
+reached both validation pairs, but the failed research case required lower-case
+identifiers and an exact phrase that the public task did not disclose. Its raw
+route and resource receipts are diagnostic only; the quality, tie, and
+validation decision are not capability evidence. The untouched test matrix and
+Grounded Direct control were not run. The Workflow GEPA V4 product campaign is a
 separate explicit, billable run. Its
 deterministic contract checks are part of the Rust suite, but they do not call a
 provider and cannot prove learned-profile uplift. A valid V4 run must start from
@@ -282,11 +282,12 @@ The final gate requires complete quality acceptance for every candidate cell,
 quality wins on at least two unseen tasks, zero quality losses, no completion
 or safety regression, and aggregate latency and token
 ratios no greater than `1.05`. A Grounded Direct product control must also pass.
-V2 is `INVALID_EVALUATOR` and V3 is `INVALID_TASK_SPEC`; neither is a baseline
-or evidence of capability change. The rejected V4 candidate is not reusable as
-promotion evidence, and untouched test evidence must not be used to select its
-successor. Any further V4 campaign requires separate explicit provider
-authorization.
+V2 and the first V4 attempt are `INVALID_EVALUATOR`; V3 and the second V4
+attempt are `INVALID_TASK_SPEC`. None is a baseline or evidence of capability
+change. The V4 candidate is not reusable as promotion evidence, and untouched
+test evidence must not be used to select its successor. V4 must be replaced by
+a new preregistered suite version rather than rerun unchanged; any provider
+campaign still requires separate explicit authorization.
 
 The memory-effect provider matrix is a separate explicit, billable run. Its
 deterministic analyzer is exercised with:
