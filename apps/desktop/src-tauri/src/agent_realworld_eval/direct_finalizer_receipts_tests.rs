@@ -201,13 +201,14 @@ fn rejects_a_tampered_assignment_receipt() {
 }
 
 #[test]
-fn rejects_a_fallback_terminal() {
+fn fallback_terminal_keeps_the_route_receipt_without_claiming_finalizer_execution() {
     let mut events = strategy_events();
     events[3]
         .metadata
         .insert("finalizer_fallback".to_string(), "true".to_string());
 
-    assert!(strategy_receipt_from_events(&events, Treatment::Auto, None)
-        .unwrap_err()
-        .contains("non-fallback terminal completion"));
+    let receipt = strategy_receipt_from_events(&events, Treatment::Auto, None)
+        .unwrap()
+        .expect("strategy receipt");
+    assert!(receipt.direct_finalizer_execution.is_none());
 }

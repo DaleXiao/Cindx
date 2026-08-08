@@ -104,6 +104,9 @@ pub(super) fn project_direct_finalizer_execution(
         .ok_or_else(|| {
             "direct-finalizer evidence is missing its terminal completion".to_string()
         })?;
+    if optional_nonempty(&terminal.metadata, "finalizer_fallback") == Some("true") {
+        return Ok(None);
+    }
     if optional_nonempty(&terminal.metadata, "direct_finalizer_profile_exercised") != Some("true")
         || optional_nonempty(&terminal.metadata, "finalizer_fallback") != Some("false")
     {

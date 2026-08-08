@@ -1,7 +1,7 @@
 {
-  "schema": "cindx.workflow-gepa-campaign.v1",
-  "id": "cindx-workflow-gepa-v1",
-  "version": 1,
+  "schema": "cindx.workflow-gepa-campaign.v2",
+  "id": "cindx-workflow-gepa-v2",
+  "version": 2,
   "description": "Frozen real-agent tasks for producing terminal learning evidence, evolving a Pro workflow profile, and checking a causally exercised route and Task Graph on held-out work.",
   "default_replicates": 1,
   "per_run_timeout_seconds": 600,
@@ -42,7 +42,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     },
@@ -77,7 +77,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     },
@@ -112,7 +112,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     },
@@ -147,7 +147,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     },
@@ -190,7 +190,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     },
@@ -233,7 +233,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     },
@@ -276,7 +276,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     },
@@ -323,7 +323,7 @@
           }
         ],
         "required_tools_any": ["file.read", "file.read_many", "file.search"],
-        "required_tools_all": ["file.write", "shell.run"],
+        "required_tools_all": ["shell.run"],
         "minimum_denied_permissions": 0
       }
     }

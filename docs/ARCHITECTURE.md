@@ -506,16 +506,21 @@ preparation and finalization do not enqueue speculative evaluations. Restored
 assignment receipts bind the evaluation to the profile that actually ran, and
 tampered or missing assignments fail closed.
 
-The feature-gated Workflow GEPA campaign exercises this causal chain on eight
+The feature-gated Workflow GEPA V2 campaign exercises this causal chain on eight
 frozen real-agent coding and research tasks. Seed Pro runs must complete their
-effectful tool postconditions before their terminal evidence becomes the
-dataset. The temporary workspace is then deleted and reconstructed; its content
+deterministic file, JSON, and command postconditions before their terminal
+evidence becomes the dataset. Successful read and command receipts prove that
+the product harness was used, while the verifier remains neutral between
+authorized mutation implementations. The temporary workspace is then deleted
+and reconstructed; its content
 fingerprint must equal the pre-treatment fingerprint before either paired
 candidate receives the read-only view. Train and holdout evidence are matched,
 the learned candidate must beat seed without quality, safety, completion,
 latency, or token regression, and a fresh full-product run must prove both route
 semantics and Task Graph execution. This campaign is exploratory evidence and
-does not publish a production deployment.
+does not publish a production deployment. Product background evolution is
+disabled inside the campaign app; only the bounded campaign driver may advance
+GEPA, preventing asynchronous learning from contaminating the matched cells.
 
 Direct-finalizer evolution is a separate one-gene surface, not an extension of
 the workflow phenotype. The feature-gated evaluator materializes one canonical
