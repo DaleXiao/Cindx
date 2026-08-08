@@ -2,7 +2,8 @@ use super::requirements::AgentPlanningSource;
 use agent_core::Metadata;
 use orchestrator::{
     select_causal_route_v2, sha256_hex, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
-    CausalRouteReason, ConductorPromptGenome, ModelCandidate, RouteFeatureSnapshotV2,
+    CausalRouteReason, ConductorPromptGenome, ModelCandidate, RouteFeatureRequest,
+    RouteFeatureSnapshotV2, RoutingContext,
 };
 
 pub(super) fn run_decision_evolved_directive(
@@ -27,14 +28,17 @@ pub(super) fn finalize_causal_route(
     degraded: bool,
     decision: &mut AgentRunDecision,
 ) -> Result<(), String> {
-    let snapshot = RouteFeatureSnapshotV2::from_request(
-        prompt,
-        recent_context,
-        effort.label(),
-        route_requirements,
+    let snapshot = RouteFeatureSnapshotV2::from_decision_request(
+        decision,
+        RouteFeatureRequest {
+            objective: prompt,
+            recent_context,
+            effort: effort.label(),
+            requirements: route_requirements,
+            budget_fingerprint: budget_fingerprint.as_deref(),
+            prompt_profile_sha256: &prompt_profile_sha256,
+        },
         candidates,
-        budget_fingerprint,
-        prompt_profile_sha256,
     );
     let mut receipt = match decision.causal_route.take() {
         Some(receipt) if receipt.feature_snapshot == snapshot => receipt,
@@ -65,6 +69,11 @@ pub(super) fn apply_causal_route_to_context(
         .as_ref()
         .ok_or_else(|| "planned run is missing its causal route receipt".to_string())?;
     receipt.validate()?;
+    let pre_decision_task_class = run_context
+        .get("effective_prompt_objective")
+        .or_else(|| run_context.get("prompt_objective"))
+        .map(|objective| RoutingContext::from_prompt(objective, Vec::new()).task_class)
+        .unwrap_or_else(|| receipt.feature_snapshot.task_class.clone());
     for (key, value) in [
         (
             "pre_decision_context_fingerprint",
@@ -72,7 +81,7 @@ pub(super) fn apply_causal_route_to_context(
         ),
         (
             "pre_decision_task_class",
-            receipt.feature_snapshot.task_class.label().to_string(),
+            pre_decision_task_class.label().to_string(),
         ),
         (
             "route_requirements_fingerprint",

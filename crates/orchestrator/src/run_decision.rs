@@ -3,7 +3,7 @@ use crate::{
     minimum_team_uplift_bps, select_causal_route_v2, AgentDecisionCalibration,
     AutoComputationAssessment, CausalRouteReason, CausalRouteSelectionV2,
     ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy,
-    MatchedCollaborationEvidenceTeacher, ModelCandidate, OrchestrationPolicy,
+    MatchedCollaborationEvidenceTeacher, ModelCandidate, OrchestrationPolicy, RouteFeatureRequest,
     RouteFeatureSnapshotV2, RoutingContext, RoutingDecision, TaskClass,
     AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
@@ -529,8 +529,9 @@ impl AgentRunDecision {
 
     pub fn learning_signature(&self) -> String {
         format!(
-            "{}:execution={:?}:tools={:?}:retrieval={}:memory={:?}:vision={}:risk={:?}:parallelism={}:verify={:?}",
+            "{}:model={}:execution={:?}:tools={:?}:retrieval={}:memory={:?}:vision={}:risk={:?}:parallelism={}:verify={:?}",
             self.task_class.label(),
+            self.primary_model.trim(),
             self.execution,
             self.tool_requirement,
             self.retrieval.mode_label(),
@@ -752,7 +753,7 @@ impl AgentRunDecisionHarness {
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
-                "Workflow admission is enforced after parsing. Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 then admits collaboration only when explicit independent demand and a conservative lower-bound value cover capability uncertainty, model cost, coordination, verification, and critical-path latency. Otherwise runtime preserves the selected model, tools, vision, retrieval, memory, and risk posture in a direct or grounded-direct route without a repair call. If you cannot justify those estimates, choose direct.\n",
+                "Workflow admission is enforced after parsing. Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 uses your confidence-weighted estimate plus independently scored matched team-versus-direct evidence. It enforces capability, safety, resource, independent-work, and minimum-uplift boundaries, but does not replace your judgment with keyword routing or invented cost formulas. Otherwise runtime preserves the selected model, tools, vision, retrieval, memory, and risk posture in a direct or grounded-direct route without a repair call. If you cannot justify those estimates, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
                 "Runtime execution constraints are facts, not suggestions. Do not assign required effects or interactive work to a worker that cannot perform them:\n{execution_constraints}\n\n",
                 "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, effect_authority={effect_authority}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade them and never request effects when effect_authority=forbidden.\n\n",
@@ -804,19 +805,22 @@ impl AgentRunDecisionHarness {
             .ok_or_else(|| "run decision returned incomplete JSON".to_string())?;
         let mut decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
-        let snapshot = RouteFeatureSnapshotV2::from_request(
-            &self.request.objective,
-            &self.request.recent_context,
-            &self.request.effort,
-            self.request.route_requirements,
-            &self.request.model_candidates,
-            self.request.budget_fingerprint.clone(),
-            self.request.prompt_profile_sha256.clone(),
-        );
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
         self.request
             .route_requirements
             .validate_decision(&decision, &self.request.model_candidates)?;
+        let snapshot = RouteFeatureSnapshotV2::from_decision_request(
+            &decision,
+            RouteFeatureRequest {
+                objective: &self.request.objective,
+                recent_context: &self.request.recent_context,
+                effort: &self.request.effort,
+                requirements: self.request.route_requirements,
+                budget_fingerprint: self.request.budget_fingerprint.as_deref(),
+                prompt_profile_sha256: &self.request.prompt_profile_sha256,
+            },
+            &self.request.model_candidates,
+        );
         let normalized_effort = self.request.effort.trim().to_ascii_lowercase();
         let candidate_action_id = causal_route_action_id_v2(&decision)?;
         let (matched, evidence_key_lookups) = matching_collaboration_evidence_for_context(
@@ -845,13 +849,11 @@ impl AgentRunDecisionHarness {
             decision = decision.calibrated_to_direct(
                 calibration,
                 format!(
-                    "Causal Router v2 {}: predicted={}bps adjusted={}bps coordination={}bps latency={}bps uncertainty={}bps net_lower={}bps",
+                    "Causal Router v2 {}: conductor_confidence_weighted={}bps matched_adjusted={}bps admission_floor={}bps net_lower={}bps",
                     receipt.reason.label(),
                     receipt.predicted_benefit_bps,
                     receipt.evidence_adjusted_benefit_bps,
                     receipt.coordination_cost_bps,
-                    receipt.latency_cost_bps,
-                    receipt.uncertainty_bps,
                     receipt.net_value_lower_bps,
                 ),
                 legacy_auto_assessment,
@@ -1008,7 +1010,7 @@ mod tests {
         assert!(prompt.contains("Memory and workspace retrieval are blocking foreground work"));
         assert!(prompt.contains("missing evidence can materially change answer quality"));
         assert!(prompt.contains("Greetings, capability questions, and self-contained requests"));
-        assert!(prompt.contains("conservative lower-bound value cover capability uncertainty"));
+        assert!(prompt.contains("does not replace your judgment with keyword routing"));
         assert!(prompt.contains("without a repair call"));
     }
 

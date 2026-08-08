@@ -6,8 +6,8 @@ use agent_core::{
 use orchestrator::{
     causal_route_action_id_v2, prompt_genome_sha256, select_causal_route_v2, AgentExecutionMode,
     AgentRiskLevel, AgentVerificationPolicy, CausalRouteEvidenceBasis, ConductorStopPolicy,
-    MatchedCollaborationEvidence, ModelCapabilitySource, PromptVerification,
-    RouteFeatureSnapshotV2,
+    MatchedCollaborationEvidence, ModelCapabilitySource, PromptVerification, RouteFeatureRequest,
+    RouteFeatureSnapshotV2, TaskClass,
 };
 
 #[test]
@@ -96,29 +96,8 @@ fn learned_profile_provenance_is_neutral_to_route_and_matched_admission() {
         cost_tier: 1,
         latency_tier: 1,
     }];
-    let build_snapshot = |route_profile_sha256| {
-        RouteFeatureSnapshotV2::from_request(
-            "Compare independent architecture alternatives and cross-check sources",
-            "",
-            "auto",
-            AgentRouteRequirements::default(),
-            &candidates,
-            Some("1".repeat(64)),
-            route_profile_sha256,
-        )
-    };
-    let snapshot_a = build_snapshot(route_a);
-    let snapshot_b = build_snapshot(route_b);
-    assert_eq!(snapshot_a, snapshot_b);
-    assert!(!serde_json::to_string(&snapshot_a)
-        .unwrap()
-        .contains(&actual_a));
-    assert!(!serde_json::to_string(&snapshot_b)
-        .unwrap()
-        .contains(&actual_b));
-
     let mut decision = AgentRunDecision::direct("executor");
-    decision.task_class = snapshot_a.task_class.clone();
+    decision.task_class = TaskClass::Research;
     decision.execution = AgentExecutionMode::Workflow;
     decision.risk_level = AgentRiskLevel::Elevated;
     decision.verification = AgentVerificationPolicy::Independent;
@@ -129,6 +108,30 @@ fn learned_profile_provenance_is_neutral_to_route_and_matched_admission() {
     decision.expected_uplift_bps = 6_000;
     decision.confidence_bps = 8_000;
     decision.stop_policy = ConductorStopPolicy::Quorum;
+    let build_snapshot = |route_profile_sha256: &str| {
+        RouteFeatureSnapshotV2::from_decision_request(
+            &decision,
+            RouteFeatureRequest {
+                objective: "Compare independent architecture alternatives and cross-check sources",
+                recent_context: "",
+                effort: "auto",
+                requirements: AgentRouteRequirements::default(),
+                budget_fingerprint: Some(&"1".repeat(64)),
+                prompt_profile_sha256: route_profile_sha256,
+            },
+            &candidates,
+        )
+    };
+    let snapshot_a = build_snapshot(&route_a);
+    let snapshot_b = build_snapshot(&route_b);
+    assert_eq!(snapshot_a, snapshot_b);
+    assert!(!serde_json::to_string(&snapshot_a)
+        .unwrap()
+        .contains(&actual_a));
+    assert!(!serde_json::to_string(&snapshot_b)
+        .unwrap()
+        .contains(&actual_b));
+
     let evidence = MatchedCollaborationEvidence {
         task_class: decision.task_class.clone(),
         effort: "auto".to_string(),

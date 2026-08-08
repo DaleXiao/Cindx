@@ -2,7 +2,7 @@
 
 Current application version: `0.2.25`
 
-Last code-fact review: `2026-08-08`
+Last code-fact review: `2026-08-09`
 
 This document describes the current source tree. Evaluation reports describe
 only the revision recorded in each report.
@@ -14,20 +14,26 @@ only the revision recorded in each report.
 - **Auto** asks the configured conductor for a typed `AgentRunDecision`, with a
   maximum requested parallelism of two. The decision may remain direct or
   select a bounded workflow. Every candidate then passes Causal Router v2,
-  which freezes a pre-decision task/capability/budget fingerprint and compares
-  the candidate with its direct or grounded-direct counterfactual using explicit
-  independent demand, capability provenance, evidence, model/coordination cost,
-  critical-path latency, and uncertainty. Only evidence matching both that
-  context and candidate action may adjust predicted benefit; legacy same-action
-  evidence can veto but cannot manufacture positive value. A rejected candidate
-  becomes direct or grounded-direct without another conductor call while
-  preserving its selected model, tools, vision, risk, retrieval, and memory.
+  which freezes the actual request/capability/budget inputs and compares the
+  candidate with its direct or grounded-direct counterfactual. Task class,
+  retrieval, risk, decomposition, and verification come from the validated
+  Conductor decision rather than a second keyword classifier. Admission uses the
+  Conductor's confidence-weighted uplift, explicit independent demand, hard
+  capability/safety/resource boundaries, and independently scored matched
+  team-versus-direct evidence. Exact context/action evidence wins; sufficiently
+  supported evidence for the same model and route shape generalizes to new
+  requests. Failed team executions remain negative evidence when their paired
+  comparison and provenance are complete. A rejected candidate becomes direct
+  or grounded-direct without another conductor call while preserving its
+  selected model, tools, vision, risk, retrieval, and memory.
+  The deterministic pre-decision task label is retained only as an independent
+  evaluation stratum; it does not alter the Conductor decision or route.
 - **Pro** uses the same decision contract with a maximum requested parallelism
   of three and a larger outer workflow budget. The validated task contract
   narrows that ceiling to the conductor's task estimate while retaining the
   structural minimum for required independent contributions, verification, and
-  synthesis. It passes the same Router v2 contract with Pro's cost/latency
-  policy; a low-value Pro workflow also downshifts without a repair call.
+  synthesis. It passes the same Router v2 contract with Pro's minimum-uplift
+  floor; a low-value Pro workflow also downshifts without a repair call.
 - Runtime-derived tool and image-input requirements remain hard postconditions
   on the decision and selected model. Effect authority is independent and
   tri-state: explicit no-change language forbids effects, an explicit effect
@@ -79,7 +85,8 @@ A new run currently follows this sequence:
    the actual objective, recent context, prompt profile, requirements, model
    pool, and budget; action identity binds the complete executable route policy.
    The receipt records candidate, selected and counterfactual actions,
-   conservative value components, capability provenance, reason, and operation
+   confidence-weighted and matched-evidence value components, capability
+   provenance, reason, and operation
    counts without model chain-of-thought. Full receipts
    live only on the decision event; run context carries stable join keys and a
    digest. Both paths fail clearly when the selected configured model cannot

@@ -2,7 +2,7 @@ use crate::{
     minimum_team_uplift_bps, AgentEffectAuthority, AgentRiskLevel, AgentRouteRequirements,
     AgentRouteTier, AgentRunDecision, AgentToolRequirement, AgentVerificationPolicy,
     ConductorStopPolicy, MatchedCollaborationEvidence, MemoryRecallPolicy, ModelCandidate,
-    ModelCapabilitySource, RoutingContext, TaskClass, WorkspaceRetrievalChannel,
+    ModelCapabilitySource, TaskClass, WorkspaceRetrievalChannel,
     AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,8 @@ impl RouteCapabilityEvidence {
 #[serde(rename_all = "snake_case")]
 pub enum CausalRouteEvidenceBasis {
     RuntimeDemandOnly,
-    LegacyMatchedAction,
+    #[serde(alias = "legacy_matched_action")]
+    MatchedRouteShape,
     MatchedContextAction,
 }
 
@@ -109,21 +110,34 @@ pub struct RouteFeatureSnapshotV2 {
     pub context_fingerprint: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RouteFeatureRequest<'a> {
+    pub objective: &'a str,
+    pub recent_context: &'a str,
+    pub effort: &'a str,
+    pub requirements: AgentRouteRequirements,
+    pub budget_fingerprint: Option<&'a str>,
+    pub prompt_profile_sha256: &'a str,
+}
+
 impl RouteFeatureSnapshotV2 {
-    pub fn from_request(
-        objective: &str,
-        recent_context: &str,
-        effort: &str,
-        requirements: AgentRouteRequirements,
+    pub fn from_decision_request(
+        decision: &AgentRunDecision,
+        request: RouteFeatureRequest<'_>,
         model_candidates: &[ModelCandidate],
-        budget_fingerprint: Option<String>,
-        prompt_profile_sha256: String,
     ) -> Self {
-        let context = RoutingContext::from_prompt(objective, model_candidates.to_vec());
+        let RouteFeatureRequest {
+            objective,
+            recent_context,
+            effort,
+            requirements,
+            budget_fingerprint,
+            prompt_profile_sha256,
+        } = request;
         let effort = normalize_effort(effort);
         let objective_sha256 = sha256_hex(objective.as_bytes());
         let recent_context_sha256 = sha256_hex(recent_context.as_bytes());
-        let prompt_length_bucket = context.prompt_length.min(4_096).div_ceil(128) as u16;
+        let prompt_length_bucket = objective.chars().count().min(4_096).div_ceil(128) as u16;
         let model_pool_sha256 = model_pool_digest(model_candidates);
         let requirements_fingerprint = sha256_hex(
             format!(
@@ -135,41 +149,36 @@ impl RouteFeatureSnapshotV2 {
             .as_bytes(),
         );
         let canonical = format!(
-            "schema={CAUSAL_ROUTE_SELECTION_SCHEMA_V2};effort={effort};objective={objective_sha256};recent={recent_context_sha256};profile={prompt_profile_sha256};class={};length={prompt_length_bucket};tool={};effects={};image={};retrieval={};stakes={};parallel={};verify={};latency={};complexity={};steps={};models={model_pool_sha256};budget={}",
-            context.task_class.label(),
-            requirements.minimum_tool_requirement.label(),
-            requirements.effect_authority.label(),
-            u8::from(requirements.image_input_required),
-            u8::from(context.needs_retrieval),
-            u8::from(context.high_stakes),
-            u8::from(context.parallelizable),
-            u8::from(context.verification_required),
-            u8::from(context.latency_sensitive),
-            (context.complexity_score / 2).min(4),
-            context.estimated_steps.min(5),
-            budget_fingerprint.as_deref().unwrap_or("missing"),
+            "schema={CAUSAL_ROUTE_SELECTION_SCHEMA_V2};effort={effort};objective={objective_sha256};recent={recent_context_sha256};profile={prompt_profile_sha256};length={prompt_length_bucket};requirements={requirements_fingerprint};models={model_pool_sha256};budget={}",
+            budget_fingerprint.unwrap_or("missing"),
         );
+        let complexity_score = decision
+            .estimated_steps
+            .saturating_add(decision.distinct_contributions)
+            .saturating_sub(1)
+            .min(8) as u8;
+        let latency_sensitive = effort == "fast";
         Self {
             schema: CAUSAL_ROUTE_SELECTION_SCHEMA_V2.to_string(),
             effort,
             objective_sha256,
             recent_context_sha256,
-            prompt_profile_sha256,
-            task_class: context.task_class,
+            prompt_profile_sha256: prompt_profile_sha256.to_string(),
+            task_class: decision.task_class.clone(),
             prompt_length_bucket,
             minimum_tool_requirement: requirements.minimum_tool_requirement,
             effect_authority: requirements.effect_authority,
             image_input_required: requirements.image_input_required,
-            needs_retrieval: context.needs_retrieval,
-            high_stakes: context.high_stakes,
-            parallelizable: context.parallelizable,
-            verification_required: context.verification_required,
-            latency_sensitive: context.latency_sensitive,
-            complexity_band: (context.complexity_score / 2).min(4),
-            estimated_steps: context.estimated_steps.min(5),
+            needs_retrieval: decision.retrieval.enabled(),
+            high_stakes: decision.risk_level == AgentRiskLevel::High,
+            parallelizable: decision.max_parallelism > 1 && decision.distinct_contributions > 1,
+            verification_required: decision.verification != AgentVerificationPolicy::None,
+            latency_sensitive,
+            complexity_band: (complexity_score / 2).min(4),
+            estimated_steps: u8::try_from(decision.estimated_steps).unwrap_or(5).min(5),
             model_pool_sha256,
             model_pool_size: unique_model_count(model_candidates),
-            budget_fingerprint,
+            budget_fingerprint: budget_fingerprint.map(str::to_string),
             requirements_fingerprint,
             context_fingerprint: sha256_hex(canonical.as_bytes()),
         }
@@ -379,76 +388,47 @@ pub fn select_causal_route_v2(
         None
     };
     let support = route_support(snapshot, decision, &candidate_action.action_id, matched);
-    let predicted_benefit_bps = demand_benefit_bps(snapshot, decision);
-    let evidence_adjusted_benefit_bps = match support.basis {
-        CausalRouteEvidenceBasis::MatchedContextAction => support
-            .observed_uplift_bps
-            .map(i32::from)
-            .map(|observed| observed.min(predicted_benefit_bps))
-            .unwrap_or(predicted_benefit_bps),
-        CausalRouteEvidenceBasis::RuntimeDemandOnly
-        | CausalRouteEvidenceBasis::LegacyMatchedAction => predicted_benefit_bps,
-    };
+    let predicted_benefit_bps = i32::from(decision.expected_uplift_bps)
+        .saturating_mul(i32::from(decision.confidence_bps))
+        / 10_000;
+    let evidence_adjusted_benefit_bps = matched
+        .filter(|evidence| evidence.evidence_ready())
+        .and(support.observed_uplift_bps)
+        .map(|observed| {
+            const PRIOR_SAMPLES: i32 = 4;
+            const MAX_MATCHED_SAMPLES: usize = 32;
+            let samples = support.matched_examples.min(MAX_MATCHED_SAMPLES) as i32;
+            predicted_benefit_bps
+                .saturating_mul(PRIOR_SAMPLES)
+                .saturating_add(i32::from(observed).saturating_mul(samples))
+                / PRIOR_SAMPLES.saturating_add(samples)
+        })
+        .unwrap_or(predicted_benefit_bps);
     let pro = snapshot.effort == "pro";
-    let coordination_unit_bps = if pro { 140 } else { 260 };
-    let latency_unit_bps = if pro { 70 } else { 160 };
-    let coordination_cost_bps = i32::from(candidate_action.cost_units)
-        .saturating_mul(coordination_unit_bps)
-        .saturating_add(
-            i32::from(decision.verification == AgentVerificationPolicy::Independent)
-                * if pro { 120 } else { 240 },
-        );
-    let latency_cost_bps = i32::from(candidate_action.critical_path_latency_units)
-        .saturating_mul(latency_unit_bps)
-        .saturating_add(i32::from(snapshot.latency_sensitive) * if pro { 300 } else { 900 });
-    let assumed_capability = candidate_action.tools
-        == RouteCapabilityEvidence::CompatibilityAssumed
-        || candidate_action.vision == RouteCapabilityEvidence::CompatibilityAssumed;
-    let uncertainty_bps = match support.basis {
-        CausalRouteEvidenceBasis::MatchedContextAction => {
-            (1_200i32 / support.matched_examples.max(1) as i32).max(100)
-        }
-        CausalRouteEvidenceBasis::LegacyMatchedAction => {
-            if pro {
-                500
-            } else {
-                1_000
-            }
-        }
-        CausalRouteEvidenceBasis::RuntimeDemandOnly => {
-            if pro {
-                650
-            } else {
-                1_250
-            }
-        }
-    }
-    .saturating_add(i32::from(assumed_capability) * 350);
-    let net_value_lower_bps = evidence_adjusted_benefit_bps
-        .saturating_sub(coordination_cost_bps)
-        .saturating_sub(latency_cost_bps)
-        .saturating_sub(uncertainty_bps);
+    // The receipt keeps its v2 field names for replay compatibility. The only
+    // deterministic "cost" is the declared quality floor; latency and
+    // uncertainty must come from conductor estimates or matched observations.
+    let coordination_cost_bps = if pro {
+        i32::from(minimum_team_uplift_bps("pro"))
+    } else {
+        i32::from(AUTO_COLLABORATION_MIN_UPLIFT_BPS)
+            .saturating_mul(i32::from(AUTO_COLLABORATION_MIN_CONFIDENCE_BPS))
+            / 10_000
+    };
+    let latency_cost_bps = 0;
+    let uncertainty_bps = 0;
+    let net_value_lower_bps = evidence_adjusted_benefit_bps.saturating_sub(coordination_cost_bps);
     let prediction_floor_met = if pro {
         decision.expected_uplift_bps >= minimum_team_uplift_bps("pro")
     } else {
         decision.expected_uplift_bps >= AUTO_COLLABORATION_MIN_UPLIFT_BPS
             && decision.confidence_bps >= AUTO_COLLABORATION_MIN_CONFIDENCE_BPS
     };
-    let independent_demand = decision.max_parallelism >= 2
-        && decision.distinct_contributions >= 2
-        && (snapshot.parallelizable
-            || decision.verification == AgentVerificationPolicy::Independent
-            || (matches!(
-                snapshot.task_class,
-                TaskClass::Research | TaskClass::Retrieval
-            ) && decision.estimated_steps >= 3));
-    let serial_interaction = matches!(
-        snapshot.task_class,
-        TaskClass::Browser | TaskClass::Computer
-    ) || decision.tool_requirement == AgentToolRequirement::Effects;
-    let serial_exception = snapshot.high_stakes
-        && decision.verification == AgentVerificationPolicy::Independent
-        && decision.tool_requirement != AgentToolRequirement::Effects;
+    let independent_contributions =
+        decision.max_parallelism >= 2 && decision.distinct_contributions >= 2;
+    let independent_verification = decision.verification == AgentVerificationPolicy::Independent
+        && decision.estimated_steps >= 2;
+    let independent_demand = independent_contributions || independent_verification;
     let strong_evidence_against = support.basis != CausalRouteEvidenceBasis::RuntimeDemandOnly
         && matched.is_some_and(|evidence| {
             evidence.strong_evidence_against_collaboration(if pro {
@@ -465,8 +445,6 @@ pub fn select_causal_route_v2(
         CausalRouteReason::BelowPredictionFloor
     } else if !independent_demand {
         CausalRouteReason::NoIndependentDemand
-    } else if serial_interaction && !serial_exception {
-        CausalRouteReason::SerialInteraction
     } else if strong_evidence_against {
         CausalRouteReason::MatchedEvidenceAgainst
     } else if net_value_lower_bps < 0 {
@@ -631,11 +609,11 @@ fn route_support(
     let exact_context_action = common_scope
         && evidence.pre_decision_context_fingerprint == snapshot.context_fingerprint
         && evidence.route_action_id == candidate_action_id;
-    let legacy_action = common_scope
+    let matched_route_shape = common_scope
         && evidence.pre_decision_context_fingerprint.is_empty()
         && evidence.route_action_id.is_empty()
         && evidence.routing_signature == decision.learning_signature();
-    if !exact_context_action && !legacy_action {
+    if !exact_context_action && !matched_route_shape {
         return CausalRouteSupportV2 {
             basis: CausalRouteEvidenceBasis::RuntimeDemandOnly,
             evidence_sha256: None,
@@ -644,7 +622,7 @@ fn route_support(
         };
     }
     let canonical = format!(
-        "context={};class={};effort={};action={};legacy_action={};examples={};wins={};below={};uplift={};team_latency={};anchor_latency={}",
+        "context={};class={};effort={};action={};route_shape={};examples={};wins={};below={};uplift={};team_latency={};anchor_latency={}",
         evidence.pre_decision_context_fingerprint,
         evidence.task_class.label(),
         evidence.effort,
@@ -661,27 +639,12 @@ fn route_support(
         basis: if exact_context_action {
             CausalRouteEvidenceBasis::MatchedContextAction
         } else {
-            CausalRouteEvidenceBasis::LegacyMatchedAction
+            CausalRouteEvidenceBasis::MatchedRouteShape
         },
         evidence_sha256: Some(sha256_hex(canonical.as_bytes())),
         matched_examples: evidence.examples,
         observed_uplift_bps: Some(evidence.average_uplift_bps),
     }
-}
-
-fn demand_benefit_bps(snapshot: &RouteFeatureSnapshotV2, decision: &AgentRunDecision) -> i32 {
-    400i32
-        .saturating_add(i32::from(snapshot.parallelizable) * 1_600)
-        .saturating_add(i32::from(snapshot.verification_required) * 650)
-        .saturating_add(i32::from(snapshot.high_stakes) * 800)
-        .saturating_add(i32::from(snapshot.needs_retrieval) * 350)
-        .saturating_add(
-            i32::from(decision.verification == AgentVerificationPolicy::Independent) * 900,
-        )
-        .saturating_add(i32::from(snapshot.complexity_band) * 450)
-        .saturating_add(i32::from(snapshot.estimated_steps >= 4) * 550)
-        .saturating_sub(i32::from(snapshot.latency_sensitive) * 1_000)
-        .max(0)
 }
 
 fn model_pool_digest(candidates: &[ModelCandidate]) -> String {

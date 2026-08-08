@@ -56,7 +56,7 @@ impl WorkflowExecutionTelemetry {
             && self.learning_evidence.usage_completeness != LearningUsageCompleteness::Missing
             && self.learning_evidence.steer_epoch.is_some()
             && self.learning_evidence.budget_fingerprint.is_some();
-        self.succeeded && scores_are_valid && provenance_is_complete
+        scores_are_valid && provenance_is_complete
     }
 }
 
@@ -182,17 +182,24 @@ impl MatchedCollaborationEvidence {
     }
 
     pub fn prompt_hint(&self) -> String {
+        let scope = if self.pre_decision_context_fingerprint.is_empty()
+            && self.route_action_id.is_empty()
+        {
+            "matched_route_shape"
+        } else {
+            "matched_context_action"
+        };
         format!(
-            "matched_direct_team class={} effort={} context={} action={} legacy_signature={} samples={} team_wins={} team_win_rate={:.0}% team_win_lower_confidence={:.2} below_admission_floor={} below_admission_floor_lower_confidence={:.2} average_uplift_bps={} anchor_selected={} average_team_latency_ms={} average_anchor_latency_ms={} support={}",
+            "matched_direct_team scope={scope} class={} effort={} context={} action={} route_signature={} samples={} team_wins={} team_win_rate={:.0}% team_win_lower_confidence={:.2} below_admission_floor={} below_admission_floor_lower_confidence={:.2} average_uplift_bps={} anchor_selected={} average_team_latency_ms={} average_anchor_latency_ms={} support={}",
             self.task_class.label(),
             self.effort,
             if self.pre_decision_context_fingerprint.is_empty() {
-                "legacy"
+                "any"
             } else {
                 self.pre_decision_context_fingerprint.as_str()
             },
             if self.route_action_id.is_empty() {
-                "legacy"
+                "any"
             } else {
                 self.route_action_id.as_str()
             },
@@ -222,31 +229,47 @@ impl MatchedCollaborationEvidence {
 pub struct MatchedCollaborationEvidenceTeacher {
     evidence: Vec<MatchedCollaborationEvidence>,
     exact_index: BTreeMap<(TaskClass, String, String, String), usize>,
-    legacy_index: BTreeMap<(TaskClass, String, String), usize>,
+    route_shape_index: BTreeMap<(TaskClass, String, String), usize>,
 }
 
 impl MatchedCollaborationEvidenceTeacher {
     pub fn train(telemetry: &[WorkflowExecutionTelemetry]) -> Self {
-        let mut grouped = BTreeMap::<
+        let mut exact_groups = BTreeMap::<
             (TaskClass, String, String, String, String),
             MatchedEvidenceAccumulator,
         >::new();
+        let mut route_shape_groups =
+            BTreeMap::<(TaskClass, String, String), MatchedEvidenceAccumulator>::new();
         for entry in telemetry
             .iter()
             .filter(|entry| entry.has_valid_matched_comparison())
         {
-            grouped
-                .entry((
-                    entry.task_class.clone(),
-                    entry.plan.effort.clone(),
-                    entry.pre_decision_context_fingerprint.clone(),
-                    entry.route_action_id.clone(),
-                    entry.routing_signature.clone(),
-                ))
-                .or_default()
-                .record(entry);
+            if !entry.pre_decision_context_fingerprint.is_empty()
+                && !entry.route_action_id.is_empty()
+            {
+                exact_groups
+                    .entry((
+                        entry.task_class.clone(),
+                        entry.plan.effort.clone(),
+                        entry.pre_decision_context_fingerprint.clone(),
+                        entry.route_action_id.clone(),
+                        entry.routing_signature.clone(),
+                    ))
+                    .or_default()
+                    .record(entry);
+            }
+            if !entry.routing_signature.is_empty() {
+                route_shape_groups
+                    .entry((
+                        entry.task_class.clone(),
+                        entry.plan.effort.clone(),
+                        entry.routing_signature.clone(),
+                    ))
+                    .or_default()
+                    .record(entry);
+            }
         }
-        let mut evidence = grouped
+        let exact_evidence = exact_groups
             .into_iter()
             .map(
                 |(
@@ -262,6 +285,21 @@ impl MatchedCollaborationEvidenceTeacher {
                     )
                 },
             )
+            .collect::<Vec<_>>();
+        let route_shape_evidence = route_shape_groups.into_iter().map(
+            |((task_class, effort, routing_signature), accumulator)| {
+                accumulator.finish(
+                    task_class,
+                    effort,
+                    String::new(),
+                    String::new(),
+                    routing_signature,
+                )
+            },
+        );
+        let mut evidence = exact_evidence
+            .into_iter()
+            .chain(route_shape_evidence)
             .collect::<Vec<_>>();
         evidence.sort_by(|left, right| {
             right
@@ -282,7 +320,7 @@ impl MatchedCollaborationEvidenceTeacher {
 
     pub(crate) fn from_calibrated_evidence(evidence: Vec<MatchedCollaborationEvidence>) -> Self {
         let mut exact_index = BTreeMap::new();
-        let mut legacy_index = BTreeMap::new();
+        let mut route_shape_index = BTreeMap::new();
         for (index, entry) in evidence.iter().enumerate() {
             let effort = entry.effort.trim().to_ascii_lowercase();
             if !entry.pre_decision_context_fingerprint.is_empty()
@@ -301,7 +339,7 @@ impl MatchedCollaborationEvidenceTeacher {
                 && entry.route_action_id.is_empty()
                 && !entry.routing_signature.is_empty()
             {
-                legacy_index.insert(
+                route_shape_index.insert(
                     (
                         entry.task_class.clone(),
                         effort,
@@ -314,7 +352,7 @@ impl MatchedCollaborationEvidenceTeacher {
         Self {
             evidence,
             exact_index,
-            legacy_index,
+            route_shape_index,
         }
     }
 
@@ -328,7 +366,7 @@ impl MatchedCollaborationEvidenceTeacher {
         effort: &str,
         context_fingerprint: &str,
         route_action_id: &str,
-        legacy_signature: &str,
+        route_signature: &str,
     ) -> (Option<&MatchedCollaborationEvidence>, usize) {
         let effort = effort.trim().to_ascii_lowercase();
         let mut lookups = 0usize;
@@ -343,12 +381,13 @@ impl MatchedCollaborationEvidenceTeacher {
                 return (self.evidence.get(*index), lookups);
             }
         }
-        if !legacy_signature.is_empty() {
+        if !route_signature.is_empty() {
             lookups = lookups.saturating_add(1);
-            if let Some(index) =
-                self.legacy_index
-                    .get(&(task_class.clone(), effort, legacy_signature.to_string()))
-            {
+            if let Some(index) = self.route_shape_index.get(&(
+                task_class.clone(),
+                effort,
+                route_signature.to_string(),
+            )) {
                 return (self.evidence.get(*index), lookups);
             }
         }
