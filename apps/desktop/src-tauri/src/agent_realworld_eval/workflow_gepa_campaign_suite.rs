@@ -247,7 +247,6 @@ mod tests {
     use super::*;
     use crate::agent_realworld_eval::tool_receipts::{ToolAttemptReceipt, ToolReceiptStatus};
     use crate::agent_realworld_eval::verification::verify_case;
-    use crate::agent_realworld_eval::workflow_gepa_campaign_execution::campaign_workspace_sha256;
     use crate::agent_realworld_eval::{materialize_case, Treatment};
     use std::fs;
 
@@ -298,22 +297,6 @@ mod tests {
         assert!(validate_campaign_suite(&missing_contract)
             .unwrap_err()
             .contains("complete behavior contract"));
-    }
-
-    #[test]
-    fn every_frozen_case_has_identical_isolated_prestates() {
-        for case in frozen_suite().cases {
-            let seed = tempfile::tempdir().unwrap();
-            let candidate = tempfile::tempdir().unwrap();
-            materialize_case(seed.path(), &case).unwrap();
-            materialize_case(candidate.path(), &case).unwrap();
-            assert_eq!(
-                campaign_workspace_sha256(seed.path()).unwrap(),
-                campaign_workspace_sha256(candidate.path()).unwrap(),
-                "{}",
-                case.id
-            );
-        }
     }
 
     #[test]

@@ -2,7 +2,9 @@ use super::execution::{execute_case, CaseExecutionInput};
 use super::workflow_gepa_campaign_contract::{
     CampaignSplit, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
 };
-use super::{materialize_case, ExecutionCell, RawRun, RealworldCase, Treatment};
+use super::{
+    materialize_case, ExecutionCell, RawRun, RealworldCase, RealworldSuite, Treatment,
+};
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
 use crate::prompt_learning_runtime::{
@@ -241,6 +243,29 @@ pub(super) fn campaign_workspace_sha256(root: &Path) -> Result<String, String> {
     prompt_workspace_content_sha256(root, &control)
 }
 
+pub(super) fn preflight_matched_workspaces(
+    suite_root: &Path,
+    suite: &RealworldSuite,
+) -> Result<(), String> {
+    let preflight_root = suite_root.join("matched-workspace-preflight");
+    for case in &suite.cases {
+        if CampaignSplit::parse(case)? == CampaignSplit::Train {
+            continue;
+        }
+        let seed_root = preflight_root.join(format!("{}-seed", case.id));
+        let candidate_root = preflight_root.join(format!("{}-candidate", case.id));
+        materialize_case(&seed_root, case)?;
+        materialize_case(&candidate_root, case)?;
+        if campaign_workspace_sha256(&seed_root)? != campaign_workspace_sha256(&candidate_root)? {
+            return Err(format!(
+                "matched product pair {} did not materialize identical workspace contents",
+                case.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn project_scope(
     split: CampaignSplit,
     case: &RealworldCase,
@@ -276,5 +301,17 @@ mod tests {
             campaign_workspace_sha256(seed.path()).unwrap(),
             campaign_workspace_sha256(candidate.path()).unwrap()
         );
+    }
+
+    #[test]
+    fn campaign_preflights_every_matched_case_before_provider_work() {
+        let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../benchmarks/agent/workflow-gepa-v4.json"
+        )))
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        preflight_matched_workspaces(root.path(), &suite).unwrap();
     }
 }

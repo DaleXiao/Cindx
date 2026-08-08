@@ -7,7 +7,8 @@ use super::workflow_gepa_campaign_contract::{
 };
 use super::workflow_gepa_campaign_evidence::training_reflection_packets;
 use super::workflow_gepa_campaign_execution::{
-    execute_campaign_case, execute_product_pair, project_scope, EvaluationDataEnvironment,
+    execute_campaign_case, execute_product_pair, preflight_matched_workspaces, project_scope,
+    EvaluationDataEnvironment,
 };
 use super::workflow_gepa_campaign_suite::{
     cases_for_split, training_dataset_sha256, validate_campaign_suite,
@@ -118,6 +119,7 @@ pub(super) fn run() -> Result<(), String> {
         .tempdir()
         .map_err(|error| format!("failed to create campaign workspace: {error}"))?;
     let suite_root = temp.path();
+    preflight_matched_workspaces(suite_root, &suite)?;
     let _evaluation_data_environment = EvaluationDataEnvironment::install(suite_root);
     let evaluation_database = activate_evaluation_data_root(suite_root)?;
     let sidecars = SidecarConfig::default();
