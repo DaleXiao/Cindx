@@ -105,6 +105,14 @@ revision and is no longer the current product decision.
 
 ## Current Targeted Causal Evidence
 
+- [Cindx Workflow GEPA V2 invalid attempt 0.2.25](CINDX_WORKFLOW_GEPA_V2_INVALID_0.2.25_2026-08-08.md)
+  records the authorized provider attempt on source commit
+  `40e07a3103ab98d040b7270404dbd6327a81dabe`. It is
+  `INVALID_EVALUATOR`: V2 rejected a behaviorally valid implementation based on
+  source spelling and exposed exact research answers in workspace fixtures. The
+  run stopped before candidate generation and provides no uplift or regression
+  evidence. V3 replaces those checks; it has not yet received a provider run.
+
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
   `2647daafae98e99d31c101886d2836e446d83d96`. It is

@@ -152,6 +152,31 @@ pub(super) fn verify_case(
             passed,
         ));
     }
+    for path in &case.verification.immutable_files {
+        let expected = case
+            .files
+            .iter()
+            .find(|fixture| fixture.path == *path)
+            .map(|fixture| fixture.content.as_str());
+        let bytes = fs::read(root.join(path)).ok();
+        let actual = bytes
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let passed = expected.is_some() && actual == expected;
+        record_check(
+            &mut result,
+            passed,
+            format!("{path} changed, is missing, or is not a declared fixture"),
+        );
+        result.postcondition_receipts.push(postcondition_receipt(
+            "immutable_fixture",
+            path,
+            expected.unwrap_or_default().as_bytes(),
+            actual,
+            bytes.as_deref(),
+            passed,
+        ));
+    }
     for check in &case.verification.file_contains {
         let bytes = fs::read(root.join(&check.path)).ok();
         let actual = bytes
@@ -360,6 +385,7 @@ mod tests {
         BrowserTargetReceiptContract, FixtureFile, PermissionPolicy, RealworldCase, Treatment,
         VerificationContract,
     };
+    use std::fs;
 
     fn receipt(tool: &str, status: ToolReceiptStatus) -> ToolAttemptReceipt {
         ToolAttemptReceipt {
@@ -408,6 +434,41 @@ mod tests {
 
         assert!(!tool_requirement_satisfied(&observed, "file.write"));
         assert!(!tool_requirement_satisfied(&observed, "shell.run"));
+    }
+
+    #[test]
+    fn immutable_fixture_passes_unchanged_and_fails_after_mutation() {
+        let root = tempfile::tempdir().expect("workspace");
+        fs::write(root.path().join("check.mjs"), "frozen\n").expect("fixture");
+        let case = RealworldCase {
+            id: "immutable-fixture".to_string(),
+            category: "coding".to_string(),
+            objective: "preserve the check".to_string(),
+            seed_memory_prompt: None,
+            index_workspace: false,
+            files: vec![FixtureFile {
+                path: "check.mjs".to_string(),
+                content: "frozen\n".to_string(),
+            }],
+            permission_policy: PermissionPolicy::AllowOnce,
+            verification: VerificationContract {
+                immutable_files: vec!["check.mjs".to_string()],
+                ..VerificationContract::default()
+            },
+            memory_effect: None,
+        };
+
+        let unchanged = verify_case(&case, Treatment::Fast, root.path(), "", &[], None, 0);
+        assert!(unchanged.quality_passed);
+        assert_eq!(
+            unchanged.postcondition_receipts[0].kind,
+            "immutable_fixture"
+        );
+
+        fs::write(root.path().join("check.mjs"), "tampered\n").expect("mutation");
+        let changed = verify_case(&case, Treatment::Fast, root.path(), "", &[], None, 0);
+        assert!(!changed.quality_passed);
+        assert!(!changed.postcondition_receipts[0].passed);
     }
 
     #[test]

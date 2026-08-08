@@ -1,0 +1,315 @@
+{
+  "schema": "cindx.workflow-gepa-campaign.v3",
+  "id": "cindx-workflow-gepa-v3",
+  "version": 3,
+  "description": "Frozen real-agent tasks with answer-free workspace checks and host-owned hidden postconditions for evolving and causally exercising a Pro workflow profile and Task Graph.",
+  "default_replicates": 1,
+  "per_run_timeout_seconds": 600,
+  "treatments": ["pro"],
+  "execution_order": {
+    "protocol": "campaign_sequence_v1",
+    "base_treatments": ["pro"]
+  },
+  "cases": [
+    {
+      "id": "coding-calculate-total",
+      "category": "coding",
+      "objective": "Fix the function in wg1/calc.mjs. Preserve export names and run node wg1/check.mjs. Do not edit the check file.",
+      "files": [
+        {
+          "path": "wg1/calc.mjs",
+          "content": "export function total(items) {\n  return items.reduce((sum, item) => sum - item.price * item.quantity, 0);\n}\n"
+        },
+        {
+          "path": "wg1/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { total } from './calc.mjs';\nassert.equal(typeof total, 'function');\nassert.equal(total([]), 0);\nconsole.log('wg1-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["wg1-check-passed"],
+        "immutable_files": ["wg1/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const { total } = await import('./wg1/calc.mjs'); assert.equal(total([{ price: 7, quantity: 3 }, { price: 4, quantity: 2 }]), 29); assert.equal(total([{ price: 2.5, quantity: 4 }]), 10); console.log('wg1-hidden-verified');"],
+            "stdout_contains": "wg1-hidden-verified"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "coding-parse-port",
+      "category": "coding",
+      "objective": "Repair the parser in wg2/parser.mjs. Preserve export names and run node wg2/check.mjs. Do not edit the check file.",
+      "files": [
+        {
+          "path": "wg2/parser.mjs",
+          "content": "export function parseEndpoint(value) {\n  const [host, port] = value.split(':');\n  return { host, port };\n}\n"
+        },
+        {
+          "path": "wg2/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { parseEndpoint } from './parser.mjs';\nassert.equal(typeof parseEndpoint, 'function');\nconsole.log('wg2-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["wg2-check-passed"],
+        "immutable_files": ["wg2/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const { parseEndpoint } = await import('./wg2/parser.mjs'); assert.deepEqual(parseEndpoint('relay.internal:4317'), { host: 'relay.internal', port: 4317 }); assert.deepEqual(parseEndpoint('localhost:80'), { host: 'localhost', port: 80 }); console.log('wg2-hidden-verified');"],
+            "stdout_contains": "wg2-hidden-verified"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "coding-normalize-tags",
+      "category": "coding",
+      "objective": "Implement the missing function in wg3/normalize.mjs. Preserve export names and run node wg3/check.mjs. Do not edit the check file.",
+      "files": [
+        {
+          "path": "wg3/normalize.mjs",
+          "content": "export function normalizeTags(values) {\n  throw new Error('not implemented');\n}\n"
+        },
+        {
+          "path": "wg3/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { normalizeTags } from './normalize.mjs';\nassert.equal(typeof normalizeTags, 'function');\nassert.deepEqual(normalizeTags([]), []);\nconsole.log('wg3-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["wg3-check-passed"],
+        "immutable_files": ["wg3/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const { normalizeTags } = await import('./wg3/normalize.mjs'); assert.deepEqual(normalizeTags([' Beta ', 'alpha', 'ALPHA', '']), ['alpha', 'beta']); assert.deepEqual(normalizeTags([' z ', 'Y', 'y', '']), ['y', 'z']); console.log('wg3-hidden-verified');"],
+            "stdout_contains": "wg3-hidden-verified"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "coding-select-latest",
+      "category": "coding",
+      "objective": "Debug wg4/select.mjs. Preserve export names and run node wg4/check.mjs. Do not edit the check file.",
+      "files": [
+        {
+          "path": "wg4/select.mjs",
+          "content": "export function latest(records) {\n  return records.toSorted((a, b) => a.revision - b.revision)[0];\n}\n"
+        },
+        {
+          "path": "wg4/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { latest } from './select.mjs';\nassert.equal(typeof latest, 'function');\nconsole.log('wg4-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["wg4-check-passed"],
+        "immutable_files": ["wg4/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const { latest } = await import('./wg4/select.mjs'); assert.deepEqual(latest([{ id: 'old', revision: 2 }, { id: 'new', revision: 9 }]), { id: 'new', revision: 9 }); assert.deepEqual(latest([{ id: 'a', revision: 11 }, { id: 'b', revision: 3 }, { id: 'c', revision: 7 }]), { id: 'a', revision: 11 }); console.log('wg4-hidden-verified');"],
+            "stdout_contains": "wg4-hidden-verified"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "research-authoritative-threshold",
+      "category": "research",
+      "objective": "Investigate the conflicting evidence in wg5/alpha.txt and wg5/beta.txt. Compare both accounts, produce wg5/out.json with exactly keys owner, threshold, and authority, then run node wg5/check.mjs. Treat the supplied evidence and check as read-only.",
+      "files": [
+        {
+          "path": "wg5/alpha.txt",
+          "content": "Draft note: Kai proposed a 4.0% threshold. This proposal was never approved.\n"
+        },
+        {
+          "path": "wg5/beta.txt",
+          "content": "Decision BOARD-42 supersedes drafts. Owner Mira Sol approved a 2.5% threshold.\n"
+        },
+        {
+          "path": "wg5/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst value = JSON.parse(fs.readFileSync('wg5/out.json', 'utf8'));\nassert.deepEqual(Object.keys(value).sort(), ['authority', 'owner', 'threshold']);\nassert.ok(Object.values(value).every((item) => typeof item === 'string'));\nconsole.log('wg5-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["Mira Sol", "2.5%", "BOARD-42", "wg5-check-passed"],
+        "json_files": [
+          {
+            "path": "wg5/out.json",
+            "equals": {
+              "owner": "Mira Sol",
+              "threshold": "2.5%",
+              "authority": "BOARD-42"
+            }
+          }
+        ],
+        "immutable_files": ["wg5/alpha.txt", "wg5/beta.txt", "wg5/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["wg5/check.mjs"],
+            "stdout_contains": "wg5-check-passed"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "research-measurement-choice",
+      "category": "research",
+      "objective": "Analyze the measurements in wg6/red.txt and wg6/blue.txt. Compare the alternatives, produce wg6/out.json with exactly keys winner, margin, and basis, then run node wg6/check.mjs. Treat the supplied evidence and check as read-only.",
+      "files": [
+        {
+          "path": "wg6/red.txt",
+          "content": "Red candidate validated score: 81. Calibration status: passed.\n"
+        },
+        {
+          "path": "wg6/blue.txt",
+          "content": "Blue candidate validated score: 88. Calibration status: passed.\n"
+        },
+        {
+          "path": "wg6/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst value = JSON.parse(fs.readFileSync('wg6/out.json', 'utf8'));\nassert.deepEqual(Object.keys(value).sort(), ['basis', 'margin', 'winner']);\nassert.equal(typeof value.winner, 'string');\nassert.equal(typeof value.margin, 'number');\nassert.equal(typeof value.basis, 'string');\nconsole.log('wg6-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["blue", "7", "validated score", "wg6-check-passed"],
+        "json_files": [
+          {
+            "path": "wg6/out.json",
+            "equals": {
+              "winner": "blue",
+              "margin": 7,
+              "basis": "validated score"
+            }
+          }
+        ],
+        "immutable_files": ["wg6/red.txt", "wg6/blue.txt", "wg6/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["wg6/check.mjs"],
+            "stdout_contains": "wg6-check-passed"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "research-approved-region",
+      "category": "research",
+      "objective": "Study the records in wg7/north.txt and wg7/south.txt. Determine the approved region, expiry, and approver, produce wg7/out.json with exactly those keys, then run node wg7/check.mjs. Use the supplied evidence without changing it.",
+      "files": [
+        {
+          "path": "wg7/north.txt",
+          "content": "Expired proposal: region north-1, expiry 2025-12-01, proposed by Dev Team.\n"
+        },
+        {
+          "path": "wg7/south.txt",
+          "content": "Current approval: region south-2, expiry 2027-03-31, approver Inez Wu.\n"
+        },
+        {
+          "path": "wg7/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst value = JSON.parse(fs.readFileSync('wg7/out.json', 'utf8'));\nassert.deepEqual(Object.keys(value).sort(), ['approver', 'expiry', 'region']);\nassert.ok(Object.values(value).every((item) => typeof item === 'string'));\nconsole.log('wg7-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["south-2", "2027-03-31", "Inez Wu", "wg7-check-passed"],
+        "json_files": [
+          {
+            "path": "wg7/out.json",
+            "equals": {
+              "region": "south-2",
+              "expiry": "2027-03-31",
+              "approver": "Inez Wu"
+            }
+          }
+        ],
+        "immutable_files": ["wg7/north.txt", "wg7/south.txt", "wg7/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["wg7/check.mjs"],
+            "stdout_contains": "wg7-check-passed"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "route-collaboration-proof",
+      "category": "research",
+      "objective": "Use independent multi-model collaboration to investigate the tradeoffs recorded in wg8/a.txt, wg8/b.txt, and wg8/c.txt. Reconcile the evidence, produce wg8/out.json with exactly keys choice, rejected, and reason, then run node wg8/check.mjs. Treat the supplied evidence and check as read-only.",
+      "files": [
+        {
+          "path": "wg8/a.txt",
+          "content": "Alpha: throughput 920/s, verified error rate 1.8%, operational approval yes.\n"
+        },
+        {
+          "path": "wg8/b.txt",
+          "content": "Beta: throughput 1040/s, verified error rate 3.2%, operational approval no.\n"
+        },
+        {
+          "path": "wg8/c.txt",
+          "content": "Delta: throughput 970/s, verified error rate 0.7%, operational approval yes. Selection policy prioritizes approval, then lowest verified error rate.\n"
+        },
+        {
+          "path": "wg8/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst value = JSON.parse(fs.readFileSync('wg8/out.json', 'utf8'));\nassert.deepEqual(Object.keys(value).sort(), ['choice', 'reason', 'rejected']);\nassert.equal(typeof value.choice, 'string');\nassert.ok(Array.isArray(value.rejected) && value.rejected.every((item) => typeof item === 'string'));\nassert.equal(typeof value.reason, 'string');\nconsole.log('wg8-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["delta", "alpha", "beta", "lowest verified error rate", "wg8-check-passed"],
+        "json_files": [
+          {
+            "path": "wg8/out.json",
+            "equals": {
+              "choice": "delta",
+              "rejected": ["alpha", "beta"],
+              "reason": "lowest verified error rate among approved candidates"
+            }
+          }
+        ],
+        "immutable_files": ["wg8/a.txt", "wg8/b.txt", "wg8/c.txt", "wg8/check.mjs"],
+        "commands": [
+          {
+            "program": "node",
+            "args": ["wg8/check.mjs"],
+            "stdout_contains": "wg8-check-passed"
+          }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    }
+  ]
+}
