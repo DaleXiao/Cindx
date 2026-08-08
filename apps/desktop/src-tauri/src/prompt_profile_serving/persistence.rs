@@ -186,6 +186,16 @@ pub(crate) fn publish_canonical_prompt_profile_deployment(
         .map_err(|error| error.to_string())
 }
 
+pub(crate) fn validate_canonical_prompt_profile_deployment(
+    model: &PromptEvolutionReadModel,
+    effort: &str,
+    scope: &str,
+) -> Result<(), String> {
+    PromptProfileDeploymentCatalog::new(model)
+        .build(scope.trim(), effort, model.revision)
+        .map(|_| ())
+}
+
 pub(super) fn reconcile_canonical_active_deployment_in_transaction(
     store: &mut SqliteStore,
     scope: &str,

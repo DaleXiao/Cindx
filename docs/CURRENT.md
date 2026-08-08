@@ -2,7 +2,7 @@
 
 Current application version: `0.2.24`
 
-Last code-fact review: `2026-08-06`
+Last code-fact review: `2026-08-08`
 
 This document describes the current source tree. Evaluation reports describe
 only the revision recorded in each report.
@@ -147,6 +147,18 @@ A new run currently follows this sequence:
    Semantic memory refresh and prompt evolution are background work and run only
    after a newly inserted successful terminal.
 
+`agent-application` also owns the persistable run-context policy and terminal
+commit identity. A run start stores one display prompt plus only distinct model
+or recovery variants; a user/runtime message stores only a distinct display or
+model override. Generic events retain run identity and policy metadata but do
+not copy raw objective text. Route decisions, permission checkpoints, recovery
+records, and prompt-profile selection explicitly own the bounded objective
+snapshot they require. The desktop crate supplies SQLite and Tauri adapters to
+these contracts rather than defining a second lifecycle or persistence policy.
+Startup recovery reconstructs the effective objective first and then inserts
+that snapshot through the same explicit objective-owner contract; generic
+context merging never restores or duplicates raw prompt fields implicitly.
+
 Within an active epoch, `PreparedTaskState` is the typed source for the effective
 objective, steer/contract epochs, and completion intent; `AgentTaskContract`
 owns the resulting obligations and evidence. Runtime checkpoints use the
@@ -274,6 +286,18 @@ loops from unlocking the maximum Auto or Pro budget.
   but no longer affect ranking. Semantic curation is reserved for workflow,
   workspace-evidence, or durable-effect runs; direct self-contained text runs
   use deterministic projection.
+- Semantic curation uses one bounded, duplicate-coalescing background queue.
+  `semantic_memory_scheduler` owns validation and admission,
+  `semantic_memory_queue` owns queue identity, retry state, counters, and
+  deterministic fallback, and `semantic_memory_worker` owns only serialized
+  execution and lifecycle.
+  Admission, capacity rejection, retries, exponential backoff, exhaustion,
+  shutdown drain, generation failure, and generation panic all have explicit
+  outcomes. Rejected or failed work takes the deterministic memory projection
+  path instead of disappearing; a provider panic is isolated to that job and
+  does not terminate the worker. Exceptional queue events expose bounded
+  counters without adding writes to the healthy path or persisting model inputs
+  and outputs.
 - Workspace knowledge is separate from memory. The current retrieval adapter
   supports file indexing, provider embeddings, local file persistence, and a
   production-enabled LanceDB store.
@@ -324,6 +348,16 @@ deployment state produces a typed
 seed fallback instead of being silently confused with a disabled optimizer.
 Fast and explicitly disabled evolution remain seed-only and do not acquire the
 store merely to select that seed.
+
+Canonical observations and rollout events remain authoritative if publication
+of the compact serving projection fails. The reconciler first validates the
+desired deployment; deterministic invalid state still fails closed. A storage
+or source-race failure after canonical evidence is durable records a
+nonterminal `deployment_recovery_pending` checkpoint, keeps the prior serving
+state, pauses further mutations for that campaign, and retries authoritative
+projection recovery before learning resumes. The scientific result is neither
+discarded nor misreported as a failed evaluation because its serving cache was
+temporarily unavailable.
 
 Deployment generations are monotonic independently of the deletable evolution
 event sequence. Each key also has a durable monotonic binding to its
@@ -622,9 +656,10 @@ Therefore the current claim is:
   desktop integration layer.
 - `agent-rag` and parts of the desktop adapter remain large modules. Structure
   checks prevent some regressions but do not prove ideal boundaries.
-- `agent-application` owns the portable run/reprepare and lifecycle contracts,
-  but several use cases and all product side-effect adapters still live in the
-  desktop composition root.
+- `agent-application` owns the portable run/reprepare driver, lifecycle,
+  terminal-commit identity, persistable run-context policy, and reusable
+  loss-aware work queue. Several use cases and all product side-effect adapters
+  still live in the desktop composition root.
 - Provider-backed real-world coverage now includes file mutation, code editing,
   browser evidence, long-horizon work, RAG/memory, and denied mutation.
   Cancellation, interruption/resume, steering, broader computer interaction,

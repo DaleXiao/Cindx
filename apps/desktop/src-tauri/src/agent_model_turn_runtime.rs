@@ -253,7 +253,7 @@ pub(crate) fn execute_agent_model_turn(
             ("turn".to_string(), runtime.turn.to_string()),
             ("model".to_string(), agent_model.to_string()),
             ("tool_count".to_string(), tools.len().to_string()),
-            ("prompt".to_string(), prompt.to_string()),
+            ("prompt_bytes".to_string(), prompt.len().to_string()),
             (
                 "context_governor_applied".to_string(),
                 context_governor.applied.to_string(),

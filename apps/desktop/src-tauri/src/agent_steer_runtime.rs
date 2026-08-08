@@ -11,6 +11,7 @@ use crate::project_session_persistence::metadata_with_context;
 use crate::queue_service::pending_queued_agent_messages;
 use crate::runtime_values::phase16_task_id;
 use crate::tool_execution::runtime_message_from_event;
+use agent_application::insert_runtime_message_display_prompt;
 #[cfg(test)]
 use agent_core::MessageRole;
 use agent_core::{Event, EventKind, Message, Metadata};
@@ -114,42 +115,42 @@ fn commit_pending_steers(
             )));
         }
 
-        let (model_prompt, metadata, created_at_ms, already_persisted) =
-            if let Some(event) = durable_event {
-                let message = runtime_message_from_event(event).ok_or_else(|| {
-                    steer_storage_error(format!(
-                        "durable steer {queue_id} could not be restored as a runtime message"
-                    ))
-                })?;
-                (message.content, message.metadata, None, true)
-            } else if let Some(queued_message) = queued_message {
-                let attachments = validate_agent_attachments(
-                    workspace_root,
-                    queued_message.payload.attachments.clone(),
-                )
-                .map_err(steer_storage_error)?;
-                let display_prompt = queued_message.payload.prompt.clone();
-                let model_prompt = prompt_with_attachments(&display_prompt, &attachments);
-                let mut metadata = [
-                    ("queue_id".to_string(), queue_id.to_string()),
-                    ("queue_mode".to_string(), "steer".to_string()),
-                    ("display_content".to_string(), display_prompt),
-                    ("model_content".to_string(), model_prompt.clone()),
-                ]
-                .into_iter()
-                .collect::<Metadata>();
-                add_attachment_metadata(&mut metadata, &attachments);
-                (
-                    model_prompt,
-                    metadata,
-                    Some(queued_message.view.created_at_ms),
-                    false,
-                )
-            } else {
-                return Err(steer_storage_error(format!(
-                    "queued steer {queue_id} disappeared before it could be applied"
-                )));
-            };
+        let (model_prompt, metadata, created_at_ms, already_persisted) = if let Some(event) =
+            durable_event
+        {
+            let message = runtime_message_from_event(event).ok_or_else(|| {
+                steer_storage_error(format!(
+                    "durable steer {queue_id} could not be restored as a runtime message"
+                ))
+            })?;
+            (message.content, message.metadata, None, true)
+        } else if let Some(queued_message) = queued_message {
+            let attachments = validate_agent_attachments(
+                workspace_root,
+                queued_message.payload.attachments.clone(),
+            )
+            .map_err(steer_storage_error)?;
+            let display_prompt = queued_message.payload.prompt.clone();
+            let model_prompt = prompt_with_attachments(&display_prompt, &attachments);
+            let mut metadata = [
+                ("queue_id".to_string(), queue_id.to_string()),
+                ("queue_mode".to_string(), "steer".to_string()),
+            ]
+            .into_iter()
+            .collect::<Metadata>();
+            insert_runtime_message_display_prompt(&mut metadata, &display_prompt, &model_prompt);
+            add_attachment_metadata(&mut metadata, &attachments);
+            (
+                model_prompt,
+                metadata,
+                Some(queued_message.view.created_at_ms),
+                false,
+            )
+        } else {
+            return Err(steer_storage_error(format!(
+                "queued steer {queue_id} disappeared before it could be applied"
+            )));
+        };
 
         let mut steer_context = run_context.clone();
         steer_context.insert("steer_epoch".to_string(), pending_steer.epoch.to_string());

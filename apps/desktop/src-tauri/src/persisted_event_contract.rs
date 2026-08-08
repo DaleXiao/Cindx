@@ -186,6 +186,27 @@ mod tests {
     }
 
     #[test]
+    fn generic_desktop_events_keep_run_identity_without_copying_objective_text() {
+        let context = [
+            ("agent_run_id".to_string(), "run-a".to_string()),
+            (
+                "effective_prompt_objective".to_string(),
+                "inspect the workspace".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let metadata = metadata_with_context(Metadata::new(), &context);
+
+        assert_eq!(
+            metadata.get("agent_run_id").map(String::as_str),
+            Some("run-a")
+        );
+        assert!(!metadata.contains_key("effective_prompt_objective"));
+    }
+
+    #[test]
     fn queue_tag_wins_over_lifecycle_like_summary() {
         let metadata = [("queue_action".to_string(), "delete".to_string())]
             .into_iter()

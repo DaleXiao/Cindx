@@ -40,6 +40,32 @@ pub(crate) struct PromptEvolutionEvaluation {
     pub(crate) mutation_trajectories: Vec<AgentEvaluationReflectionPacket>,
 }
 
+pub(crate) struct PromptEvolutionReconciliation {
+    pub(crate) evaluation: PromptEvolutionEvaluation,
+    pub(crate) deployment_recovery_error: Option<String>,
+}
+
+pub(crate) struct PromptPairwiseEvaluationOutcome {
+    pub(crate) progressed: bool,
+    pub(crate) deployment_recovery_error: Option<String>,
+}
+
+impl PromptPairwiseEvaluationOutcome {
+    pub(crate) fn no_work() -> Self {
+        Self {
+            progressed: false,
+            deployment_recovery_error: None,
+        }
+    }
+
+    pub(crate) fn progressed(deployment_recovery_error: Option<String>) -> Self {
+        Self {
+            progressed: true,
+            deployment_recovery_error,
+        }
+    }
+}
+
 pub(crate) fn prompt_evaluation_inflight() -> &'static ExclusiveKeyRegistry {
     PROMPT_EVALUATIONS_INFLIGHT
         .get_or_init(|| ExclusiveKeyRegistry::new("prompt evaluation inflight"))

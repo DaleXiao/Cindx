@@ -22,7 +22,7 @@ pub(crate) use model::{
 pub(crate) use persistence::{
     active_prompt_profile_deployment_lineage,
     delete_prompt_profile_deployments_for_scope_in_transaction,
-    publish_canonical_prompt_profile_deployment,
+    publish_canonical_prompt_profile_deployment, validate_canonical_prompt_profile_deployment,
 };
 #[cfg(test)]
 pub(crate) use persistence::{

@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+use crate::process_time::absolute_time_to_nanos;
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
 
 #[cfg(target_os = "macos")]
@@ -77,7 +79,7 @@ pub(crate) fn process_group_cpu_nanos(group_id: u32) -> Option<u64> {
                 .saturating_add(usage.child_system_time);
         }
     }
-    observed.then_some(total)
+    observed.then(|| absolute_time_to_nanos(total)).flatten()
 }
 
 #[cfg(not(target_os = "macos"))]

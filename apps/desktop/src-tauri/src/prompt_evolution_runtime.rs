@@ -363,7 +363,7 @@ pub(crate) fn reconcile_prompt_evolution_for_background(
     effort: &str,
     evidence_scope: &str,
     run_context: &Metadata,
-) -> Result<PromptEvolutionEvaluation, String> {
+) -> Result<crate::prompt_evolution_models::PromptEvolutionReconciliation, String> {
     let model = load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
     let mut scoped_model = prompt_evolution_read_model_for_scope(&model, evidence_scope);
     let evaluation = evaluate_prompt_evolution_read_model(&scoped_model, effort)?;
@@ -388,18 +388,31 @@ pub(crate) fn reconcile_prompt_evolution_for_background(
             load_prompt_evolution_read_model(store).map_err(|error| error.to_string())?;
         scoped_model = prompt_evolution_read_model_for_scope(&canonical, evidence_scope);
     }
-    if rollout_changed || active_lineage.is_none() {
-        let published = crate::prompt_profile_serving::publish_canonical_prompt_profile_deployment(
-            store,
+    let deployment_recovery_error = if rollout_changed || active_lineage.is_none() {
+        crate::prompt_profile_serving::validate_canonical_prompt_profile_deployment(
             &scoped_model,
             effort,
             evidence_scope,
         )?;
-        if !published {
-            return Err("prompt profile canonical publication source drifted".to_string());
+        match crate::prompt_profile_serving::publish_canonical_prompt_profile_deployment(
+            store,
+            &scoped_model,
+            effort,
+            evidence_scope,
+        ) {
+            Ok(true) => None,
+            Ok(false) => Some("prompt profile canonical publication source drifted".to_string()),
+            Err(error) => Some(error),
         }
-    }
-    Ok(evaluation)
+    } else {
+        None
+    };
+    Ok(
+        crate::prompt_evolution_models::PromptEvolutionReconciliation {
+            evaluation,
+            deployment_recovery_error,
+        },
+    )
 }
 
 fn append_prompt_rollout_update(
@@ -558,6 +571,62 @@ mod prompt_rollout_persistence_tests {
             serde_json::to_value(incrementally_loaded).expect("snapshot should serialize"),
             serde_json::to_value(replayed).expect("replay should serialize")
         );
+    }
+
+    #[test]
+    fn deployment_write_failure_preserves_learning_and_recovers_serving() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let scope = "project-deployment-recovery";
+        let run_context = [("project_id".to_string(), scope.to_string())]
+            .into_iter()
+            .collect::<Metadata>();
+        store
+            .execute_batch_for_testing(
+                "
+                create trigger fail_prompt_profile_deployment
+                before insert on read_models
+                when new.namespace = 'cindx.prompt-profile-deployment.v1'
+                begin
+                  select raise(abort, 'injected prompt deployment failure');
+                end;
+                ",
+            )
+            .expect("failure trigger should install");
+
+        let reconciled =
+            reconcile_prompt_evolution_for_background(&mut store, "auto", scope, &run_context)
+                .expect("scientific reconciliation should survive a serving write failure");
+        assert!(reconciled.deployment_recovery_error.is_some());
+        let canonical =
+            load_prompt_evolution_read_model(&mut store).expect("canonical model should persist");
+        assert!(prompt_evolution_read_model_for_scope(&canonical, scope)
+            .rollouts
+            .contains_key("auto"));
+        assert!(store
+            .load_read_model(
+                crate::prompt_profile_serving::PROMPT_PROFILE_DEPLOYMENT_NAMESPACE,
+                &crate::prompt_profile_serving::prompt_profile_deployment_key(scope, "auto"),
+            )
+            .expect("deployment lookup should succeed")
+            .is_none());
+
+        store
+            .execute_batch_for_testing("drop trigger fail_prompt_profile_deployment;")
+            .expect("failure trigger should uninstall");
+        assert_eq!(
+            crate::prompt_profile_serving::recover_prompt_profile_deployments(
+                &mut store, &canonical,
+            )
+            .expect("serving should recover from the canonical model"),
+            1
+        );
+        assert!(store
+            .load_read_model(
+                crate::prompt_profile_serving::PROMPT_PROFILE_DEPLOYMENT_NAMESPACE,
+                &crate::prompt_profile_serving::prompt_profile_deployment_key(scope, "auto"),
+            )
+            .expect("deployment lookup should succeed")
+            .is_some());
     }
 }
 
