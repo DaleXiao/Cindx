@@ -532,6 +532,9 @@ below the desktop integration boundary. The reviewer remains treatment-blind;
 the GEPA selector receives the exact exercised candidate and may only promote
 or reject it. Reject stops before holdout, and promotion still requires the
 existing paired train/holdout gate.
+Assignment and execution are distinct receipts: an assigned but unexercised or
+fallback Finalizer contributes no execution receipt, while any claimed execution
+must still prove its non-fallback request and delivery lineage exactly.
 
 The Pro evolution path can learn from qualified Auto outcomes without coupling
 the two foreground runtimes:
