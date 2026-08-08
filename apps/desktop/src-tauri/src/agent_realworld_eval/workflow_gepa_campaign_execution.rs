@@ -2,6 +2,7 @@ use super::execution::{execute_case, CaseExecutionInput};
 use super::workflow_gepa_campaign_contract::{
     CampaignSplit, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
 };
+use super::workflow_gepa_campaign_journal::CampaignJournal;
 use super::{
     materialize_case, ExecutionCell, RawRun, RealworldCase, RealworldSuite, Treatment,
 };
@@ -11,6 +12,7 @@ use crate::prompt_learning_runtime::{
     prompt_evaluation_parent_budget, prompt_workspace_content_sha256,
 };
 use agent_runtime::AgentRunControl;
+use agent_runtime::RunBudget;
 use orchestrator::{sha256_hex, FrozenPromptProfileSnapshot};
 use std::ffi::OsString;
 use std::path::Path;
@@ -107,6 +109,7 @@ pub(super) fn execute_product_pair(
     snapshot_path: &Path,
     snapshot_artifact_sha256: &str,
     snapshot: &FrozenPromptProfileSnapshot,
+    journal: &mut CampaignJournal,
 ) -> Result<ProductPairReceipt, String> {
     if comparison_scope.is_empty()
         || !comparison_scope
@@ -153,8 +156,11 @@ pub(super) fn execute_product_pair(
         replicate,
         &format!("{comparison_scope}-candidate"),
     );
-    let run_seed = |index: usize, position: usize| {
-        execute_campaign_case(
+    let run_seed = |index: usize,
+                    position: usize,
+                    journal: &mut CampaignJournal|
+     -> Result<(RawRun, ProductRunReceipt), String> {
+        execute_journaled_campaign_case(
             app,
             state,
             provider,
@@ -168,12 +174,18 @@ pub(super) fn execute_product_pair(
             None,
             Treatment::Pro,
             &seed_scope,
+            split,
+            &format!("{}-seed", seed_scope),
+            journal,
         )
     };
-    let run_candidate = |index: usize, position: usize| {
+    let run_candidate = |index: usize,
+                         position: usize,
+                         journal: &mut CampaignJournal|
+     -> Result<(RawRun, ProductRunReceipt), String> {
         let _profile_environment =
             EvaluationProfileEnvironment::install(snapshot_path, snapshot_artifact_sha256);
-        execute_campaign_case(
+        execute_journaled_campaign_case(
             app,
             state,
             provider,
@@ -187,23 +199,24 @@ pub(super) fn execute_product_pair(
             Some(snapshot),
             Treatment::Pro,
             &candidate_scope,
+            split,
+            &format!("{}-candidate", candidate_scope),
+            journal,
         )
     };
-    let (seed, candidate) = if candidate_first {
-        let candidate = run_candidate(*execution_index, 1);
+    let (seed_receipt, candidate_receipt) = if candidate_first {
+        let (_, candidate) = run_candidate(*execution_index, 1, journal)?;
         *execution_index = execution_index.saturating_add(1);
-        let seed = run_seed(*execution_index, 2);
+        let (_, seed) = run_seed(*execution_index, 2, journal)?;
         *execution_index = execution_index.saturating_add(1);
         (seed, candidate)
     } else {
-        let seed = run_seed(*execution_index, 1);
+        let (_, seed) = run_seed(*execution_index, 1, journal)?;
         *execution_index = execution_index.saturating_add(1);
-        let candidate = run_candidate(*execution_index, 2);
+        let (_, candidate) = run_candidate(*execution_index, 2, journal)?;
         *execution_index = execution_index.saturating_add(1);
         (seed, candidate)
     };
-    let seed_receipt = ProductRunReceipt::from_run(&seed, split, replicate)?;
-    let candidate_receipt = ProductRunReceipt::from_run(&candidate, split, replicate)?;
     let evaluation_id = format!(
         "product-pair-{}",
         &sha256_hex(
@@ -223,10 +236,49 @@ pub(super) fn execute_product_pair(
         evaluation_id,
         order.to_string(),
         seed_prestate,
-        case.expected_execution_mode.clone(),
         seed_receipt,
         candidate_receipt,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_journaled_campaign_case(
+    app: &tauri::App<tauri::Wry>,
+    state: &tauri::State<'_, AppState>,
+    provider: &ProviderConfig,
+    evaluation_database: &Path,
+    root: &Path,
+    case: &RealworldCase,
+    execution_index: usize,
+    treatment_position: usize,
+    replicate: u32,
+    plan_sha256: &str,
+    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
+    treatment: Treatment,
+    project_scope: &str,
+    split: CampaignSplit,
+    action_label: &str,
+    journal: &mut CampaignJournal,
+) -> Result<(RawRun, ProductRunReceipt), String> {
+    journal.begin_product(action_label)?;
+    let run = execute_campaign_case(
+        app,
+        state,
+        provider,
+        evaluation_database,
+        root,
+        case,
+        execution_index,
+        treatment_position,
+        replicate,
+        plan_sha256,
+        frozen_profile,
+        treatment,
+        project_scope,
+    );
+    let receipt = ProductRunReceipt::from_run(&run, split, replicate)?;
+    journal.complete_product(&receipt)?;
+    Ok((run, receipt))
 }
 
 fn candidate_executes_first(pair_index: usize, replicate: u32) -> bool {
@@ -267,8 +319,35 @@ pub(super) fn execute_campaign_case(
             execution: &execution,
             frozen_profile,
             project_scope: Some(project_scope),
+            run_budget: Some(workflow_gepa_product_budget()),
         },
     )
+}
+
+pub(super) fn workflow_gepa_product_budget() -> RunBudget {
+    let mut budget = RunBudget::for_effort("fast");
+    budget.max_duration = std::time::Duration::from_secs(10 * 60);
+    budget.initial_model_calls = 12;
+    budget.max_model_calls = 20;
+    budget.model_calls_per_extension = 4;
+    budget.initial_tool_calls = 24;
+    budget.max_tool_calls = 48;
+    budget.tool_calls_per_extension = 8;
+    budget.initial_agent_turns = 12;
+    budget.max_agent_turns = 20;
+    budget.agent_turns_per_extension = 4;
+    budget.max_repair_attempts = 3;
+    budget.terminal_model_call_reserve = 3;
+    budget.terminal_time_reserve = std::time::Duration::from_secs(3 * 60);
+    budget.max_physical_model_attempts = 80;
+    budget.max_total_tokens = 80_u64.saturating_mul(
+        agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
+    );
+    budget.terminal_physical_model_attempt_reserve = 12;
+    budget.terminal_token_reserve = 12_u64.saturating_mul(
+        agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
+    );
+    budget
 }
 
 pub(super) fn campaign_workspace_sha256(root: &Path) -> Result<String, String> {
@@ -348,11 +427,24 @@ mod tests {
     fn campaign_preflights_every_matched_case_before_provider_work() {
         let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v6.json"
+            "/../../../benchmarks/agent/workflow-gepa-v7.json"
         )))
         .unwrap();
         let root = tempfile::tempdir().unwrap();
 
         preflight_matched_workspaces(root.path(), &suite).unwrap();
+    }
+
+    #[test]
+    fn campaign_product_budget_is_bounded_below_shipping_pro() {
+        let campaign = workflow_gepa_product_budget();
+        let shipping_pro = RunBudget::for_effort("pro");
+
+        assert_eq!(campaign.max_model_calls, 20);
+        assert_eq!(campaign.max_tool_calls, 48);
+        assert_eq!(campaign.max_physical_model_attempts, 80);
+        assert!(campaign.max_duration < shipping_pro.max_duration);
+        assert!(campaign.max_model_calls < shipping_pro.max_model_calls);
+        assert!(campaign.max_tool_calls < shipping_pro.max_tool_calls);
     }
 }

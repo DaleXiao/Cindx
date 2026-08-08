@@ -8,11 +8,12 @@ use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment}
 use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::{
-    begin_agent_run_control_for_effort, phase16_task_id, resolve_agent_permission_blocking,
-    retry_agent_task_blocking, run_agent_task_blocking_inner_with_evaluation_constraints,
-    AgentState, AgentTaskInput, AppState, EventKind, FrozenPromptProfileSnapshot,
-    SessionActionInput,
+    begin_agent_run_control_for_effort, begin_agent_run_control_with_budget, phase16_task_id,
+    resolve_agent_permission_blocking, retry_agent_task_blocking,
+    run_agent_task_blocking_inner_with_evaluation_constraints, AgentState, AgentTaskInput,
+    AppState, EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
 };
+use agent_runtime::RunBudget;
 use std::path::Path;
 
 const MAX_DRIVER_ROUNDS: usize = 24;
@@ -24,6 +25,7 @@ pub(super) fn run_product_task(
     prompt: &str,
     treatment: Treatment,
     permission_policy: PermissionPolicy,
+    run_budget: Option<RunBudget>,
 ) -> ProductRun {
     let effort = treatment
         .product_effort()
@@ -41,7 +43,11 @@ pub(super) fn run_product_task(
         _ => AgentMemoryEvaluationConstraint::Native,
     };
     let initial = (|| -> Result<AgentState, String> {
-        let lease = begin_agent_run_control_for_effort(state, session_id, effort, None)?;
+        let lease = if let Some(budget) = run_budget {
+            begin_agent_run_control_with_budget(state, session_id, budget)?
+        } else {
+            begin_agent_run_control_for_effort(state, session_id, effort, None)?
+        };
         let control = lease.control();
         let result = run_agent_task_blocking_inner_with_evaluation_constraints(
             app,
@@ -176,6 +182,7 @@ pub(super) fn collect_event_metrics(
     frozen_profile: Option<&FrozenPromptProfileSnapshot>,
     sequence_floor: u64,
     workspace_root: &Path,
+    run_budget: Option<RunBudget>,
 ) -> Result<EventMetrics, String> {
     let events = {
         let store = state
@@ -273,7 +280,7 @@ pub(super) fn collect_event_metrics(
             metrics.model_responses
         ));
     }
-    match resolved_budget_from_events(&events, treatment) {
+    match resolved_budget_from_events(&events, treatment, run_budget) {
         Ok(receipt) => metrics.resolved_budget = Some(receipt),
         Err(error) => metrics.evidence_errors.push(error),
     }

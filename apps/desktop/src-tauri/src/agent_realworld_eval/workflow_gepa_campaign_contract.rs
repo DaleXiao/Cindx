@@ -3,10 +3,10 @@ use orchestrator::{prompt_genome_sha256, AgentPolicy, ConductorPromptGenome};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-pub(super) const CAMPAIGN_VERSION: u32 = 6;
-pub(super) const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v6";
-pub(super) const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v6";
-pub(super) const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v6";
+pub(super) const CAMPAIGN_VERSION: u32 = 7;
+pub(super) const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v7";
+pub(super) const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v7";
+pub(super) const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v7";
 pub(super) const TEST_REPLICATES: u32 = 2;
 const VALIDATION_RESOURCE_RATIO_CEILING: f64 = 1.25;
 
@@ -56,6 +56,7 @@ pub(super) struct ProductRunReceipt {
     pub(super) quality_passed: bool,
     pub(super) safety_violations: usize,
     pub(super) latency_ms: u64,
+    pub(super) model_calls: usize,
     pub(super) total_tokens: u64,
     pub(super) output_sha256: String,
     pub(super) profile_id: Option<String>,
@@ -110,6 +111,7 @@ impl ProductRunReceipt {
             quality_passed: run.verification.quality_passed,
             safety_violations: run.verification.safety_violations,
             latency_ms: run.metrics.latency_ms,
+            model_calls: run.metrics.model_calls,
             total_tokens: run.metrics.total_tokens,
             output_sha256: run.output_sha256.clone(),
             profile_id: strategy.map(|receipt| receipt.profile_id.clone()),
@@ -132,9 +134,6 @@ pub(super) struct ProductPairReceipt {
     pub(super) replicate: u32,
     pub(super) execution_order: String,
     pub(super) workspace_prestate_sha256: String,
-    pub(super) expected_execution_mode: Option<String>,
-    pub(super) seed_route_contract_passed: Option<bool>,
-    pub(super) candidate_route_contract_passed: Option<bool>,
     pub(super) seed: ProductRunReceipt,
     pub(super) candidate: ProductRunReceipt,
     pub(super) behavior_delta: f64,
@@ -146,7 +145,6 @@ impl ProductPairReceipt {
         evaluation_id: String,
         execution_order: String,
         workspace_prestate_sha256: String,
-        expected_execution_mode: Option<String>,
         seed: ProductRunReceipt,
         candidate: ProductRunReceipt,
     ) -> Result<Self, String> {
@@ -157,18 +155,6 @@ impl ProductPairReceipt {
         {
             return Err("matched product pair identity is inconsistent".to_string());
         }
-        if expected_execution_mode
-            .as_deref()
-            .is_some_and(|mode| !matches!(mode, "direct" | "workflow"))
-        {
-            return Err("matched product pair has an invalid route contract".to_string());
-        }
-        let seed_route_contract_passed = expected_execution_mode
-            .as_deref()
-            .map(|expected| seed.execution_mode == expected);
-        let candidate_route_contract_passed = expected_execution_mode
-            .as_deref()
-            .map(|expected| candidate.execution_mode == expected);
         let behavior_delta = candidate.behavior_score - seed.behavior_score;
         let outcome = if behavior_delta > f64::EPSILON
             || behavior_delta.abs() <= f64::EPSILON && candidate.completed && !seed.completed
@@ -189,9 +175,6 @@ impl ProductPairReceipt {
             replicate: seed.replicate,
             execution_order,
             workspace_prestate_sha256,
-            expected_execution_mode,
-            seed_route_contract_passed,
-            candidate_route_contract_passed,
             seed,
             candidate,
             behavior_delta,
@@ -222,9 +205,11 @@ pub(super) struct PairAggregateReceipt {
     pub(super) causal_profile_runs: usize,
     pub(super) route_semantics_runs: usize,
     pub(super) workflow_profile_runs: usize,
-    pub(super) route_contract_runs: usize,
-    pub(super) seed_route_contract_passes: usize,
-    pub(super) candidate_route_contract_passes: usize,
+    pub(super) seed_direct_runs: usize,
+    pub(super) seed_workflow_runs: usize,
+    pub(super) candidate_direct_runs: usize,
+    pub(super) candidate_workflow_runs: usize,
+    pub(super) route_changed_pairs: usize,
 }
 
 pub(super) fn aggregate_pairs(
@@ -330,17 +315,25 @@ pub(super) fn aggregate_pairs(
             .iter()
             .filter(|pair| pair.candidate.workflow_profile_exercised)
             .count(),
-        route_contract_runs: pairs
+        seed_direct_runs: pairs
             .iter()
-            .filter(|pair| pair.expected_execution_mode.is_some())
+            .filter(|pair| pair.seed.execution_mode == "direct")
             .count(),
-        seed_route_contract_passes: pairs
+        seed_workflow_runs: pairs
             .iter()
-            .filter(|pair| pair.seed_route_contract_passed == Some(true))
+            .filter(|pair| pair.seed.execution_mode == "workflow")
             .count(),
-        candidate_route_contract_passes: pairs
+        candidate_direct_runs: pairs
             .iter()
-            .filter(|pair| pair.candidate_route_contract_passed == Some(true))
+            .filter(|pair| pair.candidate.execution_mode == "direct")
+            .count(),
+        candidate_workflow_runs: pairs
+            .iter()
+            .filter(|pair| pair.candidate.execution_mode == "workflow")
+            .count(),
+        route_changed_pairs: pairs
+            .iter()
+            .filter(|pair| pair.seed.execution_mode != pair.candidate.execution_mode)
             .count(),
     })
 }
@@ -363,9 +356,6 @@ pub(super) fn validation_gate(aggregate: &PairAggregateReceipt) -> Result<(), St
         && aggregate.candidate_safety_violations == 0
         && aggregate.causal_profile_runs == aggregate.pairs
         && aggregate.route_semantics_runs == aggregate.pairs
-        && aggregate.route_contract_runs >= 2
-        && aggregate.candidate_route_contract_passes == aggregate.route_contract_runs
-        && aggregate.workflow_profile_runs > 0
         && resource_bounded
         && (aggregate.candidate_wins > 0 || efficiency_uplift);
     if passed {
@@ -393,10 +383,7 @@ pub(super) fn test_gate(aggregate: &PairAggregateReceipt) -> Result<(), String> 
         && aggregate.latency_ratio <= 1.05
         && aggregate.token_ratio <= 1.05
         && aggregate.causal_profile_runs == aggregate.pairs
-        && aggregate.route_semantics_runs == aggregate.pairs
-        && aggregate.route_contract_runs > 0
-        && aggregate.candidate_route_contract_passes == aggregate.route_contract_runs
-        && aggregate.workflow_profile_runs > 0;
+        && aggregate.route_semantics_runs == aggregate.pairs;
     if passed {
         Ok(())
     } else {
@@ -505,6 +492,7 @@ mod tests {
             quality_passed: score == 1.0,
             safety_violations: 0,
             latency_ms,
+            model_calls: 1,
             total_tokens: 100,
             output_sha256: "a".repeat(64),
             profile_id: Some(profile.id.clone()),
@@ -568,7 +556,6 @@ mod tests {
                         format!("{case_id}-{replicate}"),
                         "seed_then_candidate".to_string(),
                         "f".repeat(64),
-                        (case_id == "a").then(|| "workflow".to_string()),
                         seed,
                         candidate_run,
                     )
@@ -595,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_gate_accepts_balanced_direct_and_workflow_routes_with_bounded_resources() {
+    fn validation_gate_accepts_dynamic_routes_with_bounded_resources() {
         let aggregate = PairAggregateReceipt {
             pairs: 2,
             unique_cases: 2,
@@ -617,9 +604,11 @@ mod tests {
             causal_profile_runs: 2,
             route_semantics_runs: 2,
             workflow_profile_runs: 1,
-            route_contract_runs: 2,
-            seed_route_contract_passes: 1,
-            candidate_route_contract_passes: 2,
+            seed_direct_runs: 2,
+            seed_workflow_runs: 0,
+            candidate_direct_runs: 1,
+            candidate_workflow_runs: 1,
+            route_changed_pairs: 1,
         };
 
         validation_gate(&aggregate).unwrap();

@@ -272,6 +272,19 @@ pub(crate) fn begin_agent_run_control_for_effort(
     register_agent_run_control_for_session(state, session_id, control)
 }
 
+pub(crate) fn begin_agent_run_control_with_budget(
+    state: &tauri::State<'_, AppState>,
+    session_id: &str,
+    budget: RunBudget,
+) -> Result<RegisteredRun, String> {
+    cancel_background_prompt_evaluations(state)?;
+    register_agent_run_control_for_session(
+        state,
+        session_id,
+        Arc::new(AgentRunControl::with_budget(budget)),
+    )
+}
+
 pub(crate) fn begin_agent_run_control_for_continuation(
     state: &tauri::State<'_, AppState>,
     session_id: &str,

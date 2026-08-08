@@ -33,6 +33,7 @@ pub(super) struct CaseExecutionInput<'a> {
     pub(super) execution: &'a ExecutionCell,
     pub(super) frozen_profile: Option<&'a FrozenPromptProfileSnapshot>,
     pub(super) project_scope: Option<&'a str>,
+    pub(super) run_budget: Option<RunBudget>,
 }
 
 pub(super) fn execute_case(
@@ -50,6 +51,7 @@ pub(super) fn execute_case(
         execution,
         frozen_profile,
         project_scope,
+        run_budget,
     } = input;
     let input_sha256 = case_input_sha256(case);
     let started = Instant::now();
@@ -365,6 +367,7 @@ pub(super) fn execute_case(
         &objective,
         treatment,
         case.permission_policy,
+        run_budget,
     );
     let output = product.state.latest_answer.clone().unwrap_or_default();
     let mut event_metrics = match collect_event_metrics(
@@ -374,6 +377,7 @@ pub(super) fn execute_case(
         frozen_profile,
         sequence_floor,
         root,
+        run_budget,
     ) {
         Ok(metrics) => metrics,
         Err(error) => EventMetrics {
@@ -424,7 +428,11 @@ pub(super) fn execute_case(
         setup_failure: None,
         resolved_budget: event_metrics
             .resolved_budget
-            .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment)),
+            .unwrap_or_else(|| {
+                run_budget
+                    .map(ResolvedBudgetReceipt::from_budget)
+                    .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment))
+            }),
         strategy_receipt: event_metrics.strategy_receipt,
         memory_evaluation_receipt: event_metrics.memory_evaluation_receipt,
         model_receipts: event_metrics.model_receipts,

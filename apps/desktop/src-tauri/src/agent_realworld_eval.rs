@@ -37,6 +37,7 @@ mod workflow_gepa_candidate_search;
 mod workflow_gepa_campaign_contract;
 mod workflow_gepa_campaign_evidence;
 mod workflow_gepa_campaign_execution;
+mod workflow_gepa_campaign_journal;
 mod workflow_gepa_campaign_suite;
 
 use execution::{execute_case, CaseExecutionInput};
@@ -478,6 +479,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                         execution: &execution,
                         frozen_profile: frozen_profile.as_ref(),
                         project_scope: None,
+                        run_budget: None,
                     },
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;
