@@ -309,15 +309,15 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     current_profile: &ConductorPromptGenome,
     pro_teacher_snapshot: Option<&FrozenPromptProfileSnapshot>,
     control: &Arc<AgentRunControl>,
-) -> Result<bool, String> {
+) -> Result<PromptPairwiseEvaluationOutcome, String> {
     if control.should_stop() {
         return Err(MODEL_REQUEST_CANCELLED.to_string());
     }
     if worker_models.is_empty() {
-        return Ok(false);
+        return Ok(PromptPairwiseEvaluationOutcome::no_work());
     }
     let Some(project_id) = run_context.get("project_id") else {
-        return Ok(false);
+        return Ok(PromptPairwiseEvaluationOutcome::no_work());
     };
     let workspace_root = run_context
         .get("project_root")
@@ -393,7 +393,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 None,
             )?;
         }
-        return Ok(false);
+        return Ok(PromptPairwiseEvaluationOutcome::no_work());
     }
     let distillation = pro_teacher_snapshot
         .map(|snapshot| {
@@ -437,7 +437,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 &evaluation.mutation_trajectories,
                 control,
             )? {
-                return Ok(true);
+                return Ok(PromptPairwiseEvaluationOutcome::progressed(None));
             }
         }
     }
@@ -454,7 +454,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             )
         })
     else {
-        return Ok(false);
+        return Ok(PromptPairwiseEvaluationOutcome::no_work());
     };
     let (current_counts, challenger_counts) = if let Some(distillation) = distillation.as_ref() {
         let counts = crate::prompt_distillation_runtime::prompt_distillation_evidence_counts(
@@ -538,7 +538,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
         .as_ref()
         .is_some_and(PromptProposalMinibatchDecision::is_rejected)
     {
-        return Ok(false);
+        return Ok(PromptPairwiseEvaluationOutcome::no_work());
     }
     let minibatch_pending = proposal_gate
         .as_ref()
@@ -559,7 +559,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             .filter(|observation| observation.mode == PromptEvaluationMode::Live)
             .count();
         if live_observations == 0 || live_observations % PROMPT_EVOLUTION_SHADOW_INTERVAL != 0 {
-            return Ok(false);
+            return Ok(PromptPairwiseEvaluationOutcome::no_work());
         }
         PromptEvaluationSplit::Train
     };
@@ -620,7 +620,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 .flatten()
         });
     let Some(selected_case) = selected_case else {
-        return Ok(false);
+        return Ok(PromptPairwiseEvaluationOutcome::no_work());
     };
     let auto_teacher = (effort == "pro")
         .then(|| {
@@ -637,7 +637,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
     let (evaluation_worker_models, reserved_evaluator_models) =
         prompt_evaluation_model_partition(config, worker_models, &excluded_reviewer_models);
     if reserved_evaluator_models.is_empty() {
-        return Ok(false);
+        return Ok(PromptPairwiseEvaluationOutcome::no_work());
     }
     if distillation.is_none() {
         append_prompt_offline_dataset_snapshot(
@@ -867,7 +867,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             "treatment_execution_failed",
         )?;
         if distillation.is_some() {
-            return Ok(false);
+            return Ok(PromptPairwiseEvaluationOutcome::no_work());
         }
     }
     let participant_models = prompt_candidate_models([candidate_a, candidate_b]);
@@ -1152,7 +1152,7 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
             [candidate_a, candidate_b],
         )?;
     }
-    let next_evaluation =
+    let reconciliation =
         crate::prompt_evolution_store_runtime::with_prompt_evolution_store(state, |store| {
             crate::prompt_evolution_runtime::reconcile_prompt_evolution_for_background(
                 store,
@@ -1161,8 +1161,8 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                 run_context,
             )
         })?;
-    if distillation.is_none() {
-        if let Some(parent) = next_evaluation.mutation_parent.as_ref() {
+    if distillation.is_none() && reconciliation.deployment_recovery_error.is_none() {
+        if let Some(parent) = reconciliation.evaluation.mutation_parent.as_ref() {
             if attempted_mutation_parent.as_deref() != Some(parent.id.as_str()) {
                 let _ = generate_background_prompt_mutation(
                     state,
@@ -1171,13 +1171,15 @@ pub(crate) fn run_background_prompt_pairwise_evaluation(
                     run_context,
                     effort,
                     parent,
-                    &next_evaluation.mutation_trajectories,
+                    &reconciliation.evaluation.mutation_trajectories,
                     control,
                 )?;
             }
         }
     }
-    Ok(true)
+    Ok(PromptPairwiseEvaluationOutcome::progressed(
+        reconciliation.deployment_recovery_error,
+    ))
 }
 
 #[cfg(test)]

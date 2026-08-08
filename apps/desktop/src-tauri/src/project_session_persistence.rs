@@ -9,8 +9,11 @@ use crate::{
     session_projection::load_agent_session_read_model_snapshot,
     view_models::{ProjectSessionState, ProjectView, SessionView},
 };
-use agent_application::{project_session_lifecycle, SessionLifecycleInput, SessionTitleState};
-use agent_core::{Event, Metadata, EVENT_TYPE_METADATA_KEY};
+use agent_application::{
+    merge_persistable_run_context, project_session_lifecycle, SessionLifecycleInput,
+    SessionTitleState,
+};
+use agent_core::{Event, Metadata};
 use agent_storage::{SqliteStore, StorageError};
 
 pub(crate) fn project_session_state(
@@ -279,14 +282,8 @@ pub(crate) fn project_session_metadata(config: &ProjectSessionConfig) -> Metadat
     metadata
 }
 
-pub(crate) fn metadata_with_context(mut metadata: Metadata, context: &Metadata) -> Metadata {
-    for (key, value) in context {
-        if key == EVENT_TYPE_METADATA_KEY {
-            continue;
-        }
-        metadata.entry(key.clone()).or_insert_with(|| value.clone());
-    }
-    metadata
+pub(crate) fn metadata_with_context(metadata: Metadata, context: &Metadata) -> Metadata {
+    merge_persistable_run_context(metadata, context)
 }
 
 pub(crate) fn agent_run_context_from_events(events: &[Event]) -> AgentRunContext {

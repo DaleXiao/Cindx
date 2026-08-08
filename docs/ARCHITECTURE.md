@@ -92,7 +92,7 @@ stored as a second trajectory blob.
 | `tools` | Built-in tool specifications, validation, local/delegated execution contracts, workspace exact-patch publication, bounded query cursors, managed process sessions, and model observations | Permission decisions or UI |
 | `agent-mcp` | MCP transports, catalog cache, and tool adaptation | Permission bypass or agent policy |
 | `agent-skills` | Skill discovery, trust, selection, and loading | Privileged script execution |
-| `agent-application` | Run/reprepare driver, typed run lifecycle, application projections, and session-level contracts | Provider construction, Tauri state, persistence, or tool side effects |
+| `agent-application` | Run/reprepare driver, typed run lifecycle, terminal-commit identity, persistable run-context policy, bounded loss-aware background queue, application projections, and session-level contracts | Provider construction, Tauri state, SQLite implementation, or tool side effects |
 | `orchestrator-eval` | Non-shipping benchmark and evaluation harnesses | Product runtime behavior |
 
 The root workspace excludes `orchestrator-eval` from default members so the
@@ -403,6 +403,20 @@ requirements. Completed self-contained direct text-only runs still refresh
 deterministic memory state but do not spend a second model call on semantic
 curation.
 
+Semantic curation is scheduled through the application layer's bounded
+loss-aware queue. The desktop adapter supplies provider, Tauri, SQLite, and
+deterministic-fallback effects. Its ingress adapter is
+`semantic_memory_scheduler`, its retry/ledger/metrics adapter is
+`semantic_memory_queue`, and `semantic_memory_worker` owns only serialized job
+execution and shutdown. Queue identity is project/session/physical-run
+scoped; duplicate work coalesces, capacity and spawn failures fail over
+immediately, provider cancellation receives bounded exponential retry, and
+shutdown drains pending jobs. A panic inside one generation attempt is caught
+while its claimed payload is still owned, recorded, completed in the queue
+ledger, and projected deterministically so the worker can continue. Healthy
+enqueue/completion adds no event-store write; retry and exceptional outcomes
+persist bounded metrics.
+
 The existing `agent-runtime::context_governor` is also the request Context
 Compiler; there is no second transcript or fact store. Its
 `context_compiler` child owns only optional-source relevance ranking and the
@@ -443,6 +457,15 @@ outbox dispatch, provider workers, or rollout writes. A deployment carries only
 the validated stable/canary genomes and fingerprints, canary stage, status, and
 source revision; canonical events and the full evolution projection remain the
 recovery and audit authority.
+
+Scientific reconciliation and serving publication have separate outcomes.
+After observations and a canonical rollout event commit, a failed compact
+deployment write cannot retroactively fail or erase that evaluation. The
+worker records a nonterminal recovery checkpoint, leaves the prior deployment
+untouched, and suspends new mutation work until authoritative startup-style
+recovery republishes the projection. Desired deployments are validated before
+publication errors become recoverable, so invalid canonical state still fails
+closed rather than entering the retry path.
 
 The deployment row has its own monotonic generation, a per-key canonical-content
 binding epoch, and a durable per-scope fence. The binding hashes only the
@@ -645,6 +668,13 @@ that layer has its own frozen matched causal evaluation.
   state.
 - User messages, lifecycle transitions, tool events, permission decisions,
   traces, and completion data are persisted as events/projections.
+- Run starts own the canonical display prompt and only distinct model/recovery
+  variants. Generic event context carries identity and policy but excludes raw
+  objectives; the few events whose replay contracts require an objective insert
+  that snapshot explicitly. This keeps recovery compatibility without copying
+  the prompt through the complete event stream. Startup recovery reconstructs
+  the effective objective before using the same explicit owner insertion; the
+  generic context merge cannot restore objective fields.
 - Events index both immutable logical-run identity and physical-attempt
   identity. Permission rows deliberately index only the physical attempt, so a
   continuation cannot inherit an allow-once decision or effect authority merely

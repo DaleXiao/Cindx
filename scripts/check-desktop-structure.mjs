@@ -1022,6 +1022,7 @@ const toolsModuleBudgets = new Map([
   ["process_cpu.rs", 100],
   ["process_runtime.rs", 670],
   ["process_supervisor.rs", 340],
+  ["process_time.rs", 80],
   ["process_tests.rs", 740],
   ["process_tools.rs", 370],
   ["shell.rs", 950],
@@ -1145,6 +1146,7 @@ assert(
     read("crates/tools/src/lib.rs").includes("mod image_generation;") &&
     read("crates/tools/src/lib.rs").includes("mod process_runtime;") &&
     read("crates/tools/src/lib.rs").includes("mod process_supervisor;") &&
+    read("crates/tools/src/lib.rs").includes("mod process_time;") &&
     read("crates/tools/src/lib.rs").includes("mod process_tools;") &&
     read("crates/tools/src/lib.rs").includes("mod tool_contract_v2;") &&
     read("crates/tools/src/lib.rs").includes("mod web_search;") &&

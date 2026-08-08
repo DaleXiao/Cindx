@@ -1,73 +1,7 @@
 use crate::{agent_read_model::agent_state_for_session, view_models::AgentState};
-use agent_application::AgentRunEvent;
-use agent_core::{agent_run_id, Metadata, TaskId};
+use agent_application::{AgentTerminalCommitIdentity, AgentTerminalCommitState};
+use agent_core::{Metadata, TaskId};
 use agent_storage::{SqliteStore, StorageError};
-use orchestrator::sha256_hex;
-
-const AGENT_TERMINAL_COMMIT_SCHEMA: &str = "cindx.agent.terminal-commit.v1";
-const AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY: &str = "agent_terminal_commit_schema";
-const AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY: &str = "agent_terminal_commit_key";
-const AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY: &str = "agent_terminal_commit_steer_epoch";
-const AGENT_TERMINAL_COMMIT_HASH_DOMAIN: &str = "cindx.agent.terminal-commit.v1\0";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentTerminalCommitIdentity {
-    key: String,
-    agent_run_id: String,
-    steer_epoch: u64,
-}
-
-impl AgentTerminalCommitIdentity {
-    fn new(
-        task_id: &TaskId,
-        run_context: &Metadata,
-        steer_epoch: u64,
-    ) -> Result<Self, StorageError> {
-        let agent_run_id = agent_run_id(run_context)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| StorageError::new("terminal commit requires a physical agent_run_id"))?;
-        let session_id = run_context
-            .get("session_id")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let canonical = serde_json::to_vec(&(
-            AGENT_TERMINAL_COMMIT_HASH_DOMAIN,
-            task_id.0.as_str(),
-            session_id,
-            agent_run_id,
-            steer_epoch,
-        ))
-        .map_err(|error| {
-            StorageError::new(format!(
-                "failed to encode terminal commit identity: {error}"
-            ))
-        })?;
-        Ok(Self {
-            key: sha256_hex(&canonical),
-            agent_run_id: agent_run_id.to_string(),
-            steer_epoch,
-        })
-    }
-
-    pub(crate) fn metadata(&self) -> Metadata {
-        [
-            (
-                AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY.to_string(),
-                AGENT_TERMINAL_COMMIT_SCHEMA.to_string(),
-            ),
-            (
-                AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY.to_string(),
-                self.key.clone(),
-            ),
-            (
-                AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY.to_string(),
-                self.steer_epoch.to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect()
-    }
-}
 
 #[derive(Debug)]
 pub(crate) struct PersistedAgentTerminal {
@@ -85,12 +19,13 @@ pub(crate) fn persist_agent_terminal_once(
         &AgentTerminalCommitIdentity,
     ) -> Result<AgentState, StorageError>,
 ) -> Result<PersistedAgentTerminal, StorageError> {
-    let identity = AgentTerminalCommitIdentity::new(task_id, run_context, steer_epoch)?;
+    let identity = AgentTerminalCommitIdentity::new(task_id, run_context, steer_epoch)
+        .map_err(|error| StorageError::new(error.to_string()))?;
     let session_id = run_context.get("session_id").map(String::as_str);
     store.with_immediate_transaction(|store| {
-        match terminal_commit_event_count(store, task_id, &identity)? {
-            0 => {}
-            1 => {
+        match terminal_commit_state(store, task_id, &identity)? {
+            AgentTerminalCommitState::Pending => {}
+            AgentTerminalCommitState::Committed => {
                 return agent_state_for_session(store, None, session_id).map(|state| {
                     PersistedAgentTerminal {
                         state,
@@ -98,15 +33,11 @@ pub(crate) fn persist_agent_terminal_once(
                     }
                 });
             }
-            _ => {
-                return Err(StorageError::new(
-                    "terminal commit identity resolves to multiple terminal events",
-                ));
-            }
         }
 
         let state = writer(store, &identity)?;
-        if terminal_commit_event_count(store, task_id, &identity)? != 1 {
+        if terminal_commit_state(store, task_id, &identity)? != AgentTerminalCommitState::Committed
+        {
             return Err(StorageError::new(
                 "terminal writer must persist exactly one matching terminal event",
             ));
@@ -118,52 +49,22 @@ pub(crate) fn persist_agent_terminal_once(
     })
 }
 
-fn terminal_commit_event_count(
+fn terminal_commit_state(
     store: &SqliteStore,
     task_id: &TaskId,
     identity: &AgentTerminalCommitIdentity,
-) -> Result<usize, StorageError> {
+) -> Result<AgentTerminalCommitState, StorageError> {
     let events =
-        store.list_by_task_and_metadata(task_id, "agent_run_id", &identity.agent_run_id)?;
-    let mut count = 0usize;
-    for event in events.iter().filter(|event| {
-        event
-            .metadata
-            .get(AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY)
-            .map(String::as_str)
-            == Some(identity.key.as_str())
-    }) {
-        if event
-            .metadata
-            .get(AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY)
-            .map(String::as_str)
-            != Some(AGENT_TERMINAL_COMMIT_SCHEMA)
-            || event
-                .metadata
-                .get(AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY)
-                .and_then(|value| value.parse::<u64>().ok())
-                != Some(identity.steer_epoch)
-        {
-            return Err(StorageError::new(
-                "persisted terminal commit identity is malformed",
-            ));
-        }
-        let terminal = AgentRunEvent::try_from_event(event)
-            .map_err(|error| StorageError::new(error.to_string()))?
-            .is_some_and(|event| event.status().is_terminal());
-        if !terminal {
-            return Err(StorageError::new(
-                "terminal commit identity is attached to a nonterminal event",
-            ));
-        }
-        count = count.saturating_add(1);
-    }
-    Ok(count)
+        store.list_by_task_and_metadata(task_id, "agent_run_id", identity.agent_run_id())?;
+    identity
+        .inspect_events(&events)
+        .map_err(|error| StorageError::new(error.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_application::AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY;
     use crate::{
         event_persistence::{append_event, append_message_event_with_metadata},
         project_session_persistence::metadata_with_context,
@@ -341,9 +242,9 @@ mod tests {
         let identity = AgentTerminalCommitIdentity::new(&phase16_task_id(), &context, 0)
             .expect("terminal identity should be stable");
         assert_eq!(
-            terminal_commit_event_count(&store, &phase16_task_id(), &identity)
+            terminal_commit_state(&store, &phase16_task_id(), &identity)
                 .expect("retry terminal event should load"),
-            1
+            AgentTerminalCommitState::Committed
         );
     }
 

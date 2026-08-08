@@ -223,6 +223,14 @@ fn record_prompt_profile_selection(
                     "prompt_evolution_enabled".to_string(),
                     config.prompt_evolution_enabled.to_string(),
                 ),
+                (
+                    "prompt_objective".to_string(),
+                    run_context
+                        .get("effective_prompt_objective")
+                        .or_else(|| run_context.get("prompt_objective"))
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
             ]
             .into_iter()
             .collect(),

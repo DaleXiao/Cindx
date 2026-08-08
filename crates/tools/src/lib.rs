@@ -33,6 +33,7 @@ mod process_runtime;
 mod process_supervisor;
 #[cfg(test)]
 mod process_tests;
+mod process_time;
 mod process_tools;
 mod shell;
 mod shell_postcondition;

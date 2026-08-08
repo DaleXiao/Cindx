@@ -15,6 +15,10 @@ use crate::suspended_run_runtime::{
     take_suspended_agent_run, SuspendedAgentRun,
 };
 use crate::*;
+use agent_application::{
+    insert_run_objectives, insert_run_start_prompts, insert_user_message_model_prompt,
+    merge_persistable_run_context,
+};
 use agent_core::AgentRunIdentity;
 
 pub(crate) fn persisted_agent_policy_from_active_events(
@@ -193,15 +197,13 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
             .collect::<Vec<_>>();
         let artifact_manifest = artifact_manifest_message(&session_events);
         let mut start_metadata = run_context.clone();
-        start_metadata.insert("prompt".to_string(), display_prompt.clone());
-        start_metadata.insert("model_prompt".to_string(), prompt.clone());
-        start_metadata.insert("recovery_prompt".to_string(), prompt.clone());
+        insert_run_start_prompts(&mut start_metadata, &display_prompt, &prompt, &prompt);
         start_metadata.insert(
             "context_window_tokens".to_string(),
             config.context_window_tokens.to_string(),
         );
-        let mut message_metadata = run_context.clone();
-        message_metadata.insert("model_content".to_string(), prompt.clone());
+        let mut message_metadata = merge_persistable_run_context(Metadata::new(), &run_context);
+        insert_user_message_model_prompt(&mut message_metadata, &display_prompt, &prompt);
         add_attachment_metadata(&mut message_metadata, &attachments);
         store
             .with_immediate_transaction(|store| {
@@ -491,26 +493,28 @@ pub(crate) fn resume_suspended_agent_run(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let mut retry_metadata = [
+            ("continuation".to_string(), "true".to_string()),
+            (
+                "context_window_tokens".to_string(),
+                config.context_window_tokens.to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        insert_run_start_prompts(
+            &mut retry_metadata,
+            &display_prompt,
+            &prompt,
+            &recovery_prompt,
+        );
+        insert_run_objectives(&mut retry_metadata, &run_context);
         append_event(
             &mut store,
             &phase16_task_id(),
             EventKind::TaskStatusChanged,
             "Agent task retry started",
-            metadata_with_context(
-                [
-                    ("prompt".to_string(), display_prompt),
-                    ("model_prompt".to_string(), prompt.clone()),
-                    ("recovery_prompt".to_string(), recovery_prompt),
-                    ("continuation".to_string(), "true".to_string()),
-                    (
-                        "context_window_tokens".to_string(),
-                        config.context_window_tokens.to_string(),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-                &run_context,
-            ),
+            metadata_with_context(retry_metadata, &run_context),
         )
         .map_err(|error| error.to_string())?;
     }
@@ -712,9 +716,12 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
         let mut start_metadata = run_context.clone();
-        start_metadata.insert("prompt".to_string(), display_prompt.clone());
-        start_metadata.insert("model_prompt".to_string(), prompt.clone());
-        start_metadata.insert("recovery_prompt".to_string(), recovery_prompt.clone());
+        insert_run_start_prompts(
+            &mut start_metadata,
+            &display_prompt,
+            &prompt,
+            &recovery_prompt,
+        );
         start_metadata.insert(
             "context_window_tokens".to_string(),
             config.context_window_tokens.to_string(),
@@ -727,10 +734,11 @@ pub(crate) fn retry_agent_task_blocking_inner(
             start_metadata,
         )
         .map_err(|error| error.to_string())?;
-        let mut continuation_metadata = run_context.clone();
+        let mut continuation_metadata =
+            merge_persistable_run_context(Metadata::new(), &run_context);
         continuation_metadata.insert("continuation_replay".to_string(), "true".to_string());
         continuation_metadata.insert("display_content".to_string(), display_prompt.clone());
-        continuation_metadata.insert("model_content".to_string(), prompt.clone());
+        insert_user_message_model_prompt(&mut continuation_metadata, &display_prompt, &prompt);
         append_message_event_with_metadata(
             &mut store,
             &task_id,

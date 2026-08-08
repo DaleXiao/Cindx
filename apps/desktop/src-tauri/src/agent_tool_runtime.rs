@@ -2,6 +2,7 @@ use super::*;
 use crate::agent_runtime_snapshot::persist_runtime_append_and_snapshot;
 use crate::agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor;
 use crate::suspended_run_runtime::{remember_suspended_agent_run, SuspendedAgentRun};
+use agent_application::{insert_run_objectives, merge_persistable_run_context};
 
 pub(crate) enum AgentToolBatchOutcome {
     Continue,
@@ -82,7 +83,6 @@ pub(super) fn paused_agent_tools(state: AgentState) -> AgentToolBatchOutcome {
 fn evaluate_agent_tool_permission(
     store: &mut SqliteStore,
     runtime_task_id: &TaskId,
-    prompt: &str,
     run_context: &Metadata,
     session_id: Option<&str>,
     invocation: &ToolInvocation,
@@ -106,15 +106,8 @@ fn evaluate_agent_tool_permission(
         "tool_input_fingerprint".to_string(),
         tool_input_fingerprint(&invocation.tool_name, &invocation.input_json),
     );
-    request
-        .metadata
-        .insert("agent_prompt".to_string(), prompt.to_string());
-    for (key, value) in run_context {
-        request
-            .metadata
-            .entry(key.clone())
-            .or_insert_with(|| value.clone());
-    }
+    request.metadata = merge_persistable_run_context(request.metadata, run_context);
+    insert_run_objectives(&mut request.metadata, run_context);
 
     if !agent_session_permission_granted(store, &phase16_task_id(), &request, session_id)
         .map_err(|error| error.to_string())?
@@ -137,27 +130,25 @@ fn evaluate_agent_tool_permission(
         store
             .save_permission_request(request.clone(), current_time_millis())
             .map_err(|error| error.to_string())?;
+        let mut permission_metadata = [
+            ("permission_id".to_string(), request.id.0.clone()),
+            ("tool_call_id".to_string(), invocation.id.0.clone()),
+            ("tool".to_string(), request.action.clone()),
+            (
+                "risk".to_string(),
+                permission_risk_label(&request.risk).to_string(),
+            ),
+            ("scope".to_string(), request.scope.clone()),
+        ]
+        .into_iter()
+        .collect();
+        insert_run_objectives(&mut permission_metadata, run_context);
         append_event(
             store,
             runtime_task_id,
             EventKind::PermissionRequested,
             format!("Agent permission requested for {}", request.action),
-            metadata_with_context(
-                [
-                    ("permission_id".to_string(), request.id.0),
-                    ("tool_call_id".to_string(), invocation.id.0.clone()),
-                    ("tool".to_string(), request.action),
-                    (
-                        "risk".to_string(),
-                        permission_risk_label(&request.risk).to_string(),
-                    ),
-                    ("scope".to_string(), request.scope),
-                    ("agent_prompt".to_string(), prompt.to_string()),
-                ]
-                .into_iter()
-                .collect(),
-                run_context,
-            ),
+            metadata_with_context(permission_metadata, run_context),
         )
         .map_err(|error| error.to_string())?;
         return Ok(AgentToolPermissionGateOutcome::Pending);
@@ -648,7 +639,6 @@ fn execute_agent_tool_batch_serial(
                 if evaluate_agent_tool_permission(
                     &mut store,
                     &runtime.task_id,
-                    prompt,
                     run_context,
                     session_id,
                     &invocation,
@@ -993,7 +983,6 @@ mod tests {
                 evaluate_agent_tool_permission(
                     &mut store,
                     &phase16_task_id(),
-                    "write notes",
                     &context,
                     Some("session-a"),
                     &equivalent,
@@ -1009,7 +998,6 @@ mod tests {
         evaluate_agent_tool_permission(
             &mut store,
             &phase16_task_id(),
-            "write notes",
             &context,
             Some("session-a"),
             &different_call,
@@ -1021,7 +1009,6 @@ mod tests {
         evaluate_agent_tool_permission(
             &mut store,
             &phase16_task_id(),
-            "write notes",
             &next_epoch,
             Some("session-a"),
             &invocation,
@@ -1033,7 +1020,6 @@ mod tests {
         evaluate_agent_tool_permission(
             &mut store,
             &phase16_task_id(),
-            "write notes",
             &next_run,
             Some("session-a"),
             &invocation,
@@ -1045,7 +1031,6 @@ mod tests {
         evaluate_agent_tool_permission(
             &mut store,
             &phase16_task_id(),
-            "write notes",
             &next_session,
             Some("session-b"),
             &invocation,
@@ -1086,7 +1071,6 @@ mod tests {
         let first = evaluate_agent_tool_permission(
             &mut store,
             &phase16_task_id(),
-            "write notes",
             &context,
             Some("session-a"),
             &invocation,
@@ -1115,7 +1099,6 @@ mod tests {
         let reused = evaluate_agent_tool_permission(
             &mut store,
             &phase16_task_id(),
-            "write notes",
             &context,
             Some("session-a"),
             &invocation,
@@ -1128,7 +1111,6 @@ mod tests {
         let other_session = evaluate_agent_tool_permission(
             &mut store,
             &phase16_task_id(),
-            "write notes",
             &other_run_context,
             Some("session-b"),
             &invocation,

@@ -60,14 +60,22 @@ fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
     if !crate::prompt_attempt_runtime::recover_prompt_evaluation_attempts_at_worker_start(&app) {
         return;
     }
-    if let Err(error) = recover_prompt_profile_deployments_at_worker_start(&app) {
-        eprintln!("prompt profile deployment recovery failed: {error}");
-    }
+    let mut deployment_recovery_pending = true;
     let mut wake_revision = 0u64;
     loop {
         let state = app.state::<AppState>();
         if state.allow_exit.load(std::sync::atomic::Ordering::Relaxed) {
             break;
+        }
+        if deployment_recovery_pending {
+            match recover_prompt_profile_deployments_at_worker_start(&app) {
+                Ok(_) => deployment_recovery_pending = false,
+                Err(error) => {
+                    eprintln!("prompt profile deployment recovery failed: {error}");
+                    wait_for_prompt_evaluation_worker(&mut wake_revision, Duration::from_secs(30));
+                    continue;
+                }
+            }
         }
         if let Err(error) =
             crate::prompt_evolution_transfer_outbox::dispatch_prompt_auto_transfer_intents(&app)
@@ -104,6 +112,7 @@ fn prompt_evolution_worker_loop(app: tauri::AppHandle) {
                 &pending,
                 &mut completed_actions,
                 &mut campaign_usage,
+                &mut deployment_recovery_pending,
             ) {
                 if error != MODEL_REQUEST_CANCELLED {
                     if let Err(status_error) = finish_prompt_evaluation_request(
@@ -227,6 +236,7 @@ fn process_pending_prompt_evaluation(
     pending: &PendingPromptEvaluation,
     completed_actions_out: &mut usize,
     campaign_usage_out: &mut PromptEvaluationCampaignUsage,
+    deployment_recovery_pending: &mut bool,
 ) -> Result<(), String> {
     let request = &pending.request;
     if *completed_actions_out >= PROMPT_EVOLUTION_BACKGROUND_CAMPAIGN_LIMIT {
@@ -322,8 +332,9 @@ fn process_pending_prompt_evaluation(
             &control,
         );
         *campaign_usage_out = pending.campaign_usage.with_control_usage(&control);
-        let next_completed_actions =
-            completed_actions.saturating_add(usize::from(matches!(&result, Ok(true))));
+        let next_completed_actions = completed_actions.saturating_add(usize::from(
+            matches!(&result, Ok(outcome) if outcome.progressed),
+        ));
         append_prompt_evaluation_action(
             state,
             &TaskId(request.task_id.clone()),
@@ -336,11 +347,23 @@ fn process_pending_prompt_evaluation(
             Some(campaign_usage_out),
         )?;
         match result {
-            Ok(true) => {
+            Ok(outcome) if outcome.progressed => {
                 completed_actions = next_completed_actions;
                 *completed_actions_out = completed_actions;
+                if let Some(error) = outcome.deployment_recovery_error.as_deref() {
+                    *deployment_recovery_pending = true;
+                    return finish_prompt_evaluation_request(
+                        state,
+                        request,
+                        CHECKPOINT_EVENT,
+                        completed_actions,
+                        campaign_usage_out,
+                        "deployment_recovery_pending",
+                        Some(error),
+                    );
+                }
             }
-            Ok(false) => {
+            Ok(_) => {
                 return finish_prompt_evaluation_request(
                     state,
                     request,

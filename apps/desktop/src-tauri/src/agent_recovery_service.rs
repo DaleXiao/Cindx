@@ -23,6 +23,7 @@ use agent_core::{
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
     AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
+use agent_application::insert_run_objectives;
 pub(super) use recovery_status::agent_task_is_cancelled;
 use recovery_status::{latest_agent_run_event, recovery_run_context};
 
@@ -237,6 +238,7 @@ pub(super) fn agent_recovery_metadata_with_task_state(
         serde_json::to_string(&envelope)
             .map_err(|error| format!("failed to encode agent recovery checkpoint: {error}"))?,
     );
+    insert_run_objectives(&mut metadata, run_context);
     Ok(metadata_with_context(metadata, run_context))
 }
 
