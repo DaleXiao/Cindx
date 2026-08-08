@@ -58,6 +58,38 @@ pub struct WorkflowStepClaim {
 }
 
 impl WorkflowExecutionCheckpoint {
+    pub fn delivery_target_step_id(&self) -> Result<String, String> {
+        delivery_target(&self.plan.steps)
+            .map(|step| step.id.clone())
+            .ok_or_else(|| "workflow checkpoint has no delivery target".to_string())
+    }
+
+    pub fn delivery_required_step_ids(&self) -> Result<BTreeSet<String>, String> {
+        let target_step_id = self.delivery_target_step_id()?;
+        let by_id = self
+            .plan
+            .steps
+            .iter()
+            .map(|step| (step.id.as_str(), step))
+            .collect::<BTreeMap<_, _>>();
+        let mut required = BTreeSet::new();
+        collect_delivery_requirements(&target_step_id, &by_id, &mut required)?;
+        Ok(required)
+    }
+
+    pub fn delivery_is_complete(&self) -> bool {
+        self.delivery_required_step_ids().is_ok_and(|required| {
+            required.iter().all(|step_id| {
+                self.steps.get(step_id).is_some_and(|step| {
+                    matches!(
+                        step.status,
+                        WorkflowStepStatus::Completed | WorkflowStepStatus::Degraded
+                    )
+                })
+            })
+        })
+    }
+
     pub fn execution_frontier(
         &self,
         attempt_limit: usize,
@@ -100,8 +132,7 @@ impl WorkflowExecutionCheckpoint {
             .iter()
             .map(|step| (step.id.as_str(), step))
             .collect::<BTreeMap<_, _>>();
-        let mut required = BTreeSet::new();
-        collect_delivery_requirements(&target.id, &by_id, &mut required)?;
+        let required = self.delivery_required_step_ids()?;
         let execution =
             self.execution_frontier_with_recovery(attempt_limit, allow_partial_recovery)?;
         let runnable = execution
@@ -609,6 +640,59 @@ mod tests {
         assert_eq!(terminal.remaining_steps, vec!["synthesize"]);
         assert_eq!(terminal.runnable_steps, vec!["synthesize"]);
         assert_eq!(terminal.remaining_layers, 1);
+    }
+
+    #[test]
+    fn finalized_delivery_ignores_later_disconnected_speculation_in_resume_and_handoff() {
+        let base = checkpoint();
+        let mut plan = base.plan;
+        plan.steps.push(WorkflowPlanStep {
+            id: "orphan".to_string(),
+            role: "worker".to_string(),
+            model: "worker".to_string(),
+            subtask: "optional orphan".to_string(),
+            access: Vec::new(),
+            tool_policy: WorkflowToolPolicy::None,
+            contract: WorkflowStepContract::default(),
+        });
+        plan.budget.max_steps = 3;
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("delivery-finalize", plan, 1);
+        checkpoint
+            .complete_step(
+                "inspect",
+                "worker",
+                "evidence".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+        checkpoint
+            .complete_step(
+                "synthesize",
+                "planner",
+                "answer".to_string(),
+                "[]".to_string(),
+                3,
+            )
+            .unwrap();
+
+        checkpoint.finalize("answer".to_string(), 4).unwrap();
+
+        assert!(checkpoint.is_complete());
+        assert_eq!(
+            checkpoint.steps["orphan"].status,
+            WorkflowStepStatus::Pending
+        );
+        let handoff = checkpoint.execution_handoff();
+        assert_eq!(
+            handoff
+                .steps
+                .iter()
+                .map(|step| step.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["inspect", "synthesize"]
+        );
+        assert!(handoff.unresolved_actions.is_empty());
     }
 
     #[test]

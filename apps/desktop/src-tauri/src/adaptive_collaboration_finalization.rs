@@ -300,7 +300,8 @@ pub(super) fn finalize_adaptive_collaboration(
         && workflow_checkpoint
             .plan
             .steps
-            .last()
+            .iter()
+            .find(|step| step.id == final_step_id)
             .is_some_and(|step| step.contract.output_kind == WorkflowOutputKind::Synthesis);
     let selected_deliverable = selected_verified
         && (selected_is_final_synthesis

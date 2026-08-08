@@ -465,8 +465,8 @@ fn receipt_sha256<T: Serialize>(receipt: &T) -> Option<String> {
 mod tests {
     use super::*;
     use crate::{
-        merge_memory_records, recall_memories_at, record_memory_observed_uses, MemoryKind,
-        MemoryLedger, MemoryProvenance, MemoryTrust,
+        fuse_memory_recalls_at, merge_memory_records, recall_memories_at,
+        record_memory_observed_uses, MemoryKind, MemoryLedger, MemoryProvenance, MemoryTrust,
     };
 
     fn digest(value: &str) -> String {
@@ -704,6 +704,78 @@ mod tests {
             regression.utility.disposition_for_at(&regression, 30),
             MemoryUtilityDisposition::Harmful
         );
+    }
+
+    #[test]
+    fn matched_regression_is_quarantined_from_recall_until_its_evidence_expires() {
+        let mut harmful = memory_record("memory-harmful");
+        let influence = influence(&harmful, "logical-run-harmful", 20);
+        let regression = effect(
+            &influence,
+            MemoryEffectKind::MatchedRegression,
+            MemoryEvidenceKind::MatchedEvaluationReceipt,
+            30,
+        );
+        record_memory_utility(&mut harmful, &influence, &regression, 30)
+            .expect("matched regression should be recorded");
+        let harmful_id = harmful.id.clone();
+        let mut ledger = MemoryLedger::new("project-a");
+        merge_memory_records(&mut ledger, [harmful], 8);
+
+        assert!(recall_memories_at(
+            &ledger,
+            "release receipt preserve source revision",
+            Some("session-b"),
+            4,
+            40,
+        )
+        .is_empty());
+        assert!(fuse_memory_recalls_at(
+            &ledger,
+            Vec::new(),
+            &std::collections::BTreeMap::from([(harmful_id.clone(), 0.95)]),
+            Some("session-b"),
+            4,
+            40,
+        )
+        .is_empty());
+
+        let after_expiry = recall_memories_at(
+            &ledger,
+            "release receipt preserve source revision",
+            Some("session-b"),
+            4,
+            1_040,
+        );
+        assert_eq!(
+            after_expiry
+                .into_iter()
+                .map(|recall| recall.record.id)
+                .collect::<Vec<_>>(),
+            vec![harmful_id]
+        );
+    }
+
+    #[test]
+    fn harmful_memory_is_evicted_before_unknown_memory_under_pressure() {
+        let mut harmful = memory_record("memory-harmful");
+        let influence = influence(&harmful, "logical-run-harmful", 20);
+        let regression = effect(
+            &influence,
+            MemoryEffectKind::MatchedRegression,
+            MemoryEvidenceKind::MatchedEvaluationReceipt,
+            30,
+        );
+        record_memory_utility(&mut harmful, &influence, &regression, 30)
+            .expect("matched regression should be recorded");
+        let unknown = memory_record("memory-unknown");
+
+        let mut ledger = MemoryLedger::new("project-a");
+        let stats = merge_memory_records(&mut ledger, [harmful, unknown], 1);
+
+        assert_eq!(stats.evicted, 1);
+        assert_eq!(ledger.records.len(), 1);
+        assert_eq!(ledger.records[0].id, "memory-unknown");
     }
 
     #[test]

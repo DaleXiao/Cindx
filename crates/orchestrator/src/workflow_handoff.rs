@@ -45,10 +45,16 @@ pub struct WorkflowStepHandoff {
 
 impl WorkflowExecutionCheckpoint {
     pub fn execution_handoff(&self) -> WorkflowExecutionHandoff {
+        let delivery_steps = self.delivery_required_step_ids().ok();
         let steps = self
             .plan
             .steps
             .iter()
+            .filter(|plan_step| {
+                delivery_steps
+                    .as_ref()
+                    .is_none_or(|required| required.contains(&plan_step.id))
+            })
             .filter_map(|plan_step| {
                 let checkpoint = self.steps.get(&plan_step.id)?;
                 Some(WorkflowStepHandoff {

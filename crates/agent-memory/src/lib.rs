@@ -386,6 +386,13 @@ impl MemoryLedger {
                 .is_none_or(|control| !control.disabled && !control.deleted)
     }
 
+    pub fn record_is_active_for_recall_at(&self, record: &MemoryRecord, now_ms: u64) -> bool {
+        self.record_is_active_for_recall(record)
+            && (record.has_verified_user_requirement()
+                || record.utility.disposition_for_at(record, now_ms)
+                    != MemoryUtilityDisposition::Harmful)
+    }
+
     pub fn is_pinned(&self, memory_id: &str) -> bool {
         self.records
             .iter()
