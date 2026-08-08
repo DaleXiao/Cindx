@@ -560,12 +560,27 @@ impl OpenAiCompatibleProvider {
     pub fn complete_streaming_cancellable(
         &self,
         request: ModelRequest,
+        on_delta: impl FnMut(&str),
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        self.complete_streaming_cancellable_with_activity(request, on_delta, || {}, should_cancel)
+    }
+
+    pub fn complete_streaming_cancellable_with_activity(
+        &self,
+        request: ModelRequest,
         mut on_delta: impl FnMut(&str),
+        mut on_activity: impl FnMut(),
         mut should_cancel: impl FnMut() -> bool,
     ) -> Result<ModelResponse, ModelError> {
         let prepared = self.prepare_streaming_model_request(&request)?;
         drop(request);
-        self.complete_prepared_streaming_model_request(&prepared, &mut on_delta, &mut should_cancel)
+        self.complete_prepared_streaming_model_request_with_activity(
+            &prepared,
+            &mut on_delta,
+            &mut on_activity,
+            &mut should_cancel,
+        )
     }
 
     pub fn complete_once(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -891,6 +906,7 @@ mod tests {
             hard_timeout,
             deadline,
             on_delta,
+            &mut || {},
             should_cancel,
         ))
     }

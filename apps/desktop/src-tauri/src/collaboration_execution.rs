@@ -22,6 +22,7 @@ pub(crate) const CONDUCTOR_NO_PROGRESS_DEADLINE_CODE: &str = "conductor_no_progr
 pub(crate) struct CollaborationCallLimits {
     pub(crate) recovery_window: Option<Duration>,
     pub(crate) no_progress_timeout: Option<Duration>,
+    pub(crate) provider_activity_is_progress: bool,
     pub(crate) objective_epoch: Option<u64>,
 }
 
@@ -370,6 +371,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     let response_started = AtomicBool::new(false);
     let attempt_deadline_reached = AtomicBool::new(false);
     let attempt_started_at = Instant::now();
+    let provider_activity_progress_at = std::cell::Cell::new(Instant::now());
     let model_request = ModelRequest {
         role,
         messages: vec![
@@ -453,7 +455,7 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
             ));
         }
     }
-    let response = provider.complete_streaming_cancellable(
+    let response = provider.complete_streaming_cancellable_with_activity(
         model_request,
         |delta| {
             if !delta.is_empty() {
@@ -471,6 +473,26 @@ pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
                 );
             }
             on_delta(delta);
+        },
+        || {
+            if !limits.provider_activity_is_progress {
+                return;
+            }
+            response_started.store(true, Ordering::Release);
+            let now = Instant::now();
+            if now.saturating_duration_since(provider_activity_progress_at.get())
+                < Duration::from_millis(500)
+            {
+                return;
+            }
+            provider_activity_progress_at.set(now);
+            if let Some(control) = cancellation.as_ref() {
+                control.mark_progress_at(
+                    objective_epoch.unwrap_or_else(|| control.steer_epoch()),
+                    "model_stream",
+                    &stage,
+                );
+            }
         },
         || {
             if cancellation.as_ref().is_some_and(|control| {
