@@ -514,12 +514,17 @@ route dynamically, but a candidate cannot collapse or relabel its own
 generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
-The feature-gated Workflow GEPA V2 campaign exercises this causal chain on eight
-frozen real-agent coding and research tasks. Seed Pro runs must complete their
-deterministic file, JSON, and command postconditions before their terminal
-evidence becomes the dataset. Successful read and command receipts prove that
-the product harness was used, while the verifier remains neutral between
-authorized mutation implementations. The frozen suite contract also requires
+The feature-gated Workflow GEPA V3 campaign exercises this causal chain on eight
+frozen real-agent coding and research tasks. V2 is retained only as
+`INVALID_EVALUATOR` history because it prescribed source spellings and exposed
+research answers in workspace verifier files. V3 gives the Agent answer-free
+workspace checks while the host owns hidden behavioral or exact JSON
+postconditions. Evidence and check fixtures are byte-bound to their original
+contents, so editing a visible check cannot manufacture success. Seed Pro runs
+must complete those postconditions before their terminal evidence becomes the
+dataset. Successful read and command receipts prove that the product harness was
+used, while hidden behavior checks remain neutral between authorized mutation
+implementations. The frozen suite contract also requires
 every declared category to match the independent pre-decision classifier. The
 temporary workspace is then deleted
 and reconstructed; its content

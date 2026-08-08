@@ -23,6 +23,7 @@ use orchestrator::{
     FrozenPromptProfileSnapshot, PromptEvaluationSplit, PromptEvolutionObservation,
 };
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
@@ -30,9 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
 
-const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v2";
-const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v2";
-const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v2";
+const CAMPAIGN_SCHEMA: &str = "cindx.workflow-gepa-campaign.v3";
+const CAMPAIGN_SUITE_ID: &str = "cindx-workflow-gepa-v3";
+const CAMPAIGN_PROJECT_ID: &str = "project-workflow-gepa-v3";
 const MAX_PAIRWISE_ACTIONS: usize = 24;
 const MIN_TRAIN_EVIDENCE: usize = 6;
 const MIN_HOLDOUT_EVIDENCE: usize = 4;
@@ -183,7 +184,7 @@ pub(super) fn run() -> Result<(), String> {
     let source_commit = require_clean_source(&repo_root)?;
     let suite_path = std::env::var_os("CINDX_WORKFLOW_GEPA_SUITE")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v2.json"));
+        .unwrap_or_else(|| repo_root.join("benchmarks/agent/workflow-gepa-v3.json"));
     let suite_bytes = fs::read(&suite_path)
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let suite: RealworldSuite = serde_json::from_slice(&suite_bytes)
@@ -827,7 +828,7 @@ fn route_exercise_receipt(
 fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), String> {
     if suite.schema != CAMPAIGN_SCHEMA
         || suite.id != CAMPAIGN_SUITE_ID
-        || suite.version != 2
+        || suite.version != 3
         || suite.cases.len() != 8
     {
         return Err("Workflow GEPA suite identity or case count is invalid".to_string());
@@ -845,10 +846,94 @@ fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), String> {
         {
             return Err(format!("Workflow GEPA case {} is invalid", case.id));
         }
+        if case.verification.immutable_files.is_empty()
+            || !case.verification.exact_files.is_empty()
+            || !case.verification.file_contains.is_empty()
+            || case.verification.commands.len() != 1
+            || case.verification.commands[0].program != "node"
+            || case.verification.required_tools_all.as_slice() != ["shell.run"]
+            || case.verification.required_tools_any.is_empty()
+        {
+            return Err(format!(
+                "Workflow GEPA case {} lacks neutral postconditions or tool evidence",
+                case.id
+            ));
+        }
+        let mut case_paths = BTreeSet::new();
         for fixture in &case.files {
             super::validate_relative_path(&fixture.path)?;
-            if !paths.insert(fixture.path.as_str()) {
+            if !case_paths.insert(fixture.path.as_str()) || !paths.insert(fixture.path.as_str()) {
                 return Err(format!("duplicate campaign fixture path {}", fixture.path));
+            }
+        }
+        let check_files = case
+            .files
+            .iter()
+            .filter(|fixture| fixture.path.ends_with("/check.mjs"))
+            .collect::<Vec<_>>();
+        if check_files.len() != 1
+            || !case
+                .verification
+                .immutable_files
+                .iter()
+                .all(|path| case_paths.contains(path.as_str()))
+            || !case
+                .verification
+                .immutable_files
+                .iter()
+                .any(|path| path == &check_files[0].path)
+        {
+            return Err(format!(
+                "Workflow GEPA case {} has an invalid immutable fixture contract",
+                case.id
+            ));
+        }
+        let command = &case.verification.commands[0];
+        match case.category.as_str() {
+            "coding" => {
+                if case.files.len() != 2
+                    || case.verification.immutable_files.len() != 1
+                    || !case.verification.json_files.is_empty()
+                    || !command.args.iter().any(|arg| arg == "--eval")
+                    || !command.stdout_contains.ends_with("-hidden-verified")
+                {
+                    return Err(format!(
+                        "Workflow GEPA coding case {} lacks a hidden behavioral postcondition",
+                        case.id
+                    ));
+                }
+            }
+            "research" => {
+                if case.verification.json_files.len() != 1
+                    || case.verification.immutable_files.len() != case.files.len()
+                    || command.args.as_slice() != [check_files[0].path.as_str()]
+                    || !command.stdout_contains.ends_with("-check-passed")
+                {
+                    return Err(format!(
+                        "Workflow GEPA research case {} lacks hidden answer verification",
+                        case.id
+                    ));
+                }
+                let mut expected_values = Vec::new();
+                collect_scalar_values(
+                    &case.verification.json_files[0].equals,
+                    &mut expected_values,
+                );
+                if expected_values
+                    .iter()
+                    .any(|value| check_files[0].content.contains(value))
+                {
+                    return Err(format!(
+                        "Workflow GEPA case {} leaks an expected answer into its workspace check",
+                        case.id
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Workflow GEPA case {} has unsupported category {}",
+                    case.id, case.category
+                ));
             }
         }
     }
@@ -858,17 +943,56 @@ fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), String> {
     Ok(())
 }
 
+fn collect_scalar_values(value: &Value, values: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_scalar_values(item, values);
+            }
+        }
+        Value::Object(object) => {
+            for item in object.values() {
+                collect_scalar_values(item, values);
+            }
+        }
+        Value::String(value) => values.push(value.clone()),
+        Value::Number(value) => values.push(value.to_string()),
+        Value::Bool(value) => values.push(value.to_string()),
+        Value::Null => values.push("null".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_realworld_eval::tool_receipts::{ToolAttemptReceipt, ToolReceiptStatus};
+    use crate::agent_realworld_eval::verification::verify_case;
+
+    fn frozen_suite() -> RealworldSuite {
+        serde_json::from_slice(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../benchmarks/agent/workflow-gepa-v3.json"
+        )))
+        .unwrap()
+    }
+
+    fn successful_tool(tool: &str) -> ToolAttemptReceipt {
+        ToolAttemptReceipt {
+            call_sha256: "a".repeat(64),
+            tool: tool.to_string(),
+            status: ToolReceiptStatus::Succeeded,
+            input_fingerprint: Some("b".repeat(64)),
+            started_sequence: Some(1),
+            finished_sequence: Some(2),
+            target_sha256: None,
+            evidence_sha256: None,
+            artifacts: Vec::new(),
+        }
+    }
 
     #[test]
     fn frozen_suite_has_balanced_classes_and_immutable_splits() {
-        let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v2.json"
-        )))
-        .unwrap();
+        let suite = frozen_suite();
         validate_campaign_suite(&suite).unwrap();
         assert!(suite.cases.iter().all(|case| {
             case.verification.required_tools_all.len() == 1
@@ -930,12 +1054,85 @@ mod tests {
     }
 
     #[test]
-    fn campaign_workspace_reset_removes_treatment_outputs() {
-        let suite: RealworldSuite = serde_json::from_slice(include_bytes!(concat!(
+    fn campaign_rejects_missing_immutable_fixture_and_workspace_answer_leakage() {
+        let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/workflow-gepa-v2.json"
-        )))
-        .unwrap();
+            "/../../../benchmarks/agent/workflow-gepa-v3.json"
+        ));
+        let mut missing: Value = serde_json::from_slice(bytes).unwrap();
+        missing["cases"][0]["verification"]["immutable_files"][0] =
+            Value::String("wg1/missing.mjs".to_string());
+        let missing: RealworldSuite = serde_json::from_value(missing).unwrap();
+        assert!(validate_campaign_suite(&missing)
+            .unwrap_err()
+            .contains("immutable fixture contract"));
+
+        let mut leaked: Value = serde_json::from_slice(bytes).unwrap();
+        let content = leaked["cases"][4]["files"][2]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        leaked["cases"][4]["files"][2]["content"] =
+            Value::String(format!("{content}\n// Mira Sol\n"));
+        let leaked: RealworldSuite = serde_json::from_value(leaked).unwrap();
+        assert!(validate_campaign_suite(&leaked)
+            .unwrap_err()
+            .contains("leaks an expected answer"));
+    }
+
+    #[test]
+    fn hidden_postconditions_accept_behaviorally_equivalent_coding_solutions() {
+        let suite = frozen_suite();
+        let alternatives = [
+            (
+                "coding-calculate-total",
+                "wg1/calc.mjs",
+                "export function total(items) { let value = 0; for (const item of items) value += item.price * item.quantity; return value; }\n",
+                "sum + item.price * item.quantity",
+            ),
+            (
+                "coding-parse-port",
+                "wg2/parser.mjs",
+                "export function parseEndpoint(value) { const [host, port] = value.split(':'); return { host, port: parseInt(port, 10) }; }\n",
+                "Number(port)",
+            ),
+            (
+                "coding-normalize-tags",
+                "wg3/normalize.mjs",
+                "export function normalizeTags(values) { const clean = values.map((value) => value.replace(/^\\s+|\\s+$/g, '').toLocaleLowerCase()).filter(Boolean); const result = Array.from(new Set(clean)); for (let index = 1; index < result.length; index += 1) { let cursor = index; while (cursor > 0 && result[cursor].localeCompare(result[cursor - 1]) < 0) { [result[cursor - 1], result[cursor]] = [result[cursor], result[cursor - 1]]; cursor -= 1; } } return result; }\n",
+                "toLowerCase()",
+            ),
+            (
+                "coding-select-latest",
+                "wg4/select.mjs",
+                "export function latest(records) { return records.reduce((best, value) => value.revision > best.revision ? value : best); }\n",
+                "b.revision - a.revision",
+            ),
+        ];
+        let receipts = [successful_tool("file.read"), successful_tool("shell.run")];
+        for (id, path, implementation, forbidden_v2_source) in alternatives {
+            assert!(!implementation.contains(forbidden_v2_source));
+            let case = suite.cases.iter().find(|case| case.id == id).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            materialize_case(temp.path(), case).unwrap();
+            fs::write(temp.path().join(path), implementation).unwrap();
+            let output = case.verification.direct_output_contains.join(" ");
+            let result = verify_case(
+                case,
+                Treatment::Pro,
+                temp.path(),
+                &output,
+                &receipts,
+                None,
+                0,
+            );
+            assert!(result.quality_passed, "{id}: {:?}", result.failures);
+        }
+    }
+
+    #[test]
+    fn campaign_workspace_reset_removes_treatment_outputs() {
+        let suite = frozen_suite();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("workspace");
         reset_suite_workspace(&root, &suite).unwrap();

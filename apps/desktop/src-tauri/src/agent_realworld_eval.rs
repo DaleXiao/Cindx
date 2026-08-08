@@ -107,6 +107,8 @@ struct VerificationContract {
     #[serde(default)]
     exact_files: Vec<ExactFileCheck>,
     #[serde(default)]
+    immutable_files: Vec<String>,
+    #[serde(default)]
     file_contains: Vec<FileContainsCheck>,
     #[serde(default)]
     commands: Vec<CommandCheck>,
@@ -522,8 +524,15 @@ fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
             return Err(format!("{} must have an objective and fixtures", case.id));
         }
         categories.insert(case.category.as_str());
+        let mut fixture_paths = BTreeSet::new();
         for fixture in &case.files {
             validate_relative_path(&fixture.path)?;
+            if !fixture_paths.insert(fixture.path.as_str()) {
+                return Err(format!(
+                    "{} has duplicate fixture path {}",
+                    case.id, fixture.path
+                ));
+            }
         }
         for path in case
             .verification
@@ -536,6 +545,7 @@ fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
                     .iter()
                     .map(|check| check.path.as_str()),
             )
+            .chain(case.verification.immutable_files.iter().map(String::as_str))
             .chain(
                 case.verification
                     .file_contains
@@ -544,6 +554,14 @@ fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
             )
         {
             validate_relative_path(path)?;
+        }
+        for path in &case.verification.immutable_files {
+            if !fixture_paths.contains(path.as_str()) {
+                return Err(format!(
+                    "{} immutable file {} is not a declared fixture",
+                    case.id, path
+                ));
+            }
         }
         for command in &case.verification.commands {
             if command.program != "node" || command.args.is_empty() {
