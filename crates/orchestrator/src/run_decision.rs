@@ -1,11 +1,11 @@
 use crate::{
     causal_route_action_id_v2, matching_collaboration_evidence_for_context,
     minimum_team_uplift_bps, select_causal_route_v2, AgentDecisionCalibration,
-    AutoComputationAssessment, CausalRouteReason, CausalRouteSelectionV2,
-    ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy,
-    MatchedCollaborationEvidenceTeacher, ModelCandidate, OrchestrationPolicy, RouteFeatureRequest,
-    RouteFeatureSnapshotV2, RoutingContext, RoutingDecision, TaskClass,
-    AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+    AutoComputationAssessment, CausalRouteSelectionV2, ConductorExecutionContract,
+    ConductorFallbackPolicy, ConductorStopPolicy, MatchedCollaborationEvidenceTeacher,
+    ModelCandidate, OrchestrationPolicy, RouteFeatureRequest, RouteFeatureSnapshotV2,
+    RoutingContext, RoutingDecision, TaskClass, AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
+    AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
@@ -460,64 +460,6 @@ impl AgentRunDecision {
         Ok(())
     }
 
-    pub fn validate_effort_admission(&self, effort: &str) -> Result<(), String> {
-        if self.execution != AgentExecutionMode::Workflow {
-            return Ok(());
-        }
-        let normalized_effort = effort.trim().to_ascii_lowercase();
-        match normalized_effort.as_str() {
-            "auto" => {
-                if self.expected_uplift_bps < AUTO_COLLABORATION_MIN_UPLIFT_BPS
-                    || self.confidence_bps < AUTO_COLLABORATION_MIN_CONFIDENCE_BPS
-                {
-                    return Err(format!(
-                        "auto workflow is below its collaboration admission floor: uplift={}bps confidence={}bps",
-                        self.expected_uplift_bps, self.confidence_bps
-                    ));
-                }
-            }
-            "pro" => {
-                let minimum_uplift = minimum_team_uplift_bps("pro");
-                if self.expected_uplift_bps < minimum_uplift {
-                    return Err(format!(
-                        "pro workflow is below its direct-anchor uplift floor: uplift={}bps required={}bps",
-                        self.expected_uplift_bps, minimum_uplift
-                    ));
-                }
-            }
-            _ => {
-                return Err("fast effort cannot admit a collaboration workflow".to_string());
-            }
-        }
-        Ok(())
-    }
-
-    fn calibrated_to_direct(
-        mut self,
-        calibration: AgentDecisionCalibration,
-        reason: String,
-        computation_value: Option<AutoComputationAssessment>,
-    ) -> Self {
-        self.execution = AgentExecutionMode::Direct;
-        self.verification = match self.verification {
-            AgentVerificationPolicy::Independent => AgentVerificationPolicy::SelfCheck,
-            verification => verification,
-        };
-        self.max_parallelism = 1;
-        self.min_successful_branches = 1;
-        self.distinct_contributions = 0;
-        self.expected_uplift_bps = 0;
-        self.stop_policy = ConductorStopPolicy::FirstVerified;
-        self.rationale = bounded_chars(
-            &format!("Calibrated to the direct anchor: {reason}"),
-            MAX_RUN_DECISION_RATIONALE_CHARS,
-        );
-        self.calibration = Some(calibration);
-        self.calibration_reason = Some(reason);
-        self.computation_value = computation_value;
-        self
-    }
-
     pub fn policy(&self) -> OrchestrationPolicy {
         match self.execution {
             AgentExecutionMode::Direct => OrchestrationPolicy::Single,
@@ -684,14 +626,13 @@ pub struct AgentRunDecisionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRunDecisionDraft {
     pub conductor_candidate: AgentRunDecision,
-    pub selected_action: AgentRunDecision,
     pub compatibility_route: CausalRouteSelectionV2,
 }
 
 impl AgentRunDecisionDraft {
     pub fn into_legacy_selected(mut self) -> AgentRunDecision {
-        self.selected_action.causal_route = Some(self.compatibility_route);
-        self.selected_action
+        self.conductor_candidate.causal_route = Some(self.compatibility_route);
+        self.conductor_candidate
     }
 }
 
@@ -767,7 +708,7 @@ impl AgentRunDecisionHarness {
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
-                "Workflow admission is enforced after parsing. Auto requires at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence; Pro requires at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 uses your confidence-weighted estimate plus independently scored matched team-versus-direct evidence. It enforces capability, safety, resource, independent-work, and minimum-uplift boundaries, but does not replace your judgment with keyword routing or invented cost formulas. Otherwise runtime preserves the selected model, tools, vision, retrieval, memory, and risk posture in a direct or grounded-direct route without a repair call. If you cannot justify those estimates, choose direct.\n",
+                "You own the final quality and collaboration decision. Auto should require at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence before choosing workflow; Pro should require at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 records a read-only counterfactual observation from your estimate and independently scored matched team-versus-direct evidence; it cannot downshift or replace a valid decision. Runtime may override only explicit safety, capability, resource, or evaluation constraints, and records every override. If you cannot justify collaboration, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
                 "Runtime execution constraints are facts, not suggestions. Do not assign required effects or interactive work to a worker that cannot perform them:\n{execution_constraints}\n\n",
                 "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, effect_authority={effect_authority}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade them and never request effects when effect_authority=forbidden.\n\n",
@@ -822,7 +763,7 @@ impl AgentRunDecisionHarness {
             .rfind('}')
             .filter(|end| *end >= start)
             .ok_or_else(|| "run decision returned incomplete JSON".to_string())?;
-        let decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
+        let mut decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
         self.request
@@ -856,38 +797,14 @@ impl AgentRunDecisionHarness {
             matched,
             evidence_key_lookups,
         )?;
-        let legacy_auto_assessment = (normalized_effort == "auto"
+        let compatibility_assessment = (normalized_effort == "auto"
             && decision.execution == AgentExecutionMode::Workflow)
             .then(|| AutoComputationAssessment::from_causal_route(&receipt));
-        let mut selected_action = decision.clone();
-        if decision.execution == AgentExecutionMode::Workflow && !receipt.admitted() {
-            let calibration = if receipt.reason == CausalRouteReason::MatchedEvidenceAgainst {
-                AgentDecisionCalibration::MatchedEvidence
-            } else {
-                AgentDecisionCalibration::ValueOfComputation
-            };
-            selected_action = selected_action.calibrated_to_direct(
-                calibration,
-                format!(
-                    "Causal Router v2 {}: conductor_confidence_weighted={}bps matched_adjusted={}bps admission_floor={}bps net_lower={}bps",
-                    receipt.reason.label(),
-                    receipt.predicted_benefit_bps,
-                    receipt.evidence_adjusted_benefit_bps,
-                    receipt.coordination_cost_bps,
-                    receipt.net_value_lower_bps,
-                ),
-                legacy_auto_assessment,
-            );
-            selected_action.validate(&self.request.allowed_models, self.request.max_parallelism)?;
-            self.request
-                .route_requirements
-                .validate_decision(&selected_action, &self.request.model_candidates)?;
-        } else if let Some(assessment) = legacy_auto_assessment {
-            selected_action.computation_value = Some(assessment);
+        if let Some(assessment) = compatibility_assessment {
+            decision.computation_value = Some(assessment);
         }
         Ok(AgentRunDecisionDraft {
             conductor_candidate: decision,
-            selected_action,
             compatibility_route: receipt,
         })
     }
@@ -906,7 +823,9 @@ fn bounded_chars(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentRouteTier, AutoComputationVerdict, MatchedCollaborationEvidence};
+    use crate::{
+        AgentRouteTier, AutoComputationVerdict, CausalRouteReason, MatchedCollaborationEvidence,
+    };
 
     fn request() -> AgentRunDecisionRequest {
         AgentRunDecisionRequest {
@@ -980,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_draft_preserves_the_conductor_candidate_before_compatibility_downshift() {
+    fn decision_draft_keeps_compatibility_value_as_a_shadow_observation() {
         let mut candidate = AgentRunDecision::direct("executor");
         candidate.execution = AgentExecutionMode::Workflow;
         candidate.verification = AgentVerificationPolicy::Independent;
@@ -1001,13 +920,15 @@ mod tests {
             draft.conductor_candidate.execution,
             AgentExecutionMode::Workflow
         );
-        assert_eq!(draft.selected_action.execution, AgentExecutionMode::Direct);
         assert_eq!(
             draft.compatibility_route.reason,
             CausalRouteReason::BelowPredictionFloor
         );
+        assert_eq!(
+            draft.compatibility_route.selected_route,
+            AgentRouteTier::Direct
+        );
         assert!(draft.conductor_candidate.causal_route.is_none());
-        assert!(draft.selected_action.causal_route.is_none());
     }
 
     #[test]
@@ -1064,8 +985,8 @@ mod tests {
         assert!(prompt.contains("Memory and workspace retrieval are blocking foreground work"));
         assert!(prompt.contains("missing evidence can materially change answer quality"));
         assert!(prompt.contains("Greetings, capability questions, and self-contained requests"));
-        assert!(prompt.contains("does not replace your judgment with keyword routing"));
-        assert!(prompt.contains("without a repair call"));
+        assert!(prompt.contains("read-only counterfactual observation"));
+        assert!(prompt.contains("cannot downshift or replace a valid decision"));
     }
 
     #[test]
@@ -1265,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_admission_makes_conductor_estimates_actionable() {
+    fn matched_evidence_remains_shadow_only_after_a_conductor_workflow_decision() {
         let mut auto = AgentRunDecision::direct("executor");
         auto.execution = AgentExecutionMode::Workflow;
         auto.verification = AgentVerificationPolicy::Independent;
@@ -1273,21 +1194,9 @@ mod tests {
         auto.min_successful_branches = 2;
         auto.distinct_contributions = 2;
         auto.estimated_steps = 3;
-        auto.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS - 1;
-        auto.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
-        auto.stop_policy = ConductorStopPolicy::Quorum;
-        assert!(auto.validate_effort_admission("auto").is_err());
-
-        auto.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS;
-        assert!(auto.validate_effort_admission("auto").is_ok());
-
-        auto.expected_uplift_bps = 0;
-        assert!(auto.validate_effort_admission("pro").is_err());
-        auto.expected_uplift_bps = minimum_team_uplift_bps("pro");
-        assert!(auto.validate_effort_admission("pro").is_ok());
-
         auto.expected_uplift_bps = 8_000;
         auto.confidence_bps = 9_000;
+        auto.stop_policy = ConductorStopPolicy::Quorum;
         let evidence = MatchedCollaborationEvidence {
             task_class: auto.task_class.clone(),
             effort: "auto".to_string(),
@@ -1305,25 +1214,21 @@ mod tests {
             average_team_latency_ms: 4_000,
             average_anchor_latency_ms: Some(1_000),
         };
-        assert!(auto.validate_effort_admission("auto").is_ok());
-
         let mut calibrated_request = request();
         calibrated_request.matched_collaboration_evidence = Arc::new(
             MatchedCollaborationEvidenceTeacher::from_calibrated_evidence(vec![evidence.clone()]),
         );
-        let calibrated = AgentRunDecisionHarness::new(calibrated_request)
+        let observed = AgentRunDecisionHarness::new(calibrated_request)
             .parse(&serde_json::to_string(&auto).unwrap())
-            .expect("strong matched evidence should calibrate without a repair call");
-        assert_eq!(calibrated.execution, AgentExecutionMode::Direct);
-        assert_eq!(calibrated.primary_model, "executor");
-        assert!(calibrated.calibration_reason.is_some());
+            .expect("strong matched evidence should remain an auditable shadow observation");
+        assert_eq!(observed.execution, AgentExecutionMode::Workflow);
+        assert_eq!(observed.primary_model, "executor");
+        assert!(observed.calibration_reason.is_none());
+        assert!(observed.calibration.is_none());
         assert_eq!(
-            calibrated.calibration,
-            Some(AgentDecisionCalibration::MatchedEvidence)
+            observed.causal_route.as_ref().map(|receipt| receipt.reason),
+            Some(CausalRouteReason::MatchedEvidenceAgainst)
         );
-        assert!(calibrated
-            .rationale
-            .contains("Causal Router v2 matched_evidence_against"));
 
         let mut unrelated = evidence.clone();
         unrelated.routing_signature = "different-task-shape".to_string();
@@ -1356,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_value_downshift_preserves_grounding_and_capabilities_without_repair() {
+    fn auto_value_shadow_preserves_the_conductor_workflow_without_repair() {
         let mut request = request();
         request.objective =
             "Inspect the workspace evidence and image before applying the change".to_string();
@@ -1388,10 +1293,10 @@ mod tests {
                     "rationale":"inspect and independently verify"
                 }"#,
             )
-            .expect("low-value Auto workflow should downshift without a repair call");
+            .expect("low-value Auto workflow should remain conductor-owned");
 
-        assert_eq!(decision.execution, AgentExecutionMode::Direct);
-        assert_eq!(decision.route_tier(), AgentRouteTier::GroundedDirect);
+        assert_eq!(decision.execution, AgentExecutionMode::Workflow);
+        assert_eq!(decision.route_tier(), AgentRouteTier::Workflow);
         assert_eq!(decision.candidate_route_tier(), AgentRouteTier::Workflow);
         assert_eq!(decision.primary_model, "executor");
         assert_eq!(decision.tool_requirement, AgentToolRequirement::Effects);
@@ -1399,10 +1304,7 @@ mod tests {
         assert_eq!(decision.risk_level, AgentRiskLevel::High);
         assert!(decision.retrieval.enabled());
         assert!(decision.memory.enabled());
-        assert_eq!(
-            decision.calibration,
-            Some(AgentDecisionCalibration::ValueOfComputation)
-        );
+        assert!(decision.calibration.is_none());
         assert_eq!(
             decision
                 .computation_value

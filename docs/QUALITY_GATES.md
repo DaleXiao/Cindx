@@ -142,7 +142,10 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   fingerprint, explicit workflow/direct counterfactual, deterministic policy,
   capability and effect-authority checks, Conductor-owned typed demand, and
   exact-context plus route-shape matched-evidence semantics. Complete failed
-  team comparisons remain negative evidence. The paired
+  team comparisons remain negative evidence. In current production this policy
+  is a read-only shadow: `cindx.execution-plan.v2` binds the real executable
+  action to a typed authority receipt, rejects compatibility-value authority,
+  and retains V1 only for historical replay. The paired
   `causal-router-v2-scaling` gate requires one
   `cindx.causal-router-v2-scaling.v1` marker and proves identical selection when
   the exact record is after the prompt's top eight in both 32- and 2,048-row

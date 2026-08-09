@@ -1,7 +1,8 @@
 use super::{causal_route, requirements, AgentPlanningSource, PlannedAgentRun};
 use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
-    CausalRouteSelectionV2, ConductorPromptGenome, ExecutionPlan, ModelCandidate,
+    CausalRouteSelectionV2, ConductorPromptGenome, ExecutionPlan, ExecutionPlanDecisionReason,
+    ModelCandidate,
 };
 
 pub(super) struct PlannedRunFinalizeInput {
@@ -9,6 +10,7 @@ pub(super) struct PlannedRunFinalizeInput {
     pub(super) decision: AgentRunDecision,
     pub(super) compatibility_route: Option<CausalRouteSelectionV2>,
     pub(super) source: AgentPlanningSource,
+    pub(super) decision_reason: ExecutionPlanDecisionReason,
     pub(super) attempts: usize,
     pub(super) prompt_genome: ConductorPromptGenome,
     pub(super) effort: AgentPolicy,
@@ -31,6 +33,7 @@ pub(super) fn finalize_planned_run(
         mut decision,
         compatibility_route,
         source,
+        decision_reason,
         attempts,
         prompt_genome,
         effort,
@@ -65,7 +68,6 @@ pub(super) fn finalize_planned_run(
         source,
         degradation_reason.is_some(),
         &conductor_candidate,
-        &decision,
         compatibility_route,
     )?;
     let routing_context = decision.routing_context(prompt, candidates);
@@ -77,6 +79,7 @@ pub(super) fn finalize_planned_run(
     let execution_plan = ExecutionPlan::new(
         conductor_candidate,
         decision,
+        decision_reason,
         compatibility_route,
         workflow_execution_profile_sha256,
     )?;

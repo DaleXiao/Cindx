@@ -8,7 +8,6 @@ pub(crate) enum AgentPlanningSource {
     MatchedMemoryEvaluation,
     DynamicConductor,
     DynamicConductorReplanned,
-    CalibratedDirect,
     DegradedDirect,
     DegradedWorkflow,
 }
@@ -20,7 +19,6 @@ impl AgentPlanningSource {
             Self::MatchedMemoryEvaluation => "matched_memory_evaluation",
             Self::DynamicConductor => "dynamic_conductor_v2",
             Self::DynamicConductorReplanned => "dynamic_conductor_replanned",
-            Self::CalibratedDirect => "dynamic_conductor_calibrated_direct",
             Self::DegradedDirect => "dynamic_conductor_degraded_direct",
             Self::DegradedWorkflow => "dynamic_conductor_degraded_workflow",
         }
@@ -91,13 +89,8 @@ pub(super) fn apply_and_validate_route_requirements(
     Ok(decision)
 }
 
-pub(super) fn selected_conductor_source(
-    decision: &AgentRunDecision,
-    attempted_models: usize,
-) -> AgentPlanningSource {
-    if decision.calibration_reason.is_some() {
-        AgentPlanningSource::CalibratedDirect
-    } else if attempted_models > 1 {
+pub(super) fn selected_conductor_source(attempted_models: usize) -> AgentPlanningSource {
+    if attempted_models > 1 {
         AgentPlanningSource::DynamicConductorReplanned
     } else {
         AgentPlanningSource::DynamicConductor
@@ -105,6 +98,12 @@ pub(super) fn selected_conductor_source(
 }
 
 pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
+    let decision_reason = planned
+        .execution_plan
+        .decision_receipt
+        .as_ref()
+        .map(|receipt| receipt.reason.label())
+        .unwrap_or("legacy");
     let mut metadata = [
         (
             "route_minimum_tool_requirement".to_string(),
@@ -125,6 +124,10 @@ pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
                 .effect_authority
                 .label()
                 .to_string(),
+        ),
+        (
+            "execution_plan_decision_reason".to_string(),
+            decision_reason.to_string(),
         ),
     ]
     .into_iter()

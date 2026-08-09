@@ -13,34 +13,31 @@ only the revision recorded in each report.
   shared interactive agent loop.
 - **Auto** asks the configured conductor for a typed candidate, with a maximum
   requested parallelism of two. The candidate may remain direct or select a
-  bounded workflow. The planner preserves that candidate and the final action in
-  one `ExecutionPlan`. Its hard-constraint guard checks model capability,
-  independent workflow demand, and bounded execution without estimating answer
-  quality. The retained Causal Router v2 policy is recorded separately as a
-  compatibility value policy that compares a valid workflow candidate with its
-  direct or grounded-direct counterfactual. Task class,
+  bounded workflow. That validated candidate is the quality and collaboration
+  decision used by production execution. The planner preserves it together with
+  any explicit runtime override in one `cindx.execution-plan.v2`. Its hard guard
+  checks model capability and bounded execution without estimating answer
+  quality; independent-work demand remains a diagnostic observation, not an
+  override. The retained Causal Router v2 policy is recorded separately as a
+  read-only compatibility shadow that compares a valid workflow candidate with
+  its direct or grounded-direct counterfactual. Task class,
   retrieval, risk, decomposition, and verification come from the validated
-  Conductor decision rather than a second keyword classifier. Admission uses the
-  Conductor's confidence-weighted uplift, explicit independent demand, hard
-  capability/safety/resource boundaries, and independently scored matched
-  team-versus-direct evidence. Exact context/action evidence wins; sufficiently
-  supported evidence for the same model and route shape generalizes to new
-  requests. Failed team executions remain negative evidence when their paired
-  comparison and provenance are complete. A downshifted candidate becomes direct
-  or grounded-direct without another conductor call while preserving its
-  selected model, tools, vision, risk, retrieval, and memory.
-  The plan records whether final authority came from the Conductor, a hard
-  constraint, the compatibility value policy, a runtime constraint, fixed Fast
-  policy, or degraded fallback; the original candidate remains auditable.
+  Conductor decision rather than a second keyword classifier or value gate.
+  Confidence, independent demand, and matched team-versus-direct evidence are
+  visible to the Conductor and the shadow receipt, but the compatibility policy
+  cannot replace a valid Conductor action. The plan records a typed decision
+  receipt binding the candidate and executable action. Production authority is
+  Conductor, fixed Fast policy, an explicit evaluation/runtime constraint, or a
+  degraded fallback; invalid safety, capability, or budget candidates fail
+  closed into bounded repair rather than being silently rewritten.
   The deterministic pre-decision task label is retained only as an independent
   evaluation stratum; it does not alter the Conductor decision or route.
 - **Pro** uses the same decision contract with a maximum requested parallelism
   of three and a larger outer workflow budget. The validated task contract
   narrows that ceiling to the conductor's task estimate while retaining the
   structural minimum for required independent contributions, verification, and
-  synthesis. It passes the same Router v2 contract with Pro's minimum-uplift
-  floor; a low-value Pro workflow also downshifts without a repair call and the
-  plan records that compatibility policy as the final authority.
+  synthesis. It records the same Router v2 shadow, but only the Conductor decides
+  whether the native Pro action is Direct or Workflow.
 - Runtime-derived tool and image-input requirements remain hard postconditions
   on the decision and selected model. Effect authority is independent and
   tri-state: explicit no-change language forbids effects, an explicit effect
@@ -51,9 +48,9 @@ only the revision recorded in each report.
   still fails, the workflow contributes no guidance and the shared foreground
   Actor runs directly with its validated model, tools, retrieval, memory, and
   permission path. Cindx does not manufacture a deterministic workflow or
-  inject a partial best-known handoff after failure. Strong matched
-  direct-anchor evidence likewise selects this foreground Direct path without
-  spending repair or alternate-conductor calls. Every conductor request has a
+  inject a partial best-known handoff after failure. Matched direct-anchor
+  evidence is observational input to the Conductor and shadow receipt; it does
+  not independently select this path. Every conductor request has a
   45-second no-progress boundary, including a configuration with only one
   conductor model; response progress retains the existing bounded recovery
   behavior.
@@ -87,9 +84,10 @@ A new run currently follows this sequence:
 5. The active objective, completion intent, current image input, and image
    generation requirement form typed route requirements. Fast chooses a direct
    candidate; Auto and Pro request a Conductor candidate. All three paths create
-   one validated `cindx.execution-plan.v1`. It contains the original candidate,
-   final executable action, hard-constraint receipt, explicit compatibility
-   route, authority, and optional workflow-execution profile identity. Its
+   one validated `cindx.execution-plan.v2`. It contains the original candidate,
+   final executable action, hard-constraint receipt, typed decision receipt,
+   read-only compatibility route, authority, and optional workflow-execution
+   profile identity. Its
    compatibility receipt binds digests of
    the actual objective, recent context, prompt profile, requirements, model
    pool, and budget; action identity binds the complete executable route policy.
@@ -749,10 +747,11 @@ Therefore the current claim is:
   browser evidence, long-horizon work, RAG/memory, and denied mutation.
   Cancellation, interruption/resume, steering, broader computer interaction,
   and adversarial instruction resistance still need matched repeated suites.
-- The compatibility value policy remains in the planning path to preserve current
-  Auto/Pro behavior. It is now explicitly separated from hard constraints and
-  attributed in `ExecutionPlan`, but only future matched evidence can justify
-  removing it. Workflow GEPA also remains a coupled route-plus-workflow treatment;
+- The compatibility value policy remains computed as a read-only shadow for
+  comparison and learning diagnostics. It cannot select or rewrite the V2
+  executable action. Provider-backed matched evidence is still required to show
+  whether this ownership change improves Auto/Pro outcomes. Workflow GEPA also
+  remains a coupled route-plus-workflow treatment;
   the current causal gate prevents false attribution but does not yet split the
   production genome into independently deployable layers.
 
