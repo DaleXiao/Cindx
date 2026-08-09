@@ -34,18 +34,17 @@ test("execution is explicit and all paths are required", () => {
   assert.throws(() => parseArguments(["--unknown"]), /unknown argument/);
 });
 
-test("raw stays outside while publishable reports may use docs evaluations", () => {
+test("all provider evidence outputs stay outside the repository", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cindx-provider-paths-"));
   const repository = path.join(directory, "repo");
   const outside = path.join(directory, "outside");
-  fs.mkdirSync(path.join(repository, "docs", "evaluations"), { recursive: true });
-  fs.mkdirSync(path.join(repository, "target"));
+  fs.mkdirSync(path.join(repository, "target"), { recursive: true });
   fs.mkdirSync(outside);
   try {
     const accepted = validateOutputPaths(repository, {
       raw: path.join(outside, "raw.json"),
-      sanitized: path.join(repository, "docs/evaluations/current.json"),
-      markdown: path.join(repository, "docs/evaluations/current.md")
+      sanitized: path.join(outside, "current.json"),
+      markdown: path.join(outside, "current.md")
     });
     assert.equal(
       accepted.raw,
@@ -65,16 +64,16 @@ test("raw stays outside while publishable reports may use docs evaluations", () 
         sanitized: path.join(repository, "target/report.json"),
         markdown: path.join(outside, "report.md")
       }),
-      /sanitized.*docs\/evaluations/
+      /--sanitized must be outside/
     );
 
     const linkedParent = path.join(outside, "linked-parent");
-    fs.symlinkSync(path.join(repository, "docs", "evaluations"), linkedParent, "dir");
+    fs.symlinkSync(path.join(repository, "target"), linkedParent, "dir");
     assert.throws(
       () => validateOutputPaths(repository, {
         raw: path.join(linkedParent, "raw.json"),
-        sanitized: path.join(repository, "docs/evaluations/report.json"),
-        markdown: path.join(repository, "docs/evaluations/report.md")
+        sanitized: path.join(outside, "report.json"),
+        markdown: path.join(outside, "report.md")
       }),
       /--raw must be outside/
     );

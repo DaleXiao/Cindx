@@ -67,12 +67,11 @@ export function validateOutputPaths(root, outputs) {
   const resolved = Object.fromEntries(
     Object.entries(outputs).map(([key, value]) => [key, path.resolve(value)])
   );
-  requireFact(!isWithin(root, resolved.raw), "--raw must remain outside the Git checkout");
-  const reports = path.join(root, "docs", "evaluations");
-  for (const key of ["sanitized", "markdown"]) {
-    if (isWithin(root, resolved[key])) {
-      requireFact(isWithin(reports, resolved[key]), `--${key} may be tracked only under docs/evaluations`);
-    }
+  for (const key of ["raw", "sanitized", "markdown"]) {
+    requireFact(
+      !isWithin(root, resolved[key]),
+      `--${key} must remain outside the Git checkout`
+    );
   }
   requireFact(new Set(Object.values(resolved)).size === 3, "output paths must be distinct");
   return resolved;

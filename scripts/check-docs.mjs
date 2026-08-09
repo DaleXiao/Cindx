@@ -15,6 +15,14 @@ function requireFile(relativePath) {
   }
 }
 
+function walk(directory) {
+  if (!fs.existsSync(directory)) return [];
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    return entry.isDirectory() ? walk(target) : [target];
+  });
+}
+
 function packageVersion(toml) {
   return toml.match(/^\[package\][\s\S]*?^version = "([^"]+)"$/m)?.[1];
 }
@@ -23,21 +31,47 @@ function lockVersion(lock) {
   return lock.match(/\[\[package\]\]\nname = "cindx-desktop"\nversion = "([^"]+)"/)?.[1];
 }
 
-function documentedVersion(markdown) {
-  return markdown.match(/^Current application version: `([^`]+)`$/m)?.[1];
+function markedVersion(markdown, label) {
+  return markdown.match(new RegExp("^" + label + ": `([^`]+)`$", "m"))?.[1];
 }
 
-for (const file of [
+const maintained = [
+  "README.md",
   "AGENTS.md",
-  "docs/README.md",
   "docs/CURRENT.md",
   "docs/ARCHITECTURE.md",
-  "docs/AGENT_EVALUATION.md",
-  "docs/QUALITY_GATES.md",
-  "docs/evaluations/README.md",
-  "docs/evaluations/archive/README.md"
-]) {
-  requireFile(file);
+  "docs/DEVELOPMENT.md",
+  "docs/EVALUATION.md",
+  "docs/HANDOFF.md"
+];
+maintained.forEach(requireFile);
+
+const allowedDocs = new Set(
+  maintained.filter((file) => file.startsWith("docs/")).map((file) => file.slice(5))
+);
+for (const file of walk(path.join(root, "docs"))) {
+  const relative = path.relative(path.join(root, "docs"), file);
+  if (!allowedDocs.has(relative)) {
+    failures.push(`unmaintained documentation file: docs/${relative}`);
+  }
+}
+
+for (const obsolete of ["apps/desktop/README.md"]) {
+  if (fs.existsSync(path.join(root, obsolete))) {
+    failures.push(`obsolete documentation returned: ${obsolete}`);
+  }
+}
+
+for (const entry of fs.readdirSync(root)) {
+  if (/^Cindx-HANDOFF-.*\.md$/i.test(entry)) {
+    failures.push(`versioned handoff is forbidden; update docs/HANDOFF.md: ${entry}`);
+  }
+}
+
+for (const file of walk(path.join(root, "releases"))) {
+  if (file.endsWith(".md") || file.endsWith(".json")) {
+    failures.push(`release history belongs in GitHub Releases, not the source tree: ${path.relative(root, file)}`);
+  }
 }
 
 const packageJson = JSON.parse(read("apps/desktop/package.json"));
@@ -45,135 +79,40 @@ const packageLock = JSON.parse(read("apps/desktop/package-lock.json"));
 const tauriConfig = JSON.parse(read("apps/desktop/src-tauri/tauri.conf.json"));
 const cargoTomlVersion = packageVersion(read("apps/desktop/src-tauri/Cargo.toml"));
 const cargoLockVersion = lockVersion(read("apps/desktop/src-tauri/Cargo.lock"));
-const currentDocVersion = documentedVersion(read("docs/CURRENT.md"));
-const versions = new Map([
+const currentVersion = markedVersion(read("docs/CURRENT.md"), "Current application version");
+const handoffVersion = markedVersion(read("docs/HANDOFF.md"), "Current release version");
+const expectedVersion = tauriConfig.version;
+
+for (const [label, version] of new Map([
   ["package.json", packageJson.version],
   ["package-lock.json", packageLock.version],
   ["package-lock root", packageLock.packages?.[""]?.version],
   ["tauri.conf.json", tauriConfig.version],
   ["desktop Cargo.toml", cargoTomlVersion],
   ["desktop Cargo.lock", cargoLockVersion],
-  ["docs/CURRENT.md", currentDocVersion]
-]);
-const expectedVersion = tauriConfig.version;
-for (const [label, version] of versions) {
+  ["docs/CURRENT.md", currentVersion],
+  ["docs/HANDOFF.md", handoffVersion]
+])) {
   if (version !== expectedVersion) {
     failures.push(`${label} version ${version ?? "missing"} != ${expectedVersion}`);
   }
 }
 
-for (const obsolete of [
-  "docs/MODULES.md",
-  "docs/MVP_SPEC.md",
-  "docs/POST_MVP_SPEC.md",
-  "docs/ROADMAP.md",
-  "docs/VISUAL_QA.md",
-  "docs/diagram.html",
-  "docs/handoffs"
-]) {
-  if (fs.existsSync(path.join(root, obsolete))) {
-    failures.push(`obsolete documentation path returned: ${obsolete}`);
-  }
-}
-
-const evaluationRoot = path.join(root, "docs/evaluations");
-const allowedEvaluationRootFiles = new Set([
-  "README.md",
-  "CINDX_DYNAMIC_COLLABORATION_V1_0.2.27_2026-08-09.md",
-  "CINDX_DYNAMIC_COLLABORATION_V1_0.2.27_2026-08-09.json",
-  "CINDX_DYNAMIC_COLLABORATION_V1_PROTOCOL_0.2.27_2026-08-09.md",
-  "CINDX_CONDUCTOR_OWNERSHIP_V1_0.2.27_2026-08-09.md",
-  "CINDX_CONDUCTOR_OWNERSHIP_V1_OLD_TRAIN_0.2.27_2026-08-09.json",
-  "CINDX_CONDUCTOR_OWNERSHIP_V1_CURRENT_TRAIN_0.2.27_2026-08-09.json",
-  "CINDX_CONDUCTOR_OWNERSHIP_V1_CONTROL_HOLDOUT_0.2.27_2026-08-09.json",
-  "CINDX_CONDUCTOR_OWNERSHIP_V1_CANDIDATE_HOLDOUT_0.2.27_2026-08-09.json",
-  "CINDX_WORKFLOW_GEPA_V2_INVALID_0.2.25_2026-08-08.md",
-  "CINDX_WORKFLOW_GEPA_V3_INVALID_0.2.25_2026-08-08.md",
-  "CINDX_WORKFLOW_GEPA_V4_INVALID_0.2.25_2026-08-08.md",
-  "CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.md",
-  "CINDX_WORKFLOW_GEPA_V4_0.2.25_2026-08-08.json",
-  "CINDX_WORKFLOW_GEPA_V5_0.2.25_2026-08-08.md",
-  "CINDX_WORKFLOW_GEPA_V5_0.2.25_2026-08-08.json",
-  "CINDX_WORKFLOW_GEPA_V6_PROTOCOL_0.2.25_2026-08-08.md",
-  "CINDX_WORKFLOW_GEPA_V7_PROTOCOL_0.2.25_2026-08-09.md",
-  "CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.md",
-  "CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.json",
-  "CINDX_WORKFLOW_GEPA_V7_0.2.26_2026-08-09.md",
-  "CINDX_WORKFLOW_GEPA_V7_0.2.26_2026-08-09.json",
-  "CINDX_WORKFLOW_GEPA_V9_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md",
-  "CINDX_WORKFLOW_GEPA_V10_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md",
-  "CINDX_WORKFLOW_GEPA_V11_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md",
-  "CINDX_WORKFLOW_GEPA_V12_ROUTE_CAUSAL_PROTOCOL_0.2.29_2026-08-09.md",
-  "CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md",
-  "CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.json",
-  "CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.md",
-  "CINDX_AGENT_MEMORY_EFFECT_V2_0.2.19_2026-08-06.json",
-  "CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.md",
-  "CINDX_AGENT_MEMORY_EFFECT_V1_0.2.19_2026-08-06.json",
-  "CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.md",
-  "CINDX_AGENT_REALWORLD_V5_0.2.22_2026-08-06.json",
-  "CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.md",
-  "CINDX_AGENT_REALWORLD_V5_0.2.11_2026-08-06.json",
-  "CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.md",
-  "CINDX_AGENT_REALWORLD_V4_0.2.9_2026-08-06.json",
-  "CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.md",
-  "CINDX_AGENT_REALWORLD_V3_0.2.3_2026-08-04.json",
-  "CINDX_AGENT_REALWORLD_13A_REPAIR_0.1.95_2026-08-04.md",
-  "CINDX_AGENT_REALWORLD_13A_PILOT_0.1.94_2026-08-04.md",
-  "CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.md",
-  "CINDX_AGENT_REALWORLD_V2_0.1.98_2026-08-04.json",
-  "CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.md",
-  "CINDX_AGENT_REALWORLD_V1_0.1.82_2026-08-02.json",
-  "CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.md",
-  "CINDX_AGENT_REALWORLD_V2_0.1.82_2026-08-02.json",
-  "CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.md",
-  "CINDX_PROVIDER_BASELINE_0.1.78_2026-07-31.json"
-]);
-for (const entry of fs.readdirSync(evaluationRoot, { withFileTypes: true })) {
-  if (entry.isFile() && !allowedEvaluationRootFiles.has(entry.name)) {
-    failures.push(`unindexed current evaluation file: docs/evaluations/${entry.name}`);
-  }
-}
-
-function walk(directory) {
-  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const target = path.join(directory, entry.name);
-    return entry.isDirectory() ? walk(target) : [target];
-  });
-}
-
-for (const file of walk(evaluationRoot)) {
-  if (!file.endsWith(".md") && !file.endsWith(".json")) continue;
-  const source = fs.readFileSync(file, "utf8");
-  if (/source commit[^\n]*`?unknown`?/i.test(source)) {
-    failures.push(`evaluation has unknown source revision: ${path.relative(root, file)}`);
-  }
-}
-
-const markdownFiles = [
-  path.join(root, "README.md"),
-  path.join(root, "AGENTS.md"),
-  path.join(root, "releases/README.md"),
-  ...walk(path.join(root, "docs")).filter((file) => file.endsWith(".md"))
-];
+const markdownFiles = maintained
+  .filter((file) => file.endsWith(".md"))
+  .map((file) => path.join(root, file));
 const linkPattern = /\[[^\]]*\]\(([^)]+)\)/g;
 for (const file of markdownFiles) {
   const source = fs.readFileSync(file, "utf8");
   for (const match of source.matchAll(linkPattern)) {
     const rawTarget = match[1].trim().replace(/^<|>$/g, "");
-    if (
-      !rawTarget ||
-      rawTarget.startsWith("#") ||
-      /^(?:https?:|mailto:)/i.test(rawTarget)
-    ) {
+    if (!rawTarget || rawTarget.startsWith("#") || /^(?:https?:|mailto:)/i.test(rawTarget)) {
       continue;
     }
     const relativeTarget = rawTarget.split("#", 1)[0];
     const resolved = path.resolve(path.dirname(file), decodeURIComponent(relativeTarget));
     if (!fs.existsSync(resolved)) {
-      failures.push(
-        `broken link in ${path.relative(root, file)}: ${rawTarget}`
-      );
+      failures.push(`broken link in ${path.relative(root, file)}: ${rawTarget}`);
     }
   }
 }
@@ -183,4 +122,6 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-process.stdout.write(`Documentation baseline ${expectedVersion} is consistent.\n`);
+process.stdout.write(
+  `Documentation baseline ${expectedVersion} is consistent (${maintained.length} maintained files).\n`
+);

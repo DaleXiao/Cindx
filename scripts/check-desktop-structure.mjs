@@ -684,7 +684,7 @@ const qualityGateById = new Map(
   qualityGateManifest.gates.map((gate) => [gate.id, gate])
 );
 const qualityGateRunner = read("scripts/run-quality-gates.mjs");
-const qualityGateDoc = read("docs/QUALITY_GATES.md");
+const qualityGateDoc = read("docs/DEVELOPMENT.md");
 const evaluationLabSource = read(
   "crates/orchestrator-eval/examples/evaluation_lab.rs"
 );
@@ -694,8 +694,8 @@ const shippingOrchestratorExamples = fs.existsSync(
   ? fs.readdirSync(path.join(root, "crates", "orchestrator", "examples"))
   : [];
 const memoryEvaluationLabSource = read("crates/agent-memory/examples/memory_lab.rs");
-const agentEvaluationDoc = read("docs/AGENT_EVALUATION.md");
-const browserControlDoc = read("docs/BROWSER_CONTROL.md");
+const agentEvaluationDoc = read("docs/EVALUATION.md");
+const browserControlDoc = read("docs/DEVELOPMENT.md");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
 const viteConfig = read("apps/desktop/vite.config.ts");
@@ -4334,11 +4334,11 @@ assert(
     evaluationLabSource.includes("Cindx agent benchmark") &&
     evaluationLabSource.includes("quality=not_observed") &&
     agentEvaluationDoc.includes("## Evidence Levels") &&
-    agentEvaluationDoc.includes("## Current Real-World Findings") &&
+    agentEvaluationDoc.includes("## Current Decision Ledger") &&
     qualityGateManifest.schema === "cindx.quality-gates.v1" &&
     qualityGateManifest.profiles["ci-contract"].includes("routing-contract") &&
     qualityGateRunner.includes("cindx.quality-gate-report.v1") &&
-    qualityGateDoc.includes("deterministic green build") &&
+    qualityGateDoc.includes("Deterministic contracts do not establish") &&
     ciWorkflow.includes("run-quality-gates.mjs --profile ci-contract") &&
     ciWorkflow.includes("Upload quality reports") &&
     ciWorkflow.includes("target/agent-benchmark-report.json"),
@@ -4433,7 +4433,7 @@ assert(
     agentModelTurnRuntimeSource.indexOf(
       "prepared_streaming_request_once(provider, &request, &mut prepared_request)"
     ) > agentModelTurnRuntimeSource.indexOf("let mut response = loop {") &&
-    qualityGateDoc.includes("never cross-machine wall-clock thresholds"),
+    qualityGateDoc.includes("Cross-machine wall-clock numbers are diagnostics"),
   "Shipping builds must enforce auditable deterministic scaling contracts"
 );
 assert(
@@ -4463,7 +4463,7 @@ assert(
     qualityGateManifest.profiles["ci-contract"].includes("memory-attribution-contract") &&
     qualityGateManifest.profiles["ci-contract"].includes("memory-attribution-atomicity-contract") &&
     qualityGateManifest.profiles["ci-contract"].includes("agent-memory-effect-contract") &&
-    qualityGateDoc.includes("Memory recall is 100% at top-1 and recall@3"),
+    agentEvaluationDoc.includes("all `6/6` required-memory pairs improved"),
   "Project memory must have a versioned deterministic recall and trust-boundary gate"
 );
 assert(
@@ -4561,7 +4561,7 @@ assert(
     browserIntegrationTest.includes("browser sidecar integration ok") &&
     browserIntegrationTest.includes('invoke("select_tab"') &&
     browserIntegrationTest.includes('const closedAgain = await invoke("close")') &&
-    browserControlDoc.includes("CDP owns browser process discovery") &&
+    browserControlDoc.includes("Browser and Computer Sidecars") &&
     ciWorkflow.includes("Test Browser Control v2") &&
     localBuildScript.includes("test-browser-sidecar.mjs") &&
     computerSidecarSource.includes('const REQUEST_SCHEMA = "cindx.computer-control.v1"') &&

@@ -9,7 +9,6 @@ export const GPQA_SHA256 =
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptPath), "..");
-const evaluationDirectory = path.join(repositoryRoot, "docs", "evaluations");
 const baselineContract = path.join(
   repositoryRoot,
   "benchmarks",
@@ -70,15 +69,9 @@ export function validateOutputPaths(root, paths) {
   const resolved = Object.fromEntries(
     Object.entries(paths).map(([key, value]) => [key, canonicalOutputPath(value)])
   );
-  if (isWithin(canonicalRoot, resolved.raw)) {
-    throw new Error("--raw must be outside the repository");
-  }
-  const allowedReports = fs.realpathSync.native(
-    path.join(canonicalRoot, "docs", "evaluations")
-  );
-  for (const key of ["sanitized", "markdown"]) {
-    if (isWithin(canonicalRoot, resolved[key]) && !isWithin(allowedReports, resolved[key])) {
-      throw new Error(`--${key} may be inside the repository only under docs/evaluations`);
+  for (const key of ["raw", "sanitized", "markdown"]) {
+    if (isWithin(canonicalRoot, resolved[key])) {
+      throw new Error(`--${key} must be outside the repository`);
     }
   }
   const identities = new Set(Object.values(resolved));

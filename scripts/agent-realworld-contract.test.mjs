@@ -1026,25 +1026,32 @@ test("preflight rejects dirty or malformed provenance", () => {
   );
 });
 
-test("output boundary keeps raw evidence outside Git", () => {
+test("output boundary keeps all provider evidence outside Git", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cindx-realworld-output-"));
-  const reports = path.join(root, "docs", "evaluations");
-  fs.mkdirSync(reports, { recursive: true });
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "cindx-realworld-private-"));
   const valid = validateOutputPaths(root, {
     raw: path.join(outside, "raw.json"),
-    sanitized: path.join(reports, "report.json"),
-    markdown: path.join(reports, "report.md")
+    sanitized: path.join(outside, "report.json"),
+    markdown: path.join(outside, "report.md")
   });
   assert.equal(valid.raw, path.join(outside, "raw.json"));
   assert.throws(
     () =>
       validateOutputPaths(root, {
         raw: path.join(root, "raw.json"),
-        sanitized: path.join(reports, "report.json"),
-        markdown: path.join(reports, "report.md")
+        sanitized: path.join(outside, "report.json"),
+        markdown: path.join(outside, "report.md")
       }),
     /raw must remain outside/
+  );
+  assert.throws(
+    () =>
+      validateOutputPaths(root, {
+        raw: path.join(outside, "raw.json"),
+        sanitized: path.join(root, "report.json"),
+        markdown: path.join(outside, "report.md")
+      }),
+    /sanitized must remain outside/
   );
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
