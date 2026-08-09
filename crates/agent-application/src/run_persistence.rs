@@ -4,6 +4,7 @@ const EVENT_LOCAL_RUN_CONTEXT_KEYS: &[&str] = &[
     "initial_prompt_objective",
     "effective_prompt_objective",
     "prompt_objective",
+    "matched_route_plan_anchor",
 ];
 
 /// Merge durable run identity and policy context into an event without copying
@@ -91,6 +92,10 @@ mod tests {
         let context = [
             ("agent_run_id".to_string(), "run-1".to_string()),
             (
+                "matched_route_plan_anchor".to_string(),
+                "private-evaluation-anchor".to_string(),
+            ),
+            (
                 "initial_prompt_objective".to_string(),
                 "inspect the repository".to_string(),
             ),
@@ -110,6 +115,7 @@ mod tests {
         );
         assert!(!merged.contains_key("initial_prompt_objective"));
         assert!(!merged.contains_key("effective_prompt_objective"));
+        assert!(!merged.contains_key("matched_route_plan_anchor"));
     }
 
     #[test]

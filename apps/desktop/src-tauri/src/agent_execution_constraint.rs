@@ -1,10 +1,72 @@
 use agent_core::Metadata;
 use orchestrator::{
-    AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentToolRequirement, MemoryRecallPlan,
-    MemoryRecallPolicy,
+    AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentToolRequirement,
+    CausalRouteSelectionV2, MemoryRecallPlan, MemoryRecallPolicy, WorkflowPlanProposal,
 };
+use serde::{Deserialize, Serialize};
 
 pub(crate) const AGENT_EXECUTION_CONSTRAINT_KEY: &str = "execution_constraint";
+pub(crate) const MATCHED_ROUTE_PLAN_ANCHOR_KEY: &str = "matched_route_plan_anchor";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MatchedRoutePlanAnchor {
+    pub(crate) conductor_candidate: AgentRunDecision,
+    pub(crate) compatibility_route: CausalRouteSelectionV2,
+    pub(crate) workflow_plan: WorkflowPlanProposal,
+}
+
+impl MatchedRoutePlanAnchor {
+    #[cfg(feature = "realworld-eval")]
+    pub(crate) fn new(
+        conductor_candidate: AgentRunDecision,
+        compatibility_route: CausalRouteSelectionV2,
+        workflow_plan: WorkflowPlanProposal,
+    ) -> Result<Self, String> {
+        let anchor = Self {
+            conductor_candidate,
+            compatibility_route,
+            workflow_plan,
+        };
+        anchor.validate()?;
+        Ok(anchor)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.conductor_candidate.execution != AgentExecutionMode::Workflow {
+            return Err("matched route plan anchor must contain a workflow candidate".to_string());
+        }
+        self.compatibility_route.validate()?;
+        let allowed_models = self
+            .workflow_plan
+            .steps
+            .iter()
+            .map(|step| step.model.trim().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.workflow_plan
+            .validate(&self.conductor_candidate, &allowed_models)
+    }
+
+    pub(crate) fn write_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {
+        self.validate()?;
+        let encoded = serde_json::to_string(self)
+            .map_err(|error| format!("matched route plan anchor serialization failed: {error}"))?;
+        run_context.insert(MATCHED_ROUTE_PLAN_ANCHOR_KEY.to_string(), encoded);
+        Ok(())
+    }
+
+    pub(crate) fn from_context(run_context: &Metadata) -> Result<Option<Self>, String> {
+        let Some(encoded) = run_context.get(MATCHED_ROUTE_PLAN_ANCHOR_KEY) else {
+            return Ok(None);
+        };
+        let anchor = serde_json::from_str::<Self>(encoded)
+            .map_err(|error| format!("matched route plan anchor is invalid: {error}"))?;
+        anchor.validate()?;
+        Ok(Some(anchor))
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum AgentExecutionConstraint {
@@ -29,10 +91,12 @@ impl AgentExecutionConstraint {
         matches!(self, Self::MatchedDirect | Self::MatchedWorkflow)
     }
 
-    pub(crate) const fn required_execution(self) -> Option<AgentExecutionMode> {
+    pub(crate) const fn conductor_required_execution(self) -> Option<AgentExecutionMode> {
         match self {
-            Self::MatchedDirect => Some(AgentExecutionMode::Direct),
-            Self::MatchedWorkflow => Some(AgentExecutionMode::Workflow),
+            // Both arms start from the same workflow-capable conductor plan. The
+            // runtime projects only the Direct arm after planning so the causal
+            // treatment cannot be confounded by two different plan shapes.
+            Self::MatchedDirect | Self::MatchedWorkflow => Some(AgentExecutionMode::Workflow),
             Self::Native | Self::GroundedDirect | Self::MatchedMemoryEffect => None,
         }
     }
@@ -107,17 +171,17 @@ impl AgentExecutionConstraint {
                 Err("matched route evaluation requires the Pro policy and budget".to_string())
             }
             Self::MatchedDirect | Self::MatchedWorkflow => {
-                let required = self
-                    .required_execution()
-                    .expect("matched route constraints have a required execution mode");
-                if decision.execution != required {
+                if decision.execution != AgentExecutionMode::Workflow {
                     return Err(format!(
-                        "matched route evaluation required {} but conductor returned {}",
-                        execution_mode_label(required),
+                        "matched route evaluation requires a shared workflow plan anchor but conductor returned {}",
                         execution_mode_label(decision.execution),
                     ));
                 }
-                Ok(decision)
+                match self {
+                    Self::MatchedDirect => Ok(decision.constrained_to_grounded_direct()),
+                    Self::MatchedWorkflow => Ok(decision),
+                    _ => unreachable!("matched route branch only"),
+                }
             }
         }
     }
@@ -212,13 +276,30 @@ mod tests {
     }
 
     #[test]
-    fn matched_route_constraints_are_pro_only_and_validate_without_rewriting() {
-        let direct = AgentRunDecision::direct("executor");
+    fn matched_route_constraints_share_a_workflow_anchor_and_are_pro_only() {
+        let mut workflow = AgentRunDecision::direct("executor");
+        workflow.execution = AgentExecutionMode::Workflow;
+        workflow.max_parallelism = 2;
+        workflow.min_successful_branches = 2;
+        workflow.distinct_contributions = 2;
+        let direct = AgentExecutionConstraint::MatchedDirect
+            .apply(workflow.clone(), AgentPolicy::Pro)
+            .expect("matched direct should project the shared workflow anchor");
+        assert_eq!(direct.execution, AgentExecutionMode::Direct);
+        assert_eq!(direct.primary_model, workflow.primary_model);
         assert_eq!(
-            AgentExecutionConstraint::MatchedDirect
-                .apply(direct.clone(), AgentPolicy::Pro)
-                .expect("matched direct should accept a direct conductor decision"),
-            direct
+            AgentExecutionConstraint::MatchedWorkflow
+                .apply(workflow.clone(), AgentPolicy::Pro)
+                .expect("matched workflow should retain the shared anchor"),
+            workflow
+        );
+        assert_eq!(
+            AgentExecutionConstraint::MatchedDirect.conductor_required_execution(),
+            Some(AgentExecutionMode::Workflow)
+        );
+        assert_eq!(
+            AgentExecutionConstraint::MatchedWorkflow.conductor_required_execution(),
+            Some(AgentExecutionMode::Workflow)
         );
         assert!(AgentExecutionConstraint::MatchedDirect
             .apply(AgentRunDecision::direct("executor"), AgentPolicy::Auto)

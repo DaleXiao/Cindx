@@ -2,7 +2,7 @@ use super::direct_finalizer_receipts::{
     project_direct_finalizer_execution, DirectFinalizerExecutionReceipt,
 };
 use super::{metadata_u64, Treatment};
-use crate::agent_execution_constraint::AgentExecutionConstraint;
+use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::*;
 use agent_core::Event;
 use orchestrator::{ExecutionPlan, WorkflowPlanIr};
@@ -52,12 +52,15 @@ impl ResolvedBudgetReceipt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct StrategyReceipt {
+    #[serde(skip)]
+    pub(super) matched_route_plan_anchor: Option<MatchedRoutePlanAnchor>,
     pub(super) requested_policy: String,
     pub(super) effective_policy: String,
     pub(super) execution_mode: String,
     pub(super) decision_source: String,
     pub(super) execution_constraint: String,
     pub(super) decision_sha256: String,
+    pub(super) conductor_candidate_sha256: Option<String>,
     pub(super) execution_plan_sha256: Option<String>,
     pub(super) execution_plan_semantic_sha256: Option<String>,
     pub(super) execution_plan_authority: Option<String>,
@@ -284,6 +287,9 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     let mut workflow_verifier_steps = 0;
     let mut workflow_synthesis_steps = 0;
     let mut workflow_execution_completed = false;
+    let mut matched_route_plan_anchor = None;
+    let matched_direct_anchor =
+        expected_execution_constraint == Some(AgentExecutionConstraint::MatchedDirect);
     if decision.execution == orchestrator::AgentExecutionMode::Workflow {
         let encoded = workflow_proposal
             .ok_or_else(|| "workflow strategy receipt is missing its route proposal".to_string())?;
@@ -302,6 +308,16 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
             || declared_workflow_plan_source.as_deref() != Some("run_decision")
         {
             return Err("workflow strategy proposal receipt is inconsistent".to_string());
+        }
+        if expected_execution_constraint.is_some_and(AgentExecutionConstraint::is_matched_route) {
+            let plan = execution_plan.as_ref().ok_or_else(|| {
+                "matched Workflow execution plan is missing from its strategy receipt".to_string()
+            })?;
+            matched_route_plan_anchor = Some(MatchedRoutePlanAnchor::new(
+                plan.conductor_candidate.clone(),
+                plan.compatibility_route.clone(),
+                proposal.clone(),
+            )?);
         }
 
         if let Some((planned_index, planned)) = events
@@ -361,14 +377,51 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
                 .count();
             workflow_profile_exercised = planned.metadata.get("prompt_profile") == Some(&genome.id);
             let collaboration_id = planned.metadata.get("collaboration_id");
-            workflow_execution_completed = events
-                .iter()
-                .skip(planned_index.saturating_add(1))
-                .any(|event| {
-                    event.summary == "Collaboration workflow completed"
-                        && event.metadata.get("collaboration_id") == collaboration_id
-                });
+            workflow_execution_completed =
+                events
+                    .iter()
+                    .skip(planned_index.saturating_add(1))
+                    .any(|event| {
+                        event.summary == "Collaboration workflow completed"
+                            && event.metadata.get("collaboration_id") == collaboration_id
+                    });
         }
+    } else if matched_direct_anchor {
+        let encoded = workflow_proposal.ok_or_else(|| {
+            "matched Direct receipt is missing its shared workflow proposal anchor".to_string()
+        })?;
+        let proposal = serde_json::from_str::<WorkflowPlanProposal>(encoded)
+            .map_err(|error| format!("matched Direct workflow anchor is invalid: {error}"))?;
+        let candidate = execution_plan
+            .as_ref()
+            .map(|plan| &plan.conductor_candidate)
+            .ok_or_else(|| "matched Direct execution plan is missing".to_string())?;
+        if candidate.execution != orchestrator::AgentExecutionMode::Workflow {
+            return Err("matched Direct conductor anchor is not a workflow".to_string());
+        }
+        let proposal_models = proposal
+            .steps
+            .iter()
+            .map(|step| step.model.trim().to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        proposal.validate(candidate, &proposal_models)?;
+        let expected_proposal_sha256 = sha256_hex(encoded.as_bytes());
+        if workflow_proposal_sha256.as_deref() != Some(expected_proposal_sha256.as_str())
+            || declared_workflow_plan_source.as_deref() != Some("run_decision")
+        {
+            return Err("matched Direct workflow anchor receipt is inconsistent".to_string());
+        }
+        matched_route_plan_anchor = Some(MatchedRoutePlanAnchor::new(
+            candidate.clone(),
+            execution_plan
+                .as_ref()
+                .expect("matched Direct execution plan was required above")
+                .compatibility_route
+                .clone(),
+            proposal,
+        )?);
     } else if workflow_proposal.is_some()
         || workflow_proposal_sha256.is_some()
         || declared_workflow_plan_source.is_some()
@@ -376,6 +429,7 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
         return Err("direct strategy receipt claimed a workflow proposal".to_string());
     }
     Ok(Some(StrategyReceipt {
+        matched_route_plan_anchor,
         requested_policy: required_metadata(&event.metadata, "requested_policy")?.to_string(),
         effective_policy: required_metadata(&event.metadata, "collaboration_policy")?.to_string(),
         execution_mode: match decision.execution {
@@ -386,6 +440,12 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
         decision_source: required_metadata(&event.metadata, "decision_source")?.to_string(),
         execution_constraint: execution_constraint.to_string(),
         decision_sha256: domain_hash("cindx.agent-run-decision.v1\0", decision_json),
+        conductor_candidate_sha256: execution_plan
+            .as_ref()
+            .map(|plan| serde_json::to_string(&plan.conductor_candidate))
+            .transpose()
+            .map_err(|error| format!("conductor candidate serialization failed: {error}"))?
+            .map(|candidate| domain_hash("cindx.agent-conductor-candidate.v1\0", &candidate)),
         execution_plan_sha256: execution_plan
             .as_ref()
             .map(ExecutionPlan::digest)
@@ -473,10 +533,7 @@ fn validate_execution_constraint_receipt(
     }
 }
 
-fn workflow_plan_matches_proposal(
-    plan: &WorkflowPlanIr,
-    proposal: &WorkflowPlanProposal,
-) -> bool {
+fn workflow_plan_matches_proposal(plan: &WorkflowPlanIr, proposal: &WorkflowPlanProposal) -> bool {
     plan.steps.len() == proposal.steps.len()
         && plan
             .steps
@@ -789,10 +846,9 @@ mod tests {
             metadata.get("conductor_workflow_proposal").unwrap(),
         )
         .unwrap();
-        let genome = serde_json::from_str::<ConductorPromptGenome>(
-            metadata.get("prompt_genome").unwrap(),
-        )
-        .unwrap();
+        let genome =
+            serde_json::from_str::<ConductorPromptGenome>(metadata.get("prompt_genome").unwrap())
+                .unwrap();
         let plan = WorkflowPlanIr {
             schema: WORKFLOW_IR_SCHEMA.to_string(),
             workflow_id: "workflow-receipt-test".to_string(),
@@ -863,13 +919,9 @@ mod tests {
     fn workflow_strategy_receipt_binds_the_route_proposal() {
         let metadata = workflow_strategy_metadata();
         let events = workflow_strategy_events(&metadata);
-        let receipt = strategy_receipt_from_events(
-            &events,
-            Treatment::Pro,
-            None,
-        )
-        .expect("strategy receipt")
-        .expect("product strategy");
+        let receipt = strategy_receipt_from_events(&events, Treatment::Pro, None)
+            .expect("strategy receipt")
+            .expect("product strategy");
 
         assert_eq!(receipt.execution_mode, "workflow");
         assert_eq!(
@@ -893,10 +945,9 @@ mod tests {
             "conductor_source".to_string(),
             "model_cold_start".to_string(),
         );
-        let fallback_receipt =
-            strategy_receipt_from_events(&fallback_events, Treatment::Pro, None)
-                .expect("fallback strategy receipt")
-                .expect("product strategy");
+        let fallback_receipt = strategy_receipt_from_events(&fallback_events, Treatment::Pro, None)
+            .expect("fallback strategy receipt")
+            .expect("product strategy");
         assert_eq!(
             fallback_receipt.workflow_plan_source.as_deref(),
             Some("model_cold_start")

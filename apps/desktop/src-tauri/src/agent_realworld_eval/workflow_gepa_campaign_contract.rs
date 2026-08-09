@@ -62,6 +62,8 @@ pub(super) struct ProductRunReceipt {
     pub(super) model_calls: usize,
     pub(super) total_tokens: u64,
     pub(super) output_sha256: String,
+    pub(super) conductor_candidate_sha256: Option<String>,
+    pub(super) workflow_proposal_sha256: Option<String>,
     pub(super) profile_id: Option<String>,
     pub(super) profile_sha256: Option<String>,
     pub(super) route_profile_sha256: Option<String>,
@@ -121,6 +123,10 @@ impl ProductRunReceipt {
             model_calls: run.metrics.model_calls,
             total_tokens: run.metrics.total_tokens,
             output_sha256: run.output_sha256.clone(),
+            conductor_candidate_sha256: strategy
+                .and_then(|receipt| receipt.conductor_candidate_sha256.clone()),
+            workflow_proposal_sha256: strategy
+                .and_then(|receipt| receipt.workflow_proposal_sha256.clone()),
             profile_id: strategy.map(|receipt| receipt.profile_id.clone()),
             profile_sha256: strategy.map(|receipt| receipt.profile_sha256.clone()),
             route_profile_sha256: strategy.map(|receipt| receipt.route_profile_sha256.clone()),
@@ -544,6 +550,8 @@ mod tests {
             model_calls: 1,
             total_tokens: 100,
             output_sha256: "a".repeat(64),
+            conductor_candidate_sha256: Some("0".repeat(64)),
+            workflow_proposal_sha256: Some("1".repeat(64)),
             profile_id: Some(profile.id.clone()),
             profile_sha256: Some(prompt_genome_sha256(profile).unwrap()),
             route_profile_sha256: Some(

@@ -209,9 +209,13 @@ revision and is no longer the current product decision.
   product receipt, matched pair, candidate, snapshot, or quality conclusion.
 
 - [Cindx Workflow GEPA V10 route-causal protocol 0.2.28](CINDX_WORKFLOW_GEPA_V10_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md)
-  corrects only the expected-constraint receipt projection. The matched design,
-  frozen V7 suite, gates, budgets, route-only GEPA space, and one-shot rule are
-  unchanged. It is `PROTOCOL_ONLY`; no V10 uplift claim exists yet.
+  records `INVALID_INSTRUMENTATION`: one coding pair completed, but the first
+  research arm exposed that separate conductor requests confounded plan shape
+  with execution. It supports no quality or capability conclusion.
+
+- [Cindx Workflow GEPA V11 route-causal protocol 0.2.28](CINDX_WORKFLOW_GEPA_V11_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md)
+  freezes a shared workflow-plan anchor and changes only runtime execution. It
+  is `PROTOCOL_ONLY`; no V11 uplift claim exists yet.
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit

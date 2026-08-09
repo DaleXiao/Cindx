@@ -2,7 +2,7 @@
 
 ## Status
 
-`PROTOCOL_ONLY`
+`INVALID_INSTRUMENTATION`
 
 This protocol freezes one causal question before any V10 provider execution: when
 the same Pro conductor, prompt profile, task, workspace, model set, and budget
@@ -10,8 +10,14 @@ are held fixed, does a required Workflow produce externally verified product
 value over a required Direct execution? GEPA may learn a routing instruction
 only if that contrast contains a positive Workflow treatment.
 
-There is no V10 provider result, candidate snapshot, profile promotion, quality
-gain, efficiency gain, or frontier claim in this document.
+The authorized V10 execution at source commit
+`329de6e33aa5c6b7d2b35738ed7bc8f828ec0782` completed the first coding pair,
+then failed closed on the first research arm before a second pair existed. The
+conductor returned four responses without satisfying the requested execution
+shape, so no strategy receipt was recorded. This exposed a causal-design flaw:
+the treatment depended on separate conductor responses instead of holding one
+plan fixed and changing only execution. There is no V10 report, candidate,
+snapshot, promotion, quality result, efficiency result, or frontier claim.
 
 | Field | Frozen value |
 | --- | --- |
@@ -24,7 +30,10 @@ gain, efficiency gain, or frontier claim in this document.
 | Learned field | `route_directive` only |
 | Candidate population | 2 distinct route policies from at most 6 proposals |
 | Maximum product runs | 33 planned, below the existing hard cap of 35 |
-| Provider calls in this protocol change | 0 |
+| V10 journal SHA-256 | `5f6557edc081b66d44962ffb4c8ba92d9e1257106abfe0c88a5890b2fd44ea2c` |
+| Completed product runs | `2` |
+| Completed matched pairs | `1` |
+| Product model calls before failure | `16` |
 
 ## Instrumentation correction from V9
 
@@ -36,9 +45,12 @@ constraint, persisted metadata, and actual Direct or Workflow route to agree.
 Ordinary Pro still requires `native`; the fix does not relax production or
 campaign evidence checks.
 
-No V9 output or partial quality result informed this correction. The frozen
-suite, case order, thresholds, budgets, candidate count, learned field, and
-one-shot rule below are unchanged.
+No V9 output or partial quality result informed this correction. V10 proved the
+expected-constraint projection fix, but did not isolate execution mode because
+each arm independently asked the conductor for a different route shape. Raw
+task output was not inspected and the completed coding pair is not interpreted
+as quality evidence. V11 keeps the suite, case order, thresholds, budgets,
+candidate count, and learned field unchanged while fixing that causal boundary.
 
 An authorized campaign must use one clean exact Git revision and three new
 outside-repository paths for its report, candidate snapshot, and hash-chained
@@ -56,9 +68,10 @@ separates the two interventions instead of adding another routing heuristic:
    budgets, or finalization. Existing snapshots without this field retain their
    legacy behavior.
 2. Workflow-execution genes no longer alter the route-policy fingerprint.
-3. The evaluation runtime can require Direct or Workflow, but production leaves
-   that field unset. The conductor still constructs the best bounded plan for
-   the required arm, and a response with the wrong execution mode is rejected.
+3. The evaluation runtime attempted to require Direct or Workflow while
+   production left that field unset. Because each arm separately asked the
+   conductor for its treatment shape, provider compliance and plan variation
+   remained confounded with execution mode. V11 supersedes this boundary.
 4. Each train pair starts from byte-identical materialized workspaces. Direct
    and Workflow share the same parent prompt and route fingerprints, Pro budget,
    provider configuration, task, and replicate; arm order is counterbalanced.
@@ -125,7 +138,7 @@ result-driven prompt edit, case replacement, threshold change, or rerun.
 - `valid_no_go_training`, `valid_no_go_validation`,
   `valid_no_go_grounded_control`, and `valid_no_go_product_test` identify the
   first pre-registered gate that failed.
-- `valid_candidate_product_uplift` means only that the frozen V10 campaign
+- `valid_candidate_product_uplift` would have meant only that the frozen V10 campaign
   passed. It is not production promotion, broad Agent superiority, or Fugu
   Ultra parity.
 - setup, identity, treatment, journal, or evidence inconsistency is invalid

@@ -6,6 +6,7 @@ use orchestrator::{AgentExecutionMode, AgentRouteRequirements, AgentRunDecision,
 pub(crate) enum AgentPlanningSource {
     FastDirect,
     MatchedMemoryEvaluation,
+    MatchedRouteEvaluation,
     DynamicConductor,
     DynamicConductorReplanned,
     DegradedDirect,
@@ -17,6 +18,7 @@ impl AgentPlanningSource {
         match self {
             Self::FastDirect => "fast_direct",
             Self::MatchedMemoryEvaluation => "matched_memory_evaluation",
+            Self::MatchedRouteEvaluation => "matched_route_shared_anchor",
             Self::DynamicConductor => "dynamic_conductor_v2",
             Self::DynamicConductorReplanned => "dynamic_conductor_replanned",
             Self::DegradedDirect => "dynamic_conductor_degraded_direct",

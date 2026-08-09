@@ -585,7 +585,7 @@ generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
 The feature-gated Workflow GEPA campaign keeps the frozen V7 task suite and
-product gates while the current source emits a V10 evidence receipt. Six modules
+product gates while the current source emits a V11 evidence receipt. Six modules
 retain one-way responsibilities: the runner owns protocol order, the suite
 module validates public requirements and frozen strata, the evidence module
 converts external product verification into redacted reflection packets, the
@@ -594,15 +594,17 @@ execution module isolates and counterbalances matched cells, and the contract
 module computes gates from sanitized receipts. V2 and the first V4 attempt are
 retained only as `INVALID_EVALUATOR` history; V3 and the second V4 attempt remain
 `INVALID_TASK_SPEC` history. V5 and V7 provider runs remain valid targeted no-go
-evidence and are not reinterpreted by the V10 mechanism change. V9 itself is
-retained as invalid instrumentation with zero completed product receipts.
+evidence and are not reinterpreted by the V11 mechanism change. V9 and V10 are
+retained as invalid instrumentation rather than capability evidence.
 
-Before mutation, V10 runs each training task through explicit matched Direct and
-Workflow treatments. Both arms share the same task, workspace prestate, Pro
-profile, route identity, provider configuration, and budget. The evaluation-only
-constraint is part of the Conductor request and receipt; production leaves it
-unset. The Conductor must return the required execution mode and constructs the
-bounded workflow graph itself. A wrong mode, missing arm, duplicate arm, or
+Before mutation, V11 asks the first arm in each pair for one workflow-capable
+conductor candidate and proposal, then injects that exact private in-memory
+anchor into the second arm. Workflow executes the proposal unchanged; Direct is
+a runtime projection of the same plan anchor after planning. Arm order is
+counterbalanced. Exact candidate and
+proposal hashes, task, workspace prestate, Pro profile, route identity, provider
+configuration, and budget must match. Production leaves the evaluation
+constraint unset. A different plan, wrong route, missing arm, duplicate arm, or
 profile drift fails closed.
 
 The campaign stops before GEPA unless Workflow records an externally verified
