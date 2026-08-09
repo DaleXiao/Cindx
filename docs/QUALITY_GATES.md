@@ -361,7 +361,13 @@ Passing them proves schema, matched-treatment, profile-identity, route-only
 intervention, and fail-closed behavior; it does not prove answer-quality uplift
 and does not authorize a provider run.
 
-The separately authorized V11 one-shot campaign uses a clean exact revision and
+The one authorized V11 execution on clean source `24b11ac` failed closed on the
+first product arm before a `ProductRunReceipt` was completed. Direct-finalizer
+assignment evidence could not bind a terminal completion, leaving the durable
+journal pending with one reservation. The result is `INVALID_EVIDENCE`, not a
+GO or NO-GO; V11 must not be replayed and production routing remains unchanged.
+
+The consumed V11 one-shot campaign used a clean exact revision and
 three fresh outside-Git paths. The resulting journal and report must be retained
 even when the command exits with a preregistered no-go:
 
