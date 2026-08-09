@@ -1052,6 +1052,54 @@ fn conductor_harness_builds_context_and_parses_a_valid_plan() {
 }
 
 #[test]
+fn conductor_harness_materializes_the_route_decision_proposal_without_replanning() {
+    let harness = ConductorHarness::new(conductor_request());
+    let proposal = WorkflowPlanProposal {
+        steps: vec![
+            WorkflowPlanProposalStep {
+                id: "a".to_string(),
+                role: "thinker".to_string(),
+                model: "planner".to_string(),
+                subtask: "derive the primary approach".to_string(),
+                access: Vec::new(),
+                output_kind: WorkflowOutputKind::Analysis,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+            WorkflowPlanProposalStep {
+                id: "b".to_string(),
+                role: "worker".to_string(),
+                model: "reviewer".to_string(),
+                subtask: "derive an independent alternative".to_string(),
+                access: Vec::new(),
+                output_kind: WorkflowOutputKind::Analysis,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+            WorkflowPlanProposalStep {
+                id: "final".to_string(),
+                role: "synthesizer".to_string(),
+                model: "planner".to_string(),
+                subtask: "reconcile both approaches".to_string(),
+                access: vec!["a".to_string(), "b".to_string()],
+                output_kind: WorkflowOutputKind::Synthesis,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+        ],
+    };
+
+    let plan = harness
+        .plan_from_proposal(&proposal)
+        .expect("route proposal should materialize as the executable graph");
+
+    assert_eq!(plan.steps.len(), 3);
+    assert_eq!(plan.steps[0].subtask, "derive the primary approach");
+    assert_eq!(plan.steps[1].model, "reviewer");
+    assert_eq!(
+        plan.steps[2].contract.output_kind,
+        WorkflowOutputKind::Synthesis
+    );
+}
+
+#[test]
 fn conductor_schema_keeps_required_branches_when_only_one_model_is_available() {
     let mut request = conductor_request();
     request.worker_models = vec!["planner".to_string()];

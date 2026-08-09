@@ -1,4 +1,4 @@
-use super::{requirements::route_decision_metadata, PlannedAgentRun};
+use super::{requirements::route_decision_metadata, workflow_proposal, PlannedAgentRun};
 use crate::collaboration_service::truncate_for_collaboration;
 use agent_core::Metadata;
 use orchestrator::{AgentExecutionMode, AgentToolRequirement, AGENT_ROUTE_OBSERVABILITY_KEYS};
@@ -6,7 +6,6 @@ use orchestrator::{AgentExecutionMode, AgentToolRequirement, AGENT_ROUTE_OBSERVA
 impl PlannedAgentRun {
     pub(crate) fn apply_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {
         let decision = self.execution_plan.action();
-        let requested_policy = self.policy.requested_policy();
         let collaboration_policy = decision.policy();
         run_context.insert(
             "task_class".to_string(),
@@ -48,8 +47,8 @@ impl PlannedAgentRun {
         super::causal_route::apply_causal_route_to_context(&self.execution_plan, run_context)?;
         run_context.insert("agent_effort".to_string(), self.policy.label().to_string());
         run_context.insert(
-            "requested_policy".to_string(),
-            requested_policy.label().to_string(),
+            "requested_policy".into(),
+            self.policy.requested_policy().label().into(),
         );
         run_context.insert(
             "collaboration_policy".to_string(),
@@ -122,6 +121,7 @@ impl PlannedAgentRun {
             "conductor_selected_model".to_string(),
             self.selected_conductor_model.clone().unwrap_or_default(),
         );
+        workflow_proposal::apply_to_context(self, run_context)?;
         run_context.insert("prompt_profile".to_string(), self.prompt_genome.id.clone());
         run_context.insert(
             "prompt_genome".to_string(),

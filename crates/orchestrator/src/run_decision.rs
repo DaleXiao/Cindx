@@ -4,8 +4,8 @@ use crate::{
     AutoComputationAssessment, CausalRouteSelectionV2, ConductorExecutionContract,
     ConductorFallbackPolicy, ConductorStopPolicy, MatchedCollaborationEvidenceTeacher,
     ModelCandidate, OrchestrationPolicy, RouteFeatureRequest, RouteFeatureSnapshotV2,
-    RoutingContext, RoutingDecision, TaskClass, AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
-    AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+    RoutingContext, RoutingDecision, TaskClass, WorkflowOutputKind, WorkflowToolPolicy,
+    AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
@@ -627,6 +627,7 @@ pub struct AgentRunDecisionRequest {
 pub struct AgentRunDecisionDraft {
     pub conductor_candidate: AgentRunDecision,
     pub compatibility_route: CausalRouteSelectionV2,
+    pub workflow_plan: Option<WorkflowPlanProposal>,
 }
 
 impl AgentRunDecisionDraft {
@@ -634,6 +635,167 @@ impl AgentRunDecisionDraft {
         self.conductor_candidate.causal_route = Some(self.compatibility_route);
         self.conductor_candidate
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowPlanProposal {
+    pub steps: Vec<WorkflowPlanProposalStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowPlanProposalStep {
+    pub id: String,
+    pub role: String,
+    pub model: String,
+    pub subtask: String,
+    #[serde(default)]
+    pub access: Vec<String>,
+    pub output_kind: WorkflowOutputKind,
+    pub tool_policy: WorkflowToolPolicy,
+}
+
+impl WorkflowPlanProposal {
+    pub fn validate(
+        &self,
+        decision: &AgentRunDecision,
+        allowed_models: &[String],
+    ) -> Result<(), String> {
+        if decision.execution != AgentExecutionMode::Workflow {
+            return Err("a workflow proposal requires workflow execution".to_string());
+        }
+        if self.steps.is_empty() || self.steps.len() != decision.estimated_steps {
+            return Err(
+                "workflow proposal step count must match the run decision estimate".to_string(),
+            );
+        }
+
+        let mut prior_ids = BTreeSet::new();
+        for (index, step) in self.steps.iter().enumerate() {
+            let id = step.id.trim();
+            if id.is_empty()
+                || step.role.trim().is_empty()
+                || step.model.trim().is_empty()
+                || step.subtask.trim().is_empty()
+                || prior_ids.contains(id)
+            {
+                return Err(
+                    "workflow proposal steps require unique ids, roles, and subtasks".to_string(),
+                );
+            }
+            if !allowed_models
+                .iter()
+                .any(|model| model.trim() == step.model.trim())
+            {
+                return Err(format!(
+                    "workflow proposal model {} is not configured",
+                    step.model
+                ));
+            }
+            if step
+                .access
+                .iter()
+                .any(|dependency| !prior_ids.contains(dependency.trim()))
+            {
+                return Err(format!(
+                    "workflow proposal step {} references a missing or later dependency",
+                    step.id
+                ));
+            }
+            prior_ids.insert(id.to_string());
+            if index + 1 == self.steps.len() {
+                if step.output_kind != WorkflowOutputKind::Synthesis
+                    || step.tool_policy != WorkflowToolPolicy::None
+                {
+                    return Err(
+                        "workflow proposal must end with a tool-free synthesis step".to_string()
+                    );
+                }
+            } else if step.output_kind == WorkflowOutputKind::Synthesis {
+                return Err(
+                    "workflow proposal can contain only one final synthesis step".to_string(),
+                );
+            }
+        }
+
+        let root_steps = self
+            .steps
+            .iter()
+            .take(self.steps.len().saturating_sub(1))
+            .filter(|step| step.access.is_empty())
+            .collect::<Vec<_>>();
+        if root_steps.len() != decision.distinct_contributions
+            || root_steps.len() > decision.max_parallelism
+        {
+            return Err(
+                "workflow proposal roots must match the declared independent contributions"
+                    .to_string(),
+            );
+        }
+        let contribution_keys = root_steps
+            .iter()
+            .map(|step| crate::workflow_contribution_key(&step.subtask))
+            .collect::<BTreeSet<_>>();
+        if contribution_keys.len() != root_steps.len() {
+            return Err("workflow proposal repeats an independent contribution".to_string());
+        }
+
+        let final_step = self
+            .steps
+            .last()
+            .ok_or_else(|| "workflow proposal has no synthesis step".to_string())?;
+        let reachable = final_step
+            .access
+            .iter()
+            .map(|dependency| dependency.trim())
+            .collect::<BTreeSet<_>>();
+        if root_steps
+            .iter()
+            .any(|root| !proposal_step_reaches(&self.steps, root.id.trim(), &reachable))
+        {
+            return Err("every workflow proposal branch must reach synthesis".to_string());
+        }
+
+        if decision.verification == AgentVerificationPolicy::Independent {
+            let root_ids = root_steps
+                .iter()
+                .map(|step| step.id.trim())
+                .collect::<BTreeSet<_>>();
+            let covers_roots = self.steps.iter().any(|step| {
+                step.output_kind == WorkflowOutputKind::Verification
+                    && root_ids.iter().all(|root| {
+                        step.access
+                            .iter()
+                            .any(|dependency| dependency.trim() == *root)
+                    })
+                    && proposal_step_reaches(&self.steps, step.id.trim(), &reachable)
+            });
+            if !covers_roots {
+                return Err(
+                    "independent verification must audit every proposal root and reach synthesis"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn proposal_step_reaches(
+    steps: &[WorkflowPlanProposalStep],
+    target: &str,
+    frontier: &BTreeSet<&str>,
+) -> bool {
+    if frontier.contains(target) {
+        return true;
+    }
+    let next = steps
+        .iter()
+        .filter(|step| frontier.contains(step.id.trim()))
+        .flat_map(|step| step.access.iter().map(|dependency| dependency.trim()))
+        .collect::<BTreeSet<_>>();
+    !next.is_empty() && proposal_step_reaches(steps, target, &next)
 }
 
 #[derive(Debug, Clone)]
@@ -707,6 +869,7 @@ impl AgentRunDecisionHarness {
                 "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Memory and workspace retrieval are blocking foreground work: select them only when missing evidence can materially change answer quality. Greetings, capability questions, and self-contained requests should use neither. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
+                "A workflow decision is valid only when you can name a concrete executable graph now. Include workflow_plan with one step per estimated step: independent root steps have empty access, dependent steps reference only earlier ids, and the final step is a tool-free synthesis that receives every branch. Use output_kind=analysis|evidence|verification|synthesis and tool_policy=none|read_only_evidence|read_only_exploration. Isolated workers may inspect supplied or read-only evidence and advise the foreground executor even when only that executor can perform writes. If no non-overlapping graph is likely to beat Direct, choose direct and set workflow_plan to null.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
                 "You own the final quality and collaboration decision. Auto should require at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence before choosing workflow; Pro should require at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 records a read-only counterfactual observation from your estimate and independently scored matched team-versus-direct evidence; it cannot downshift or replace a valid decision. Runtime may override only explicit safety, capability, resource, or evaluation constraints, and records every override. If you cannot justify collaboration, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
@@ -714,7 +877,8 @@ impl AgentRunDecisionHarness {
                 "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, effect_authority={effect_authority}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade them and never request effects when effect_authority=forbidden.\n\n",
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
                 "Return this shape exactly:\n",
-                "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\"}}\n\n",
+                "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\",\"workflow_plan\":null}}\n",
+                "For workflow replace null with {{\"steps\":[{{\"id\":\"branch_a\",\"role\":\"domain_specialist\",\"model\":\"configured model\",\"subtask\":\"one non-overlapping contribution\",\"access\":[],\"output_kind\":\"analysis\",\"tool_policy\":\"none\"}},{{\"id\":\"synthesize\",\"role\":\"synthesizer\",\"model\":\"configured model\",\"subtask\":\"reconcile authorized branch outputs\",\"access\":[\"branch_a\"],\"output_kind\":\"synthesis\",\"tool_policy\":\"none\"}}]}}. The number of steps must equal estimated_steps and the number of independent roots must equal distinct_contributions.\n\n",
                 "Effort: {effort}\nConductor model: {conductor_model}\nConfigured execution models:\n{models}\n\nUser request:\n{objective}\n\nRecent session context:\n{context}"
             ),
             query_limit = MAX_RUN_DECISION_QUERY_CHARS,
@@ -763,12 +927,31 @@ impl AgentRunDecisionHarness {
             .rfind('}')
             .filter(|end| *end >= start)
             .ok_or_else(|| "run decision returned incomplete JSON".to_string())?;
-        let mut decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
+        let payload = serde_json::from_str::<serde_json::Value>(&response[start..=end])
+            .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
+        let mut decision = serde_json::from_value::<AgentRunDecision>(payload.clone())
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
         self.request
             .route_requirements
             .validate_decision(&decision, &self.request.model_candidates)?;
+        let workflow_plan = payload
+            .get("workflow_plan")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value::<WorkflowPlanProposal>)
+            .transpose()
+            .map_err(|error| format!("workflow proposal JSON is invalid: {error}"))?;
+        match decision.execution {
+            AgentExecutionMode::Direct if workflow_plan.is_some() => {
+                return Err("direct execution must set workflow_plan to null".to_string())
+            }
+            AgentExecutionMode::Workflow => workflow_plan
+                .as_ref()
+                .ok_or_else(|| "workflow execution requires workflow_plan".to_string())?
+                .validate(&decision, &self.request.allowed_models)?,
+            AgentExecutionMode::Direct => {}
+        }
         let snapshot = RouteFeatureSnapshotV2::from_decision_request(
             &decision,
             RouteFeatureRequest {
@@ -806,6 +989,7 @@ impl AgentRunDecisionHarness {
         Ok(AgentRunDecisionDraft {
             conductor_candidate: decision,
             compatibility_route: receipt,
+            workflow_plan,
         })
     }
 }
@@ -858,6 +1042,15 @@ mod tests {
         }
     }
 
+    fn workflow_payload(decision: &AgentRunDecision, steps: serde_json::Value) -> String {
+        let mut payload = serde_json::to_value(decision).expect("decision JSON");
+        payload.as_object_mut().expect("decision object").insert(
+            "workflow_plan".to_string(),
+            serde_json::json!({ "steps": steps }),
+        );
+        serde_json::to_string(&payload).expect("workflow payload")
+    }
+
     #[test]
     fn parses_a_consistent_dynamic_workflow_decision() {
         let harness = AgentRunDecisionHarness::new(request());
@@ -881,7 +1074,13 @@ mod tests {
                     "expected_uplift_bps":6000,
                     "confidence_bps":8000,
                     "stop_policy":"quorum",
-                    "rationale":"independent architecture and implementation analysis"
+                    "rationale":"independent architecture and implementation analysis",
+                    "workflow_plan":{"steps":[
+                        {"id":"architecture","role":"architect","model":"executor","subtask":"analyze the architecture tradeoffs","access":[],"output_kind":"analysis","tool_policy":"none"},
+                        {"id":"implementation","role":"implementer","model":"executor","subtask":"derive an independent implementation strategy","access":[],"output_kind":"evidence","tool_policy":"read_only_evidence"},
+                        {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both contributions","access":["architecture","implementation"],"output_kind":"verification","tool_policy":"none"},
+                        {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the verified result","access":["architecture","implementation","verify"],"output_kind":"synthesis","tool_policy":"none"}
+                    ]}
                 }"#,
             )
             .unwrap();
@@ -906,14 +1105,23 @@ mod tests {
         candidate.max_parallelism = 2;
         candidate.min_successful_branches = 2;
         candidate.distinct_contributions = 2;
-        candidate.estimated_steps = 3;
+        candidate.estimated_steps = 4;
         candidate.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS - 1;
         candidate.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
         candidate.stop_policy = ConductorStopPolicy::Quorum;
         candidate.rationale = "independent comparison".to_string();
 
+        let payload = workflow_payload(
+            &candidate,
+            serde_json::json!([
+                {"id":"approach_a","role":"architect","model":"executor","subtask":"derive the architecture path","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"approach_b","role":"implementer","model":"executor","subtask":"derive the implementation path","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both paths","access":["approach_a","approach_b"],"output_kind":"verification","tool_policy":"none"},
+                {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the audited paths","access":["approach_a","approach_b","verify"],"output_kind":"synthesis","tool_policy":"none"}
+            ]),
+        );
         let draft = AgentRunDecisionHarness::new(request())
-            .parse_draft(&serde_json::to_string(&candidate).unwrap())
+            .parse_draft(&payload)
             .expect("low-value workflow should produce an auditable compatibility draft");
 
         assert_eq!(
@@ -928,6 +1136,10 @@ mod tests {
             draft.compatibility_route.selected_route,
             AgentRouteTier::Direct
         );
+        assert_eq!(
+            draft.workflow_plan.as_ref().map(|plan| plan.steps.len()),
+            Some(4)
+        );
         assert!(draft.conductor_candidate.causal_route.is_none());
     }
 
@@ -936,29 +1148,28 @@ mod tests {
         let mut request = request();
         request.allowed_models = vec!["executor".to_string()];
         let harness = AgentRunDecisionHarness::new(request);
+        let mut candidate = AgentRunDecision::direct("executor");
+        candidate.task_class = TaskClass::Research;
+        candidate.execution = AgentExecutionMode::Workflow;
+        candidate.verification = AgentVerificationPolicy::SelfCheck;
+        candidate.max_parallelism = 2;
+        candidate.min_successful_branches = 2;
+        candidate.distinct_contributions = 2;
+        candidate.estimated_steps = 3;
+        candidate.expected_uplift_bps = 5_000;
+        candidate.confidence_bps = 8_000;
+        candidate.stop_policy = ConductorStopPolicy::Quorum;
+        candidate.rationale = "two different solution paths from the strongest model".to_string();
+        let payload = workflow_payload(
+            &candidate,
+            serde_json::json!([
+                {"id":"approach_a","role":"analyst","model":"executor","subtask":"derive the first solution path","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"approach_b","role":"critic","model":"executor","subtask":"derive a distinct second solution path","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile both paths","access":["approach_a","approach_b"],"output_kind":"synthesis","tool_policy":"none"}
+            ]),
+        );
         let decision = harness
-            .parse(
-                r#"{
-                    "schema":"cindx.agent-run-decision.v1",
-                    "task_class":"research",
-                    "execution":"workflow",
-                    "primary_model":"executor",
-                    "tool_requirement":"none",
-                    "vision_required":false,
-                    "risk_level":"low",
-                    "retrieval":{"query":"","channels":[],"max_results":8},
-                    "memory":{"policy":"none","query":""},
-                    "verification":"self_check",
-                    "max_parallelism":2,
-                    "min_successful_branches":2,
-                    "distinct_contributions":2,
-                    "estimated_steps":3,
-                    "expected_uplift_bps":5000,
-                    "confidence_bps":8000,
-                    "stop_policy":"quorum",
-                    "rationale":"two different solution paths from the strongest model"
-                }"#,
-            )
+            .parse(&payload)
             .expect("contribution count must not be capped by model count");
 
         assert_eq!(decision.distinct_contributions, 2);
@@ -1193,10 +1404,19 @@ mod tests {
         auto.max_parallelism = 2;
         auto.min_successful_branches = 2;
         auto.distinct_contributions = 2;
-        auto.estimated_steps = 3;
+        auto.estimated_steps = 4;
         auto.expected_uplift_bps = 8_000;
         auto.confidence_bps = 9_000;
         auto.stop_policy = ConductorStopPolicy::Quorum;
+        let payload = workflow_payload(
+            &auto,
+            serde_json::json!([
+                {"id":"approach_a","role":"analyst","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"approach_b","role":"critic","model":"executor","subtask":"derive an independent alternative","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both alternatives","access":["approach_a","approach_b"],"output_kind":"verification","tool_policy":"none"},
+                {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the audit","access":["approach_a","approach_b","verify"],"output_kind":"synthesis","tool_policy":"none"}
+            ]),
+        );
         let evidence = MatchedCollaborationEvidence {
             task_class: auto.task_class.clone(),
             effort: "auto".to_string(),
@@ -1219,7 +1439,7 @@ mod tests {
             MatchedCollaborationEvidenceTeacher::from_calibrated_evidence(vec![evidence.clone()]),
         );
         let observed = AgentRunDecisionHarness::new(calibrated_request)
-            .parse(&serde_json::to_string(&auto).unwrap())
+            .parse(&payload)
             .expect("strong matched evidence should remain an auditable shadow observation");
         assert_eq!(observed.execution, AgentExecutionMode::Workflow);
         assert_eq!(observed.primary_model, "executor");
@@ -1237,7 +1457,7 @@ mod tests {
             MatchedCollaborationEvidenceTeacher::from_calibrated_evidence(vec![unrelated]),
         );
         let uncalibrated = AgentRunDecisionHarness::new(unrelated_request)
-            .parse(&serde_json::to_string(&auto).unwrap())
+            .parse(&payload)
             .unwrap();
         assert_eq!(uncalibrated.execution, AgentExecutionMode::Workflow);
         assert!(uncalibrated.calibration_reason.is_none());
@@ -1254,7 +1474,7 @@ mod tests {
             MatchedCollaborationEvidenceTeacher::from_calibrated_evidence(vec![cross_context]),
         );
         let cross_context_result = AgentRunDecisionHarness::new(cross_context_request)
-            .parse(&serde_json::to_string(&auto).unwrap())
+            .parse(&payload)
             .unwrap();
         assert_eq!(cross_context_result.execution, AgentExecutionMode::Workflow);
         assert!(cross_context_result.calibration_reason.is_none());
@@ -1290,7 +1510,13 @@ mod tests {
                     "expected_uplift_bps":2999,
                     "confidence_bps":8000,
                     "stop_policy":"quorum",
-                    "rationale":"inspect and independently verify"
+                    "rationale":"inspect and independently verify",
+                    "workflow_plan":{"steps":[
+                        {"id":"inspect","role":"evidence_researcher","model":"executor","subtask":"inspect workspace implementation evidence","access":[],"output_kind":"evidence","tool_policy":"read_only_evidence"},
+                        {"id":"analyze_image","role":"visual_analyst","model":"executor","subtask":"analyze the supplied image independently","access":[],"output_kind":"analysis","tool_policy":"none"},
+                        {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both evidence streams","access":["inspect","analyze_image"],"output_kind":"verification","tool_policy":"none"},
+                        {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the verified execution brief","access":["inspect","analyze_image","verify"],"output_kind":"synthesis","tool_policy":"none"}
+                    ]}
                 }"#,
             )
             .expect("low-value Auto workflow should remain conductor-owned");
@@ -1312,6 +1538,59 @@ mod tests {
                 .map(|value| value.verdict),
             Some(AutoComputationVerdict::BelowPredictionFloor)
         );
+    }
+
+    #[test]
+    fn independent_verification_must_feed_the_final_synthesis() {
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.execution = AgentExecutionMode::Workflow;
+        decision.verification = AgentVerificationPolicy::Independent;
+        decision.max_parallelism = 2;
+        decision.min_successful_branches = 2;
+        decision.distinct_contributions = 2;
+        decision.estimated_steps = 4;
+        decision.expected_uplift_bps = 6_000;
+        decision.confidence_bps = 8_000;
+        decision.stop_policy = ConductorStopPolicy::Quorum;
+        let payload = workflow_payload(
+            &decision,
+            serde_json::json!([
+                {"id":"analysis","role":"analyst","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"counterexample","role":"critic","model":"executor","subtask":"derive an independent counterexample","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both branches","access":["analysis","counterexample"],"output_kind":"verification","tool_policy":"none"},
+                {"id":"synthesis","role":"synthesizer","model":"executor","subtask":"reconcile the branches without the audit","access":["analysis","counterexample"],"output_kind":"synthesis","tool_policy":"none"}
+            ]),
+        );
+
+        let error = AgentRunDecisionHarness::new(request())
+            .parse_draft(&payload)
+            .expect_err("a disconnected verifier must fail closed");
+
+        assert!(error.contains("and reach synthesis"));
+    }
+
+    #[test]
+    fn workflow_proposal_rejects_a_self_dependency() {
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.execution = AgentExecutionMode::Workflow;
+        decision.verification = AgentVerificationPolicy::SelfCheck;
+        decision.distinct_contributions = 1;
+        decision.estimated_steps = 2;
+        decision.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS;
+        decision.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
+        let payload = workflow_payload(
+            &decision,
+            serde_json::json!([
+                {"id":"analysis","role":"analyst","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"synthesis","role":"synthesizer","model":"executor","subtask":"integrate the result","access":["synthesis"],"output_kind":"synthesis","tool_policy":"none"}
+            ]),
+        );
+
+        let error = AgentRunDecisionHarness::new(request())
+            .parse_draft(&payload)
+            .expect_err("a self-dependent step must fail closed");
+
+        assert!(error.contains("missing or later dependency"));
     }
 
     #[test]

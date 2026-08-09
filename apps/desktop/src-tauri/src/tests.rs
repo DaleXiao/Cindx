@@ -29,15 +29,14 @@ use crate::prompt_learning_runtime::prompt_dataset_identity;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    causal_route_action_id_v2, select_causal_route_v2, AdaptiveWorkflow,
-    AdaptiveWorkflowStep, AgentDecisionCalibration,
-    AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRouteTier,
-    AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
-    AgentVerificationPolicy, CausalRouteReason,
-    CausalRouteSelectionV2, ExecutionPlan, ExecutionPlanAuthority, ExecutionPlanDecisionReason,
-    ModelCapabilitySource, PromptDatasetCaseIdentityV1, PromptExecutionContextV1,
-    PromptLiveAssignmentProvenanceV1, PromptTransferProvenance, RouteFeatureRequest,
-    RouteFeatureSnapshotV2,
+    causal_route_action_id_v2, select_causal_route_v2, AdaptiveWorkflow, AdaptiveWorkflowStep,
+    AgentDecisionCalibration, AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements,
+    AgentRouteTier, AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
+    AgentVerificationPolicy, CausalRouteReason, CausalRouteSelectionV2, ExecutionPlan,
+    ExecutionPlanAuthority, ExecutionPlanDecisionReason, ModelCapabilitySource,
+    PromptDatasetCaseIdentityV1, PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1,
+    PromptTransferProvenance, RouteFeatureRequest, RouteFeatureSnapshotV2, WorkflowOutputKind,
+    WorkflowPlanProposal, WorkflowPlanProposalStep, WorkflowToolPolicy,
     CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
     PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
 };
@@ -347,7 +346,124 @@ fn test_planned_agent_run_with_candidate(
         attempted_conductor_models: Vec::new(),
         selected_conductor_model: None,
         route_requirements,
+        workflow_plan: None,
     }
+}
+
+fn test_workflow_proposal(model: &str) -> WorkflowPlanProposal {
+    WorkflowPlanProposal {
+        steps: vec![
+            WorkflowPlanProposalStep {
+                id: "analysis".to_string(),
+                role: "analyst".to_string(),
+                model: model.to_string(),
+                subtask: "derive the primary solution".to_string(),
+                access: Vec::new(),
+                output_kind: WorkflowOutputKind::Analysis,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+            WorkflowPlanProposalStep {
+                id: "counterexample".to_string(),
+                role: "critic".to_string(),
+                model: model.to_string(),
+                subtask: "search for an independent counterexample".to_string(),
+                access: Vec::new(),
+                output_kind: WorkflowOutputKind::Verification,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+            WorkflowPlanProposalStep {
+                id: "synthesis".to_string(),
+                role: "synthesizer".to_string(),
+                model: model.to_string(),
+                subtask: "reconcile both contributions".to_string(),
+                access: vec!["analysis".to_string(), "counterexample".to_string()],
+                output_kind: WorkflowOutputKind::Synthesis,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn workflow_proposal_is_bound_to_context_and_direct_clears_it() {
+    let mut workflow = AgentRunDecision::direct("executor");
+    workflow.execution = AgentExecutionMode::Workflow;
+    workflow.verification = AgentVerificationPolicy::SelfCheck;
+    workflow.max_parallelism = 2;
+    workflow.min_successful_branches = 2;
+    workflow.distinct_contributions = 2;
+    workflow.estimated_steps = 3;
+    workflow.expected_uplift_bps = 4_000;
+    workflow.confidence_bps = 8_000;
+    workflow.stop_policy = ConductorStopPolicy::Quorum;
+    let mut planned = test_planned_agent_run(workflow, AgentPolicy::Pro);
+    planned.workflow_plan = Some(test_workflow_proposal("executor"));
+    let mut context = Metadata::new();
+
+    planned
+        .apply_to_context(&mut context)
+        .expect("workflow proposal should enter run context");
+
+    let encoded = context
+        .get("conductor_workflow_proposal")
+        .expect("workflow proposal json");
+    assert_eq!(
+        context.get("conductor_workflow_proposal_sha256"),
+        Some(&sha256_hex(encoded.as_bytes()))
+    );
+    assert_eq!(
+        context
+            .get("conductor_workflow_plan_source")
+            .map(String::as_str),
+        Some("run_decision")
+    );
+    assert_eq!(
+        serde_json::from_str::<WorkflowPlanProposal>(encoded)
+            .expect("typed workflow proposal")
+            .steps
+            .len(),
+        3
+    );
+    assert_eq!(
+        route_workflow_proposal_from_context(&context, false, &["executor".to_string()])
+            .expect("valid route proposal receipt"),
+        planned.workflow_plan
+    );
+    let mut tampered = context.clone();
+    tampered.insert(
+        "conductor_workflow_proposal_sha256".to_string(),
+        "0".repeat(64),
+    );
+    assert!(route_workflow_proposal_from_context(&tampered, false, &["executor".to_string()])
+        .expect_err("tampered route proposal receipt must fail closed")
+        .contains("receipt is inconsistent"));
+    assert!(route_workflow_proposal_from_context(&tampered, true, &["executor".to_string()])
+        .expect("checkpoint resume owns its persisted plan")
+        .is_none());
+
+    let mut semantically_tampered = context.clone();
+    let mut proposal = planned.workflow_plan.clone().expect("workflow proposal");
+    proposal.steps[2].access = vec!["analysis".to_string()];
+    let encoded = serde_json::to_string(&proposal).expect("tampered proposal json");
+    semantically_tampered.insert(
+        "conductor_workflow_proposal_sha256".to_string(),
+        sha256_hex(encoded.as_bytes()),
+    );
+    semantically_tampered.insert("conductor_workflow_proposal".to_string(), encoded);
+    assert!(route_workflow_proposal_from_context(
+        &semantically_tampered,
+        false,
+        &["executor".to_string()]
+    )
+    .expect_err("proposal must remain bound to the final decision")
+    .contains("every workflow proposal branch must reach synthesis"));
+
+    test_planned_agent_run(AgentRunDecision::direct("executor"), AgentPolicy::Auto)
+        .apply_to_context(&mut context)
+        .expect("direct plan should replace workflow context");
+    assert!(!context.contains_key("conductor_workflow_proposal"));
+    assert!(!context.contains_key("conductor_workflow_proposal_sha256"));
+    assert!(!context.contains_key("conductor_workflow_plan_source"));
 }
 
 #[test]

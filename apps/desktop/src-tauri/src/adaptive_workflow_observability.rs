@@ -20,6 +20,7 @@ pub(super) struct AdaptiveWorkflowObservabilityContext<'a, 'state> {
     pub(super) conductor_model: &'a str,
     pub(super) execution_contract: &'a ConductorExecutionContract,
     pub(super) conductor_attempts: usize,
+    pub(super) workflow_plan_source: AdaptiveWorkflowPlanSource,
     pub(super) prior: Option<&'a WorkflowTopologyPrior>,
     pub(super) agent_budget: usize,
     pub(super) workflow_checkpoint: &'a WorkflowExecutionCheckpoint,
@@ -46,6 +47,7 @@ pub(super) fn record_adaptive_workflow_planned(
         conductor_model,
         execution_contract,
         conductor_attempts,
+        workflow_plan_source,
         prior,
         agent_budget,
         workflow_checkpoint,
@@ -132,12 +134,7 @@ pub(super) fn record_adaptive_workflow_planned(
                     ),
                     (
                         "conductor_source".to_string(),
-                        if prior.is_some() {
-                            "pareto_search_teacher_v2"
-                        } else {
-                            "model_cold_start"
-                        }
-                        .to_string(),
+                        workflow_plan_source.label().to_string(),
                     ),
                     (
                         "teacher_examples".to_string(),

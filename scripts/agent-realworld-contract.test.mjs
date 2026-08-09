@@ -214,6 +214,14 @@ function fixture({ current = false } = {}) {
             dataset_sha256: null,
             paired_evidence_sha256: null,
             promotion_gate_protocol: null,
+            workflow_proposal_sha256: null,
+            workflow_plan_source: null,
+            workflow_plan_sha256: null,
+            workflow_step_count: 0,
+            workflow_root_roles: [],
+            workflow_verifier_steps: 0,
+            workflow_synthesis_steps: 0,
+            workflow_execution_completed: false,
             workflow_profile_exercised: false,
             route_profile_semantics_exercised: false
           },
@@ -427,6 +435,37 @@ test("separates current grounded-direct mechanism claims without inventing learn
   const markdown = renderMarkdown(report);
   assert.match(markdown, /Paired Against Grounded Direct/);
   assert.doesNotMatch(markdown, /Broad orchestration uplift/);
+});
+
+test("binds an exercised workflow to materialized-plan and completion evidence", () => {
+  const value = fixture({ current: true });
+  const run = value.raw.runs.find((candidate) => candidate.treatment === "auto");
+  Object.assign(run.strategy_receipt, {
+    execution_mode: "workflow",
+    workflow_proposal_sha256: hash("workflow-proposal"),
+    workflow_plan_source: "run_decision",
+    workflow_plan_sha256: hash("workflow-plan"),
+    workflow_step_count: 4,
+    workflow_root_roles: ["analyst", "critic"],
+    workflow_verifier_steps: 1,
+    workflow_synthesis_steps: 1,
+    workflow_execution_completed: true,
+    workflow_profile_exercised: true
+  });
+  value.rawBytes = Buffer.from(JSON.stringify(value.raw));
+
+  const report = validateAndSanitize(value);
+
+  const sanitized = report.runs.find((candidate) => candidate.treatment === "auto");
+  assert.equal(sanitized.strategy_receipt.workflow_plan_source, "run_decision");
+  assert.equal(sanitized.strategy_receipt.workflow_execution_completed, true);
+
+  run.strategy_receipt.workflow_plan_sha256 = null;
+  value.rawBytes = Buffer.from(JSON.stringify(value.raw));
+  assert.throws(
+    () => validateAndSanitize(value),
+    /workflow strategy lacks bound materialization evidence/
+  );
 });
 
 test("binds browser success to the exact HTTP fixture target and artifact evidence", () => {

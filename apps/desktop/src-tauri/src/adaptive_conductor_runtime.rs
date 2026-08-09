@@ -4,8 +4,28 @@ pub(super) enum AdaptiveConductorOutcome {
     Plan {
         workflow_plan: Box<WorkflowPlanIr>,
         attempts: usize,
+        source: AdaptiveWorkflowPlanSource,
     },
     DirectCommit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdaptiveWorkflowPlanSource {
+    CheckpointResume,
+    RunDecisionProposal,
+    ParetoSearchTeacher,
+    ModelColdStart,
+}
+
+impl AdaptiveWorkflowPlanSource {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::CheckpointResume => "checkpoint_resume",
+            Self::RunDecisionProposal => "run_decision_proposal",
+            Self::ParetoSearchTeacher => "pareto_search_teacher_v2",
+            Self::ModelColdStart => "model_cold_start",
+        }
+    }
 }
 
 pub(super) struct AdaptiveConductorContext<'a, 'state> {
@@ -24,6 +44,7 @@ pub(super) struct AdaptiveConductorContext<'a, 'state> {
     pub(super) role_hints: &'a ConductorRoleHints,
     pub(super) execution_contract: &'a ConductorExecutionContract,
     pub(super) prior: Option<&'a WorkflowTopologyPrior>,
+    pub(super) route_workflow_proposal: Option<&'a WorkflowPlanProposal>,
     pub(super) prompt_genome: &'a ConductorPromptGenome,
     pub(super) checkpoint: Option<&'a WorkflowExecutionCheckpoint>,
     pub(super) resume_key: &'a str,
@@ -53,6 +74,7 @@ pub(super) fn plan_adaptive_workflow(
         role_hints,
         execution_contract,
         prior,
+        route_workflow_proposal,
         prompt_genome,
         checkpoint,
         resume_key,
@@ -99,6 +121,7 @@ pub(super) fn plan_adaptive_workflow(
         return Ok(AdaptiveConductorOutcome::Plan {
             workflow_plan: Box::new(checkpoint.plan.clone()),
             attempts: 0,
+            source: AdaptiveWorkflowPlanSource::CheckpointResume,
         });
     }
 
@@ -128,6 +151,25 @@ pub(super) fn plan_adaptive_workflow(
         prompt_evolution_enabled: config.prompt_evolution_enabled,
         prompt_genome: prompt_genome.clone(),
     });
+    if let Some(proposal) = route_workflow_proposal {
+        match harness.plan_from_proposal(proposal) {
+            Ok(workflow_plan) => {
+                return Ok(AdaptiveConductorOutcome::Plan {
+                    workflow_plan: Box::new(workflow_plan),
+                    attempts: 0,
+                    source: AdaptiveWorkflowPlanSource::RunDecisionProposal,
+                });
+            }
+            Err(error) => record_conductor_rejection(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                0,
+                &format!("run-decision workflow proposal rejected: {error}"),
+            ),
+        }
+    }
     let conductor_response = run_collaboration_stage(
         state,
         config,
@@ -178,6 +220,11 @@ pub(super) fn plan_adaptive_workflow(
                 return Ok(AdaptiveConductorOutcome::Plan {
                     workflow_plan: Box::new(workflow_plan),
                     attempts,
+                    source: if prior.is_some() {
+                        AdaptiveWorkflowPlanSource::ParetoSearchTeacher
+                    } else {
+                        AdaptiveWorkflowPlanSource::ModelColdStart
+                    },
                 });
             }
             Err(error) if attempts < CONDUCTOR_MAX_ATTEMPTS => {

@@ -12,23 +12,15 @@ pub(super) fn is_conductor_ownership_suite(suite: &RealworldSuite) -> bool {
     matches!(suite.id.as_str(), TRAIN_SUITE_ID | HOLDOUT_SUITE_ID)
 }
 
-pub(super) fn validate_conductor_ownership_suite(
-    suite: &RealworldSuite,
-) -> Result<(), String> {
+pub(super) fn validate_conductor_ownership_suite(suite: &RealworldSuite) -> Result<(), String> {
     let (expected_split, expected_cases): (&str, &[&str]) = match suite.id.as_str() {
         TRAIN_SUITE_ID => (
             "train",
-            &[
-                "train-reconcile-release",
-                "train-features-maintenance",
-            ],
+            &["train-reconcile-release", "train-features-maintenance"],
         ),
         HOLDOUT_SUITE_ID => (
             "test",
-            &[
-                "holdout-capacity-retention",
-                "holdout-layers-vendor",
-            ],
+            &["holdout-capacity-retention", "holdout-layers-vendor"],
         ),
         _ => return Err("Conductor ownership suite identity is invalid".to_string()),
     };
@@ -70,7 +62,9 @@ fn validate_case<'a>(
         || case.index_workspace
         || case.objective.contains("{{BROWSER_URL}}")
         || leaks_route_answer(&case.objective)
-        || !case.objective.starts_with("Complete both independently verifiable work items.")
+        || !case
+            .objective
+            .starts_with("Complete both independently verifiable work items.")
     {
         return Err(format!(
             "Conductor ownership case {} is not route blind",
@@ -129,9 +123,11 @@ fn validate_case<'a>(
                 .immutable_files
                 .iter()
                 .any(|immutable| immutable == path)
-                && case.verification.commands.iter().any(|command| {
-                    command.program == "node" && command.args.as_slice() == [*path]
-                })
+                && case
+                    .verification
+                    .commands
+                    .iter()
+                    .any(|command| command.program == "node" && command.args.as_slice() == [*path])
         })
         || case
             .verification

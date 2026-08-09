@@ -96,10 +96,7 @@ pub(super) fn apply_causal_route_to_context(
             "causal_route_selected",
             plan.action().route_tier().label().to_string(),
         ),
-        (
-            "causal_route_selected_action_id",
-            executable_action_id,
-        ),
+        ("causal_route_selected_action_id", executable_action_id),
         (
             "causal_route_shadow_selected",
             receipt.selected_route.label().to_string(),

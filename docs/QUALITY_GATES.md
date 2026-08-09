@@ -137,6 +137,14 @@ come from the paired wrapper. Cross-machine comparisons are never release eviden
   overlay dispatchable together. These are deterministic execution-plane
   contracts, not provider-backed evidence of collaboration quality or
   intelligence uplift.
+- The route-to-workflow proposal checks additionally require the route decision
+  parser, desktop context boundary, and real-world strategy receipt tests to
+  reject missing, stale, semantically disconnected, or digest-mismatched
+  proposals. They prove that one Conductor response can materialize the same
+  executable graph, reject self-dependencies, record the actual materialization
+  source, and bind completion evidence; independent verification must reach
+  synthesis. They do not prove that Workflow improves a provider-backed result;
+  that claim remains gated by the frozen comparison in `AGENT_EVALUATION.md`.
 - The exact `causal-router-v2-contract` gate requires one
   `cindx.causal-router-v2-contract.v1` marker. It proves a stable pre-decision
   fingerprint, explicit workflow/direct counterfactual, deterministic policy,

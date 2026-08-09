@@ -27,6 +27,7 @@ pub(crate) fn run_adaptive_collaboration(
         resumed_from_workflow_id,
         resumed_from_checkpoint,
         prior,
+        route_workflow_proposal,
         selection_mode,
         prompt_genome,
         prompt_genome_json,
@@ -86,6 +87,7 @@ pub(crate) fn run_adaptive_collaboration(
         role_hints: &role_hints,
         execution_contract: &execution_contract,
         prior: prior.as_ref(),
+        route_workflow_proposal: route_workflow_proposal.as_ref(),
         prompt_genome: &prompt_genome,
         checkpoint: workflow_checkpoint.as_ref(),
         resume_key: &resume_key,
@@ -95,11 +97,12 @@ pub(crate) fn run_adaptive_collaboration(
         anchor_supervisor: &mut anchor_supervisor,
         direct_anchor_output: &mut direct_anchor_output,
     })?;
-    let (workflow_plan, conductor_attempts) = match conductor_outcome {
+    let (workflow_plan, conductor_attempts, workflow_plan_source) = match conductor_outcome {
         AdaptiveConductorOutcome::Plan {
             workflow_plan,
             attempts,
-        } => (*workflow_plan, attempts),
+            source,
+        } => (*workflow_plan, attempts, source),
         AdaptiveConductorOutcome::DirectCommit => {
             return Ok(AdaptiveCollaborationOutcome::foreground_direct());
         }
@@ -169,6 +172,7 @@ pub(crate) fn run_adaptive_collaboration(
         conductor_model: &conductor_model,
         execution_contract: &execution_contract,
         conductor_attempts,
+        workflow_plan_source,
         prior: prior.as_ref(),
         agent_budget,
         workflow_checkpoint: &workflow_checkpoint,

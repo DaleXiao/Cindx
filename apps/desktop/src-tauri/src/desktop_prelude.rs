@@ -100,11 +100,11 @@ pub(crate) use orchestrator::{
     RoutingTelemetry, RuleBasedRouter, TaskClass, TeamAnchorComparison, UpliftGap,
     UpliftGateDecision, UpliftGateInput, WorkflowBudget, WorkflowEvidenceSummary,
     WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry, WorkflowOutputKind, WorkflowPlanIr,
-    WorkflowSearchTeacher, WorkflowStepStatus, WorkflowToolPolicy, WorkflowTopologyPrior,
-    WorkflowVerificationReceipt, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
-    AGENT_EVALUATION_TRACE_SCHEMA, CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS, CONDUCTOR_MAX_ATTEMPTS,
-    DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS, PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
-    WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
+    WorkflowPlanProposal, WorkflowSearchTeacher, WorkflowStepStatus, WorkflowToolPolicy,
+    WorkflowTopologyPrior, WorkflowVerificationReceipt, WorkspaceRetrievalChannel,
+    WorkspaceRetrievalPlan, AGENT_EVALUATION_TRACE_SCHEMA, CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS,
+    CONDUCTOR_MAX_ATTEMPTS, DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS,
+    PROMPT_REFLECTION_SELECTOR_SCHEMA_V1, WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
 };
 #[cfg(test)]
 pub(crate) use orchestrator::{

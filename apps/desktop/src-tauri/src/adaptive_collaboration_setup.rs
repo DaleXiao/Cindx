@@ -12,6 +12,7 @@ pub(super) struct AdaptiveCollaborationSetup {
     pub(super) resumed_from_workflow_id: Option<String>,
     pub(super) resumed_from_checkpoint: bool,
     pub(super) prior: Option<WorkflowTopologyPrior>,
+    pub(super) route_workflow_proposal: Option<WorkflowPlanProposal>,
     pub(super) selection_mode: String,
     pub(super) prompt_genome: ConductorPromptGenome,
     pub(super) prompt_genome_json: String,
@@ -83,6 +84,8 @@ pub(super) fn prepare_adaptive_collaboration(
     } else {
         workflow_prior_for_run(state, run_context, models, agent_budget)?
     };
+    let route_workflow_proposal =
+        route_workflow_proposal_from_context(run_context, resumed_from_checkpoint, models)?;
     let strategy_genome = (!resumed_from_checkpoint)
         .then(|| run_context.get("prompt_genome"))
         .flatten()
@@ -155,6 +158,7 @@ pub(super) fn prepare_adaptive_collaboration(
         resumed_from_workflow_id,
         resumed_from_checkpoint,
         prior,
+        route_workflow_proposal,
         selection_mode,
         prompt_genome,
         prompt_genome_json,
@@ -162,6 +166,42 @@ pub(super) fn prepare_adaptive_collaboration(
         anchor_spec,
         cancellation,
     })
+}
+
+pub(super) fn route_workflow_proposal_from_context(
+    run_context: &Metadata,
+    resumed_from_checkpoint: bool,
+    allowed_models: &[String],
+) -> Result<Option<WorkflowPlanProposal>, String> {
+    if resumed_from_checkpoint {
+        return Ok(None);
+    }
+    let Some(encoded) = run_context.get("conductor_workflow_proposal") else {
+        return Ok(None);
+    };
+    let expected_sha256 = sha256_hex(encoded.as_bytes());
+    if run_context
+        .get("conductor_workflow_proposal_sha256")
+        .map(String::as_str)
+        != Some(expected_sha256.as_str())
+        || run_context
+            .get("conductor_workflow_plan_source")
+            .map(String::as_str)
+            != Some("run_decision")
+    {
+        return Err("run-decision workflow proposal receipt is inconsistent".to_string());
+    }
+    let decision = serde_json::from_str::<AgentRunDecision>(
+        run_context
+            .get("run_decision")
+            .ok_or_else(|| "run-decision workflow proposal is missing its decision".to_string())?,
+    )
+    .map_err(|error| format!("run-decision workflow proposal has an invalid decision: {error}"))?;
+    decision.validate(allowed_models, MAX_ADAPTIVE_WORKFLOW_AGENTS)?;
+    let proposal = serde_json::from_str::<WorkflowPlanProposal>(encoded)
+        .map_err(|error| format!("run-decision workflow proposal is invalid: {error}"))?;
+    proposal.validate(&decision, allowed_models)?;
+    Ok(Some(proposal))
 }
 
 #[allow(clippy::too_many_arguments)]
