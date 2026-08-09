@@ -43,7 +43,7 @@ run_agent_task
        -> plan_agent_run
             Fast: fixed direct candidate
             Auto/Pro: conductor -> validated candidate
-            all modes: hard-constraint guard + explicit compatibility policy
+            all modes: hard guard + typed authority receipt + compatibility shadow
             construct the single typed ExecutionPlan used downstream
        -> recall memory + retrieve workspace evidence
        -> select skills and tools
@@ -291,8 +291,9 @@ separate evidence domain from general web retrieval and screen observation.
 `ExecutionPlan` is the unique typed boundary between planning and execution.
 It preserves both the validated Conductor candidate and the final executable
 `AgentRunDecision`, together with the authority that selected the final action,
-the deterministic hard-constraint receipt, the compatibility-route receipt,
-and the optional workflow-execution profile identity. Downstream preparation,
+the deterministic hard-constraint receipt, a typed candidate-to-action decision
+receipt, the read-only compatibility-route receipt, and the optional
+workflow-execution profile identity. Downstream preparation,
 context, canonical events, and evaluation consume the final action through this
 plan rather than carrying an independent decision value.
 
@@ -324,18 +325,16 @@ for whether those segments require effects.
 
 - Fast constructs a direct decision without a conductor call.
 - Auto and Pro ask configured conductor candidates for this schema.
-- After validation, the planner first records deterministic hard constraints:
-  configured model capability, explicit independent demand for a workflow, and
-  bounded execution. These constraints may reject an unsafe or structurally
-  invalid candidate, but they do not estimate answer quality. The retained
-  Causal Router v2 policy is an explicit compatibility value policy that may
-  downshift a structurally valid workflow using the existing confidence and
-  matched team-versus-direct evidence. It is not hidden as a second Conductor:
-  `ExecutionPlan.authority` distinguishes Conductor, hard-constraint,
-  compatibility-value, runtime-constraint, fixed-policy, and degraded-fallback
-  outcomes, while `conductor_candidate` remains auditable after a downshift.
-  This preserves current Auto/Pro behavior while making the remaining policy
-  overlap measurable and removable by later matched evidence.
+- After validation, the Conductor candidate is the sole native Auto/Pro quality
+  and collaboration decision. Deterministic capability and bounded-execution
+  checks may reject an invalid candidate into bounded repair or degraded
+  fallback, but they do not estimate answer quality. Explicit Grounded Direct
+  and matched-memory evaluation treatments are the only current runtime action
+  overrides. `ExecutionPlan.decision_receipt` binds their typed reason, authority,
+  candidate action identity, executable action identity, and whether the action
+  changed. Fixed Fast and degraded-fallback authorities cannot rewrite their
+  candidates, and V2 rejects compatibility-value authority. V1 remains readable
+  only so historical execution plans can be replayed.
 - The compatibility receipt freezes a pre-decision feature snapshot from digests
   of the actual objective, bounded recent context and prompt profile, route
   requirements, model capability sources, model pool, and run budget. Typed task
@@ -351,19 +350,20 @@ for whether those segments require effects.
   on a new request. Both positive and failed team trajectories are retained when
   the matched scores and provenance are complete. Only route-shape aggregates are
   shown to the Conductor; opaque exact-request hashes are not useful planning
-  context. Router admission uses at most one exact and one route-shape lookup,
+  context. The Router shadow uses at most one exact and one route-shape lookup,
   performs no linear history-row
   scan after index construction, evaluates at most two actions, and serializes a
   receipt no larger than 4 KiB. It assigns no propensity to the deterministic
   policy.
-- Rejection collapses only workflow coordination fields; model, tools, vision,
-  risk, retrieval, and memory remain intact. Fast, degraded fallback, and the
-  evaluation-only Grounded Direct constraint reconcile through the same receipt.
-  The full receipt is persisted once on `Agent run decision selected`; bounded
-  fingerprints, selected/candidate tiers, reason, policy, and receipt digest are
-  copied to run context for later matched utility attribution.
+- The compatibility result never collapses workflow fields or rewrites the
+  executable action. The evaluation-only Grounded Direct constraint performs its
+  explicit bounded transformation and records runtime-constraint authority.
+  Context stores the real executable action and action ID separately from the
+  shadow selection and reason so learning cannot mistake a counterfactual for
+  work that ran. The full receipts are persisted once on `Agent run decision
+  selected`; bounded fingerprints and digests remain available for attribution.
 - Desktop ownership remains narrow: `agent_strategy_runtime.rs` sequences
-  planning, `agent_strategy_causal_route.rs` reconciles and projects the receipt,
+  planning, `agent_strategy_causal_route.rs` validates and projects the shadow,
   and `agent_strategy_recording.rs` owns the two decision events. The portable
   policy and receipt schema remain in the `orchestrator` crate.
 - A direct decision enters the interactive loop without collaboration.

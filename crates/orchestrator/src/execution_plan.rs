@@ -5,8 +5,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const EXECUTION_PLAN_SCHEMA_V1: &str = "cindx.execution-plan.v1";
+pub const EXECUTION_PLAN_SCHEMA_V2: &str = "cindx.execution-plan.v2";
 pub const EXECUTION_PLAN_GUARD_SCHEMA_V1: &str = "cindx.execution-plan-guard.v1";
+pub const EXECUTION_PLAN_GUARD_SCHEMA_V2: &str = "cindx.execution-plan-guard.v2";
 pub const EXECUTION_PLAN_PROJECTION_SCHEMA_V1: &str = "cindx.execution-plan-projection.v1";
+pub const EXECUTION_PLAN_PROJECTION_SCHEMA_V2: &str = "cindx.execution-plan-projection.v2";
+pub const EXECUTION_PLAN_DECISION_RECEIPT_SCHEMA_V1: &str =
+    "cindx.execution-plan-decision-receipt.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +58,91 @@ impl ExecutionPlanAuthority {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ExecutionPlanDecisionReason {
+    FastPolicy,
+    ConductorSelection,
+    HardSafetyConstraint,
+    HardCapabilityConstraint,
+    HardBudgetConstraint,
+    RuntimeGroundedDirect,
+    MatchedMemoryEvaluation,
+    DegradedFallback,
+}
+
+impl ExecutionPlanDecisionReason {
+    pub const fn authority(self) -> ExecutionPlanAuthority {
+        match self {
+            Self::FastPolicy => ExecutionPlanAuthority::FixedPolicy,
+            Self::ConductorSelection => ExecutionPlanAuthority::Conductor,
+            Self::HardSafetyConstraint
+            | Self::HardCapabilityConstraint
+            | Self::HardBudgetConstraint => ExecutionPlanAuthority::HardConstraintGuard,
+            Self::RuntimeGroundedDirect | Self::MatchedMemoryEvaluation => {
+                ExecutionPlanAuthority::RuntimeConstraint
+            }
+            Self::DegradedFallback => ExecutionPlanAuthority::DegradedFallback,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FastPolicy => "fast_policy",
+            Self::ConductorSelection => "conductor_selection",
+            Self::HardSafetyConstraint => "hard_safety_constraint",
+            Self::HardCapabilityConstraint => "hard_capability_constraint",
+            Self::HardBudgetConstraint => "hard_budget_constraint",
+            Self::RuntimeGroundedDirect => "runtime_grounded_direct",
+            Self::MatchedMemoryEvaluation => "matched_memory_evaluation",
+            Self::DegradedFallback => "degraded_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionPlanDecisionReceipt {
+    pub schema: String,
+    pub authority: ExecutionPlanAuthority,
+    pub reason: ExecutionPlanDecisionReason,
+    pub conductor_action_id: String,
+    pub executable_action_id: String,
+    pub action_changed: bool,
+}
+
+impl ExecutionPlanDecisionReceipt {
+    pub fn new(
+        candidate: &AgentRunDecision,
+        action: &AgentRunDecision,
+        reason: ExecutionPlanDecisionReason,
+    ) -> Result<Self, String> {
+        let conductor_action_id = causal_route_action_id_v2(candidate)?;
+        let executable_action_id = causal_route_action_id_v2(action)?;
+        Ok(Self {
+            schema: EXECUTION_PLAN_DECISION_RECEIPT_SCHEMA_V1.to_string(),
+            authority: reason.authority(),
+            reason,
+            action_changed: conductor_action_id != executable_action_id,
+            conductor_action_id,
+            executable_action_id,
+        })
+    }
+
+    pub fn validate(
+        &self,
+        candidate: &AgentRunDecision,
+        action: &AgentRunDecision,
+    ) -> Result<(), String> {
+        if self.schema != EXECUTION_PLAN_DECISION_RECEIPT_SCHEMA_V1
+            || self != &Self::new(candidate, action, self.reason)?
+        {
+            return Err("execution-plan decision receipt is invalid".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionPlanGuardReason {
     CandidateDirect,
     Allowed,
@@ -80,6 +170,14 @@ impl ExecutionPlanGuardReceipt {
         candidate: &AgentRunDecision,
         route: &CausalRouteSelectionV2,
     ) -> Result<Self, String> {
+        Self::from_candidate_for_schema(candidate, route, EXECUTION_PLAN_GUARD_SCHEMA_V2)
+    }
+
+    fn from_candidate_for_schema(
+        candidate: &AgentRunDecision,
+        route: &CausalRouteSelectionV2,
+        schema: &str,
+    ) -> Result<Self, String> {
         route.validate()?;
         let candidate_action_id = causal_route_action_id_v2(candidate)?;
         let action = route
@@ -96,12 +194,14 @@ impl ExecutionPlanGuardReceipt {
             && (1..=3).contains(&candidate.max_parallelism)
             && action.projected_model_calls <= 8;
         let capability_compatible = action.feasible;
-        let allowed = capability_compatible && independent_work_valid && bounded_execution;
+        let legacy = schema == EXECUTION_PLAN_GUARD_SCHEMA_V1;
+        let allowed =
+            capability_compatible && bounded_execution && (!legacy || independent_work_valid);
         let reason = if !workflow {
             ExecutionPlanGuardReason::CandidateDirect
         } else if !capability_compatible {
             ExecutionPlanGuardReason::NoCompatibleRoute
-        } else if !independent_work_valid {
+        } else if legacy && !independent_work_valid {
             ExecutionPlanGuardReason::NoIndependentDemand
         } else if !bounded_execution {
             ExecutionPlanGuardReason::UnboundedExecution
@@ -109,7 +209,7 @@ impl ExecutionPlanGuardReceipt {
             ExecutionPlanGuardReason::Allowed
         };
         Ok(Self {
-            schema: EXECUTION_PLAN_GUARD_SCHEMA_V1.to_string(),
+            schema: schema.to_string(),
             candidate_action_id,
             requirements_fingerprint: route.requirements_fingerprint.clone(),
             model_pool_sha256: route.model_pool_sha256.clone(),
@@ -126,10 +226,12 @@ impl ExecutionPlanGuardReceipt {
         candidate: &AgentRunDecision,
         route: &CausalRouteSelectionV2,
     ) -> Result<(), String> {
-        if self.schema != EXECUTION_PLAN_GUARD_SCHEMA_V1
-            || self.requirements_fingerprint != route.requirements_fingerprint
+        if !matches!(
+            self.schema.as_str(),
+            EXECUTION_PLAN_GUARD_SCHEMA_V1 | EXECUTION_PLAN_GUARD_SCHEMA_V2
+        ) || self.requirements_fingerprint != route.requirements_fingerprint
             || self.model_pool_sha256 != route.model_pool_sha256
-            || self != &Self::from_candidate(candidate, route)?
+            || self != &Self::from_candidate_for_schema(candidate, route, &self.schema)?
         {
             return Err("execution-plan hard-constraint receipt is invalid".to_string());
         }
@@ -163,6 +265,8 @@ pub struct ExecutionPlan {
     pub action: AgentRunDecision,
     pub authority: ExecutionPlanAuthority,
     pub hard_guard: ExecutionPlanGuardReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_receipt: Option<ExecutionPlanDecisionReceipt>,
     pub compatibility_route: CausalRouteSelectionV2,
     pub workflow_execution_profile_sha256: Option<String>,
 }
@@ -171,6 +275,7 @@ impl ExecutionPlan {
     pub fn new(
         mut conductor_candidate: AgentRunDecision,
         mut action: AgentRunDecision,
+        decision_reason: ExecutionPlanDecisionReason,
         compatibility_route: CausalRouteSelectionV2,
         workflow_execution_profile_sha256: Option<String>,
     ) -> Result<Self, String> {
@@ -178,13 +283,16 @@ impl ExecutionPlan {
         action.causal_route = None;
         let hard_guard =
             ExecutionPlanGuardReceipt::from_candidate(&conductor_candidate, &compatibility_route)?;
-        let authority = ExecutionPlanAuthority::from_route_reason(compatibility_route.reason);
+        let decision_receipt =
+            ExecutionPlanDecisionReceipt::new(&conductor_candidate, &action, decision_reason)?;
+        let authority = decision_receipt.authority;
         let plan = Self {
-            schema: EXECUTION_PLAN_SCHEMA_V1.to_string(),
+            schema: EXECUTION_PLAN_SCHEMA_V2.to_string(),
             conductor_candidate,
             action,
             authority,
             hard_guard,
+            decision_receipt: Some(decision_receipt),
             compatibility_route,
             workflow_execution_profile_sha256,
         };
@@ -197,11 +305,22 @@ impl ExecutionPlan {
     }
 
     pub fn projection(&self) -> ExecutionPlanProjection {
+        let legacy = self.schema == EXECUTION_PLAN_SCHEMA_V1;
         ExecutionPlanProjection {
-            schema: EXECUTION_PLAN_PROJECTION_SCHEMA_V1.to_string(),
+            schema: if legacy {
+                EXECUTION_PLAN_PROJECTION_SCHEMA_V1
+            } else {
+                EXECUTION_PLAN_PROJECTION_SCHEMA_V2
+            }
+            .to_string(),
             task_class: self.action.task_class.clone(),
             execution: self.action.execution,
-            selected_action_id: self.compatibility_route.selected_action_id.clone(),
+            selected_action_id: if legacy {
+                self.compatibility_route.selected_action_id.clone()
+            } else {
+                causal_route_action_id_v2(&self.action)
+                    .expect("validated execution action identity must serialize")
+            },
             workflow_execution_profile_sha256: self.workflow_execution_profile_sha256.clone(),
         }
     }
@@ -217,7 +336,10 @@ impl ExecutionPlan {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != EXECUTION_PLAN_SCHEMA_V1 {
+        if !matches!(
+            self.schema.as_str(),
+            EXECUTION_PLAN_SCHEMA_V1 | EXECUTION_PLAN_SCHEMA_V2
+        ) {
             return Err(format!(
                 "unsupported execution-plan schema: {}",
                 self.schema
@@ -228,13 +350,60 @@ impl ExecutionPlan {
             .validate(&self.conductor_candidate, &self.compatibility_route)?;
         let candidate_action_id = causal_route_action_id_v2(&self.conductor_candidate)?;
         let selected_action_id = causal_route_action_id_v2(&self.action)?;
-        if candidate_action_id != self.hard_guard.candidate_action_id
-            || selected_action_id != self.compatibility_route.selected_action_id
-            || self.action.route_tier() != self.compatibility_route.selected_route
-            || self.authority
-                != ExecutionPlanAuthority::from_route_reason(self.compatibility_route.reason)
-        {
-            return Err("execution-plan action or authority is inconsistent".to_string());
+        if candidate_action_id != self.hard_guard.candidate_action_id {
+            return Err("execution-plan candidate is inconsistent".to_string());
+        }
+        if self.schema == EXECUTION_PLAN_SCHEMA_V1 {
+            if self.decision_receipt.is_some()
+                || selected_action_id != self.compatibility_route.selected_action_id
+                || self.action.route_tier() != self.compatibility_route.selected_route
+                || self.authority
+                    != ExecutionPlanAuthority::from_route_reason(self.compatibility_route.reason)
+            {
+                return Err("legacy execution-plan action or authority is inconsistent".to_string());
+            }
+        } else {
+            let decision_receipt = self
+                .decision_receipt
+                .as_ref()
+                .ok_or_else(|| "execution-plan decision receipt is missing".to_string())?;
+            decision_receipt.validate(&self.conductor_candidate, &self.action)?;
+            if self.authority != decision_receipt.authority
+                || !self
+                    .compatibility_route
+                    .actions
+                    .iter()
+                    .any(|action| action.action_id == selected_action_id && action.feasible)
+                || self.compatibility_route.candidate_route != self.conductor_candidate.route_tier()
+            {
+                return Err("execution-plan action or authority is inconsistent".to_string());
+            }
+            match self.authority {
+                ExecutionPlanAuthority::Conductor
+                | ExecutionPlanAuthority::FixedPolicy
+                | ExecutionPlanAuthority::DegradedFallback
+                    if selected_action_id != candidate_action_id =>
+                {
+                    return Err("execution-plan authority cannot rewrite its candidate".to_string())
+                }
+                ExecutionPlanAuthority::HardConstraintGuard if self.hard_guard.allowed => {
+                    return Err(
+                        "hard-constraint authority requires a rejected candidate".to_string()
+                    )
+                }
+                ExecutionPlanAuthority::CompatibilityValuePolicy => {
+                    return Err(
+                        "compatibility value policy is shadow-only in execution-plan v2"
+                            .to_string(),
+                    )
+                }
+                _ if self.authority != ExecutionPlanAuthority::HardConstraintGuard
+                    && !self.hard_guard.allowed =>
+                {
+                    return Err("execution-plan bypasses a hard constraint".to_string())
+                }
+                _ => {}
+            }
         }
         match self.action.execution {
             AgentExecutionMode::Direct if self.workflow_execution_profile_sha256.is_some() => {
@@ -320,8 +489,14 @@ mod tests {
         let receipt = route(&candidate);
         assert_eq!(receipt.reason, CausalRouteReason::AdmitPositiveValue);
 
-        let plan = ExecutionPlan::new(candidate.clone(), candidate, receipt, Some("a".repeat(64)))
-            .expect("execution plan");
+        let plan = ExecutionPlan::new(
+            candidate.clone(),
+            candidate,
+            ExecutionPlanDecisionReason::ConductorSelection,
+            receipt,
+            Some("a".repeat(64)),
+        )
+        .expect("execution plan");
 
         assert_eq!(plan.authority, ExecutionPlanAuthority::Conductor);
         assert!(plan.hard_guard.allowed);
@@ -329,51 +504,124 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_value_downshift_is_explicit_and_preserves_the_candidate() {
+    fn compatibility_value_policy_is_shadow_only_for_v2() {
         let candidate = workflow_candidate(2_999);
         let receipt = route(&candidate);
         assert_eq!(receipt.reason, CausalRouteReason::BelowPredictionFloor);
-        let selected = candidate.clone().constrained_to_grounded_direct();
 
-        let plan = ExecutionPlan::new(candidate, selected, receipt, None)
-            .expect("compatibility execution plan");
+        let plan = ExecutionPlan::new(
+            candidate.clone(),
+            candidate,
+            ExecutionPlanDecisionReason::ConductorSelection,
+            receipt,
+            Some("a".repeat(64)),
+        )
+        .expect("conductor-owned execution plan");
 
-        assert_eq!(
-            plan.authority,
-            ExecutionPlanAuthority::CompatibilityValuePolicy
-        );
+        assert_eq!(plan.authority, ExecutionPlanAuthority::Conductor);
         assert!(plan.hard_guard.allowed);
+        assert_eq!(plan.action.execution, AgentExecutionMode::Workflow);
         assert_eq!(
-            plan.conductor_candidate.execution,
-            AgentExecutionMode::Workflow
+            plan.compatibility_route.selected_route,
+            AgentRouteTier::Direct,
+            "the shadow recommendation remains auditable"
         );
-        assert_eq!(plan.action.execution, AgentExecutionMode::Direct);
+        assert_eq!(
+            plan.decision_receipt.as_ref().map(|receipt| receipt.reason),
+            Some(ExecutionPlanDecisionReason::ConductorSelection)
+        );
     }
 
     #[test]
-    fn hard_constraint_rejection_is_distinct_from_a_quality_downshift() {
+    fn independent_work_observation_is_not_a_hard_override() {
         let mut candidate = workflow_candidate(6_000);
         candidate.verification = AgentVerificationPolicy::SelfCheck;
         candidate.max_parallelism = 1;
         candidate.min_successful_branches = 1;
-        candidate.distinct_contributions = 0;
+        candidate.distinct_contributions = 1;
         let receipt = route(&candidate);
         assert_eq!(receipt.reason, CausalRouteReason::NoIndependentDemand);
 
         let plan = ExecutionPlan::new(
             candidate.clone(),
-            candidate.constrained_to_grounded_direct(),
+            candidate,
+            ExecutionPlanDecisionReason::ConductorSelection,
             receipt,
+            Some("a".repeat(64)),
+        )
+        .expect("independent-demand observation must remain shadow-only");
+
+        assert_eq!(plan.authority, ExecutionPlanAuthority::Conductor);
+        assert!(plan.hard_guard.allowed);
+        assert!(!plan.hard_guard.independent_work_valid);
+        assert_eq!(plan.hard_guard.reason, ExecutionPlanGuardReason::Allowed);
+    }
+
+    #[test]
+    fn explicit_runtime_override_has_a_bound_decision_receipt() {
+        let candidate = workflow_candidate(6_000);
+        let action = candidate.clone().constrained_to_grounded_direct();
+        let plan = ExecutionPlan::new(
+            candidate,
+            action,
+            ExecutionPlanDecisionReason::RuntimeGroundedDirect,
+            route(&workflow_candidate(6_000)),
             None,
         )
-        .expect("guarded execution plan");
+        .expect("runtime constraint plan");
 
-        assert_eq!(plan.authority, ExecutionPlanAuthority::HardConstraintGuard);
-        assert!(!plan.hard_guard.allowed);
+        let receipt = plan.decision_receipt.as_ref().expect("decision receipt");
+        assert_eq!(plan.authority, ExecutionPlanAuthority::RuntimeConstraint);
         assert_eq!(
-            plan.hard_guard.reason,
-            ExecutionPlanGuardReason::NoIndependentDemand
+            receipt.reason,
+            ExecutionPlanDecisionReason::RuntimeGroundedDirect
         );
+        assert!(receipt.action_changed);
+    }
+
+    #[test]
+    fn conductor_authority_cannot_rewrite_its_candidate() {
+        let candidate = workflow_candidate(6_000);
+        let action = candidate.clone().constrained_to_grounded_direct();
+
+        let error = ExecutionPlan::new(
+            candidate.clone(),
+            action,
+            ExecutionPlanDecisionReason::ConductorSelection,
+            route(&candidate),
+            None,
+        )
+        .expect_err("conductor authority must preserve its selected action");
+
+        assert!(error.contains("authority cannot rewrite its candidate"));
+    }
+
+    #[test]
+    fn legacy_v1_compatibility_downshift_remains_replayable() {
+        let candidate = workflow_candidate(2_999);
+        let receipt = route(&candidate);
+        let action = candidate.clone().constrained_to_grounded_direct();
+        let mut hard_guard = ExecutionPlanGuardReceipt::from_candidate_for_schema(
+            &candidate,
+            &receipt,
+            EXECUTION_PLAN_GUARD_SCHEMA_V1,
+        )
+        .expect("legacy guard");
+        hard_guard.schema = EXECUTION_PLAN_GUARD_SCHEMA_V1.to_string();
+        let plan = ExecutionPlan {
+            schema: EXECUTION_PLAN_SCHEMA_V1.to_string(),
+            conductor_candidate: candidate,
+            action,
+            authority: ExecutionPlanAuthority::CompatibilityValuePolicy,
+            hard_guard,
+            decision_receipt: None,
+            compatibility_route: receipt,
+            workflow_execution_profile_sha256: None,
+        };
+
+        let encoded = serde_json::to_string(&plan).expect("legacy plan json");
+        let decoded = serde_json::from_str::<ExecutionPlan>(&encoded).expect("legacy plan decode");
+        decoded.validate().expect("legacy plan validation");
     }
 
     #[test]
@@ -382,6 +630,7 @@ mod tests {
         let plan = ExecutionPlan::new(
             candidate.clone(),
             candidate,
+            ExecutionPlanDecisionReason::ConductorSelection,
             route(&workflow_candidate(6_000)),
             Some("a".repeat(64)),
         )
@@ -405,6 +654,7 @@ mod tests {
         let plan = ExecutionPlan::new(
             candidate.clone(),
             candidate.clone(),
+            ExecutionPlanDecisionReason::ConductorSelection,
             route(&candidate),
             Some("a".repeat(64)),
         )

@@ -1,9 +1,10 @@
 use super::requirements::AgentPlanningSource;
 use agent_core::Metadata;
 use orchestrator::{
-    select_causal_route_v2, sha256_hex, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
-    CausalRouteReason, CausalRouteSelectionV2, ConductorPromptGenome, ExecutionPlan,
-    ModelCandidate, RouteFeatureRequest, RouteFeatureSnapshotV2, RoutingContext,
+    causal_route_action_id_v2, select_causal_route_v2, sha256_hex, AgentPolicy,
+    AgentRouteRequirements, AgentRunDecision, CausalRouteReason, CausalRouteSelectionV2,
+    ConductorPromptGenome, ExecutionPlan, ModelCandidate, RouteFeatureRequest,
+    RouteFeatureSnapshotV2, RoutingContext,
 };
 
 pub(super) fn run_decision_evolved_directive(
@@ -27,7 +28,6 @@ pub(super) fn finalize_causal_route(
     source: AgentPlanningSource,
     degraded: bool,
     conductor_candidate: &AgentRunDecision,
-    action: &AgentRunDecision,
     compatibility_route: Option<CausalRouteSelectionV2>,
 ) -> Result<CausalRouteSelectionV2, String> {
     let snapshot = RouteFeatureSnapshotV2::from_decision_request(
@@ -49,10 +49,7 @@ pub(super) fn finalize_causal_route(
         }
         None => select_causal_route_v2(conductor_candidate, &snapshot, candidates, None, 0)?,
     };
-    let final_route = action.route_tier();
-    if receipt.selected_route != final_route {
-        receipt.reconcile_selected_route(final_route, CausalRouteReason::ExecutionConstraint)?;
-    } else if source == AgentPlanningSource::FastDirect {
+    if source == AgentPlanningSource::FastDirect {
         receipt.reason = CausalRouteReason::FastPolicy;
     } else if degraded {
         receipt.reason = CausalRouteReason::DegradedFallback;
@@ -67,6 +64,7 @@ pub(super) fn apply_causal_route_to_context(
 ) -> Result<(), String> {
     let receipt = &plan.compatibility_route;
     receipt.validate()?;
+    let executable_action_id = causal_route_action_id_v2(plan.action())?;
     let pre_decision_task_class = run_context
         .get("effective_prompt_objective")
         .or_else(|| run_context.get("prompt_objective"))
@@ -96,13 +94,25 @@ pub(super) fn apply_causal_route_to_context(
         ),
         (
             "causal_route_selected",
-            receipt.selected_route.label().to_string(),
+            plan.action().route_tier().label().to_string(),
         ),
         (
             "causal_route_selected_action_id",
+            executable_action_id,
+        ),
+        (
+            "causal_route_shadow_selected",
+            receipt.selected_route.label().to_string(),
+        ),
+        (
+            "causal_route_shadow_selected_action_id",
             receipt.selected_action_id.clone(),
         ),
         ("causal_route_reason", receipt.reason.label().to_string()),
+        (
+            "causal_route_shadow_reason",
+            receipt.reason.label().to_string(),
+        ),
         ("causal_route_receipt_sha256", receipt.digest()?),
     ] {
         run_context.insert(key.to_string(), value);

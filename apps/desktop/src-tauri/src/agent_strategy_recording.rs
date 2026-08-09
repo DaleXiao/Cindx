@@ -68,6 +68,16 @@ pub(super) fn record_planned_agent_run(
             planned.execution_plan.authority.label().to_string(),
         ),
         (
+            "execution_plan_decision_reason".to_string(),
+            planned
+                .execution_plan
+                .decision_receipt
+                .as_ref()
+                .map(|receipt| receipt.reason.label())
+                .unwrap_or("legacy")
+                .to_string(),
+        ),
+        (
             "prompt_profile".to_string(),
             planned.prompt_genome.id.clone(),
         ),

@@ -29,12 +29,15 @@ use crate::prompt_learning_runtime::prompt_dataset_identity;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    select_causal_route_v2, AdaptiveWorkflow, AdaptiveWorkflowStep, AgentDecisionCalibration,
-    AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRunDecisionHarness,
-    AgentRunDecisionRequest, AgentToolRequirement, AgentVerificationPolicy, CausalRouteReason,
-    CausalRouteSelectionV2, ExecutionPlan, ExecutionPlanAuthority, ModelCapabilitySource,
-    PromptDatasetCaseIdentityV1, PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1,
-    PromptTransferProvenance, RouteFeatureRequest, RouteFeatureSnapshotV2,
+    causal_route_action_id_v2, select_causal_route_v2, AdaptiveWorkflow,
+    AdaptiveWorkflowStep, AgentDecisionCalibration,
+    AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRouteTier,
+    AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
+    AgentVerificationPolicy, CausalRouteReason,
+    CausalRouteSelectionV2, ExecutionPlan, ExecutionPlanAuthority, ExecutionPlanDecisionReason,
+    ModelCapabilitySource, PromptDatasetCaseIdentityV1, PromptExecutionContextV1,
+    PromptLiveAssignmentProvenanceV1, PromptTransferProvenance, RouteFeatureRequest,
+    RouteFeatureSnapshotV2,
     CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
     PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
 };
@@ -300,19 +303,11 @@ fn test_planned_agent_run_with_candidate(
         },
         &candidates,
     );
-    let mut receipt = match decision.causal_route.take() {
+    let receipt = match decision.causal_route.take() {
         Some(receipt) => receipt,
         None => select_causal_route_v2(&conductor_candidate, &snapshot, &candidates, None, 0)
             .expect("test plan should produce a causal route receipt"),
     };
-    if receipt.selected_route != decision.route_tier() {
-        receipt
-            .reconcile_selected_route(
-                decision.route_tier(),
-                CausalRouteReason::ExecutionConstraint,
-            )
-            .expect("test plan receipt should reconcile to its fixture route");
-    }
     decision.causal_route = None;
     let routing_context = decision.routing_context("update the workspace", candidates);
     let routing_decision = decision.routing_decision();
@@ -320,9 +315,17 @@ fn test_planned_agent_run_with_candidate(
     let prompt_genome = ConductorPromptGenome::seed_for_effort(effort.label());
     let workflow_execution_profile_sha256 = (decision.execution == AgentExecutionMode::Workflow)
         .then(|| prompt_genome.workflow_execution_profile_sha256().unwrap());
+    let decision_reason = if effort == AgentPolicy::Fast {
+        ExecutionPlanDecisionReason::FastPolicy
+    } else if conductor_candidate.route_tier() != decision.route_tier() {
+        ExecutionPlanDecisionReason::RuntimeGroundedDirect
+    } else {
+        ExecutionPlanDecisionReason::ConductorSelection
+    };
     let execution_plan = ExecutionPlan::new(
         conductor_candidate,
         decision,
+        decision_reason,
         receipt,
         workflow_execution_profile_sha256,
     )
@@ -348,7 +351,7 @@ fn test_planned_agent_run_with_candidate(
 }
 
 #[test]
-fn execution_plan_context_preserves_conductor_candidate_and_final_authority() {
+fn execution_plan_context_keeps_compatibility_policy_shadow_only() {
     let mut candidate = AgentRunDecision::direct("executor");
     candidate.execution = AgentExecutionMode::Workflow;
     candidate.verification = AgentVerificationPolicy::Independent;
@@ -359,8 +362,8 @@ fn execution_plan_context_preserves_conductor_candidate_and_final_authority() {
     candidate.expected_uplift_bps = 2_999;
     candidate.confidence_bps = 8_000;
     candidate.stop_policy = ConductorStopPolicy::Quorum;
-    let selected = candidate.clone().constrained_to_grounded_direct();
-    let planned = test_planned_agent_run_with_candidate(candidate, selected, AgentPolicy::Auto);
+    let planned =
+        test_planned_agent_run_with_candidate(candidate.clone(), candidate, AgentPolicy::Auto);
     let mut context = Metadata::new();
 
     planned
@@ -375,10 +378,36 @@ fn execution_plan_context_preserves_conductor_candidate_and_final_authority() {
         persisted.conductor_candidate.execution,
         AgentExecutionMode::Workflow
     );
-    assert_eq!(persisted.action.execution, AgentExecutionMode::Direct);
+    assert_eq!(persisted.action.execution, AgentExecutionMode::Workflow);
+    assert_eq!(persisted.authority, ExecutionPlanAuthority::Conductor);
     assert_eq!(
-        persisted.authority,
-        ExecutionPlanAuthority::CompatibilityValuePolicy
+        persisted.compatibility_route.selected_route,
+        AgentRouteTier::Direct
+    );
+    assert_eq!(
+        persisted
+            .decision_receipt
+            .as_ref()
+            .map(|receipt| receipt.reason),
+        Some(ExecutionPlanDecisionReason::ConductorSelection)
+    );
+    assert_eq!(
+        context.get("causal_route_selected").map(String::as_str),
+        Some("workflow")
+    );
+    assert_eq!(
+        context
+            .get("causal_route_shadow_selected")
+            .map(String::as_str),
+        Some("direct")
+    );
+    assert_eq!(
+        context.get("causal_route_selected_action_id"),
+        Some(&causal_route_action_id_v2(persisted.action()).unwrap())
+    );
+    assert_eq!(
+        context.get("causal_route_shadow_selected_action_id"),
+        Some(&persisted.compatibility_route.selected_action_id)
     );
     let full_digest = persisted.digest().unwrap();
     let semantic_digest = persisted.semantic_digest().unwrap();
@@ -5543,10 +5572,6 @@ fn typed_agent_policy_provenance_preserves_the_legacy_runtime_wire() {
             "dynamic_conductor_replanned",
         ),
         (
-            AgentPlanningSource::CalibratedDirect,
-            "dynamic_conductor_calibrated_direct",
-        ),
-        (
             AgentPlanningSource::DegradedDirect,
             "dynamic_conductor_degraded_direct",
         ),
@@ -5966,7 +5991,7 @@ fn route_fallback_prefers_the_first_compatible_configured_model() {
 }
 
 #[test]
-fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
+fn legacy_calibration_metadata_remains_readable_without_a_planning_source() {
     let route_requirements = AgentRouteRequirements {
         minimum_tool_requirement: AgentToolRequirement::ReadOnly,
         effect_authority: AgentEffectAuthority::Forbidden,
@@ -6019,7 +6044,7 @@ fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
     }
     decision.causal_route = Some(receipt);
     let mut planned = test_planned_agent_run_with_candidate(candidate, decision, AgentPolicy::Auto);
-    planned.source = AgentPlanningSource::CalibratedDirect;
+    planned.source = AgentPlanningSource::DynamicConductor;
     planned.route_requirements = route_requirements;
     let mut run_context = Metadata::new();
 

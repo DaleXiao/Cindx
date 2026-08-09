@@ -44,7 +44,8 @@ use agent_runtime::AgentRunControl;
 use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
     AgentRunDecisionHarness, AgentRunDecisionRequest, ConductorExecutionContract,
-    ConductorPromptGenome, ExecutionPlan, RoutingContext, RoutingDecision,
+    ConductorPromptGenome, ExecutionPlan, ExecutionPlanDecisionReason, RoutingContext,
+    RoutingDecision,
 };
 
 #[derive(Debug, Clone)]
@@ -134,6 +135,7 @@ pub(crate) fn plan_agent_run(
                 decision,
                 compatibility_route: None,
                 source: AgentPlanningSource::MatchedMemoryEvaluation,
+                decision_reason: ExecutionPlanDecisionReason::MatchedMemoryEvaluation,
                 attempts: 0,
                 prompt_genome: profile,
                 effort,
@@ -176,6 +178,7 @@ pub(crate) fn plan_agent_run(
                 decision,
                 compatibility_route: None,
                 source: AgentPlanningSource::FastDirect,
+                decision_reason: ExecutionPlanDecisionReason::FastPolicy,
                 attempts: 0,
                 prompt_genome: profile,
                 effort,
@@ -283,18 +286,24 @@ pub(crate) fn plan_agent_run(
         failure_reasons,
     } = schedule;
 
-    let (conductor_candidate, decision, compatibility_route, source, degradation_reason) =
+    let (
+        conductor_candidate,
+        decision,
+        compatibility_route,
+        source,
+        mut decision_reason,
+        degradation_reason,
+    ) =
         match outcome {
             ConductorDecisionOutcome::Selected(draft) => {
-                let source = requirements::selected_conductor_source(
-                    &draft.selected_action,
-                    attempted_conductor_models.len(),
-                );
+                let source =
+                    requirements::selected_conductor_source(attempted_conductor_models.len());
                 (
+                    draft.conductor_candidate.clone(),
                     draft.conductor_candidate,
-                    draft.selected_action,
                     Some(draft.compatibility_route),
                     source,
+                    ExecutionPlanDecisionReason::ConductorSelection,
                     None,
                 )
             }
@@ -316,13 +325,21 @@ pub(crate) fn plan_agent_run(
                 } else {
                     AgentPlanningSource::DegradedDirect
                 };
-                (decision.clone(), decision, None, source, Some(reason))
+                (
+                    decision.clone(),
+                    decision,
+                    None,
+                    source,
+                    ExecutionPlanDecisionReason::DegradedFallback,
+                    Some(reason),
+                )
             }
         };
     let decision = execution_constraint
         .apply(decision, effort)
         .map_err(CollaborationStageError::Failed)?;
     if execution_constraint.is_grounded_direct() {
+        decision_reason = ExecutionPlanDecisionReason::RuntimeGroundedDirect;
         decision
             .validate(&allowed_models, max_parallelism)
             .map_err(CollaborationStageError::Failed)?;
@@ -335,6 +352,7 @@ pub(crate) fn plan_agent_run(
             decision,
             compatibility_route,
             source,
+            decision_reason,
             attempts,
             prompt_genome: profile,
             effort,
