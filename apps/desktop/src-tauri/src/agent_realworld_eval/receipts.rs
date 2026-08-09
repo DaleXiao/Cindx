@@ -2,6 +2,7 @@ use super::direct_finalizer_receipts::{
     project_direct_finalizer_execution, DirectFinalizerExecutionReceipt,
 };
 use super::{metadata_u64, Treatment};
+use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::*;
 use agent_core::Event;
 use orchestrator::{ExecutionPlan, WorkflowPlanIr};
@@ -142,10 +143,20 @@ pub(super) fn resolved_budget_from_events(
     Ok(observed)
 }
 
+#[cfg(test)]
 pub(super) fn strategy_receipt_from_events(
     events: &[Event],
     treatment: Treatment,
     frozen_profile: Option<&FrozenPromptProfileSnapshot>,
+) -> Result<Option<StrategyReceipt>, String> {
+    strategy_receipt_from_events_with_constraint(events, treatment, frozen_profile, None)
+}
+
+pub(super) fn strategy_receipt_from_events_with_constraint(
+    events: &[Event],
+    treatment: Treatment,
+    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
+    expected_execution_constraint: Option<AgentExecutionConstraint>,
 ) -> Result<Option<StrategyReceipt>, String> {
     if treatment.is_oracle_reference() {
         return Ok(None);
@@ -192,25 +203,12 @@ pub(super) fn strategy_receipt_from_events(
         .get("execution_constraint")
         .map(String::as_str)
         .unwrap_or("native");
-    if treatment.is_memory_evaluation() {
-        if execution_constraint != "matched_memory_effect"
-            || decision.execution != orchestrator::AgentExecutionMode::Direct
-        {
-            return Err(
-                "memory-effect receipt must prove its matched direct constraint".to_string(),
-            );
-        }
-    } else if treatment.is_grounded_direct() {
-        if execution_constraint != "grounded_direct"
-            || decision.execution != orchestrator::AgentExecutionMode::Direct
-        {
-            return Err(
-                "grounded-direct receipt must prove its direct execution constraint".to_string(),
-            );
-        }
-    } else if execution_constraint != "native" {
-        return Err("native treatment claimed an evaluation execution constraint".to_string());
-    }
+    validate_execution_constraint_receipt(
+        treatment,
+        expected_execution_constraint,
+        execution_constraint,
+        decision.execution,
+    )?;
     let genome_json = required_metadata(&event.metadata, "prompt_genome")?;
     let genome = serde_json::from_str::<ConductorPromptGenome>(genome_json)
         .map_err(|error| format!("agent strategy profile receipt is invalid: {error}"))?;
@@ -434,6 +432,45 @@ pub(super) fn strategy_receipt_from_events(
         workflow_profile_exercised,
         direct_finalizer_execution,
     }))
+}
+
+fn validate_execution_constraint_receipt(
+    treatment: Treatment,
+    expected_override: Option<AgentExecutionConstraint>,
+    observed: &str,
+    execution: orchestrator::AgentExecutionMode,
+) -> Result<(), String> {
+    let expected = expected_override.unwrap_or_else(|| {
+        if treatment.is_memory_evaluation() {
+            AgentExecutionConstraint::MatchedMemoryEffect
+        } else if treatment.is_grounded_direct() {
+            AgentExecutionConstraint::GroundedDirect
+        } else {
+            AgentExecutionConstraint::Native
+        }
+    });
+    if observed != expected.label() {
+        return Err(format!(
+            "execution constraint receipt mismatch: expected {}, observed {observed}",
+            expected.label()
+        ));
+    }
+    match expected {
+        AgentExecutionConstraint::Native => Ok(()),
+        AgentExecutionConstraint::GroundedDirect
+        | AgentExecutionConstraint::MatchedMemoryEffect
+        | AgentExecutionConstraint::MatchedDirect
+            if execution == orchestrator::AgentExecutionMode::Direct =>
+        {
+            Ok(())
+        }
+        AgentExecutionConstraint::MatchedWorkflow
+            if execution == orchestrator::AgentExecutionMode::Workflow =>
+        {
+            Ok(())
+        }
+        _ => Err("execution constraint receipt does not match the executed route".to_string()),
+    }
 }
 
 fn workflow_plan_matches_proposal(
@@ -1072,6 +1109,38 @@ mod tests {
         assert!(!serde_json::to_string(&receipt)
             .unwrap()
             .contains("direct_finalizer_execution"));
+    }
+
+    #[test]
+    fn matched_route_receipt_requires_the_explicit_expected_constraint() {
+        assert!(validate_execution_constraint_receipt(
+            Treatment::Pro,
+            Some(AgentExecutionConstraint::MatchedWorkflow),
+            "matched_workflow",
+            orchestrator::AgentExecutionMode::Workflow,
+        )
+        .is_ok());
+        assert!(validate_execution_constraint_receipt(
+            Treatment::Pro,
+            Some(AgentExecutionConstraint::MatchedDirect),
+            "matched_direct",
+            orchestrator::AgentExecutionMode::Direct,
+        )
+        .is_ok());
+        assert!(validate_execution_constraint_receipt(
+            Treatment::Pro,
+            None,
+            "matched_workflow",
+            orchestrator::AgentExecutionMode::Workflow,
+        )
+        .is_err());
+        assert!(validate_execution_constraint_receipt(
+            Treatment::Pro,
+            Some(AgentExecutionConstraint::MatchedWorkflow),
+            "matched_workflow",
+            orchestrator::AgentExecutionMode::Direct,
+        )
+        .is_err());
     }
 
     #[test]

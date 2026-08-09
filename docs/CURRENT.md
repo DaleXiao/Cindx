@@ -724,15 +724,17 @@ Therefore the current claim is:
   candidates remained Direct, and none met the train Pareto resource gate, so
   the valid decision is `NO_GO_TRAINING`. Validation, test, control, snapshot,
   and production promotion remained sealed; no intelligence uplift is shown.
-- Current source now emits the V7 suite through a V9 route-causal evidence
+- Current source now emits the V7 suite through a V10 route-causal evidence
   receipt. The training split first runs matched required-Direct and
   required-Workflow Pro treatments under the same task, workspace, profile,
   route identity, models, and budget. It stops before mutation unless Workflow
   records at least one externally verified quality win. GEPA can then change
   only `route_directive`; workflow construction and all authority and budget
   genes remain fixed. Candidate selection stays train-only, with the existing
-  unseen validation, Grounded Direct control, and untouched test gates. No V9
-  provider campaign has run and no uplift is claimed.
+  unseen validation, Grounded Direct control, and untouched test gates. V9 was
+  invalid instrumentation before any completed product receipt because the
+  legacy projector rejected the deliberate matched constraint. V10 corrects
+  only that projection boundary; no V10 result or uplift is claimed yet.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
@@ -759,7 +761,7 @@ Therefore the current claim is:
 - The compatibility value policy remains computed as a read-only shadow for
   comparison and learning diagnostics. It cannot select or rewrite the V2
   executable action. Provider-backed matched evidence is still required to show
-  whether this ownership change improves Auto/Pro outcomes. V9 splits the
+  whether this ownership change improves Auto/Pro outcomes. V10 splits the
   learned route directive from workflow execution and can identify route-policy
   effects, but no provider result yet shows that the separated policy improves
   product outcomes.

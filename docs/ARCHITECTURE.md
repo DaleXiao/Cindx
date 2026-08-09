@@ -585,7 +585,7 @@ generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
 The feature-gated Workflow GEPA campaign keeps the frozen V7 task suite and
-product gates while the current source emits a V9 evidence receipt. Six modules
+product gates while the current source emits a V10 evidence receipt. Six modules
 retain one-way responsibilities: the runner owns protocol order, the suite
 module validates public requirements and frozen strata, the evidence module
 converts external product verification into redacted reflection packets, the
@@ -594,9 +594,10 @@ execution module isolates and counterbalances matched cells, and the contract
 module computes gates from sanitized receipts. V2 and the first V4 attempt are
 retained only as `INVALID_EVALUATOR` history; V3 and the second V4 attempt remain
 `INVALID_TASK_SPEC` history. V5 and V7 provider runs remain valid targeted no-go
-evidence and are not reinterpreted by the V9 mechanism change.
+evidence and are not reinterpreted by the V10 mechanism change. V9 itself is
+retained as invalid instrumentation with zero completed product receipts.
 
-Before mutation, V9 runs each training task through explicit matched Direct and
+Before mutation, V10 runs each training task through explicit matched Direct and
 Workflow treatments. Both arms share the same task, workspace prestate, Pro
 profile, route identity, provider configuration, and budget. The evaluation-only
 constraint is part of the Conductor request and receipt; production leaves it
