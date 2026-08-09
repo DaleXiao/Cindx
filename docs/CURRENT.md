@@ -737,7 +737,10 @@ Therefore the current claim is:
   invalid instrumentation before any completed product receipt because the
   legacy projector rejected the deliberate matched constraint. V10 completed
   one pair but still confounded separate conductor plans with execution. V11
-  corrects that causal boundary; no V11 result or uplift is claimed yet.
+  corrected that causal boundary, but its single authorized run admitted zero
+  product receipts because direct-finalizer assignment evidence could not bind
+  a terminal completion. It is `INVALID_EVIDENCE`, not GO or NO-GO; production
+  routing remains unchanged and no V11 uplift is claimed.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits

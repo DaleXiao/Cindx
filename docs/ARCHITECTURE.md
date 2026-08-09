@@ -595,7 +595,10 @@ module computes gates from sanitized receipts. V2 and the first V4 attempt are
 retained only as `INVALID_EVALUATOR` history; V3 and the second V4 attempt remain
 `INVALID_TASK_SPEC` history. V5 and V7 provider runs remain valid targeted no-go
 evidence and are not reinterpreted by the V11 mechanism change. V9 and V10 are
-retained as invalid instrumentation rather than capability evidence.
+retained as invalid instrumentation rather than capability evidence. The one
+authorized V11 run is retained as `INVALID_EVIDENCE`: it reserved the first arm
+but direct-finalizer assignment evidence could not bind a terminal completion,
+so no product receipt or matched causal result was admitted.
 
 Before mutation, V11 asks the first arm in each pair for one workflow-capable
 conductor candidate and proposal, then injects that exact private in-memory

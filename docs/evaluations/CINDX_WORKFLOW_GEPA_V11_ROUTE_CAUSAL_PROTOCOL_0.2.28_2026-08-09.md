@@ -2,7 +2,7 @@
 
 ## Status
 
-`PROTOCOL_ONLY`
+`INVALID_EVIDENCE`
 
 V11 freezes one causal question before provider execution: with the same Pro
 conductor candidate, workflow proposal, route profile, task, workspace, model
@@ -10,8 +10,15 @@ set, and budget, does executing the proposal as a Workflow produce externally
 verified value over projecting that same proposal onto Direct execution? GEPA
 may mutate only route guidance, and only after a positive Workflow treatment.
 
-There is no V11 provider result, snapshot, promotion, quality gain, efficiency
-gain, or frontier claim in this protocol.
+The single authorized V11 execution on source commit
+`24b11acd2bc65821426a4992bed3c1c2712f39bd` reserved the first product arm and
+then failed closed before one `ProductRunReceipt` was completed. The evidence
+collector saw direct-finalizer assignment evidence but could not bind it to a
+terminal completion, so it rejected the strategy and execution-plan receipts.
+The retained sanitized journal cannot distinguish a product failure from event
+lifecycle drift. V11 therefore supplies neither a GO nor a NO-GO capability
+result. There is no report, snapshot, candidate, promotion, quality gain,
+efficiency gain, or frontier claim.
 
 | Field | Frozen value |
 | --- | --- |
@@ -23,6 +30,28 @@ gain, or frontier claim in this protocol.
 | Learned field | `route_directive` only |
 | Candidate population | 2 distinct route policies from at most 6 proposals |
 | Maximum product runs | 33 planned, below the hard cap of 35 |
+| Executed source commit | `24b11acd2bc65821426a4992bed3c1c2712f39bd` |
+| Journal SHA-256 | `653960b65e3a67d3aceb22203b5fc91d8d1302e7ac2f1104fbbf3f6714b35e69` |
+| Reserved / completed product runs | `1 / 0` |
+| Journal state | `running` with one pending product action; replay is forbidden |
+
+## Observed execution result
+
+The first frozen case was `coding-reconcile-records`. Provider execution
+returned to the product harness with no setup-failure classification and nine
+external check receipts, but the evidence projection failed with:
+
+`direct-finalizer evidence is missing its terminal completion`
+
+Because strategy and execution-plan receipts were not admitted, the arm cannot
+enter a matched pair or any quality denominator. The journal retained the exact
+source, suite, provider-endpoint and configured-model hashes plus its pending
+reservation. Raw task output was not inspected or committed. This is an
+evidence-lifecycle failure, not evidence that Direct or Workflow is better.
+
+The default Auto and Pro routes remain unchanged. A successor must first make
+terminal outcome and orthogonal direct-finalizer evidence independently
+projectable, then freeze a new protocol; V11 itself must not be replayed.
 
 ## Correction from V10
 

@@ -214,8 +214,11 @@ revision and is no longer the current product decision.
   with execution. It supports no quality or capability conclusion.
 
 - [Cindx Workflow GEPA V11 route-causal protocol 0.2.28](CINDX_WORKFLOW_GEPA_V11_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md)
-  freezes a shared workflow-plan anchor and changes only runtime execution. It
-  is `PROTOCOL_ONLY`; no V11 uplift claim exists yet.
+  froze a shared workflow-plan anchor and changed only runtime execution. The
+  one authorized clean-source run is `INVALID_EVIDENCE`: its first arm could
+  not bind direct-finalizer assignment evidence to terminal completion, so no
+  product receipt, matched pair, GO/NO-GO, candidate, snapshot, promotion, or
+  capability conclusion exists.
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
