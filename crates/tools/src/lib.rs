@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn other_read_tools_do_not_claim_exact_readback_evidence() {
+    fn list_and_search_do_not_claim_exact_readback_evidence() {
         let root = temp_workspace();
         fs::write(root.join("note.txt"), "needle").expect("fixture should be written");
         let lister = ListDirectoryTool::new(root.clone());
@@ -1256,18 +1256,6 @@ mod tests {
             .expect("search should succeed");
         assert!(searcher
             .postcondition_evidence(&search_request, &search_result)
-            .is_none());
-
-        let batch_reader = ReadFilesTool::new(root);
-        let batch_request = invocation(
-            "file.read_many",
-            serde_json::json!({ "paths": ["note.txt"] }).to_string(),
-        );
-        let batch_result = batch_reader
-            .execute(batch_request.clone())
-            .expect("batch read should succeed");
-        assert!(batch_reader
-            .postcondition_evidence(&batch_request, &batch_result)
             .is_none());
     }
 

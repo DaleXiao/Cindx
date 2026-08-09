@@ -7,8 +7,8 @@ mod file_batch_tests;
 use std::path::PathBuf;
 
 use agent_core::{
-    PermissionRequest, ToolExecutionConcurrency, ToolInvocation, ToolOutcomeStatus, ToolRisk,
-    ToolSpec,
+    PermissionRequest, PostconditionVerifierKind, ToolExecutionConcurrency, ToolInvocation,
+    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
 };
 
 use super::{ReadFileTool, Tool, ToolError, ToolExecutionControl};
@@ -133,11 +133,20 @@ impl Tool for ReadFilesTool {
             })
             .to_string(),
         )
+        .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceExactReadbackV1)
         .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 
     fn permission_request(&self, _invocation: &ToolInvocation) -> Option<PermissionRequest> {
         None
+    }
+
+    fn postcondition_evidence(
+        &self,
+        invocation: &ToolInvocation,
+        result: &ToolResult,
+    ) -> Option<ToolPostconditionEvidence> {
+        exact_readback_evidence(invocation, result)
     }
 
     fn execute(&self, invocation: ToolInvocation) -> Result<agent_core::ToolResult, ToolError> {
@@ -151,4 +160,52 @@ impl Tool for ReadFilesTool {
     ) -> Result<agent_core::ToolResult, ToolError> {
         self.execute_batch(invocation, &|| control.should_cancel())
     }
+}
+
+fn exact_readback_evidence(
+    invocation: &ToolInvocation,
+    result: &ToolResult,
+) -> Option<ToolPostconditionEvidence> {
+    if result.invocation_id != invocation.id
+        || !matches!(result.status, ToolOutcomeStatus::Succeeded)
+    {
+        return None;
+    }
+    let request = parse_request(&invocation.input_json).ok()?;
+    if request.paths.iter().any(|path| path.offset_bytes != 0) {
+        return None;
+    }
+    let structured =
+        serde_json::from_str::<serde_json::Value>(result.structured_output_json.as_deref()?)
+            .ok()?;
+    let items = structured.get("items")?.as_array()?;
+    if structured.get("schema")?.as_str()? != "cindx.file-read-many-result.v2"
+        || !structured.get("complete")?.as_bool()?
+        || structured.get("cancelled")?.as_bool()?
+        || structured.get("paths_requested")?.as_u64()? != request.paths.len() as u64
+        || structured.get("paths_read")?.as_u64()? != request.paths.len() as u64
+        || structured.get("paths_failed")?.as_u64()? != 0
+        || structured.get("paths_truncated")?.as_u64()? != 0
+        || items.len() != request.paths.len()
+    {
+        return None;
+    }
+    for (requested, item) in request.paths.iter().zip(items) {
+        if item.get("path")?.as_str()? != requested.path
+            || item.get("status")?.as_str()? != "succeeded"
+            || item.get("requested_offset_bytes")?.as_u64()? != 0
+            || item.get("offset_bytes")?.as_u64()? != 0
+            || item.get("truncated")?.as_bool()?
+            || item.get("returned_bytes")?.as_u64()? != item.get("total_bytes")?.as_u64()?
+        {
+            return None;
+        }
+    }
+    Some(ToolPostconditionEvidence {
+        kind: PostconditionVerifierKind::WorkspaceExactReadbackV1,
+        target_input_json: serde_json::json!({
+            "paths": request.paths.iter().map(|path| &path.path).collect::<Vec<_>>()
+        })
+        .to_string(),
+    })
 }

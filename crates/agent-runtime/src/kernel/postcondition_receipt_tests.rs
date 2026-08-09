@@ -434,6 +434,54 @@ fn multi_target_mutation_requires_complete_cumulative_coverage() {
 }
 
 #[test]
+fn complete_batch_readback_closes_the_latest_workspace_mutation() {
+    let mut state = start_agent_loop(
+        TaskId("typed-batch-readback".to_string()),
+        "update files and verify them together",
+        AgentRuntimeConfig::default(),
+    );
+    state
+        .task_contract
+        .merge_workspace_verification_policy(WorkspaceVerificationPolicy::RequiredAfterMutation);
+    let write_spec = workspace_write_spec("file.write");
+    let write = tool_request("write", "file.write", r#"{"path":"B.md"}"#);
+    apply_contract_transition(
+        &mut state,
+        &write,
+        &ToolOutcomeStatus::Succeeded,
+        &ToolRisk::WritesWorkspace,
+        &write_spec,
+        None,
+        "updated",
+        POSTCONDITION_SCOPE,
+    );
+
+    let read_spec = exact_read_spec("file.read_many");
+    let read = tool_request(
+        "read-many",
+        "file.read_many",
+        r#"{"paths":["A.md","B.md"]}"#,
+    );
+    let evidence = ToolPostconditionEvidence {
+        kind: PostconditionVerifierKind::WorkspaceExactReadbackV1,
+        target_input_json: r#"{"paths":["A.md","B.md"]}"#.to_string(),
+    };
+    let transition = apply_contract_transition(
+        &mut state,
+        &read,
+        &ToolOutcomeStatus::Succeeded,
+        &ToolRisk::ReadOnly,
+        &read_spec,
+        Some(&evidence),
+        "complete batch contents",
+        POSTCONDITION_SCOPE,
+    );
+
+    assert!(transition.postcondition_verification.is_some());
+    assert!(state.task_contract.latest_mutation_verified());
+}
+
+#[test]
 fn untrusted_shell_and_file_list_cannot_verify_but_trusted_quality_check_can() {
     let mut state = start_agent_loop(
         TaskId("typed-trusted-verifiers".to_string()),
