@@ -78,9 +78,10 @@ pub(super) fn finalize_planned_run(
     let workflow_execution_profile_sha256 = (decision.execution == AgentExecutionMode::Workflow)
         .then(|| prompt_genome.workflow_execution_profile_sha256())
         .transpose()?;
-    let workflow_plan = (decision.execution == AgentExecutionMode::Workflow)
-        .then_some(workflow_plan)
-        .flatten();
+    let retain_workflow_plan = decision.execution == AgentExecutionMode::Workflow
+        || (decision_reason == ExecutionPlanDecisionReason::MatchedRouteEvaluation
+            && conductor_candidate.execution == AgentExecutionMode::Workflow);
+    let workflow_plan = retain_workflow_plan.then_some(workflow_plan).flatten();
     let execution_plan = ExecutionPlan::new(
         conductor_candidate,
         decision,

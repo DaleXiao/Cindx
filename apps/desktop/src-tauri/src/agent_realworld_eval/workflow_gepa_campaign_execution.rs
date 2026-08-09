@@ -4,7 +4,7 @@ use super::workflow_gepa_campaign_contract::{
 };
 use super::workflow_gepa_campaign_journal::CampaignJournal;
 use super::{materialize_case, ExecutionCell, RawRun, RealworldCase, RealworldSuite, Treatment};
-use crate::agent_execution_constraint::AgentExecutionConstraint;
+use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
 use crate::prompt_learning_runtime::{
@@ -277,6 +277,7 @@ pub(super) fn execute_journaled_campaign_case(
         split,
         action_label,
         None,
+        None,
         journal,
     )
 }
@@ -299,6 +300,7 @@ fn execute_journaled_campaign_case_with_constraint(
     split: CampaignSplit,
     action_label: &str,
     execution_constraint: Option<AgentExecutionConstraint>,
+    matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
     journal: &mut CampaignJournal,
 ) -> Result<(RawRun, ProductRunReceipt), String> {
     journal.begin_product(action_label)?;
@@ -317,6 +319,7 @@ fn execute_journaled_campaign_case_with_constraint(
         treatment,
         project_scope,
         execution_constraint,
+        matched_route_plan_anchor,
     );
     let receipt = ProductRunReceipt::from_run(&run, split, replicate)?;
     journal.complete_product(&receipt)?;
@@ -366,6 +369,7 @@ pub(super) fn execute_matched_route_pair(
                    scope: &str,
                    index: usize,
                    position: usize,
+                   plan_anchor: Option<&MatchedRoutePlanAnchor>,
                    journal: &mut CampaignJournal| {
         execute_journaled_campaign_case_with_constraint(
             app,
@@ -384,6 +388,7 @@ pub(super) fn execute_matched_route_pair(
             split,
             scope,
             Some(constraint),
+            plan_anchor,
             journal,
         )
     };
@@ -394,8 +399,10 @@ pub(super) fn execute_matched_route_pair(
             &workflow_scope,
             *execution_index,
             1,
+            None,
             journal,
         )?;
+        let plan_anchor = matched_route_plan_anchor(&workflow)?;
         *execution_index = execution_index.saturating_add(1);
         let (direct, direct_receipt) = run_arm(
             &direct_root,
@@ -403,6 +410,7 @@ pub(super) fn execute_matched_route_pair(
             &direct_scope,
             *execution_index,
             2,
+            Some(&plan_anchor),
             journal,
         )?;
         *execution_index = execution_index.saturating_add(1);
@@ -420,8 +428,10 @@ pub(super) fn execute_matched_route_pair(
             &direct_scope,
             *execution_index,
             1,
+            None,
             journal,
         )?;
+        let plan_anchor = matched_route_plan_anchor(&direct)?;
         *execution_index = execution_index.saturating_add(1);
         let (workflow, workflow_receipt) = run_arm(
             &workflow_root,
@@ -429,6 +439,7 @@ pub(super) fn execute_matched_route_pair(
             &workflow_scope,
             *execution_index,
             2,
+            Some(&plan_anchor),
             journal,
         )?;
         *execution_index = execution_index.saturating_add(1);
@@ -489,6 +500,16 @@ fn validate_matched_route_receipts(
             case.id
         ));
     }
+    if direct.conductor_candidate_sha256.is_none()
+        || direct.conductor_candidate_sha256 != workflow.conductor_candidate_sha256
+        || direct.workflow_proposal_sha256.is_none()
+        || direct.workflow_proposal_sha256 != workflow.workflow_proposal_sha256
+    {
+        return Err(format!(
+            "matched route pair {} did not share one conductor candidate and workflow proposal",
+            case.id
+        ));
+    }
     if direct.execution_plan_authority.as_deref() != Some("runtime_constraint")
         || workflow.execution_plan_authority.as_deref() != Some("runtime_constraint")
     {
@@ -498,6 +519,18 @@ fn validate_matched_route_receipts(
         ));
     }
     Ok(())
+}
+
+fn matched_route_plan_anchor(run: &RawRun) -> Result<MatchedRoutePlanAnchor, String> {
+    run.strategy_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.matched_route_plan_anchor.clone())
+        .ok_or_else(|| {
+            format!(
+                "matched route pair {} did not retain its private shared plan anchor",
+                run.case_id
+            )
+        })
 }
 
 fn candidate_executes_first(pair_index: usize, replicate: u32) -> bool {
@@ -520,6 +553,7 @@ fn execute_campaign_case_with_constraint(
     treatment: Treatment,
     project_scope: &str,
     execution_constraint: Option<AgentExecutionConstraint>,
+    matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
 ) -> RawRun {
     let execution = ExecutionCell {
         execution_index,
@@ -541,6 +575,7 @@ fn execute_campaign_case_with_constraint(
             project_scope: Some(project_scope),
             run_budget: Some(workflow_gepa_product_budget()),
             execution_constraint,
+            matched_route_plan_anchor,
         },
     )
 }
@@ -631,6 +666,8 @@ mod tests {
             model_calls: 1,
             total_tokens: 1,
             output_sha256: "a".repeat(64),
+            conductor_candidate_sha256: Some("0".repeat(64)),
+            workflow_proposal_sha256: Some("1".repeat(64)),
             profile_id: Some("profile".to_string()),
             profile_sha256: Some("b".repeat(64)),
             route_profile_sha256: Some("c".repeat(64)),
@@ -677,6 +714,12 @@ mod tests {
         let mut drifted = workflow.clone();
         drifted.route_profile_sha256 = Some("9".repeat(64));
         assert!(validate_matched_route_receipts(&case, &direct, &drifted).is_err());
+        let mut different_candidate = workflow.clone();
+        different_candidate.conductor_candidate_sha256 = Some("8".repeat(64));
+        assert!(validate_matched_route_receipts(&case, &direct, &different_candidate).is_err());
+        let mut different_proposal = workflow.clone();
+        different_proposal.workflow_proposal_sha256 = Some("7".repeat(64));
+        assert!(validate_matched_route_receipts(&case, &direct, &different_proposal).is_err());
         assert!(validate_matched_route_receipts(&case, &direct, &direct).is_err());
     }
 

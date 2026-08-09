@@ -4,6 +4,8 @@ mod causal_route;
 mod context;
 #[path = "agent_strategy_finalization.rs"]
 mod finalization;
+#[path = "agent_strategy_matched_route.rs"]
+mod matched_route;
 #[path = "agent_strategy_preparation.rs"]
 mod preparation;
 #[path = "agent_strategy_recording.rs"]
@@ -17,6 +19,9 @@ mod workflow_proposal;
 pub(crate) use self::causal_route::causal_route_event_metadata;
 use self::causal_route::run_decision_evolved_directive;
 use self::finalization::{finalize_planned_run, PlannedRunFinalizeInput};
+use self::matched_route::{
+    plan_from_shared_anchor, shared_anchor_from_context, MatchedRoutePlanningInput,
+};
 #[cfg(test)]
 pub(crate) use self::preparation::should_evaluate_strategy_profile;
 pub(crate) use self::preparation::{
@@ -94,6 +99,7 @@ pub(crate) fn plan_agent_run(
     ensure_planning_current(cancellation)?;
     let execution_constraint = AgentExecutionConstraint::from_context(run_context)
         .map_err(CollaborationStageError::Failed)?;
+    let matched_route_plan_anchor = shared_anchor_from_context(run_context, execution_constraint)?;
     run_context
         .entry("prompt_objective".to_string())
         .or_insert_with(|| truncate_for_collaboration(prompt, 6_000));
@@ -119,6 +125,28 @@ pub(crate) fn plan_agent_run(
     let evolved_route_directive = run_decision_evolved_directive(&profile, effort)
         .map_err(CollaborationStageError::Failed)?;
     let recent_context = collaboration_recent_context(history);
+
+    if let Some(anchor) = matched_route_plan_anchor {
+        return plan_from_shared_anchor(
+            state,
+            task_id,
+            run_context,
+            MatchedRoutePlanningInput {
+                prompt,
+                candidates,
+                anchor,
+                profile,
+                profile_source: &profile_source,
+                effort,
+                route_requirements,
+                cancellation,
+                budget_fingerprint,
+                recent_context,
+                route_prompt_profile_sha256,
+                execution_constraint,
+            },
+        );
+    }
 
     if execution_constraint.is_matched_memory_effect() {
         let decision = requirements::fast_direct_route_decision(
@@ -238,7 +266,7 @@ pub(crate) fn plan_agent_run(
         evolved_directive: evolved_route_directive,
         historical_evidence,
         matched_collaboration_evidence,
-        required_execution: execution_constraint.required_execution(),
+        required_execution: execution_constraint.conductor_required_execution(),
         route_requirements,
         execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
             .to_string(),

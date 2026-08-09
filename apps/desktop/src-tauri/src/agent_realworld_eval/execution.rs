@@ -13,7 +13,7 @@ use super::{
     EventMetrics, ExecutionCell, FailedRunDetails, RawRun, RealworldCase, RuntimeMetrics,
     Treatment,
 };
-use crate::agent_execution_constraint::AgentExecutionConstraint;
+use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::app_state::AppState;
 use crate::collaboration_execution::complete_collaboration_model_with_control;
 use crate::configuration_models::ProviderConfig;
@@ -38,6 +38,7 @@ pub(super) struct CaseExecutionInput<'a> {
     pub(super) project_scope: Option<&'a str>,
     pub(super) run_budget: Option<RunBudget>,
     pub(super) execution_constraint: Option<AgentExecutionConstraint>,
+    pub(super) matched_route_plan_anchor: Option<&'a MatchedRoutePlanAnchor>,
 }
 
 pub(super) fn execute_case(
@@ -57,6 +58,7 @@ pub(super) fn execute_case(
         project_scope,
         run_budget,
         execution_constraint,
+        matched_route_plan_anchor,
     } = input;
     let input_sha256 = case_input_sha256(case);
     let started = Instant::now();
@@ -374,6 +376,7 @@ pub(super) fn execute_case(
         case.permission_policy,
         run_budget,
         execution_constraint,
+        matched_route_plan_anchor,
     );
     let output = product.state.latest_answer.clone().unwrap_or_default();
     let mut event_metrics = match collect_event_metrics(

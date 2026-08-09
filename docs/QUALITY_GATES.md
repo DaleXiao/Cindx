@@ -332,13 +332,14 @@ test, and snapshot publication. Any successor campaign requires a new frozen
 protocol and separate explicit authorization. V6 is that frozen successor
 protocol, but no V6 provider run has occurred.
 
-The current implementation retains the frozen V7 product suite and uses the V10
-route-causal evidence schema. Before mutation, each training case executes a
-matched required-Direct and required-Workflow Pro pair. The two arms must bind
-the same task, workspace prestate, prompt profile, route profile, provider
-configuration, and budget while recording the explicit runtime treatment and
-the requested execution mode. Incomplete pairs, treatment drift, or profile
-drift fail closed. The campaign stops before mutation unless Workflow wins at
+The current implementation retains the frozen V7 product suite and uses the V11
+route-causal evidence schema. Before mutation, each training pair shares one
+workflow-capable conductor candidate and proposal. Workflow executes the anchor;
+Direct is projected after planning. Exact candidate and proposal hashes, task,
+workspace prestate, prompt profile, route profile, provider configuration, and
+budget must match while recording the explicit runtime treatment. Incomplete
+pairs, plan drift, treatment drift, or profile drift fail closed. The campaign
+stops before mutation unless Workflow wins at
 least one externally verified matched quality outcome.
 
 Only after that positive treatment signal may GEPA propose two distinct route
@@ -360,12 +361,12 @@ Passing them proves schema, matched-treatment, profile-identity, route-only
 intervention, and fail-closed behavior; it does not prove answer-quality uplift
 and does not authorize a provider run.
 
-The separately authorized V10 one-shot campaign uses a clean exact revision and
+The separately authorized V11 one-shot campaign uses a clean exact revision and
 three fresh outside-Git paths. The resulting journal and report must be retained
 even when the command exits with a preregistered no-go:
 
 ```sh
-run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v10.XXXXXX)"
+run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v11.XXXXXX)"
 CINDX_WORKFLOW_GEPA_REPORT="$run_dir/report.json" \
 CINDX_WORKFLOW_GEPA_SNAPSHOT="$run_dir/snapshot.json" \
 CINDX_WORKFLOW_GEPA_JOURNAL="$run_dir/journal.json" \

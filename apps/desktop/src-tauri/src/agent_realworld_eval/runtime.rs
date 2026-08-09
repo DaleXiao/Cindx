@@ -5,7 +5,7 @@ use super::receipts::{
 };
 use super::tool_receipts::{project_tool_receipts, ToolReceiptStatus};
 use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment};
-use crate::agent_execution_constraint::AgentExecutionConstraint;
+use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::{
     begin_agent_run_control_for_effort, begin_agent_run_control_with_budget, phase16_task_id,
@@ -28,6 +28,7 @@ pub(super) fn run_product_task_with_execution_constraint(
     permission_policy: PermissionPolicy,
     run_budget: Option<RunBudget>,
     execution_constraint_override: Option<AgentExecutionConstraint>,
+    matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
 ) -> ProductRun {
     let effort = treatment
         .product_effort()
@@ -67,6 +68,7 @@ pub(super) fn run_product_task_with_execution_constraint(
             &control,
             execution_constraint,
             memory_constraint,
+            matched_route_plan_anchor,
         );
         drop(lease);
         result

@@ -316,6 +316,8 @@ mod tests {
             model_calls,
             total_tokens: 10,
             output_sha256: "a".repeat(64),
+            conductor_candidate_sha256: None,
+            workflow_proposal_sha256: None,
             profile_id: None,
             profile_sha256: None,
             route_profile_sha256: None,

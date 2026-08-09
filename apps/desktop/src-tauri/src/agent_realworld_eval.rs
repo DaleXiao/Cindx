@@ -483,6 +483,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                         project_scope: None,
                         run_budget: None,
                         execution_constraint: None,
+                        matched_route_plan_anchor: None,
                     },
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;

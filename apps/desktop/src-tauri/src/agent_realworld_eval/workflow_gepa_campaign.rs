@@ -35,7 +35,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v10";
+const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v11";
 
 #[derive(Debug, Serialize)]
 struct WorkflowGepaCampaignReceipt {
@@ -141,7 +141,7 @@ pub(super) fn run() -> Result<(), String> {
     )?;
 
     let temp = tempfile::Builder::new()
-        .prefix("cindx-workflow-gepa-v10-route-")
+        .prefix("cindx-workflow-gepa-v11-route-")
         .tempdir()
         .map_err(|error| format!("failed to create campaign workspace: {error}"))?;
     let suite_root = temp.path();
@@ -168,7 +168,7 @@ pub(super) fn run() -> Result<(), String> {
         .into_iter()
         .enumerate()
     {
-        eprintln!("[workflow-gepa-v10] matched route train pair: {}", case.id);
+        eprintln!("[workflow-gepa-v11] matched route train pair: {}", case.id);
         let pair = execute_matched_route_pair(
             &app,
             &state,
@@ -337,7 +337,7 @@ pub(super) fn run() -> Result<(), String> {
         let mut train_pairs = Vec::with_capacity(train_cases.len());
         for (case_index, case) in train_cases.iter().enumerate() {
             eprintln!(
-                "[workflow-gepa-v10] train candidate={}: {}",
+                "[workflow-gepa-v11] train candidate={}: {}",
                 candidate_index + 1,
                 case.id
             );
@@ -426,7 +426,7 @@ pub(super) fn run() -> Result<(), String> {
         .into_iter()
         .enumerate()
     {
-        eprintln!("[workflow-gepa-v10] validation pair: {}", case.id);
+        eprintln!("[workflow-gepa-v11] validation pair: {}", case.id);
         validation_pairs.push(execute_product_pair(
             &app,
             &state,
@@ -521,7 +521,7 @@ pub(super) fn run() -> Result<(), String> {
         for replicate in 1..=TEST_REPLICATES {
             for case in cases_for_split(&suite, CampaignSplit::Test)? {
                 eprintln!(
-                    "[workflow-gepa-v10] untouched test pair replicate={replicate}: {}",
+                    "[workflow-gepa-v11] untouched test pair replicate={replicate}: {}",
                     case.id
                 );
                 test_pairs.push(execute_product_pair(
@@ -604,7 +604,7 @@ pub(super) fn run() -> Result<(), String> {
     grounded_result?;
     test_result?;
     eprintln!(
-        "[workflow-gepa-v10] passed report={} snapshot={}",
+        "[workflow-gepa-v11] passed report={} snapshot={}",
         report_path.display(),
         snapshot_path.display()
     );
@@ -616,7 +616,7 @@ fn mutation_run_context() -> Metadata {
         ("project_id".to_string(), CAMPAIGN_PROJECT_ID.to_string()),
         (
             "session_id".to_string(),
-            "session-workflow-gepa-v10".to_string(),
+            "session-workflow-gepa-v11".to_string(),
         ),
         ("effort".to_string(), AgentPolicy::Pro.label().to_string()),
         ("steer_epoch".to_string(), "0".to_string()),
