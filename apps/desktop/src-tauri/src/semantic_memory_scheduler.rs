@@ -1,13 +1,13 @@
-use crate::app_state::AppState;
-use crate::configuration_models::ProviderConfig;
-use crate::semantic_memory_runtime::{
-    recover_semantic_memory_without_model, refresh_deterministic_memory_projection,
-};
 use super::queue::{
     record_semantic_memory_queue_event, semantic_memory_job_id, semantic_memory_queue,
     SemanticMemoryEnqueueOutcome, SemanticMemoryJob,
 };
 use super::{fallback_pending_semantic_memory_jobs, start_semantic_memory_worker};
+use crate::app_state::AppState;
+use crate::configuration_models::ProviderConfig;
+use crate::semantic_memory_runtime::{
+    recover_semantic_memory_without_model, refresh_deterministic_memory_projection,
+};
 use agent_core::Metadata;
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -22,8 +22,7 @@ pub(crate) fn schedule_semantic_memory_refresh(
     if evaluation_background_memory_disabled(
         std::env::var_os("CINDX_AGENT_REALWORLD_DISABLE_BACKGROUND_MEMORY").as_deref(),
         &run_context,
-    )
-    {
+    ) {
         let local_projection_config = ProviderConfig::default();
         if let Err(error) = refresh_deterministic_memory_projection(
             &app.state::<AppState>(),
@@ -125,14 +124,15 @@ mod tests {
 
     #[test]
     fn provider_backed_memory_is_disabled_only_for_realworld_evaluation_sessions() {
-        let evaluation_context: Metadata = [("session_id".to_string(),
-            "session-realworld-campaign-case".to_string())]
+        let evaluation_context: Metadata = [(
+            "session_id".to_string(),
+            "session-realworld-campaign-case".to_string(),
+        )]
         .into_iter()
         .collect();
-        let product_context: Metadata =
-            [("session_id".to_string(), "sess-product".to_string())]
-                .into_iter()
-                .collect();
+        let product_context: Metadata = [("session_id".to_string(), "sess-product".to_string())]
+            .into_iter()
+            .collect();
 
         assert!(!evaluation_background_memory_disabled(
             None,

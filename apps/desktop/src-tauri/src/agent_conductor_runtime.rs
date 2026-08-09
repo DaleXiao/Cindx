@@ -6,7 +6,8 @@ use crate::collaboration_stage_runtime::{
 use crate::configuration_models::ProviderConfig;
 use agent_core::{Metadata, ModelRole, TaskId};
 use orchestrator::{
-    AgentPolicy, AgentRunDecision, AgentRunDecisionHarness, ModelCandidate, CONDUCTOR_MAX_ATTEMPTS,
+    AgentPolicy, AgentRunDecisionDraft, AgentRunDecisionHarness, ModelCandidate,
+    CONDUCTOR_MAX_ATTEMPTS,
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -44,7 +45,7 @@ pub(crate) fn attempt_conductor_decision(
     conductor_model: &str,
     harness: &AgentRunDecisionHarness,
     attempts: &mut usize,
-) -> Result<AgentRunDecision, CollaborationStageError> {
+) -> Result<AgentRunDecisionDraft, CollaborationStageError> {
     let stage = format!("run_decision_model_{}", model_index + 1);
     *attempts += 1;
     let response = run_conductor_collaboration_stage(
@@ -59,7 +60,7 @@ pub(crate) fn attempt_conductor_decision(
         harness.planning_prompt(),
         conductor_call_limits(has_alternate_model, false),
     )?;
-    match harness.parse(&response) {
+    match harness.parse_draft(&response) {
         Ok(decision) => Ok(decision),
         Err(initial_error) if CONDUCTOR_MAX_ATTEMPTS > 1 => {
             *attempts += 1;
@@ -76,7 +77,7 @@ pub(crate) fn attempt_conductor_decision(
                 harness.repair_prompt(&response, &initial_error),
                 conductor_call_limits(has_alternate_model, true),
             )?;
-            harness.parse(&repaired).map_err(|repair_error| {
+            harness.parse_draft(&repaired).map_err(|repair_error| {
                 CollaborationStageError::DecisionRejected(format!(
                     "initial decision rejected ({initial_error}); repaired decision rejected ({repair_error})"
                 ))

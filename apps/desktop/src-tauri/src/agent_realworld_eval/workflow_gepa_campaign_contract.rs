@@ -1,5 +1,8 @@
 use super::{RawRun, RealworldCase};
-use orchestrator::{prompt_genome_sha256, AgentPolicy, ConductorPromptGenome};
+use orchestrator::{
+    prompt_genome_sha256, AgentExecutionMode, AgentPolicy, ConductorPromptGenome,
+    PromptExecutionDiagnosticPlan,
+};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -62,6 +65,10 @@ pub(super) struct ProductRunReceipt {
     pub(super) profile_id: Option<String>,
     pub(super) profile_sha256: Option<String>,
     pub(super) route_profile_sha256: Option<String>,
+    pub(super) execution_plan_sha256: Option<String>,
+    pub(super) execution_plan_semantic_sha256: Option<String>,
+    pub(super) execution_plan_authority: Option<String>,
+    pub(super) workflow_execution_profile_sha256: Option<String>,
     pub(super) route_profile_semantics_exercised: bool,
     pub(super) workflow_profile_exercised: bool,
 }
@@ -117,11 +124,48 @@ impl ProductRunReceipt {
             profile_id: strategy.map(|receipt| receipt.profile_id.clone()),
             profile_sha256: strategy.map(|receipt| receipt.profile_sha256.clone()),
             route_profile_sha256: strategy.map(|receipt| receipt.route_profile_sha256.clone()),
+            execution_plan_sha256: strategy
+                .and_then(|receipt| receipt.execution_plan_sha256.clone()),
+            execution_plan_semantic_sha256: strategy
+                .and_then(|receipt| receipt.execution_plan_semantic_sha256.clone()),
+            execution_plan_authority: strategy
+                .and_then(|receipt| receipt.execution_plan_authority.clone()),
+            workflow_execution_profile_sha256: strategy
+                .and_then(|receipt| receipt.workflow_execution_profile_sha256.clone()),
             route_profile_semantics_exercised: strategy
                 .is_some_and(|receipt| receipt.route_profile_semantics_exercised),
             workflow_profile_exercised: strategy
                 .is_some_and(|receipt| receipt.workflow_profile_exercised),
         })
+    }
+
+    pub(super) fn execution_diagnostic(&self) -> Result<PromptExecutionDiagnosticPlan, String> {
+        let execution = match self.execution_mode.as_str() {
+            "direct" => AgentExecutionMode::Direct,
+            "workflow" => AgentExecutionMode::Workflow,
+            other => {
+                return Err(format!(
+                    "product run {} has unsupported execution mode {other}",
+                    self.case_id
+                ))
+            }
+        };
+        PromptExecutionDiagnosticPlan::new(
+            execution,
+            self.execution_plan_semantic_sha256.clone().ok_or_else(|| {
+                format!(
+                    "product run {} is missing its execution-plan semantic identity",
+                    self.case_id
+                )
+            })?,
+            self.route_profile_sha256.clone().ok_or_else(|| {
+                format!(
+                    "product run {} is missing its route-profile identity",
+                    self.case_id
+                )
+            })?,
+            self.workflow_execution_profile_sha256.clone(),
+        )
     }
 }
 
@@ -280,14 +324,8 @@ pub(super) fn aggregate_pairs(
         candidate_behavior_score,
         behavior_delta: candidate_behavior_score - seed_behavior_score,
         seed_completed: pairs.iter().filter(|pair| pair.seed.completed).count(),
-        candidate_completed: pairs
-            .iter()
-            .filter(|pair| pair.candidate.completed)
-            .count(),
-        seed_quality_passed: pairs
-            .iter()
-            .filter(|pair| pair.seed.quality_passed)
-            .count(),
+        candidate_completed: pairs.iter().filter(|pair| pair.candidate.completed).count(),
+        seed_quality_passed: pairs.iter().filter(|pair| pair.seed.quality_passed).count(),
         candidate_quality_passed: pairs
             .iter()
             .filter(|pair| pair.candidate.quality_passed)
@@ -339,12 +377,11 @@ pub(super) fn aggregate_pairs(
 }
 
 pub(super) fn validation_gate(aggregate: &PairAggregateReceipt) -> Result<(), String> {
-    let quality_non_regression = aggregate.candidate_behavior_score + f64::EPSILON
-        >= aggregate.seed_behavior_score;
+    let quality_non_regression =
+        aggregate.candidate_behavior_score + f64::EPSILON >= aggregate.seed_behavior_score;
     let resource_bounded = aggregate.latency_ratio <= VALIDATION_RESOURCE_RATIO_CEILING
         && aggregate.token_ratio <= VALIDATION_RESOURCE_RATIO_CEILING;
-    let efficiency_uplift = (aggregate.latency_ratio <= 0.90
-        && aggregate.token_ratio <= 1.05)
+    let efficiency_uplift = (aggregate.latency_ratio <= 0.90 && aggregate.token_ratio <= 1.05)
         || (aggregate.token_ratio <= 0.90 && aggregate.latency_ratio <= 1.05);
     let passed = aggregate.pairs >= 2
         && aggregate.unique_cases >= 2
@@ -417,19 +454,31 @@ pub(super) fn validate_grounded_control(run: &RawRun) -> Result<(), String> {
 }
 
 fn validate_run_evidence(run: &RawRun) -> Result<(), String> {
+    let has_execution_plan = run.strategy_receipt.as_ref().is_some_and(|receipt| {
+        receipt.execution_plan_sha256.is_some()
+            && receipt.execution_plan_semantic_sha256.is_some()
+            && receipt.execution_plan_authority.is_some()
+            && match receipt.execution_mode.as_str() {
+                "direct" => receipt.workflow_execution_profile_sha256.is_none(),
+                "workflow" => receipt.workflow_execution_profile_sha256.is_some(),
+                _ => false,
+            }
+    });
     if run.setup_failure.is_some()
         || run.evidence_error.is_some()
         || run.verification.total_checks == 0
         || run.strategy_receipt.is_none()
+        || !has_execution_plan
         || run.model_receipts.is_empty()
     {
         return Err(format!(
-            "real product task {} produced invalid evaluation evidence: setup={:?}, evidence={:?}, checks={}, strategy={}, models={}",
+            "real product task {} produced invalid evaluation evidence: setup={:?}, evidence={:?}, checks={}, strategy={}, execution_plan={}, models={}",
             run.case_id,
             run.setup_failure,
             run.evidence_error,
             run.verification.total_checks,
             run.strategy_receipt.is_some(),
+            has_execution_plan,
             run.model_receipts.len(),
         ));
     }
@@ -502,6 +551,10 @@ mod tests {
                     .route_decision_profile_sha256(AgentPolicy::Pro.label())
                     .unwrap(),
             ),
+            execution_plan_sha256: None,
+            execution_plan_semantic_sha256: None,
+            execution_plan_authority: None,
+            workflow_execution_profile_sha256: None,
             route_profile_semantics_exercised: true,
             workflow_profile_exercised: workflow,
         }
@@ -513,6 +566,30 @@ mod tests {
         assert_eq!(externally_verified_behavior_score(false, 0, 3, 4), 0.0);
         assert_eq!(externally_verified_behavior_score(true, 1, 4, 4), 0.0);
         assert_eq!(externally_verified_behavior_score(true, 0, 1, 0), 0.0);
+    }
+
+    #[test]
+    fn execution_diagnostic_binds_route_and_workflow_profiles() {
+        let profile = ConductorPromptGenome::seed_for_effort("pro");
+        let mut receipt = run("diagnostic", "coding", 1.0, 100, &profile, true);
+        receipt.execution_plan_semantic_sha256 = Some("b".repeat(64));
+        receipt.workflow_execution_profile_sha256 =
+            Some(profile.workflow_execution_profile_sha256().unwrap());
+
+        let diagnostic = receipt.execution_diagnostic().expect("diagnostic plan");
+        assert_eq!(
+            diagnostic.route_decision_profile_sha256,
+            profile
+                .route_decision_profile_sha256(AgentPolicy::Pro.label())
+                .unwrap()
+        );
+        assert_eq!(
+            diagnostic.workflow_execution_profile_sha256,
+            Some(profile.workflow_execution_profile_sha256().unwrap())
+        );
+
+        receipt.route_profile_sha256 = None;
+        assert!(receipt.execution_diagnostic().is_err());
     }
 
     #[test]
@@ -542,7 +619,11 @@ mod tests {
             {
                 let mut seed = run(case_id, category, 1.0, 100, &candidate, index == 0);
                 seed.profile_id = Some("seed-pro-v1".to_string());
-                let candidate_score = if index < 2 && replicate == 1 { 1.0 } else { 1.0 };
+                let candidate_score = if index < 2 && replicate == 1 {
+                    1.0
+                } else {
+                    1.0
+                };
                 let candidate_run = run(
                     case_id,
                     category,
@@ -566,9 +647,10 @@ mod tests {
         let aggregate = aggregate_pairs(&pairs, &candidate).unwrap();
         assert!(test_gate(&aggregate).is_err());
 
-        for pair in pairs.iter_mut().filter(|pair| {
-            pair.replicate == 1 && matches!(pair.case_id.as_str(), "a" | "b")
-        }) {
+        for pair in pairs
+            .iter_mut()
+            .filter(|pair| pair.replicate == 1 && matches!(pair.case_id.as_str(), "a" | "b"))
+        {
             pair.seed.behavior_score = 0.0;
             pair.behavior_delta = 1.0;
             pair.outcome = "candidate_win".to_string();

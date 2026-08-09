@@ -2,6 +2,8 @@
 mod causal_route;
 #[path = "agent_strategy_context.rs"]
 mod context;
+#[path = "agent_strategy_finalization.rs"]
+mod finalization;
 #[path = "agent_strategy_preparation.rs"]
 mod preparation;
 #[path = "agent_strategy_recording.rs"]
@@ -11,12 +13,13 @@ mod requirements;
 
 #[cfg(test)]
 pub(crate) use self::causal_route::causal_route_event_metadata;
+use self::causal_route::run_decision_evolved_directive;
+use self::finalization::{finalize_planned_run, PlannedRunFinalizeInput};
 #[cfg(test)]
 pub(crate) use self::preparation::should_evaluate_strategy_profile;
 pub(crate) use self::preparation::{
     cumulative_effective_prompt_objective, effective_prompt_objective_for_messages,
 };
-use self::causal_route::run_decision_evolved_directive;
 use self::preparation::{ensure_planning_current, selected_strategy_profile};
 #[cfg(test)]
 pub(crate) use self::requirements::preferred_compatible_route_model;
@@ -41,13 +44,13 @@ use agent_runtime::AgentRunControl;
 use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
     AgentRunDecisionHarness, AgentRunDecisionRequest, ConductorExecutionContract,
-    ConductorPromptGenome, ModelCandidate, RoutingContext, RoutingDecision,
+    ConductorPromptGenome, ExecutionPlan, RoutingContext, RoutingDecision,
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedAgentRun {
     pub(crate) policy: AgentPolicy,
-    pub(crate) decision: AgentRunDecision,
+    pub(crate) execution_plan: ExecutionPlan,
     pub(crate) routing_context: RoutingContext,
     pub(crate) routing_decision: RoutingDecision,
     pub(crate) execution_contract: ConductorExecutionContract,
@@ -68,21 +71,6 @@ pub(crate) struct AgentRunPlanningRequest<'a> {
     pub(crate) effort: AgentPolicy,
     pub(crate) route_requirements: AgentRouteRequirements,
     pub(crate) cancellation: &'a AgentRunControl,
-}
-
-struct PlannedRunFinalizeInput {
-    decision: AgentRunDecision,
-    source: AgentPlanningSource,
-    attempts: usize,
-    prompt_genome: ConductorPromptGenome,
-    effort: AgentPolicy,
-    degradation_reason: Option<String>,
-    attempted_conductor_models: Vec<String>,
-    selected_conductor_model: Option<String>,
-    route_requirements: AgentRouteRequirements,
-    budget_fingerprint: Option<String>,
-    recent_context: String,
-    route_prompt_profile_sha256: String,
 }
 
 pub(crate) fn plan_agent_run(
@@ -142,7 +130,9 @@ pub(crate) fn plan_agent_run(
             prompt,
             candidates,
             PlannedRunFinalizeInput {
+                conductor_candidate: decision.clone(),
                 decision,
+                compatibility_route: None,
                 source: AgentPlanningSource::MatchedMemoryEvaluation,
                 attempts: 0,
                 prompt_genome: profile,
@@ -182,7 +172,9 @@ pub(crate) fn plan_agent_run(
             prompt,
             candidates,
             PlannedRunFinalizeInput {
+                conductor_candidate: decision.clone(),
                 decision,
+                compatibility_route: None,
                 source: AgentPlanningSource::FastDirect,
                 attempts: 0,
                 prompt_genome: profile,
@@ -291,35 +283,42 @@ pub(crate) fn plan_agent_run(
         failure_reasons,
     } = schedule;
 
-    let (decision, source, degradation_reason) = match outcome {
-        ConductorDecisionOutcome::Selected(decision) => {
-            let source = requirements::selected_conductor_source(
-                &decision,
-                attempted_conductor_models.len(),
-            );
-            (*decision, source, None)
-        }
-        ConductorDecisionOutcome::Exhausted => {
-            let reason = if failure_reasons.is_empty() {
-                "no configured conductor model was available".to_string()
-            } else {
-                failure_reasons.join(" | ")
-            };
-            let decision = AgentRunDecision::degraded_conductor_fallback(
-                fallback_model,
-                effort.label(),
-                allowed_models.len(),
-                max_parallelism,
-                &reason,
-            );
-            let source = if decision.execution == AgentExecutionMode::Workflow {
-                AgentPlanningSource::DegradedWorkflow
-            } else {
-                AgentPlanningSource::DegradedDirect
-            };
-            (decision, source, Some(reason))
-        }
-    };
+    let (conductor_candidate, decision, compatibility_route, source, degradation_reason) =
+        match outcome {
+            ConductorDecisionOutcome::Selected(draft) => {
+                let source = requirements::selected_conductor_source(
+                    &draft.selected_action,
+                    attempted_conductor_models.len(),
+                );
+                (
+                    draft.conductor_candidate,
+                    draft.selected_action,
+                    Some(draft.compatibility_route),
+                    source,
+                    None,
+                )
+            }
+            ConductorDecisionOutcome::Exhausted => {
+                let reason = if failure_reasons.is_empty() {
+                    "no configured conductor model was available".to_string()
+                } else {
+                    failure_reasons.join(" | ")
+                };
+                let decision = AgentRunDecision::degraded_conductor_fallback(
+                    fallback_model,
+                    effort.label(),
+                    allowed_models.len(),
+                    max_parallelism,
+                    &reason,
+                );
+                let source = if decision.execution == AgentExecutionMode::Workflow {
+                    AgentPlanningSource::DegradedWorkflow
+                } else {
+                    AgentPlanningSource::DegradedDirect
+                };
+                (decision.clone(), decision, None, source, Some(reason))
+            }
+        };
     let decision = execution_constraint
         .apply(decision, effort)
         .map_err(CollaborationStageError::Failed)?;
@@ -332,7 +331,9 @@ pub(crate) fn plan_agent_run(
         prompt,
         candidates,
         PlannedRunFinalizeInput {
+            conductor_candidate,
             decision,
+            compatibility_route,
             source,
             attempts,
             prompt_genome: profile,
@@ -355,62 +356,6 @@ pub(crate) fn plan_agent_run(
     recording::record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
         .map_err(CollaborationStageError::Failed)?;
     Ok(planned)
-}
-
-fn finalize_planned_run(
-    prompt: &str,
-    candidates: Vec<ModelCandidate>,
-    input: PlannedRunFinalizeInput,
-) -> Result<PlannedAgentRun, String> {
-    let PlannedRunFinalizeInput {
-        mut decision,
-        source,
-        attempts,
-        prompt_genome,
-        effort,
-        degradation_reason,
-        attempted_conductor_models,
-        selected_conductor_model,
-        route_requirements,
-        budget_fingerprint,
-        recent_context,
-        route_prompt_profile_sha256,
-    } = input;
-    decision = requirements::apply_and_validate_route_requirements(
-        decision,
-        degradation_reason.is_some(),
-        &candidates,
-        route_requirements,
-    )?;
-    causal_route::finalize_causal_route(
-        prompt,
-        &recent_context,
-        effort,
-        route_requirements,
-        &candidates,
-        budget_fingerprint,
-        route_prompt_profile_sha256,
-        source,
-        degradation_reason.is_some(),
-        &mut decision,
-    )?;
-    let routing_context = decision.routing_context(prompt, candidates);
-    let routing_decision = decision.routing_decision();
-    let execution_contract = decision.execution_contract(effort.label());
-    Ok(PlannedAgentRun {
-        policy: effort,
-        decision,
-        routing_context,
-        routing_decision,
-        execution_contract,
-        source,
-        attempts,
-        prompt_genome,
-        degradation_reason,
-        attempted_conductor_models,
-        selected_conductor_model,
-        route_requirements,
-    })
 }
 
 #[cfg(test)]

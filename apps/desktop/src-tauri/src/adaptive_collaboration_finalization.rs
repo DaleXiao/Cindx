@@ -576,12 +576,8 @@ mod tests {
             Some(&UpliftGateDecision::RepairTeam { gaps: Vec::new() }),
             Some(&UpliftGateDecision::ReturnBestKnown { gaps: Vec::new() }),
         ] {
-            let rejected = select_adaptive_guidance(
-                decision,
-                "team",
-                true,
-                Some("frontier".to_string()),
-            );
+            let rejected =
+                select_adaptive_guidance(decision, "team", true, Some("frontier".to_string()));
             assert_eq!(rejected.0.as_deref(), Some(DIRECT_ANCHOR_CANDIDATE_ID));
             assert!(!rejected.1);
         }

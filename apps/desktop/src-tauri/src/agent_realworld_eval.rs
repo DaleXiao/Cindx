@@ -33,13 +33,13 @@ mod tool_receipts;
 mod treatments;
 mod verification;
 mod workflow_gepa_campaign;
-mod workflow_gepa_candidate_search;
 mod workflow_gepa_campaign_contract;
 mod workflow_gepa_campaign_evidence;
 mod workflow_gepa_campaign_execution;
 mod workflow_gepa_campaign_journal;
 mod workflow_gepa_campaign_suite;
 mod workflow_gepa_candidate_probe;
+mod workflow_gepa_candidate_search;
 
 use execution::{execute_case, CaseExecutionInput};
 use http_fixture::HttpFixtureReceipt;

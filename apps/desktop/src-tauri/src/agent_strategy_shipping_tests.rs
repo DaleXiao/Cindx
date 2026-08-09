@@ -6,8 +6,8 @@ use agent_core::{
 use orchestrator::{
     causal_route_action_id_v2, prompt_genome_sha256, select_causal_route_v2, AgentExecutionMode,
     AgentRiskLevel, AgentVerificationPolicy, CausalRouteEvidenceBasis, ConductorStopPolicy,
-    MatchedCollaborationEvidence, ModelCapabilitySource, PromptVerification, RouteFeatureRequest,
-    RouteFeatureSnapshotV2, TaskClass,
+    MatchedCollaborationEvidence, ModelCandidate, ModelCapabilitySource, PromptVerification,
+    RouteFeatureRequest, RouteFeatureSnapshotV2, TaskClass,
 };
 
 #[test]

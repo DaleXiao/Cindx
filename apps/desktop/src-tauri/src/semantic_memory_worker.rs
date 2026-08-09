@@ -167,8 +167,8 @@ pub(crate) fn fallback_pending_semantic_memory_jobs(
 
 #[cfg(test)]
 mod tests {
-    use super::run_semantic_memory_attempt;
     use super::queue::SemanticMemoryAttemptOutcome;
+    use super::run_semantic_memory_attempt;
 
     #[test]
     fn semantic_memory_attempt_isolates_panics_without_losing_the_failure_reason() {

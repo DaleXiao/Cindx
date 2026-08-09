@@ -64,12 +64,12 @@ fn terminal_commit_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_application::AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY;
     use crate::{
         event_persistence::{append_event, append_message_event_with_metadata},
         project_session_persistence::metadata_with_context,
         runtime_values::phase16_task_id,
     };
+    use agent_application::AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY;
     use agent_core::{EventKind, MessageRole};
     use agent_runtime::{AgentRunControl, RunEpochLeaseOutcome, RunTerminalCommit};
     use std::sync::atomic::{AtomicUsize, Ordering};

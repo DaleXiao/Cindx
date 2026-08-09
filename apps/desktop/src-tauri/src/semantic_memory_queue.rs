@@ -193,11 +193,15 @@ pub(crate) fn semantic_memory_job_id(run_context: &Metadata) -> Result<String, S
     let project_id = run_context
         .get("project_id")
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "semantic memory scheduling requires project and session scope".to_string())?;
+        .ok_or_else(|| {
+            "semantic memory scheduling requires project and session scope".to_string()
+        })?;
     let session_id = run_context
         .get("session_id")
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "semantic memory scheduling requires project and session scope".to_string())?;
+        .ok_or_else(|| {
+            "semantic memory scheduling requires project and session scope".to_string()
+        })?;
     serde_json::to_string(&(project_id, session_id, run_id))
         .map_err(|error| format!("semantic memory queue identity unavailable: {error}"))
 }

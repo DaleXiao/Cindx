@@ -2,8 +2,8 @@ use super::requirements::AgentPlanningSource;
 use agent_core::Metadata;
 use orchestrator::{
     select_causal_route_v2, sha256_hex, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
-    CausalRouteReason, ConductorPromptGenome, ModelCandidate, RouteFeatureRequest,
-    RouteFeatureSnapshotV2, RoutingContext,
+    CausalRouteReason, CausalRouteSelectionV2, ConductorPromptGenome, ExecutionPlan,
+    ModelCandidate, RouteFeatureRequest, RouteFeatureSnapshotV2, RoutingContext,
 };
 
 pub(super) fn run_decision_evolved_directive(
@@ -26,10 +26,12 @@ pub(super) fn finalize_causal_route(
     prompt_profile_sha256: String,
     source: AgentPlanningSource,
     degraded: bool,
-    decision: &mut AgentRunDecision,
-) -> Result<(), String> {
+    conductor_candidate: &AgentRunDecision,
+    action: &AgentRunDecision,
+    compatibility_route: Option<CausalRouteSelectionV2>,
+) -> Result<CausalRouteSelectionV2, String> {
     let snapshot = RouteFeatureSnapshotV2::from_decision_request(
-        decision,
+        conductor_candidate,
         RouteFeatureRequest {
             objective: prompt,
             recent_context,
@@ -40,14 +42,14 @@ pub(super) fn finalize_causal_route(
         },
         candidates,
     );
-    let mut receipt = match decision.causal_route.take() {
+    let mut receipt = match compatibility_route {
         Some(receipt) if receipt.feature_snapshot == snapshot => receipt,
         Some(_) => {
             return Err("causal route receipt does not match its planning inputs".to_string())
         }
-        None => select_causal_route_v2(decision, &snapshot, candidates, None, 0)?,
+        None => select_causal_route_v2(conductor_candidate, &snapshot, candidates, None, 0)?,
     };
-    let final_route = decision.route_tier();
+    let final_route = action.route_tier();
     if receipt.selected_route != final_route {
         receipt.reconcile_selected_route(final_route, CausalRouteReason::ExecutionConstraint)?;
     } else if source == AgentPlanningSource::FastDirect {
@@ -56,18 +58,14 @@ pub(super) fn finalize_causal_route(
         receipt.reason = CausalRouteReason::DegradedFallback;
     }
     receipt.validate()?;
-    decision.causal_route = Some(receipt);
-    Ok(())
+    Ok(receipt)
 }
 
 pub(super) fn apply_causal_route_to_context(
-    decision: &AgentRunDecision,
+    plan: &ExecutionPlan,
     run_context: &mut Metadata,
 ) -> Result<(), String> {
-    let receipt = decision
-        .causal_route
-        .as_ref()
-        .ok_or_else(|| "planned run is missing its causal route receipt".to_string())?;
+    let receipt = &plan.compatibility_route;
     receipt.validate()?;
     let pre_decision_task_class = run_context
         .get("effective_prompt_objective")
@@ -114,12 +112,9 @@ pub(super) fn apply_causal_route_to_context(
 
 pub(crate) fn causal_route_event_metadata(
     run_context: &Metadata,
-    decision: &AgentRunDecision,
+    plan: &ExecutionPlan,
 ) -> Result<Metadata, String> {
-    let receipt = decision
-        .causal_route
-        .as_ref()
-        .ok_or_else(|| "planned run is missing its causal route receipt".to_string())?;
+    let receipt = &plan.compatibility_route;
     receipt.validate()?;
     let receipt_json = serde_json::to_string(receipt)
         .map_err(|error| format!("causal route receipt serialization failed: {error}"))?;

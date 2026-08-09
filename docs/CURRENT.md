@@ -11,11 +11,14 @@ only the revision recorded in each report.
 
 - **Fast** bypasses the conductor and runs one configured model through the
   shared interactive agent loop.
-- **Auto** asks the configured conductor for a typed `AgentRunDecision`, with a
-  maximum requested parallelism of two. The decision may remain direct or
-  select a bounded workflow. Every candidate then passes Causal Router v2,
-  which freezes the actual request/capability/budget inputs and compares the
-  candidate with its direct or grounded-direct counterfactual. Task class,
+- **Auto** asks the configured conductor for a typed candidate, with a maximum
+  requested parallelism of two. The candidate may remain direct or select a
+  bounded workflow. The planner preserves that candidate and the final action in
+  one `ExecutionPlan`. Its hard-constraint guard checks model capability,
+  independent workflow demand, and bounded execution without estimating answer
+  quality. The retained Causal Router v2 policy is recorded separately as a
+  compatibility value policy that compares a valid workflow candidate with its
+  direct or grounded-direct counterfactual. Task class,
   retrieval, risk, decomposition, and verification come from the validated
   Conductor decision rather than a second keyword classifier. Admission uses the
   Conductor's confidence-weighted uplift, explicit independent demand, hard
@@ -23,9 +26,12 @@ only the revision recorded in each report.
   team-versus-direct evidence. Exact context/action evidence wins; sufficiently
   supported evidence for the same model and route shape generalizes to new
   requests. Failed team executions remain negative evidence when their paired
-  comparison and provenance are complete. A rejected candidate becomes direct
+  comparison and provenance are complete. A downshifted candidate becomes direct
   or grounded-direct without another conductor call while preserving its
   selected model, tools, vision, risk, retrieval, and memory.
+  The plan records whether final authority came from the Conductor, a hard
+  constraint, the compatibility value policy, a runtime constraint, fixed Fast
+  policy, or degraded fallback; the original candidate remains auditable.
   The deterministic pre-decision task label is retained only as an independent
   evaluation stratum; it does not alter the Conductor decision or route.
 - **Pro** uses the same decision contract with a maximum requested parallelism
@@ -33,7 +39,8 @@ only the revision recorded in each report.
   narrows that ceiling to the conductor's task estimate while retaining the
   structural minimum for required independent contributions, verification, and
   synthesis. It passes the same Router v2 contract with Pro's minimum-uplift
-  floor; a low-value Pro workflow also downshifts without a repair call.
+  floor; a low-value Pro workflow also downshifts without a repair call and the
+  plan records that compatibility policy as the final authority.
 - Runtime-derived tool and image-input requirements remain hard postconditions
   on the decision and selected model. Effect authority is independent and
   tri-state: explicit no-change language forbids effects, an explicit effect
@@ -79,17 +86,19 @@ A new run currently follows this sequence:
 4. Session history is bounded and projected for the current objective.
 5. The active objective, completion intent, current image input, and image
    generation requirement form typed route requirements. Fast chooses a direct
-   decision; Auto and Pro request a conductor decision. All three paths receive
-   a bounded `cindx.causal-route.v2` receipt after schema, capability, and final
-   execution-constraint validation. Its pre-decision identity binds digests of
+   candidate; Auto and Pro request a Conductor candidate. All three paths create
+   one validated `cindx.execution-plan.v1`. It contains the original candidate,
+   final executable action, hard-constraint receipt, explicit compatibility
+   route, authority, and optional workflow-execution profile identity. Its
+   compatibility receipt binds digests of
    the actual objective, recent context, prompt profile, requirements, model
    pool, and budget; action identity binds the complete executable route policy.
    The receipt records candidate, selected and counterfactual actions,
    confidence-weighted and matched-evidence value components, capability
    provenance, reason, and operation
-   counts without model chain-of-thought. Full receipts
-   live only on the decision event; run context carries stable join keys and a
-   digest. Both paths fail clearly when the selected configured model cannot
+   counts without model chain-of-thought. Full plans and receipts live only on
+   canonical strategy events; run context carries stable join keys plus full and
+   semantic plan digests. Both paths fail clearly when the selected configured model cannot
    satisfy required tools or vision.
    Compound execution instructions retain filenames and URLs while detecting
    later mutation steps. Local report fields such as `sources` inherit explicit
@@ -451,13 +460,16 @@ Auto teachers, Goal Delta, canary success, promotion evidence, or Pro-to-Auto
 teachers. Permission failures can teach stopping or recovery within existing
 authority, never permission bypass, budget expansion, or repeated side effects.
 
-The learned genome governs both the workflow surface and the behavioral advice
-given to `AgentRunDecision`: topology, branch shape, roles, verification, tool
-exposure, retry/recovery, stopping, context policy, and bounded step budgets.
+The learned genome currently governs both the workflow surface and the
+behavioral advice given to the Conductor: topology, branch shape, roles,
+verification, tool exposure, retry/recovery, stopping, context policy, and
+bounded step budgets.
 Only behavior that differs from the effort's seed profile reaches the route
 prompt. Profile ids, generations, and Direct-finalizer-only genes are excluded
 from that route phenotype, so provenance changes cannot alter routing. The
-route receipt pins the semantic phenotype hash that was actually supplied.
+route-decision and workflow-execution uses have distinct profile hashes even
+though they currently derive from the same normalized phenotype. An admitted
+workflow freezes its workflow profile in the `ExecutionPlan`.
 Schema validation, configured model availability, effect authority, permission
 policy, and outer runtime budgets remain deterministic hard limits; learned
 advice cannot widen them. Once a workflow has been admitted, model-proposed
@@ -705,6 +717,15 @@ Therefore the current claim is:
   candidates remained Direct, and none met the train Pareto resource gate, so
   the valid decision is `NO_GO_TRAINING`. Validation, test, control, snapshot,
   and production promotion remained sealed; no intelligence uplift is shown.
+- Current source now emits the V7 suite through a V8 evidence receipt. Before
+  mutation, typed seed diagnostics must bind the actual execution-plan semantic
+  digest, route profile, and any exercised workflow profile. Direct-only seeds
+  stop as `valid_no_go_dormant_learning_layer`; missing or foreign identities
+  fail closed. Before an expensive candidate run, a zero-provider gate requires
+  a real semantic plan change on at least one frozen workflow diagnostic. The
+  current genome still couples route-decision and workflow-execution genes, so
+  any future result evaluates that coupled treatment and cannot attribute a gain
+  to one layer. No V8 provider campaign has run and no uplift is claimed.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
@@ -728,6 +749,12 @@ Therefore the current claim is:
   browser evidence, long-horizon work, RAG/memory, and denied mutation.
   Cancellation, interruption/resume, steering, broader computer interaction,
   and adversarial instruction resistance still need matched repeated suites.
+- The compatibility value policy remains in the planning path to preserve current
+  Auto/Pro behavior. It is now explicitly separated from hard constraints and
+  attributed in `ExecutionPlan`, but only future matched evidence can justify
+  removing it. Workflow GEPA also remains a coupled route-plus-workflow treatment;
+  the current causal gate prevents false attribution but does not yet split the
+  production genome into independently deployable layers.
 
 These are current constraints, not roadmap promises. A later change may remove
 them only with code and verification evidence in the same revision.

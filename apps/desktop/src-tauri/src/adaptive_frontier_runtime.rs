@@ -55,10 +55,7 @@ pub(super) fn adaptive_delivery_schedule(
         .target_step_id
         .ok_or_else(|| "adaptive workflow has no delivery target".to_string())?;
     let complete = delivery.remaining_steps.is_empty();
-    let mut runnable_steps = delivery
-        .runnable_steps
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let mut runnable_steps = delivery.runnable_steps.into_iter().collect::<BTreeSet<_>>();
     if runnable_steps.contains(&target_step_id) {
         runnable_steps.retain(|step_id| step_id == &target_step_id);
     }
@@ -380,7 +377,12 @@ mod tests {
             coordinator_model: "planner".to_string(),
             prompt_profile: "baseline".to_string(),
             steps: vec![
-                step("candidate", "worker", Vec::new(), WorkflowOutputKind::Evidence),
+                step(
+                    "candidate",
+                    "worker",
+                    Vec::new(),
+                    WorkflowOutputKind::Evidence,
+                ),
                 step(
                     "final",
                     "synthesizer",
@@ -401,7 +403,10 @@ mod tests {
 
         let initial = adaptive_delivery_schedule(&checkpoint, 1).unwrap();
         assert_eq!(initial.target_step_id, "final");
-        assert_eq!(initial.runnable_steps, BTreeSet::from(["candidate".to_string()]));
+        assert_eq!(
+            initial.runnable_steps,
+            BTreeSet::from(["candidate".to_string()])
+        );
         assert!(!initial.complete);
 
         checkpoint
@@ -414,7 +419,10 @@ mod tests {
             )
             .unwrap();
         let final_only = adaptive_delivery_schedule(&checkpoint, 1).unwrap();
-        assert_eq!(final_only.runnable_steps, BTreeSet::from(["final".to_string()]));
+        assert_eq!(
+            final_only.runnable_steps,
+            BTreeSet::from(["final".to_string()])
+        );
 
         checkpoint
             .complete_step(
@@ -428,6 +436,9 @@ mod tests {
         let complete = adaptive_delivery_schedule(&checkpoint, 1).unwrap();
         assert!(complete.complete);
         assert!(complete.runnable_steps.is_empty());
-        assert_eq!(checkpoint.steps["orphan"].status, WorkflowStepStatus::Pending);
+        assert_eq!(
+            checkpoint.steps["orphan"].status,
+            WorkflowStepStatus::Pending
+        );
     }
 }

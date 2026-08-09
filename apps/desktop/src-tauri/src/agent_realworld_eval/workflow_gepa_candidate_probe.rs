@@ -1,6 +1,4 @@
-use super::direct_finalizer_campaign_support::{
-    require_clean_source, required_external_path,
-};
+use super::direct_finalizer_campaign_support::{require_clean_source, required_external_path};
 use super::setup::{activate_evaluation_data_root, build_evaluation_app};
 use super::workflow_gepa_campaign_execution::EvaluationDataEnvironment;
 use super::workflow_gepa_candidate_search::{
@@ -13,7 +11,7 @@ use crate::configuration_persistence::load_provider_config;
 use agent_core::Metadata;
 use orchestrator::{
     prompt_genome_sha256, sha256_hex, AgentEvaluationReflectionPacket, AgentPolicy,
-    ConductorPromptGenome, FrozenPromptProfileSnapshot,
+    ConductorPromptGenome, FrozenPromptProfileSnapshot, PromptExecutionDiagnosticPlan,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -21,15 +19,17 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
-const INPUT_SCHEMA: &str = "cindx.workflow-gepa-candidate-input.v1";
+const INPUT_SCHEMA: &str = "cindx.workflow-gepa-candidate-input.v2";
 const OUTPUT_SCHEMA: &str = "cindx.workflow-gepa-candidate-probe.v1";
 const MAX_INPUT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REFLECTION_PACKETS: usize = 64;
+const MAX_DIAGNOSTIC_PLANS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 struct CandidateProbeInput {
     schema: String,
     packets: Vec<AgentEvaluationReflectionPacket>,
+    diagnostic_plans: Vec<PromptExecutionDiagnosticPlan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +152,7 @@ pub(super) fn run() -> Result<(), String> {
         &input.packets,
         &input_sha256,
         &reflection_evidence_sha256,
+        &input.diagnostic_plans,
     )?;
     validate_generated_population(&generated.candidates, &parent)?;
 
@@ -205,6 +206,14 @@ fn validate_input(input: &CandidateProbeInput) -> Result<(), String> {
             MAX_REFLECTION_PACKETS
         ));
     }
+    if input.diagnostic_plans.is_empty() || input.diagnostic_plans.len() > MAX_DIAGNOSTIC_PLANS {
+        return Err(format!(
+            "candidate probe requires 1..={MAX_DIAGNOSTIC_PLANS} execution diagnostics"
+        ));
+    }
+    for diagnostic in &input.diagnostic_plans {
+        diagnostic.validate()?;
+    }
     Ok(())
 }
 
@@ -227,8 +236,7 @@ fn validate_generated_population(
         if profile_hash != candidate.identity.profile_sha256
             || candidate.snapshot.genome != candidate.genome
             || candidate.snapshot.candidate_sha256 != profile_hash
-            || candidate.snapshot.artifact_sha256()?
-                != candidate.identity.snapshot_artifact_sha256
+            || candidate.snapshot.artifact_sha256()? != candidate.identity.snapshot_artifact_sha256
             || candidate.identity.parent_profile_id != parent.id
             || !(1..=2).contains(&candidate.identity.mutated_genes.len())
         {
@@ -283,6 +291,7 @@ mod tests {
         let input = CandidateProbeInput {
             schema: INPUT_SCHEMA.to_string(),
             packets: Vec::new(),
+            diagnostic_plans: Vec::new(),
         };
         assert_eq!(
             validate_input(&input).unwrap_err(),
@@ -292,6 +301,7 @@ mod tests {
         let wrong_schema = CandidateProbeInput {
             schema: "cindx.workflow-gepa-candidate-input.v0".to_string(),
             packets: Vec::new(),
+            diagnostic_plans: Vec::new(),
         };
         assert!(validate_input(&wrong_schema)
             .unwrap_err()

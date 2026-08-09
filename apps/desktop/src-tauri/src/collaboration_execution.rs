@@ -774,5 +774,4 @@ mod protocol_tests {
             "collaboration synthesizer attempted 1 tool call(s) in a no-tool stage"
         );
     }
-
 }

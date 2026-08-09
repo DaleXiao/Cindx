@@ -29,7 +29,7 @@ pub use learning_outbox::*;
 pub use matched_evaluation::*;
 pub use observation::*;
 pub use pareto::*;
-pub use phenotype::{DirectFinalizerPromptPhenotype, DIRECT_FINALIZER_PHENOTYPE_SCHEMA};
+pub use phenotype::*;
 pub use pro_teacher_source::*;
 pub use reflection_selection::{
     prompt_reflection_success_anchor, prompt_transfer_reflection_pairs,

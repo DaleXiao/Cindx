@@ -1,31 +1,25 @@
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use agent_runtime::AgentFailureClass;
-use orchestrator::AgentRunDecision;
 
 #[derive(Debug, Clone)]
-pub(crate) enum ConductorDecisionOutcome {
-    Selected(Box<AgentRunDecision>),
+pub(crate) enum ConductorDecisionOutcome<T> {
+    Selected(Box<T>),
     Exhausted,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ConductorDecisionSchedule {
-    pub(crate) outcome: ConductorDecisionOutcome,
+pub(crate) struct ConductorDecisionSchedule<T> {
+    pub(crate) outcome: ConductorDecisionOutcome<T>,
     pub(crate) attempted_models: Vec<String>,
     pub(crate) selected_model: Option<String>,
     pub(crate) failure_reasons: Vec<String>,
 }
 
-pub(crate) fn schedule_conductor_decision(
+pub(crate) fn schedule_conductor_decision<T>(
     conductor_models: &[String],
     attempts: &mut usize,
-    mut attempt: impl FnMut(
-        usize,
-        &str,
-        bool,
-        &mut usize,
-    ) -> Result<AgentRunDecision, CollaborationStageError>,
-) -> Result<ConductorDecisionSchedule, CollaborationStageError> {
+    mut attempt: impl FnMut(usize, &str, bool, &mut usize) -> Result<T, CollaborationStageError>,
+) -> Result<ConductorDecisionSchedule<T>, CollaborationStageError> {
     let mut attempted_models = Vec::new();
     let mut failure_reasons = Vec::new();
     for (model_index, conductor_model) in conductor_models.iter().enumerate() {

@@ -117,10 +117,10 @@ mod prompt_learning_outbox_projection;
 mod prompt_learning_runtime;
 mod prompt_mutation_runtime;
 mod prompt_pairwise_runtime;
-mod prompt_terminal_learning_runtime;
 mod prompt_profile_serving;
 mod prompt_rollout_runtime;
 mod prompt_teacher_attestation_runtime;
+mod prompt_terminal_learning_runtime;
 mod prompt_transfer_runtime;
 mod prompt_workflow_execution;
 mod prompt_workflow_selection;
@@ -169,16 +169,13 @@ use agent_query_commands::*;
 use agent_read_model::*;
 #[cfg(feature = "realworld-eval")]
 pub use agent_realworld_eval::{
-    run_agent_realworld_eval, run_direct_finalizer_gepa_eval,
-    run_workflow_gepa_candidate_probe, run_workflow_gepa_eval,
+    run_agent_realworld_eval, run_direct_finalizer_gepa_eval, run_workflow_gepa_candidate_probe,
+    run_workflow_gepa_eval,
 };
 use agent_recovery_service::*;
-#[cfg(test)]
-use agent_resource_snapshot::*;
 use agent_run_engine::continue_agent_loop;
 use agent_runtime_snapshot::*;
 pub use app_bootstrap::run;
-use app_bootstrap::QuitConfirmation;
 use app_state::*;
 use attachment_commands::*;
 use attachment_upload_batches::*;

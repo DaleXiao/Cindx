@@ -41,10 +41,10 @@ run_agent_task
   -> prepare_agent_execution
        -> project bounded context
        -> plan_agent_run
-            Fast: direct decision
-            Auto/Pro: conductor -> validated AgentRunDecision
-            all modes: Causal Router v2 candidate/counterfactual receipt
-            Auto/Pro workflow candidate: conservative causal-value admission
+            Fast: fixed direct candidate
+            Auto/Pro: conductor -> validated candidate
+            all modes: hard-constraint guard + explicit compatibility policy
+            construct the single typed ExecutionPlan used downstream
        -> recall memory + retrieve workspace evidence
        -> select skills and tools
        -> optional bounded workflow/task graph
@@ -288,10 +288,18 @@ separate evidence domain from general web retrieval and screen observation.
 
 ## Decision and Workflow Relationship
 
-`AgentRunDecision` is the validated boundary between planning and execution. It
-contains the task class, direct/workflow mode, primary model, tool requirement,
-risk, retrieval channels, memory policy, verification policy, parallelism,
-branch quorum, estimated steps, expected uplift, confidence, and stop policy.
+`ExecutionPlan` is the unique typed boundary between planning and execution.
+It preserves both the validated Conductor candidate and the final executable
+`AgentRunDecision`, together with the authority that selected the final action,
+the deterministic hard-constraint receipt, the compatibility-route receipt,
+and the optional workflow-execution profile identity. Downstream preparation,
+context, canonical events, and evaluation consume the final action through this
+plan rather than carrying an independent decision value.
+
+`AgentRunDecision` remains the executable action schema. It contains the task
+class, direct/workflow mode, primary model, tool requirement, risk, retrieval
+channels, memory policy, verification policy, parallelism, branch quorum,
+estimated steps, expected uplift, confidence, and stop policy.
 
 `AgentRouteRequirements` is the smaller authoritative input boundary. It is
 re-derived for every prepared steer epoch from completion intent, image
@@ -316,19 +324,28 @@ for whether those segments require effects.
 
 - Fast constructs a direct decision without a conductor call.
 - Auto and Pro ask configured conductor candidates for this schema.
-- After validation, Causal Router v2 freezes a pre-decision feature snapshot from
-  digests of the actual objective, bounded recent context and prompt profile,
-  plus route requirements, model capability sources, model pool, and run budget.
-  Typed task demand comes from the validated Conductor decision; the router does
-  not reclassify the prompt with keywords. It evaluates at most the workflow
-  candidate and its strongest direct counterfactual. Each action identity binds
-  the model, tool, vision, risk, retrieval, memory, verification, quorum,
-  parallelism, step and stop policy actually executed. Admission requires real
-  independent contributions or independent verification and a non-negative
-  confidence-weighted uplift above the mode's declared quality floor. Capability,
-  safety, effect authority, and run budgets remain deterministic hard boundaries.
-  A deterministic pre-decision task label is recorded separately for unbiased
-  evaluation grouping and never feeds route selection.
+- After validation, the planner first records deterministic hard constraints:
+  configured model capability, explicit independent demand for a workflow, and
+  bounded execution. These constraints may reject an unsafe or structurally
+  invalid candidate, but they do not estimate answer quality. The retained
+  Causal Router v2 policy is an explicit compatibility value policy that may
+  downshift a structurally valid workflow using the existing confidence and
+  matched team-versus-direct evidence. It is not hidden as a second Conductor:
+  `ExecutionPlan.authority` distinguishes Conductor, hard-constraint,
+  compatibility-value, runtime-constraint, fixed-policy, and degraded-fallback
+  outcomes, while `conductor_candidate` remains auditable after a downshift.
+  This preserves current Auto/Pro behavior while making the remaining policy
+  overlap measurable and removable by later matched evidence.
+- The compatibility receipt freezes a pre-decision feature snapshot from digests
+  of the actual objective, bounded recent context and prompt profile, route
+  requirements, model capability sources, model pool, and run budget. Typed task
+  demand comes from the validated Conductor candidate; no keyword classifier
+  independently changes the route. It evaluates at most the workflow candidate
+  and its strongest direct counterfactual. Each action identity binds the model,
+  tool, vision, risk, retrieval, memory, verification, quorum, parallelism, step,
+  and stop policy actually executed. A deterministic pre-decision task label is
+  recorded separately for unbiased evaluation grouping and never feeds route
+  selection.
 - Exact context-and-action matched evidence has priority. A second bounded index
   can supply sufficiently supported evidence for the same model and route shape
   on a new request. Both positive and failed team trajectories are retained when
@@ -521,11 +538,15 @@ genome, source/deployment revisions, and optional distillation evidence lease
 before recording an outcome. Fast and disabled evolution bypass the deployment
 store.
 
-Prompt genomes have one normalized execution phenotype shared by route and
-workflow construction. When that phenotype differs from the effort's seed,
-`AgentRunDecision` receives its behavior-only directive and a semantic hash;
-profile id, generation, and Direct-finalizer-only genes are omitted. The route
-receipt persists that exact hash, while assignment receipts retain full lineage.
+Prompt genomes currently have one normalized execution phenotype shared by
+route and workflow construction. The system represents the two uses with
+separate `route_decision_profile_sha256` and
+`workflow_execution_profile_sha256` identities instead of treating the shared
+payload as proof of one isolated learning layer. When that phenotype differs
+from the effort's seed, the Conductor receives its behavior-only directive and
+the route identity; profile id, generation, and Direct-finalizer-only genes are
+omitted. An admitted workflow freezes the separate workflow identity in its
+`ExecutionPlan`, while assignment receipts retain full lineage.
 Inside `ConductorHarness`, model-returned tool policy is intersected with the
 genome ceiling. The normalized phenotype removes behaviorally duplicate
 mutations, while route schema validation, effect authority, configured model
@@ -547,32 +568,35 @@ route dynamically, but a candidate cannot collapse or relabel its own
 generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
-The feature-gated Workflow GEPA V6 campaign exercises this causal chain through
-six modules with one-way responsibilities: the runner owns protocol order, the
-suite module validates public requirements and frozen strata, the evidence
-module converts external product verification into redacted reflection packets,
-the candidate-search module generates and selects only from train evidence, the
+The feature-gated Workflow GEPA campaign keeps the frozen V7 task suite and
+product gates while the current source emits a V8 evidence receipt. Six modules
+retain one-way responsibilities: the runner owns protocol order, the suite
+module validates public requirements and frozen strata, the evidence module
+converts external product verification into redacted reflection packets, the
+candidate-search module generates and selects only from train evidence, the
 execution module isolates and counterbalances matched cells, and the contract
 module computes gates from sanitized receipts. V2 and the first V4 attempt are
 retained only as `INVALID_EVALUATOR` history; V3 and the second V4 attempt remain
-`INVALID_TASK_SPEC` history. V5 remains valid targeted no-go evidence and is not
-reused as V6 selection or validation data.
+`INVALID_TASK_SPEC` history. V5 and V7 provider runs remain valid targeted no-go
+evidence and are not reinterpreted by the V8 receipt change.
 
-V6 uses two new training tasks, two new validation tasks, and four new untouched
-test tasks.
-The Agent receives every behavior and route requirement; only concrete host test
-inputs remain unseen. External postconditions override an internally completed
-status when producing GEPA reflection. Three distinct route phenotypes are
-generated from the same frozen training reflection. Each receives matched
-full-product train pairs on a Direct and a Workflow contract. Train eligibility
-requires complete quality, zero loss or safety violation, exact causal profile
-receipts, correct route contrast, actual Workflow-profile execution, and a
-measured product gain. Route contrast alone is not a gain. Eligibility requires
-either an externally verified quality win while both latency and token ratios
-remain at most `1.25`, or at least a 5% improvement in one resource while the
-other remains at most `1.05`. Instance-wise Pareto selection prioritizes quality
-and verified success; performance only breaks equal-quality ties. Validation and
-final test observations cannot select or alter the candidate.
+Before mutation or any candidate product run, V8 derives typed diagnostic plans
+from the actual seed product receipts. Each plan binds the semantic
+`ExecutionPlan`, route-decision profile, and, only for an executed workflow, the
+workflow-execution profile. A direct-only seed is a valid
+`valid_no_go_dormant_learning_layer` result: workflow genes were not exercised,
+so mutation stops without provider spending. Foreign or missing identities fail
+closed as `invalid_learning_diagnostic_identity`.
+
+Candidate generation then performs a zero-provider intervention check on the
+same frozen diagnostics. A workflow-campaign mutation must change exactly the
+route-decision and workflow-execution layers, preserve the parent identities,
+and produce a different semantic execution plan for at least one previously
+executed workflow. Custom untyped directives and Direct-finalizer changes are
+rejected from this campaign. Because the production genome still supplies one
+phenotype to both route and workflow construction, an admitted candidate is a
+coupled route-plus-workflow intervention. Later product evidence may evaluate
+the coupled treatment, but it cannot attribute a gain to either layer alone.
 
 Seed and candidate runs use separately materialized workspaces with equal
 prestate fingerprints, candidate-specific project scopes, and alternating pair
@@ -753,10 +777,10 @@ depends on that module and owns event projection plus CAS publication, not the
 reverse.
 
 Prompt evolution is not the conductor, task graph, or run loop. It cannot alter
-active permissions, transcripts, tool observations, or budgets.
-It currently learns only workflow fields exercised by the matched evolution
-harness. Route, retrieval, and memory stay in the per-run decision layer until
-that layer has its own frozen matched causal evaluation.
+active permissions, transcripts, tool observations, or budgets. The current
+workflow campaign learns a coupled route-and-workflow phenotype and reports
+that coupling explicitly. Retrieval and memory remain per-run decisions and are
+not learning claims of this campaign.
 
 ## Persistence and Recovery
 

@@ -4,12 +4,15 @@ use crate::agent_collaboration_runtime::{
     collaboration_candidate_quorum_grace, collaboration_error_blocks_executor,
 };
 use crate::agent_conductor_runtime::{conductor_call_limits, conductor_repair_recovery_window};
-use crate::agent_conductor_scheduler::{schedule_conductor_decision, ConductorDecisionOutcome};
+use crate::agent_conductor_scheduler::{
+    schedule_conductor_decision, ConductorDecisionOutcome, ConductorDecisionSchedule,
+};
 use crate::agent_preparation_runtime::{
     image_generation_objective_for_preparation, preparation_prompt_parts,
     remove_stale_preparation_context, reset_preparation_run_context,
     route_requirements_for_preparation,
 };
+use crate::agent_resource_snapshot::persist_agent_resource_snapshot;
 use crate::agent_strategy_runtime::{
     causal_route_event_metadata, effective_prompt_objective_for_messages,
     preferred_compatible_route_model, should_evaluate_strategy_profile, AgentPlanningSource,
@@ -29,10 +32,11 @@ use orchestrator::{
     select_causal_route_v2, AdaptiveWorkflow, AdaptiveWorkflowStep, AgentDecisionCalibration,
     AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRunDecisionHarness,
     AgentRunDecisionRequest, AgentToolRequirement, AgentVerificationPolicy, CausalRouteReason,
-    CausalRouteSelectionV2, ModelCapabilitySource, PromptDatasetCaseIdentityV1,
-    PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1, PromptTransferProvenance,
-    RouteFeatureRequest, RouteFeatureSnapshotV2, CAUSAL_ROUTE_MAX_RECEIPT_BYTES,
-    PROMPT_EXECUTION_CONTEXT_SCHEMA_V1, PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
+    CausalRouteSelectionV2, ExecutionPlan, ExecutionPlanAuthority, ModelCapabilitySource,
+    PromptDatasetCaseIdentityV1, PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1,
+    PromptTransferProvenance, RouteFeatureRequest, RouteFeatureSnapshotV2,
+    CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -256,7 +260,15 @@ fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> Conductor
     })
 }
 
-fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -> PlannedAgentRun {
+fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentPolicy) -> PlannedAgentRun {
+    test_planned_agent_run_with_candidate(decision.clone(), decision, effort)
+}
+
+fn test_planned_agent_run_with_candidate(
+    conductor_candidate: AgentRunDecision,
+    mut decision: AgentRunDecision,
+    effort: AgentPolicy,
+) -> PlannedAgentRun {
     let route_requirements = AgentRouteRequirements {
         minimum_tool_requirement: decision.tool_requirement,
         effect_authority: if decision.tool_requirement == AgentToolRequirement::Effects {
@@ -277,7 +289,7 @@ fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -
         latency_tier: 1,
     }];
     let snapshot = RouteFeatureSnapshotV2::from_decision_request(
-        &decision,
+        &conductor_candidate,
         RouteFeatureRequest {
             objective: "update the workspace",
             recent_context: "",
@@ -290,7 +302,7 @@ fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -
     );
     let mut receipt = match decision.causal_route.take() {
         Some(receipt) => receipt,
-        None => select_causal_route_v2(&decision, &snapshot, &candidates, None, 0)
+        None => select_causal_route_v2(&conductor_candidate, &snapshot, &candidates, None, 0)
             .expect("test plan should produce a causal route receipt"),
     };
     if receipt.selected_route != decision.route_tier() {
@@ -301,13 +313,23 @@ fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -
             )
             .expect("test plan receipt should reconcile to its fixture route");
     }
-    decision.causal_route = Some(receipt);
+    decision.causal_route = None;
     let routing_context = decision.routing_context("update the workspace", candidates);
     let routing_decision = decision.routing_decision();
     let execution_contract = decision.execution_contract(effort.label());
+    let prompt_genome = ConductorPromptGenome::seed_for_effort(effort.label());
+    let workflow_execution_profile_sha256 = (decision.execution == AgentExecutionMode::Workflow)
+        .then(|| prompt_genome.workflow_execution_profile_sha256().unwrap());
+    let execution_plan = ExecutionPlan::new(
+        conductor_candidate,
+        decision,
+        receipt,
+        workflow_execution_profile_sha256,
+    )
+    .expect("test plan should satisfy the execution-plan contract");
     PlannedAgentRun {
         policy: effort,
-        decision,
+        execution_plan,
         routing_context,
         routing_decision,
         execution_contract,
@@ -317,12 +339,54 @@ fn test_planned_agent_run(mut decision: AgentRunDecision, effort: AgentPolicy) -
             AgentPlanningSource::DynamicConductor
         },
         attempts: 1,
-        prompt_genome: ConductorPromptGenome::seed_for_effort(effort.label()),
+        prompt_genome,
         degradation_reason: None,
         attempted_conductor_models: Vec::new(),
         selected_conductor_model: None,
         route_requirements,
     }
+}
+
+#[test]
+fn execution_plan_context_preserves_conductor_candidate_and_final_authority() {
+    let mut candidate = AgentRunDecision::direct("executor");
+    candidate.execution = AgentExecutionMode::Workflow;
+    candidate.verification = AgentVerificationPolicy::Independent;
+    candidate.max_parallelism = 2;
+    candidate.min_successful_branches = 2;
+    candidate.distinct_contributions = 2;
+    candidate.estimated_steps = 3;
+    candidate.expected_uplift_bps = 2_999;
+    candidate.confidence_bps = 8_000;
+    candidate.stop_policy = ConductorStopPolicy::Quorum;
+    let selected = candidate.clone().constrained_to_grounded_direct();
+    let planned = test_planned_agent_run_with_candidate(candidate, selected, AgentPolicy::Auto);
+    let mut context = Metadata::new();
+
+    planned
+        .apply_to_context(&mut context)
+        .expect("execution plan should enter run context");
+
+    let persisted = serde_json::from_str::<ExecutionPlan>(
+        context.get("execution_plan").expect("execution plan json"),
+    )
+    .expect("valid execution plan");
+    assert_eq!(
+        persisted.conductor_candidate.execution,
+        AgentExecutionMode::Workflow
+    );
+    assert_eq!(persisted.action.execution, AgentExecutionMode::Direct);
+    assert_eq!(
+        persisted.authority,
+        ExecutionPlanAuthority::CompatibilityValuePolicy
+    );
+    let full_digest = persisted.digest().unwrap();
+    let semantic_digest = persisted.semantic_digest().unwrap();
+    assert_eq!(context.get("execution_plan_sha256"), Some(&full_digest));
+    assert_eq!(
+        context.get("execution_plan_semantic_sha256"),
+        Some(&semantic_digest)
+    );
 }
 
 #[test]
@@ -385,7 +449,7 @@ fn conductor_verification_policies_reach_the_persistent_task_contract() {
         );
         assert_eq!(
             planned.routing_decision.verifier_role == Some(ModelRole::Reviewer),
-            planned.decision.verification == AgentVerificationPolicy::Independent
+            planned.execution_plan.action().verification == AgentVerificationPolicy::Independent
         );
     }
 }
@@ -600,7 +664,7 @@ fn goal2_conductor_scheduler_fails_over_but_never_retries_after_steer_or_stage_d
     ] {
         let mut attempts = 0;
         let mut invoked = Vec::new();
-        let exhausted =
+        let exhausted: ConductorDecisionSchedule<AgentRunDecision> =
             schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
                 *attempts += 1;
                 invoked.push(model.to_string());
@@ -640,11 +704,12 @@ fn goal2_conductor_scheduler_fails_over_but_never_retries_after_steer_or_stage_d
 
     let mut attempts = 0;
     let mut invoked = Vec::new();
-    let steered = schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
-        *attempts += 1;
-        invoked.push(model.to_string());
-        Err(CollaborationStageError::SteerInterrupted)
-    });
+    let steered: Result<ConductorDecisionSchedule<AgentRunDecision>, CollaborationStageError> =
+        schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
+            *attempts += 1;
+            invoked.push(model.to_string());
+            Err(CollaborationStageError::SteerInterrupted)
+        });
     assert!(matches!(
         steered,
         Err(CollaborationStageError::SteerInterrupted)
@@ -654,12 +719,13 @@ fn goal2_conductor_scheduler_fails_over_but_never_retries_after_steer_or_stage_d
 
     let mut attempts = 0;
     let mut invoked = Vec::new();
-    let exhausted = schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
-        *attempts += 1;
-        invoked.push(model.to_string());
-        Err(CollaborationStageError::StageDeadline)
-    })
-    .expect("a global stage deadline should degrade without another attempt");
+    let exhausted: ConductorDecisionSchedule<AgentRunDecision> =
+        schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
+            *attempts += 1;
+            invoked.push(model.to_string());
+            Err(CollaborationStageError::StageDeadline)
+        })
+        .expect("a global stage deadline should degrade without another attempt");
     assert!(matches!(
         exhausted.outcome,
         ConductorDecisionOutcome::Exhausted
@@ -689,11 +755,12 @@ fn goal2_conductor_scheduler_fails_over_but_never_retries_after_steer_or_stage_d
 
     let mut attempts = 0;
     let mut invoked = Vec::new();
-    let stopped = schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
-        *attempts += 1;
-        invoked.push(model.to_string());
-        Err(CollaborationStageError::RunStopped)
-    });
+    let stopped: Result<ConductorDecisionSchedule<AgentRunDecision>, CollaborationStageError> =
+        schedule_conductor_decision(&models, &mut attempts, |_, model, _, attempts| {
+            *attempts += 1;
+            invoked.push(model.to_string());
+            Err(CollaborationStageError::RunStopped)
+        });
     assert!(matches!(stopped, Err(CollaborationStageError::RunStopped)));
     assert_eq!(invoked, vec!["primary"]);
     assert_eq!(attempts, 1);
@@ -5503,7 +5570,7 @@ fn causal_route_provenance_keeps_context_small_and_event_receipt_complete() {
     .collect::<Metadata>();
     planned.apply_to_context(&mut context).unwrap();
 
-    let receipt = planned.decision.causal_route.as_ref().unwrap();
+    let receipt = &planned.execution_plan.compatibility_route;
     assert_eq!(
         context
             .get("pre_decision_context_fingerprint")
@@ -5524,7 +5591,7 @@ fn causal_route_provenance_keeps_context_small_and_event_receipt_complete() {
     );
     assert!(!context.contains_key("causal_route_receipt"));
 
-    let event_metadata = causal_route_event_metadata(&context, &planned.decision).unwrap();
+    let event_metadata = causal_route_event_metadata(&context, &planned.execution_plan).unwrap();
     let encoded = event_metadata.get("causal_route_receipt").unwrap();
     assert!(encoded.len() <= CAUSAL_ROUTE_MAX_RECEIPT_BYTES);
     let decoded = serde_json::from_str::<CausalRouteSelectionV2>(encoded).unwrap();
@@ -5939,7 +6006,7 @@ fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
     );
     let mut receipt = select_causal_route_v2(&candidate, &snapshot, &candidates, None, 0)
         .expect("workflow candidate should produce a causal route receipt");
-    let mut decision = candidate.constrained_to_grounded_direct();
+    let mut decision = candidate.clone().constrained_to_grounded_direct();
     decision.calibration = Some(AgentDecisionCalibration::MatchedEvidence);
     decision.calibration_reason = Some("matched evidence rejects workflow".to_string());
     if receipt.selected_route != decision.route_tier() {
@@ -5951,7 +6018,7 @@ fn calibrated_direct_route_metadata_is_explicit_and_not_degraded() {
             .expect("calibrated direct route should be one of the recorded actions");
     }
     decision.causal_route = Some(receipt);
-    let mut planned = test_planned_agent_run(decision, AgentPolicy::Auto);
+    let mut planned = test_planned_agent_run_with_candidate(candidate, decision, AgentPolicy::Auto);
     planned.source = AgentPlanningSource::CalibratedDirect;
     planned.route_requirements = route_requirements;
     let mut run_context = Metadata::new();
@@ -6080,7 +6147,7 @@ fn adaptive_coordinator_rejects_models_outside_the_configured_pool() {
 }
 
 #[test]
-fn adaptive_coordinator_accepts_five_steps_with_three_reused_models() {
+fn adaptive_coordinator_rejects_a_fifth_step_beyond_the_execution_contract() {
     let response = r#"{"steps":[
           {"id":"a","role":"thinker","model":"planner-a","subtask":"Independent approach","access":[]},
           {"id":"b","role":"worker","model":"reviewer-b","subtask":"Independent challenge","access":[]},
@@ -6094,16 +6161,11 @@ fn adaptive_coordinator_accepts_five_steps_with_three_reused_models() {
         "summary-c".to_string(),
     ];
 
-    let workflow = test_conductor_harness(models, 3)
+    let error = test_conductor_harness(models, 3)
         .parse_plan(response)
-        .expect("five-step plan should parse")
-        .adaptive_workflow();
+        .expect_err("the execution contract must reject a fifth step");
 
-    assert_eq!(workflow.steps.len(), 5);
-    assert_eq!(
-        adaptive_workflow_layers(&workflow).expect("layers should build"),
-        vec![vec![0, 1], vec![2], vec![3], vec![4]]
-    );
+    assert!(error.contains("exceeds the 4-step budget"));
 }
 
 #[test]

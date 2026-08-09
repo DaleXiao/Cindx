@@ -1803,7 +1803,7 @@ assert(
 assert(
   rustLib.includes("fn prepare_run_knowledge_contexts(") &&
     rustLib.includes("let plan = plan_agent_run(") &&
-    rustLib.includes("&plan.decision") &&
+    rustLib.includes("plan.execution_plan.action()") &&
     rustLib.includes("let retrieve_workspace = decision.retrieval.enabled()") &&
     rustLib.includes("let workspace_handle = retrieve_workspace.then") &&
     rustLib.includes("if !effort.uses_conductor()") &&
