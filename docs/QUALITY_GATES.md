@@ -375,9 +375,12 @@ task is retained as a separate diagnostic while completion and external quality
 remain in the denominator. The V11 failure shape has a deterministic regression
 test; this does not authorize or predict a provider result.
 
-The V12 one-shot campaign requires a clean exact revision and three fresh
-outside-Git paths. The resulting journal and report must be retained even when
-the command exits with a preregistered no-go:
+The V12 one-shot campaign was consumed on clean source `ff8c238`. It retained a
+failed Direct action with complete route evidence, then the shared-plan Workflow
+arm stopped before persisting a strategy event. The journal has two reservations,
+one completed action, nine model calls, and 54,579 tokens. No report, matched
+pair, or GO/NO-GO exists, so the result is `INVALID_EVIDENCE` and V12 must not be
+replayed. The command below is retained only as historical protocol provenance:
 
 ```sh
 run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v12.XXXXXX)"

@@ -609,6 +609,14 @@ outcome in the matched denominator instead of invalidating the route receipt;
 the campaign makes no direct-finalizer treatment claim from that independent
 diagnostic.
 
+The one authorized V12 run proved that separation for its failed Direct arm,
+then the shared-plan Workflow arm stopped before recording its strategy event.
+The journal retained the completed Direct action and pending Workflow
+reservation, but not the pre-strategy product error. V12 is therefore
+`INVALID_EVIDENCE`, not route-quality evidence. Production routing remains
+unchanged; a successor needs bounded failure persistence before another
+provider campaign is meaningful.
+
 Before mutation, V12 asks the first arm in each pair for one workflow-capable
 conductor candidate and proposal, then injects that exact private in-memory
 anchor into the second arm. Workflow executes the proposal unchanged; Direct is

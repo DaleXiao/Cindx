@@ -2,7 +2,7 @@
 
 ## Status
 
-`FROZEN_NOT_RUN`
+`INVALID_EVIDENCE`
 
 V12 preserves V11's causal question: with the same Pro conductor candidate,
 workflow proposal, route profile, task, workspace, model set, and budget, does
@@ -36,7 +36,33 @@ changes only that evidence ownership boundary:
 | Learned field | `route_directive` only |
 | Candidate population | 2 distinct route policies from at most 6 proposals |
 | Maximum product runs | 33 planned, below the hard cap of 35 |
-| Provider executions | Exactly one clean-source campaign after deterministic gates pass |
+| Executed source commit | `ff8c238d4edd7131c4ac0409c89535712c1fe56b` |
+| Journal SHA-256 | `9cb476f4af4bb3bc3b9b971f29632f6ed683fb4b3c39f75c9bc7102e184660ed` |
+| Reserved / completed product runs | `2 / 1` |
+| Completed product usage | `9` model calls; `54,579` tokens |
+| Journal state | `running` with the Workflow arm pending; replay is forbidden |
+
+## Observed execution result
+
+The single authorized V12 execution reached both arms of the first frozen case,
+`coding-reconcile-records`. The Direct arm completed its journal action with a
+`failed` product terminal, nine model calls, 54,579 tokens, nine external check
+receipts, and complete route/task-graph evidence. This confirms that V12 fixed
+V11's evidence-ownership failure: a failed terminal no longer erases an
+otherwise projectable route receipt.
+
+The counterbalanced Workflow arm then failed before an `Agent run decision
+selected` event was persisted. Its raw run therefore had no strategy receipt,
+execution-plan receipt, or model receipt, and failed closed with:
+
+`agent strategy receipt is missing`
+
+The durable journal contains the completed Direct action and the reserved
+Workflow action, but the current failure path does not persist the pre-strategy
+product error that caused the Workflow run to stop. There is no report,
+snapshot, matched pair, candidate, mutation, validation, test, promotion, or
+GO/NO-GO result. Raw provider output was not inspected or committed. V12 must
+not be replayed.
 
 ## Frozen campaign and gates
 
@@ -55,9 +81,9 @@ shipping profile.
 
 ## Interpretation
 
-The clean frozen revision may be executed once. Every failed or incomplete
-product action remains in the external hash-chained journal. There is no
-result-driven prompt edit, case replacement, threshold change, or rerun.
+The clean frozen revision was executed once. The completed Direct action and
+pending Workflow reservation remain in the external hash-chained journal. There
+was no result-driven prompt edit, case replacement, threshold change, or rerun.
 
 - A valid no-go is evidence that the frozen collaboration/learning path did not
   improve this suite; it is not evaluator failure.
@@ -67,4 +93,6 @@ result-driven prompt edit, case replacement, threshold change, or rerun.
   verification identity remains invalid evidence.
 
 Production Fast, Auto, and Pro routing, budgets, prompt serving, UX, and safety
-policy are unchanged by this evaluation-only protocol.
+policy are unchanged by this invalid evaluation attempt. A successor requires a
+bounded product-run failure receipt that survives errors before strategy-event
+persistence; this result does not justify another provider campaign by itself.
