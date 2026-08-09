@@ -275,15 +275,17 @@ boolean metadata is derived compatibility state and carries no authority alone.
 Verifier authority is a closed tool capability, not a tool name, risk label, or
 model-provided string. `file.read` signs exact readback only after its structured
 result proves an offset-zero, complete, untruncated read of the requested path.
-`shell.run` signs a workspace-wide quality check only after a structured zero
-exit from a conservative check/test/build/lint command with no shell indirection
-or compound syntax. Listing, searching, partial reads, `echo`, dynamic shell,
-third-party read-only tools, and every asynchronous `process.poll` receipt carry
-no authority by default. A command string containing `test`, `check`, or `build`
-cannot create verification; only the trusted synchronous postcondition adapter
-may sign it. Multi-target
-mutations require cumulative exact coverage of every target, unless one trusted
-workspace-wide quality check covers the set.
+`file.read_many` has the same authority only when every request starts at byte
+zero and the typed batch result proves matching order and paths, complete bytes,
+exact counts, no truncation, no cancellation, and no failed item. `shell.run`
+signs a workspace-wide quality check only after a structured zero exit from a
+conservative check/test/build/lint command with no shell indirection or compound
+syntax. Listing, searching, partial reads, `echo`, dynamic shell, third-party
+read-only tools, and every asynchronous `process.poll` receipt carry no authority
+by default. A command string containing `test`, `check`, or `build` cannot create
+verification; only the trusted synchronous postcondition adapter may sign it.
+Multi-target mutations require cumulative exact coverage of every target,
+unless one trusted workspace-wide quality check covers the set.
 
 Workspace mutation binding accepts the built-in complete-write verifier and a
 well-formed `file.patch` after-SHA verifier as the same closed workspace-file
