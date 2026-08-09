@@ -3,9 +3,7 @@ use super::workflow_gepa_campaign_contract::{
     CampaignSplit, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
 };
 use super::workflow_gepa_campaign_journal::CampaignJournal;
-use super::{
-    materialize_case, ExecutionCell, RawRun, RealworldCase, RealworldSuite, Treatment,
-};
+use super::{materialize_case, ExecutionCell, RawRun, RealworldCase, RealworldSuite, Treatment};
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
 use crate::prompt_learning_runtime::{
@@ -144,12 +142,7 @@ pub(super) fn execute_product_pair(
     } else {
         "seed_then_candidate"
     };
-    let seed_scope = project_scope(
-        split,
-        case,
-        replicate,
-        &format!("{comparison_scope}-seed"),
-    );
+    let seed_scope = project_scope(split, case, replicate, &format!("{comparison_scope}-seed"));
     let candidate_scope = project_scope(
         split,
         case,
@@ -340,13 +333,11 @@ pub(super) fn workflow_gepa_product_budget() -> RunBudget {
     budget.terminal_model_call_reserve = 3;
     budget.terminal_time_reserve = std::time::Duration::from_secs(3 * 60);
     budget.max_physical_model_attempts = 80;
-    budget.max_total_tokens = 80_u64.saturating_mul(
-        agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
-    );
+    budget.max_total_tokens =
+        80_u64.saturating_mul(agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT);
     budget.terminal_physical_model_attempt_reserve = 12;
-    budget.terminal_token_reserve = 12_u64.saturating_mul(
-        agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
-    );
+    budget.terminal_token_reserve =
+        12_u64.saturating_mul(agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT);
     budget
 }
 

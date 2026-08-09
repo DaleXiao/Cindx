@@ -426,13 +426,11 @@ pub(super) fn execute_case(
         error: product.error.or(product.state.last_error.clone()),
         evidence_error,
         setup_failure: None,
-        resolved_budget: event_metrics
-            .resolved_budget
-            .unwrap_or_else(|| {
-                run_budget
-                    .map(ResolvedBudgetReceipt::from_budget)
-                    .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment))
-            }),
+        resolved_budget: event_metrics.resolved_budget.unwrap_or_else(|| {
+            run_budget
+                .map(ResolvedBudgetReceipt::from_budget)
+                .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment))
+        }),
         strategy_receipt: event_metrics.strategy_receipt,
         memory_evaluation_receipt: event_metrics.memory_evaluation_receipt,
         model_receipts: event_metrics.model_receipts,

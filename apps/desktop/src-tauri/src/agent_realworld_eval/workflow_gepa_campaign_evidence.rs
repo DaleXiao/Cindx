@@ -2,9 +2,9 @@ use super::workflow_gepa_campaign_contract::{CampaignSplit, ProductRunReceipt};
 use super::workflow_gepa_campaign_contract::{CAMPAIGN_SUITE_ID, CAMPAIGN_VERSION};
 use super::{RawRun, RealworldCase, RealworldSuite};
 use orchestrator::{
-    sha256_hex, ActionableSideInformation, AgentEvaluationCheck,
-    AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationToolTrace,
-    AgentEvaluationTraceStep, AgentEvaluationVerifierOutcome, ConductorPromptGenome,
+    sha256_hex, ActionableSideInformation, AgentEvaluationCheck, AgentEvaluationEvidenceSource,
+    AgentEvaluationReflectionPacket, AgentEvaluationToolTrace, AgentEvaluationTraceStep,
+    AgentEvaluationVerifierOutcome, ConductorPromptGenome,
 };
 use std::collections::BTreeMap;
 
@@ -39,8 +39,7 @@ pub(super) fn training_reflection_packets(
             != 2
     {
         return Err(
-            "Workflow GEPA reflection requires one coding and one research product run"
-                .to_string(),
+            "Workflow GEPA reflection requires one coding and one research product run".to_string(),
         );
     }
     Ok(packets)
@@ -207,7 +206,10 @@ fn public_case_input(case: &RealworldCase) -> String {
         .collect::<Vec<_>>()
         .join("\n\n");
     truncate(
-        &format!("Objective:\n{}\n\nPublic fixtures:\n{fixtures}", case.objective),
+        &format!(
+            "Objective:\n{}\n\nPublic fixtures:\n{fixtures}",
+            case.objective
+        ),
         MAX_REFLECTION_OUTPUT_CHARS,
     )
 }
@@ -224,8 +226,8 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 fn external_verifier_outcome(checks: &[AgentEvaluationCheck]) -> (bool, f64) {
     let passed = !checks.is_empty() && checks.iter().all(|check| check.passed);
-    let score = checks.iter().filter(|check| check.passed).count() as f64
-        / checks.len().max(1) as f64;
+    let score =
+        checks.iter().filter(|check| check.passed).count() as f64 / checks.len().max(1) as f64;
     (passed, score)
 }
 

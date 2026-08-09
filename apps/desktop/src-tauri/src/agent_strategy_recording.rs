@@ -14,8 +14,9 @@ pub(super) fn record_planned_agent_run(
     planned: &PlannedAgentRun,
     profile_source: &str,
 ) -> Result<(), String> {
+    let decision = planned.execution_plan.action();
     let causal_route_metadata =
-        causal_route::causal_route_event_metadata(run_context, &planned.decision)?;
+        causal_route::causal_route_event_metadata(run_context, &planned.execution_plan)?;
     let mut store = state
         .store
         .lock()
@@ -48,7 +49,23 @@ pub(super) fn record_planned_agent_run(
         ),
         (
             "decision".to_string(),
-            serde_json::to_string(&planned.decision).unwrap_or_default(),
+            serde_json::to_string(decision).unwrap_or_default(),
+        ),
+        (
+            "execution_plan".to_string(),
+            serde_json::to_string(&planned.execution_plan).unwrap_or_default(),
+        ),
+        (
+            "execution_plan_sha256".to_string(),
+            planned.execution_plan.digest()?,
+        ),
+        (
+            "execution_plan_semantic_sha256".to_string(),
+            planned.execution_plan.semantic_digest()?,
+        ),
+        (
+            "execution_plan_authority".to_string(),
+            planned.execution_plan.authority.label().to_string(),
         ),
         (
             "prompt_profile".to_string(),
@@ -69,7 +86,7 @@ pub(super) fn record_planned_agent_run(
         ),
         (
             "decision_rationale".to_string(),
-            truncate_for_collaboration(&planned.decision.rationale, 1_200),
+            truncate_for_collaboration(&decision.rationale, 1_200),
         ),
     ]
     .into_iter()

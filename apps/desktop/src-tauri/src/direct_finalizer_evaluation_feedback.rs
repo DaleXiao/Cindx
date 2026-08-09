@@ -12,9 +12,9 @@ use crate::{
 };
 use agent_core::{Metadata, ModelRole};
 use agent_runtime::AgentRunControl;
-use orchestrator::ActionableSideInformation;
 #[cfg(test)]
 use orchestrator::sha256_hex;
+use orchestrator::ActionableSideInformation;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug, Clone)]

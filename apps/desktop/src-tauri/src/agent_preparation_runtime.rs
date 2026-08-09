@@ -358,11 +358,12 @@ pub(crate) fn prepare_agent_execution_replay(
         };
         let memory_constraint = AgentMemoryEvaluationConstraint::from_context(&run_context)
             .map_err(|error| runtime_preparation_error(&run_context, error))?;
-        let effective_knowledge_decision = (!memory_constraint.is_native())
-            .then(|| memory_constraint.apply_after_routing(&mut run_context, &plan.decision));
+        let effective_knowledge_decision = (!memory_constraint.is_native()).then(|| {
+            memory_constraint.apply_after_routing(&mut run_context, plan.execution_plan.action())
+        });
         let knowledge_decision = effective_knowledge_decision
             .as_ref()
-            .unwrap_or(&plan.decision);
+            .unwrap_or_else(|| plan.execution_plan.action());
 
         let prepared_knowledge = match prepare_run_knowledge_contexts(
             state,
@@ -440,7 +441,7 @@ pub(crate) fn prepare_agent_execution_replay(
         );
         append_agent_progress_event(state, task_id, &run_context, "Preparing execution strategy")
             .map_err(|error| runtime_preparation_error(&run_context, error))?;
-        let collaboration_policy = plan.decision.policy();
+        let collaboration_policy = plan.execution_plan.action().policy();
         append_single_model_policy_guidance(&mut history, &collaboration_policy);
         let collaboration = match prepare_agent_collaboration_or_degrade(
             app,

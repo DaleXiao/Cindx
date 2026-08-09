@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_bootstrap::QuitConfirmation;
 use std::io::Read;
 
 pub(crate) const MAX_ARTIFACT_IMAGE_BYTES: u64 = 24 * 1024 * 1024;

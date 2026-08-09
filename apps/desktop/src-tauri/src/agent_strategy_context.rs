@@ -5,15 +5,16 @@ use orchestrator::{AgentExecutionMode, AgentToolRequirement, AGENT_ROUTE_OBSERVA
 
 impl PlannedAgentRun {
     pub(crate) fn apply_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {
+        let decision = self.execution_plan.action();
         let requested_policy = self.policy.requested_policy();
-        let collaboration_policy = self.decision.policy();
+        let collaboration_policy = decision.policy();
         run_context.insert(
             "task_class".to_string(),
-            self.decision.task_class.label().to_string(),
+            decision.task_class.label().to_string(),
         );
         run_context.insert(
             "tool_requirement".to_string(),
-            match self.decision.tool_requirement {
+            match decision.tool_requirement {
                 AgentToolRequirement::None => "none",
                 AgentToolRequirement::ReadOnly => "read_only",
                 AgentToolRequirement::Effects => "effects",
@@ -22,13 +23,13 @@ impl PlannedAgentRun {
         );
         run_context.insert(
             "vision_required".to_string(),
-            self.decision.vision_required.to_string(),
+            decision.vision_required.to_string(),
         );
         for key in AGENT_ROUTE_OBSERVABILITY_KEYS {
             run_context.remove(key);
         }
         run_context.extend(route_decision_metadata(self));
-        match (self.decision.calibration, &self.decision.calibration_reason) {
+        match (decision.calibration, &decision.calibration_reason) {
             (Some(_), Some(reason)) => {
                 run_context.insert(
                     "decision_calibration_reason".to_string(),
@@ -42,9 +43,9 @@ impl PlannedAgentRun {
         }
         run_context.insert(
             "routing_signature".to_string(),
-            self.decision.learning_signature(),
+            decision.learning_signature(),
         );
-        super::causal_route::apply_causal_route_to_context(&self.decision, run_context)?;
+        super::causal_route::apply_causal_route_to_context(&self.execution_plan, run_context)?;
         run_context.insert("agent_effort".to_string(), self.policy.label().to_string());
         run_context.insert(
             "requested_policy".to_string(),
@@ -56,7 +57,7 @@ impl PlannedAgentRun {
         );
         run_context.insert(
             "collaboration_profile".to_string(),
-            if self.decision.execution == AgentExecutionMode::Workflow {
+            if decision.execution == AgentExecutionMode::Workflow {
                 "adaptive"
             } else {
                 "direct"
@@ -71,14 +72,8 @@ impl PlannedAgentRun {
             "expected_collaboration_uplift_bps".to_string(),
             self.execution_contract.expected_uplift_bps.to_string(),
         );
-        run_context.insert(
-            "agent_model".to_string(),
-            self.decision.primary_model.clone(),
-        );
-        run_context.insert(
-            "router_model".to_string(),
-            self.decision.primary_model.clone(),
-        );
+        run_context.insert("agent_model".to_string(), decision.primary_model.clone());
+        run_context.insert("router_model".to_string(), decision.primary_model.clone());
         run_context.insert("router_examples".to_string(), "0".to_string());
         run_context.insert("router_source".to_string(), self.source.label().to_string());
         run_context.insert(
@@ -95,8 +90,25 @@ impl PlannedAgentRun {
         }
         run_context.insert(
             "run_decision".to_string(),
-            serde_json::to_string(&self.decision)
+            serde_json::to_string(decision)
                 .map_err(|error| format!("run decision serialization failed: {error}"))?,
+        );
+        run_context.insert(
+            "execution_plan".to_string(),
+            serde_json::to_string(&self.execution_plan)
+                .map_err(|error| format!("execution plan serialization failed: {error}"))?,
+        );
+        run_context.insert(
+            "execution_plan_sha256".to_string(),
+            self.execution_plan.digest()?,
+        );
+        run_context.insert(
+            "execution_plan_semantic_sha256".to_string(),
+            self.execution_plan.semantic_digest()?,
+        );
+        run_context.insert(
+            "execution_plan_authority".to_string(),
+            self.execution_plan.authority.label().to_string(),
         );
         run_context.insert(
             "run_decision_attempts".to_string(),
@@ -119,7 +131,7 @@ impl PlannedAgentRun {
         crate::agent_finalizer_runtime::direct_finalizer_policy::install_direct_finalizer_policy_metadata(
             run_context,
             self.policy,
-            self.decision.execution,
+            decision.execution,
             &self.prompt_genome,
         )?;
         Ok(())

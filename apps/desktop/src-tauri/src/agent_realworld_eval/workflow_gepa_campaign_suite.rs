@@ -101,8 +101,14 @@ pub(super) fn validate_campaign_suite(suite: &RealworldSuite) -> Result<(), Stri
         (CampaignSplit::Test, "research"),
     ];
     for expected_entry in expected {
-        let expected_count = expected.iter().filter(|entry| **entry == expected_entry).count();
-        let observed_count = splits.iter().filter(|entry| **entry == expected_entry).count();
+        let expected_count = expected
+            .iter()
+            .filter(|entry| **entry == expected_entry)
+            .count();
+        let observed_count = splits
+            .iter()
+            .filter(|entry| **entry == expected_entry)
+            .count();
         if observed_count != expected_count {
             return Err("Workflow GEPA train/validation/test strata are unbalanced".to_string());
         }
@@ -230,10 +236,7 @@ fn validate_research_contract(case: &RealworldCase, check_content: &str) -> Resu
             "highest reliability among compliant vendors",
         ],
         _ => {
-            return Err(format!(
-                "unknown Workflow GEPA research case {}",
-                case.id
-            ));
+            return Err(format!("unknown Workflow GEPA research case {}", case.id));
         }
     };
     if case.verification.json_files.len() != 1
@@ -354,14 +357,20 @@ mod tests {
     fn frozen_suite_has_explicit_balanced_strata_and_public_contracts() {
         let suite = frozen_suite();
         validate_campaign_suite(&suite).unwrap();
-        assert_eq!(cases_for_split(&suite, CampaignSplit::Train).unwrap().len(), 2);
+        assert_eq!(
+            cases_for_split(&suite, CampaignSplit::Train).unwrap().len(),
+            2
+        );
         assert_eq!(
             cases_for_split(&suite, CampaignSplit::Validation)
                 .unwrap()
                 .len(),
             2
         );
-        assert_eq!(cases_for_split(&suite, CampaignSplit::Test).unwrap().len(), 4);
+        assert_eq!(
+            cases_for_split(&suite, CampaignSplit::Test).unwrap().len(),
+            4
+        );
 
         let mut missing_contract: Value = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -370,8 +379,7 @@ mod tests {
         .unwrap();
         missing_contract["cases"][1]["files"][0]["content"] =
             Value::String("Return host and port.".to_string());
-        let missing_contract: RealworldSuite =
-            serde_json::from_value(missing_contract).unwrap();
+        let missing_contract: RealworldSuite = serde_json::from_value(missing_contract).unwrap();
         assert!(validate_campaign_suite(&missing_contract)
             .unwrap_err()
             .contains("complete behavior contract"));
@@ -385,12 +393,10 @@ mod tests {
             .iter_mut()
             .find(|case| case.id == "research-vendor-award")
             .unwrap();
-        award.objective = award
-            .objective
-            .replace(
-                "highest reliability among compliant vendors",
-                "best compliant vendor",
-            );
+        award.objective = award.objective.replace(
+            "highest reliability among compliant vendors",
+            "best compliant vendor",
+        );
         assert!(validate_campaign_suite(&hidden_answer)
             .unwrap_err()
             .contains("lacks answer verification"));
@@ -409,7 +415,9 @@ mod tests {
             .contains("leaks a routing answer"));
 
         let mut leaked_description = frozen_suite();
-        leaked_description.description.push_str(" Workflow route contract.");
+        leaked_description
+            .description
+            .push_str(" Workflow route contract.");
         assert!(validate_campaign_suite(&leaked_description)
             .unwrap_err()
             .contains("description leaks a routing answer"));

@@ -1,9 +1,5 @@
 use super::direct_finalizer_campaign_support::{require_clean_source, required_external_path};
 use super::setup::{activate_evaluation_data_root, build_evaluation_app};
-use super::workflow_gepa_candidate_search::{
-    build_training_receipt, generate_candidate_population, select_training_candidate,
-    CandidateIdentityReceipt, CandidateTrainingReceipt,
-};
 use super::workflow_gepa_campaign_contract::{
     aggregate_pairs, test_gate, validate_grounded_control, validation_gate, CampaignSplit,
     PairAggregateReceipt, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
@@ -20,6 +16,10 @@ use super::workflow_gepa_campaign_journal::{
 use super::workflow_gepa_campaign_suite::{
     cases_for_split, training_dataset_sha256, validate_campaign_suite,
 };
+use super::workflow_gepa_candidate_search::{
+    build_training_receipt, generate_candidate_population, select_training_candidate,
+    CandidateIdentityReceipt, CandidateTrainingReceipt,
+};
 use super::{materialize_case, RealworldSuite, Treatment};
 use crate::app_state::AppState;
 use crate::collaboration_execution::collaboration_candidate_models;
@@ -27,14 +27,15 @@ use crate::configuration_models::SidecarConfig;
 use crate::configuration_persistence::load_provider_config;
 use agent_core::Metadata;
 use orchestrator::{
-    sha256_hex, AgentPolicy, ConductorPromptGenome,
+    assess_prompt_learning_readiness, sha256_hex, AgentPolicy, ConductorPromptGenome,
+    PromptLearningLayer, PromptLearningReadinessReceipt,
 };
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v7";
+const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v8";
 
 #[derive(Debug, Serialize)]
 struct WorkflowGepaCampaignReceipt {
@@ -49,6 +50,7 @@ struct WorkflowGepaCampaignReceipt {
     campaign_budget: CampaignBudgetReceipt,
     campaign_usage: CampaignUsageReceipt,
     train_runs: Vec<ProductRunReceipt>,
+    learning_readiness: PromptLearningReadinessReceipt,
     reflection_evidence_sha256: String,
     candidate_population: Vec<CandidateTrainingReceipt>,
     selected_candidate: Option<CandidateIdentityReceipt>,
@@ -99,11 +101,11 @@ pub(super) fn run() -> Result<(), String> {
         &repo_root,
         "workflow GEPA journal",
     )?;
-    if report_path == snapshot_path
-        || report_path == journal_path
-        || snapshot_path == journal_path
+    if report_path == snapshot_path || report_path == journal_path || snapshot_path == journal_path
     {
-        return Err("workflow GEPA report, snapshot, and journal paths must be distinct".to_string());
+        return Err(
+            "workflow GEPA report, snapshot, and journal paths must be distinct".to_string(),
+        );
     }
     if report_path.exists() || snapshot_path.exists() || journal_path.exists() {
         return Err(
@@ -194,6 +196,62 @@ pub(super) fn run() -> Result<(), String> {
         &serde_json::to_vec(&reflection_packets)
             .map_err(|error| format!("failed to encode reflection evidence: {error}"))?,
     );
+    let diagnostic_plans = train_runs
+        .iter()
+        .map(ProductRunReceipt::execution_diagnostic)
+        .collect::<Result<Vec<_>, String>>()?;
+    let seed_workflow_profile_sha256 = seed_profile.workflow_execution_profile_sha256()?;
+    let seed_route_profile_sha256 = seed_profile.route_decision_profile_sha256(policy.label())?;
+    let learning_readiness = assess_prompt_learning_readiness(
+        PromptLearningLayer::WorkflowExecution,
+        Some(&seed_route_profile_sha256),
+        Some(&seed_workflow_profile_sha256),
+        &diagnostic_plans,
+    )?;
+    if !learning_readiness.eligible {
+        let status =
+            if learning_readiness.reason == "learning_layer_is_dormant_for_all_frozen_plans" {
+                "valid_no_go_dormant_learning_layer"
+            } else {
+                "invalid_learning_diagnostic_identity"
+            };
+        let readiness_reason = learning_readiness.reason.clone();
+        let receipt = WorkflowGepaCampaignReceipt {
+            schema: REPORT_SCHEMA,
+            source_commit,
+            suite_id: suite.id,
+            suite_sha256,
+            training_dataset_sha256,
+            provider_id: provider.provider_id,
+            provider_endpoint_sha256,
+            configured_model_sha256,
+            campaign_budget: journal.budget(),
+            campaign_usage: journal.usage(),
+            train_runs,
+            learning_readiness,
+            reflection_evidence_sha256,
+            candidate_population: Vec::new(),
+            selected_candidate: None,
+            validation_pairs: Vec::new(),
+            validation: None,
+            validation_gate_passed: false,
+            test_pairs: Vec::new(),
+            test: None,
+            test_gate_passed: false,
+            grounded_direct_control: None,
+            grounded_direct_control_passed: false,
+            final_test_was_untouched_during_learning: true,
+            candidate_selected_from_train_only: false,
+            candidate_snapshot_published: false,
+            production_promotion_claimed: false,
+            status: status.to_string(),
+        };
+        let report_sha256 = write_report(&report_path, &receipt)?;
+        journal.finish(&receipt.status, report_sha256)?;
+        return Err(format!(
+            "workflow GEPA stopped before mutation: {readiness_reason}"
+        ));
+    }
     let run_context = mutation_run_context();
     journal.begin_mutation_search()?;
     let generated_population = generate_candidate_population(
@@ -204,6 +262,7 @@ pub(super) fn run() -> Result<(), String> {
         &reflection_packets,
         &training_dataset_sha256,
         &reflection_evidence_sha256,
+        &diagnostic_plans,
     )?;
     journal.complete_mutation_search(
         generated_population.model_calls,
@@ -258,44 +317,45 @@ pub(super) fn run() -> Result<(), String> {
         }
         candidate_population.push(build_training_receipt(generated, train_pairs)?);
     }
-    let selected_profile_id = match select_training_candidate(&candidates, &mut candidate_population)
-    {
-        Ok(profile_id) => profile_id,
-        Err(error) => {
-            let receipt = WorkflowGepaCampaignReceipt {
-                schema: REPORT_SCHEMA,
-                source_commit,
-                suite_id: suite.id,
-                suite_sha256,
-                training_dataset_sha256,
-                provider_id: provider.provider_id,
-                provider_endpoint_sha256: provider_endpoint_sha256.clone(),
-                configured_model_sha256: configured_model_sha256.clone(),
-                campaign_budget: journal.budget(),
-                campaign_usage: journal.usage(),
-                train_runs,
-                reflection_evidence_sha256,
-                candidate_population,
-                selected_candidate: None,
-                validation_pairs: Vec::new(),
-                validation: None,
-                validation_gate_passed: false,
-                test_pairs: Vec::new(),
-                test: None,
-                test_gate_passed: false,
-                grounded_direct_control: None,
-                grounded_direct_control_passed: false,
-                final_test_was_untouched_during_learning: true,
-                candidate_selected_from_train_only: false,
-                candidate_snapshot_published: false,
-                production_promotion_claimed: false,
-                status: "valid_no_go_training".to_string(),
-            };
-            let report_sha256 = write_report(&report_path, &receipt)?;
-            journal.finish(&receipt.status, report_sha256)?;
-            return Err(error);
-        }
-    };
+    let selected_profile_id =
+        match select_training_candidate(&candidates, &mut candidate_population) {
+            Ok(profile_id) => profile_id,
+            Err(error) => {
+                let receipt = WorkflowGepaCampaignReceipt {
+                    schema: REPORT_SCHEMA,
+                    source_commit,
+                    suite_id: suite.id,
+                    suite_sha256,
+                    training_dataset_sha256,
+                    provider_id: provider.provider_id,
+                    provider_endpoint_sha256: provider_endpoint_sha256.clone(),
+                    configured_model_sha256: configured_model_sha256.clone(),
+                    campaign_budget: journal.budget(),
+                    campaign_usage: journal.usage(),
+                    train_runs,
+                    learning_readiness,
+                    reflection_evidence_sha256,
+                    candidate_population,
+                    selected_candidate: None,
+                    validation_pairs: Vec::new(),
+                    validation: None,
+                    validation_gate_passed: false,
+                    test_pairs: Vec::new(),
+                    test: None,
+                    test_gate_passed: false,
+                    grounded_direct_control: None,
+                    grounded_direct_control_passed: false,
+                    final_test_was_untouched_during_learning: true,
+                    candidate_selected_from_train_only: false,
+                    candidate_snapshot_published: false,
+                    production_promotion_claimed: false,
+                    status: "valid_no_go_training".to_string(),
+                };
+                let report_sha256 = write_report(&report_path, &receipt)?;
+                journal.finish(&receipt.status, report_sha256)?;
+                return Err(error);
+            }
+        };
     let selected = candidates
         .iter()
         .find(|candidate| candidate.genome.id == selected_profile_id)
@@ -354,6 +414,7 @@ pub(super) fn run() -> Result<(), String> {
             campaign_budget: journal.budget(),
             campaign_usage: journal.usage(),
             train_runs,
+            learning_readiness,
             reflection_evidence_sha256,
             candidate_population,
             selected_candidate: Some(selected_candidate),
@@ -469,6 +530,7 @@ pub(super) fn run() -> Result<(), String> {
         campaign_budget: journal.budget(),
         campaign_usage: journal.usage(),
         train_runs,
+        learning_readiness,
         reflection_evidence_sha256,
         candidate_population,
         selected_candidate: Some(selected_candidate),

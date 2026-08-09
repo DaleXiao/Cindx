@@ -61,10 +61,7 @@ pub(crate) fn run_background_prompt_mutation_stage_with_liveness(
         collaboration_system_prompt_for_run(&config.agent_system_prompt, run_context),
         prompt,
         Some(control.clone()),
-        prompt_mutation_call_limits(
-            response_start_timeout,
-            run_context_steer_epoch(run_context),
-        ),
+        prompt_mutation_call_limits(response_start_timeout, run_context_steer_epoch(run_context)),
         None,
         |_| {},
     );
@@ -118,27 +115,6 @@ pub(crate) fn append_prompt_mutation_status(
         metadata_with_context(metadata, run_context),
     )
     .map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn provider_protocol_activity_only_extends_explicit_liveness_calls() {
-        let production = prompt_mutation_call_limits(None, 7);
-        let bounded_candidate =
-            prompt_mutation_call_limits(Some(std::time::Duration::from_secs(300)), 7);
-
-        assert!(!production.provider_activity_is_progress);
-        assert_eq!(production.no_progress_timeout, None);
-        assert!(bounded_candidate.provider_activity_is_progress);
-        assert_eq!(
-            bounded_candidate.no_progress_timeout,
-            Some(std::time::Duration::from_secs(300))
-        );
-        assert_eq!(bounded_candidate.objective_epoch, Some(7));
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -358,4 +334,25 @@ pub(crate) fn generate_background_prompt_mutation(
         }
     };
     Ok(generated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_protocol_activity_only_extends_explicit_liveness_calls() {
+        let production = prompt_mutation_call_limits(None, 7);
+        let bounded_candidate =
+            prompt_mutation_call_limits(Some(std::time::Duration::from_secs(300)), 7);
+
+        assert!(!production.provider_activity_is_progress);
+        assert_eq!(production.no_progress_timeout, None);
+        assert!(bounded_candidate.provider_activity_is_progress);
+        assert_eq!(
+            bounded_candidate.no_progress_timeout,
+            Some(std::time::Duration::from_secs(300))
+        );
+        assert_eq!(bounded_candidate.objective_epoch, Some(7));
+    }
 }

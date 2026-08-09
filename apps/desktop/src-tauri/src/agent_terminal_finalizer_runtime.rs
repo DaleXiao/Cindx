@@ -2,10 +2,10 @@ use crate::{
     agent_completion_runtime::{
         finalize_agent_completion, AgentCompletionDelivery, AgentCompletionOutcome,
     },
+    agent_failure_terminal_runtime::{resolve_loop_failure, AgentFailureLoopOutcome},
     agent_finalizer_runtime::direct_finalizer_policy::{
         insert_direct_finalizer_receipt_metadata, selected_direct_finalizer_policy,
     },
-    agent_failure_terminal_runtime::{resolve_loop_failure, AgentFailureLoopOutcome},
     agent_finalizer_runtime::{
         grounded_finalizer_fallback, prepare_finalizer_turn, resolve_finalizer_fallback,
         resolve_finalizer_response,

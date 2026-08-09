@@ -272,6 +272,7 @@ pub(crate) fn begin_agent_run_control_for_effort(
     register_agent_run_control_for_session(state, session_id, control)
 }
 
+#[cfg(feature = "realworld-eval")]
 pub(crate) fn begin_agent_run_control_with_budget(
     state: &tauri::State<'_, AppState>,
     session_id: &str,

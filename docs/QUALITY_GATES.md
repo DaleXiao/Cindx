@@ -321,6 +321,28 @@ test, and snapshot publication. Any successor campaign requires a new frozen
 protocol and separate explicit authorization. V6 is that frozen successor
 protocol, but no V6 provider run has occurred.
 
+The current implementation retains the frozen V7 product suite and uses the V8
+evidence schema. It adds a pre-mutation learning-readiness gate and a
+pre-product-run intervention gate. Product seed receipts must bind the exact
+semantic execution plan, route-decision profile, and any actually exercised
+workflow-execution profile. Direct-only seed evidence returns a valid dormant
+no-go without mutation; identity mismatch fails closed. A generated candidate
+is not product-evaluated unless the zero-provider check proves a changed semantic
+plan on at least one frozen Workflow diagnostic. Because current workflow genes
+feed both route and Task Graph construction, the receipt records both coupled
+layers and forbids single-layer attribution.
+
+The deterministic gates can be exercised without provider access:
+
+```bash
+cargo test -p orchestrator --lib
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --features realworld-eval --lib
+```
+
+Passing them proves schema, identity, dormant-layer, and intervention behavior;
+it does not prove answer-quality uplift and does not authorize a provider run.
+
 For provenance, the first V5 campaign used a clean exact revision and a fresh
 outside-Git directory. The command is retained to document that run, not to
 authorize a repeat after validation evidence has been observed:

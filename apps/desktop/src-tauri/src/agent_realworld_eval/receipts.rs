@@ -4,6 +4,7 @@ use super::direct_finalizer_receipts::{
 use super::{metadata_u64, Treatment};
 use crate::*;
 use agent_core::Event;
+use orchestrator::ExecutionPlan;
 
 const PROVIDER_RESPONSE_ID_DOMAIN: &str = "cindx.provider-response-id.v1\0";
 const PROVIDER_FINGERPRINT_DOMAIN: &str = "cindx.provider-system-fingerprint.v1\0";
@@ -56,6 +57,10 @@ pub(super) struct StrategyReceipt {
     pub(super) decision_source: String,
     pub(super) execution_constraint: String,
     pub(super) decision_sha256: String,
+    pub(super) execution_plan_sha256: Option<String>,
+    pub(super) execution_plan_semantic_sha256: Option<String>,
+    pub(super) execution_plan_authority: Option<String>,
+    pub(super) workflow_execution_profile_sha256: Option<String>,
     pub(super) routing_signature_sha256: String,
     pub(super) profile_source: String,
     pub(super) profile_id: String,
@@ -146,6 +151,34 @@ pub(super) fn strategy_receipt_from_events(
     let decision_json = required_metadata_any(&event.metadata, &["run_decision", "decision"])?;
     let decision = serde_json::from_str::<AgentRunDecision>(decision_json)
         .map_err(|error| format!("agent strategy decision receipt is invalid: {error}"))?;
+    let execution_plan = event
+        .metadata
+        .get("execution_plan")
+        .map(|encoded| {
+            let plan = serde_json::from_str::<ExecutionPlan>(encoded)
+                .map_err(|error| format!("agent execution-plan receipt is invalid: {error}"))?;
+            plan.validate()?;
+            if plan.action() != &decision {
+                return Err(
+                    "agent execution plan does not match the legacy run-decision projection"
+                        .to_string(),
+                );
+            }
+            let digest = plan.digest()?;
+            let semantic_digest = plan.semantic_digest()?;
+            if event.metadata.get("execution_plan_sha256") != Some(&digest)
+                || event.metadata.get("execution_plan_semantic_sha256") != Some(&semantic_digest)
+                || event
+                    .metadata
+                    .get("execution_plan_authority")
+                    .map(String::as_str)
+                    != Some(plan.authority.label())
+            {
+                return Err("agent execution-plan metadata digest is inconsistent".to_string());
+            }
+            Ok(plan)
+        })
+        .transpose()?;
     let execution_constraint = event
         .metadata
         .get("execution_constraint")
@@ -248,6 +281,20 @@ pub(super) fn strategy_receipt_from_events(
         decision_source: required_metadata(&event.metadata, "decision_source")?.to_string(),
         execution_constraint: execution_constraint.to_string(),
         decision_sha256: domain_hash("cindx.agent-run-decision.v1\0", decision_json),
+        execution_plan_sha256: execution_plan
+            .as_ref()
+            .map(ExecutionPlan::digest)
+            .transpose()?,
+        execution_plan_semantic_sha256: execution_plan
+            .as_ref()
+            .map(ExecutionPlan::semantic_digest)
+            .transpose()?,
+        execution_plan_authority: execution_plan
+            .as_ref()
+            .map(|plan| plan.authority.label().to_string()),
+        workflow_execution_profile_sha256: execution_plan
+            .as_ref()
+            .and_then(|plan| plan.workflow_execution_profile_sha256.clone()),
         routing_signature_sha256: domain_hash(
             "cindx.agent-routing-signature.v1\0",
             routing_signature,
@@ -255,7 +302,9 @@ pub(super) fn strategy_receipt_from_events(
         profile_source,
         profile_id: genome.id.clone(),
         profile_sha256,
-        route_profile_semantics_exercised: route_profile_sha256 != seed_route_profile_sha256,
+        route_profile_semantics_exercised: decision.execution
+            == orchestrator::AgentExecutionMode::Workflow
+            && route_profile_sha256 != seed_route_profile_sha256,
         route_profile_sha256,
         profile_generation: genome.generation,
         parent_profile_ids: genome.parents.clone(),
@@ -468,9 +517,7 @@ mod tests {
             ),
             (
                 "run_terminal_physical_model_attempt_reserve".to_string(),
-                budget
-                    .terminal_physical_model_attempt_reserve
-                    .to_string(),
+                budget.terminal_physical_model_attempt_reserve.to_string(),
             ),
         ])
     }

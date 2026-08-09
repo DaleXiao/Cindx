@@ -681,6 +681,20 @@ pub struct AgentRunDecisionRequest {
     pub prompt_profile_sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunDecisionDraft {
+    pub conductor_candidate: AgentRunDecision,
+    pub selected_action: AgentRunDecision,
+    pub compatibility_route: CausalRouteSelectionV2,
+}
+
+impl AgentRunDecisionDraft {
+    pub fn into_legacy_selected(mut self) -> AgentRunDecision {
+        self.selected_action.causal_route = Some(self.compatibility_route);
+        self.selected_action
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunDecisionHarness {
     request: AgentRunDecisionRequest,
@@ -796,6 +810,11 @@ impl AgentRunDecisionHarness {
     }
 
     pub fn parse(&self, response: &str) -> Result<AgentRunDecision, String> {
+        self.parse_draft(response)
+            .map(AgentRunDecisionDraft::into_legacy_selected)
+    }
+
+    pub fn parse_draft(&self, response: &str) -> Result<AgentRunDecisionDraft, String> {
         let start = response
             .find('{')
             .ok_or_else(|| "run decision did not return a JSON object".to_string())?;
@@ -803,7 +822,7 @@ impl AgentRunDecisionHarness {
             .rfind('}')
             .filter(|end| *end >= start)
             .ok_or_else(|| "run decision returned incomplete JSON".to_string())?;
-        let mut decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
+        let decision = serde_json::from_str::<AgentRunDecision>(&response[start..=end])
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
         self.request
@@ -840,13 +859,14 @@ impl AgentRunDecisionHarness {
         let legacy_auto_assessment = (normalized_effort == "auto"
             && decision.execution == AgentExecutionMode::Workflow)
             .then(|| AutoComputationAssessment::from_causal_route(&receipt));
+        let mut selected_action = decision.clone();
         if decision.execution == AgentExecutionMode::Workflow && !receipt.admitted() {
             let calibration = if receipt.reason == CausalRouteReason::MatchedEvidenceAgainst {
                 AgentDecisionCalibration::MatchedEvidence
             } else {
                 AgentDecisionCalibration::ValueOfComputation
             };
-            decision = decision.calibrated_to_direct(
+            selected_action = selected_action.calibrated_to_direct(
                 calibration,
                 format!(
                     "Causal Router v2 {}: conductor_confidence_weighted={}bps matched_adjusted={}bps admission_floor={}bps net_lower={}bps",
@@ -858,15 +878,18 @@ impl AgentRunDecisionHarness {
                 ),
                 legacy_auto_assessment,
             );
-            decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
+            selected_action.validate(&self.request.allowed_models, self.request.max_parallelism)?;
             self.request
                 .route_requirements
-                .validate_decision(&decision, &self.request.model_candidates)?;
+                .validate_decision(&selected_action, &self.request.model_candidates)?;
         } else if let Some(assessment) = legacy_auto_assessment {
-            decision.computation_value = Some(assessment);
+            selected_action.computation_value = Some(assessment);
         }
-        decision.causal_route = Some(receipt);
-        Ok(decision)
+        Ok(AgentRunDecisionDraft {
+            conductor_candidate: decision,
+            selected_action,
+            compatibility_route: receipt,
+        })
     }
 }
 
@@ -954,6 +977,37 @@ mod tests {
                 .min_distinct_contributions,
             2
         );
+    }
+
+    #[test]
+    fn decision_draft_preserves_the_conductor_candidate_before_compatibility_downshift() {
+        let mut candidate = AgentRunDecision::direct("executor");
+        candidate.execution = AgentExecutionMode::Workflow;
+        candidate.verification = AgentVerificationPolicy::Independent;
+        candidate.max_parallelism = 2;
+        candidate.min_successful_branches = 2;
+        candidate.distinct_contributions = 2;
+        candidate.estimated_steps = 3;
+        candidate.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS - 1;
+        candidate.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
+        candidate.stop_policy = ConductorStopPolicy::Quorum;
+        candidate.rationale = "independent comparison".to_string();
+
+        let draft = AgentRunDecisionHarness::new(request())
+            .parse_draft(&serde_json::to_string(&candidate).unwrap())
+            .expect("low-value workflow should produce an auditable compatibility draft");
+
+        assert_eq!(
+            draft.conductor_candidate.execution,
+            AgentExecutionMode::Workflow
+        );
+        assert_eq!(draft.selected_action.execution, AgentExecutionMode::Direct);
+        assert_eq!(
+            draft.compatibility_route.reason,
+            CausalRouteReason::BelowPredictionFloor
+        );
+        assert!(draft.conductor_candidate.causal_route.is_none());
+        assert!(draft.selected_action.causal_route.is_none());
     }
 
     #[test]

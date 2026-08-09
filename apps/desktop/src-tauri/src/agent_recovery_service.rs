@@ -19,11 +19,11 @@ use crate::{
 #[path = "agent_recovery_status.rs"]
 mod recovery_status;
 pub(super) use crate::agent_recovery_identity::recovery_envelope_matches_active_turn;
+use agent_application::insert_run_objectives;
 use agent_core::{
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
     AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
-use agent_application::insert_run_objectives;
 pub(super) use recovery_status::agent_task_is_cancelled;
 use recovery_status::{latest_agent_run_event, recovery_run_context};
 

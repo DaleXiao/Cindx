@@ -162,10 +162,10 @@ impl CampaignJournal {
             .usage
             .product_tokens
             .saturating_add(run.total_tokens);
-        if self.document.usage.product_model_calls
-            > self.document.budget.max_product_model_calls
-        {
-            return Err("workflow GEPA observed product model calls exceed the campaign cap".into());
+        if self.document.usage.product_model_calls > self.document.budget.max_product_model_calls {
+            return Err(
+                "workflow GEPA observed product model calls exceed the campaign cap".into(),
+            );
         }
         self.persist()
     }
@@ -242,14 +242,14 @@ impl CampaignJournal {
             .map(|receipt| receipt.chain_sha256.clone());
         let completed_at_ms = current_time_millis();
         let chain_payload = serde_json::to_vec(&(
-                prior_chain_sha256.as_deref(),
-                expected_kind,
-                pending.label_sha256.as_str(),
-                model_calls,
-                total_tokens,
-                terminal_status,
-                output_sha256.as_deref(),
-            ))
+            prior_chain_sha256.as_deref(),
+            expected_kind,
+            pending.label_sha256.as_str(),
+            model_calls,
+            total_tokens,
+            terminal_status,
+            output_sha256.as_deref(),
+        ))
         .map_err(|error| format!("failed to encode workflow GEPA action: {error}"))?;
         let chain_sha256 = sha256_hex(&chain_payload);
         self.document.actions.push(ActionReceipt {
@@ -319,6 +319,10 @@ mod tests {
             profile_id: None,
             profile_sha256: None,
             route_profile_sha256: None,
+            execution_plan_sha256: None,
+            execution_plan_semantic_sha256: None,
+            execution_plan_authority: None,
+            workflow_execution_profile_sha256: None,
             route_profile_semantics_exercised: false,
             workflow_profile_exercised: false,
         }
@@ -381,8 +385,8 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let mut expired_journal = journal(&temp.path().join("journal.json"));
-        expired_journal.document.created_at_ms = current_time_millis()
-            .saturating_sub(MAX_CAMPAIGN_DURATION_MS);
+        expired_journal.document.created_at_ms =
+            current_time_millis().saturating_sub(MAX_CAMPAIGN_DURATION_MS);
         assert!(expired_journal.begin_product("expired").is_err());
     }
 }

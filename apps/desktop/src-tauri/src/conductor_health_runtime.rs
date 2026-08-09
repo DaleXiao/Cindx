@@ -1,6 +1,8 @@
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use agent_core::Metadata;
-use orchestrator::{sha256_hex, AgentRunDecision};
+use orchestrator::sha256_hex;
+#[cfg(test)]
+use orchestrator::AgentRunDecision;
 use std::collections::{BTreeMap, VecDeque};
 #[cfg(test)]
 use std::mem::size_of;
@@ -132,8 +134,15 @@ pub(crate) fn record_conductor_fast_bypass(run_context: &mut Metadata) {
     run_context.insert("conductor_hedge_enabled".to_string(), "false".to_string());
 }
 
+#[cfg(test)]
 pub(crate) fn conductor_health_outcome(
     result: &Result<AgentRunDecision, CollaborationStageError>,
+) -> ConductorHealthOutcome {
+    conductor_health_outcome_for(result)
+}
+
+fn conductor_health_outcome_for<T>(
+    result: &Result<T, CollaborationStageError>,
 ) -> ConductorHealthOutcome {
     match result {
         Ok(_) => ConductorHealthOutcome::ValidDecision,
@@ -193,16 +202,16 @@ pub(crate) fn route_conductor_models(
     (provider_scope, generation, routing.models)
 }
 
-pub(crate) fn record_conductor_attempt(
+pub(crate) fn record_conductor_attempt<T>(
     ledger: &Mutex<ConductorHealthLedger>,
     provider_scope: &str,
     generation: u64,
     model: &str,
     model_calls: usize,
-    result: &Result<AgentRunDecision, CollaborationStageError>,
+    result: &Result<T, CollaborationStageError>,
     run_context: &mut Metadata,
 ) {
-    let outcome = conductor_health_outcome(result);
+    let outcome = conductor_health_outcome_for(result);
     ledger
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -815,9 +824,9 @@ mod tests {
     fn goal3_conductor_health_persists_bounded_attempt_audit_metadata() {
         let ledger = Mutex::new(ConductorHealthLedger::default());
         let mut run_context = Metadata::new();
-        let result = Err(CollaborationStageError::DecisionRejected(
-            "invalid decision".to_string(),
-        ));
+        let result: Result<AgentRunDecision, CollaborationStageError> = Err(
+            CollaborationStageError::DecisionRejected("invalid decision".to_string()),
+        );
         record_conductor_attempt(
             &ledger,
             "scope",

@@ -195,8 +195,8 @@ pub(crate) fn finalize_agent_completion(
     });
     let terminal_selection_override =
         terminal_selection_overrides(terminal_selection.as_ref(), &final_answer);
-    let persist_selected_terminal_message = terminal_selection_override
-        || (delivery.is_finalizer() && !delivery.already_persisted());
+    let persist_selected_terminal_message =
+        terminal_selection_override || (delivery.is_finalizer() && !delivery.already_persisted());
     if let Some(selected) = terminal_selection
         .as_ref()
         .filter(|_| terminal_selection_override)
@@ -300,10 +300,7 @@ pub(crate) fn finalize_agent_completion(
             "collaboration".to_string(),
             collaboration.is_some().to_string(),
         ),
-        (
-            "collaboration_synthesized".to_string(),
-            "false".to_string(),
-        ),
+        ("collaboration_synthesized".to_string(), "false".to_string()),
         (
             "completion_delivery".to_string(),
             delivery.label().to_string(),

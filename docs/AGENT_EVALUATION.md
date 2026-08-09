@@ -146,6 +146,21 @@ Pareto resource threshold, so validation, test, control, snapshot publication,
 and production promotion remained sealed. This is valid targeted no-go evidence,
 not an intelligence-uplift result.
 
+Current source retains that frozen V7 product suite but emits
+`cindx.workflow-gepa-product-evidence.v8`. This is a receipt-contract change,
+not a new provider result. Seed product receipts are converted to typed
+diagnostic plans that bind the semantic `ExecutionPlan`, exact route-decision
+profile, and exact workflow-execution profile when Workflow actually ran. A
+direct-only seed makes workflow learning dormant and stops before mutation;
+missing or foreign identities invalidate the diagnostic. Candidate generation
+must then pass a zero-provider intervention gate before any matched product run:
+the candidate must change the route and workflow profile identities and cause a
+real semantic plan change on at least one frozen Workflow diagnostic. The
+current genome changes both layers together, so an eventual provider result
+would evaluate a coupled treatment rather than identify a route-only or
+workflow-only effect. These deterministic checks improve causal validity only;
+they do not establish quality, efficiency, promotion, or frontier uplift.
+
 The Pro-to-Auto path additionally replays the current Pro champion's two gates,
 transfers only the complete bounded structural delta relative to the stable Pro
 it defeated, and uses an immutable, dual-sided staged canary with conflict-safe

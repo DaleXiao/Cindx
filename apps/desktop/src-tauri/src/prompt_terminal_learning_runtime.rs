@@ -1,6 +1,5 @@
 use crate::{
-    collaboration_execution::collaboration_candidate_models,
-    configuration_models::ProviderConfig,
+    collaboration_execution::collaboration_candidate_models, configuration_models::ProviderConfig,
     prompt_pairwise_runtime::schedule_prompt_pairwise_evaluation,
     prompt_profile_serving::restore_prompt_profile_selection,
 };
@@ -71,7 +70,9 @@ fn terminal_prompt_evaluation_schedule(
         return Ok(None);
     }
     let selection = restore_prompt_profile_selection(effort.label(), project_id, run_context)?
-        .ok_or_else(|| "completed agent run is missing its prompt profile assignment".to_string())?;
+        .ok_or_else(|| {
+            "completed agent run is missing its prompt profile assignment".to_string()
+        })?;
     let agent_budget = effort.max_parallelism();
     let worker_models = collaboration_candidate_models(config, agent_budget);
     if worker_models.is_empty() {

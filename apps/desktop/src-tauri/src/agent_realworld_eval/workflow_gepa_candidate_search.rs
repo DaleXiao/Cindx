@@ -1,6 +1,5 @@
 use super::workflow_gepa_campaign_contract::{
-    aggregate_pairs, PairAggregateReceipt, ProductPairReceipt, CAMPAIGN_SUITE_ID,
-    CAMPAIGN_VERSION,
+    aggregate_pairs, PairAggregateReceipt, ProductPairReceipt, CAMPAIGN_SUITE_ID, CAMPAIGN_VERSION,
 };
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
@@ -9,9 +8,10 @@ use crate::prompt_mutation_runtime::run_background_prompt_mutation_stage_with_li
 use agent_core::Metadata;
 use agent_runtime::AgentRunControl;
 use orchestrator::{
-    prompt_genome_sha256, sha256_hex, AgentEvaluationCaseScore,
-    AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket, AgentEvaluationSplit,
-    AgentPolicy, ConductorPromptGenome, FrozenPromptProfileSnapshot,
+    assess_prompt_execution_intervention, classify_prompt_mutation, prompt_genome_sha256,
+    sha256_hex, AgentEvaluationCaseScore, AgentEvaluationEvidenceSource,
+    AgentEvaluationReflectionPacket, AgentEvaluationSplit, AgentPolicy, ConductorPromptGenome,
+    FrozenPromptProfileSnapshot, PromptExecutionDiagnosticPlan, PromptExecutionInterventionReceipt,
     PromptInstanceParetoArchive,
 };
 use serde::Serialize;
@@ -21,10 +21,8 @@ use std::sync::Arc;
 pub(super) const TARGET_CANDIDATE_POPULATION: usize = 3;
 const MAX_CANDIDATE_PROPOSALS: usize = 6;
 const MODEL_CALLS_PER_PROPOSAL: usize = 2;
-const CANDIDATE_SEARCH_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(60 * 60);
-const CANDIDATE_MODEL_CALL_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10 * 60);
+const CANDIDATE_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const CANDIDATE_MODEL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const CANDIDATE_RESPONSE_START_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
 const TRAIN_RESOURCE_RATIO_CEILING: f64 = 1.25;
@@ -40,6 +38,7 @@ pub(super) struct CandidateIdentityReceipt {
     pub(super) mutation_repaired: bool,
     pub(super) proposal_index: usize,
     pub(super) mutated_genes: Vec<String>,
+    pub(super) intervention: PromptExecutionInterventionReceipt,
     pub(super) snapshot_artifact_sha256: String,
 }
 
@@ -82,6 +81,7 @@ pub(super) fn generate_candidate_population(
     packets: &[AgentEvaluationReflectionPacket],
     training_dataset_sha256: &str,
     reflection_evidence_sha256: &str,
+    diagnostic_plans: &[PromptExecutionDiagnosticPlan],
 ) -> Result<GeneratedCandidatePopulation, String> {
     let control = Arc::new(AgentRunControl::with_budget(candidate_search_budget()));
     let seed_route_sha256 = parent.route_decision_profile_sha256(AgentPolicy::Pro.label())?;
@@ -138,8 +138,7 @@ pub(super) fn generate_candidate_population(
             }
         };
         let mutated_genes = mutated_gene_names(parent, &genome);
-        let mutation_assignment =
-            candidate_mutation_assignment(&genome, &mutated_genes)?;
+        let mutation_assignment = candidate_mutation_assignment(&genome, &mutated_genes)?;
         if !(1..=2).contains(&mutated_genes.len()) {
             search_history.push(CandidateSearchAttempt {
                 proposal_index: index + 1,
@@ -151,6 +150,21 @@ pub(super) fn generate_candidate_population(
                 index + 1,
                 mutated_genes.len(),
             ));
+            continue;
+        }
+        let intervention = assess_prompt_execution_intervention(
+            parent,
+            &genome,
+            AgentPolicy::Pro.label(),
+            diagnostic_plans,
+        )?;
+        if !intervention.eligible {
+            search_history.push(CandidateSearchAttempt {
+                proposal_index: index + 1,
+                outcome: "rejected_no_execution_plan_intervention",
+                mutation_assignment,
+            });
+            rejections.push(format!("proposal {}: {}", index + 1, intervention.reason,));
             continue;
         }
         let route_profile_sha256 =
@@ -186,6 +200,7 @@ pub(super) fn generate_candidate_population(
             mutation_repaired: repaired,
             proposal_index: index + 1,
             mutated_genes,
+            intervention,
             snapshot_artifact_sha256: snapshot.artifact_sha256()?,
         };
         population.push(GeneratedCandidate {
@@ -355,9 +370,8 @@ fn candidate_search_budget() -> agent_runtime::RunBudget {
     budget.agent_turns_per_extension = 1;
     budget.max_repair_attempts = 12;
     budget.max_physical_model_attempts = 48;
-    budget.max_total_tokens = 48_u64.saturating_mul(
-        agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
-    );
+    budget.max_total_tokens =
+        48_u64.saturating_mul(agent_runtime::CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT);
     budget.terminal_model_call_reserve = 0;
     budget.terminal_time_reserve = std::time::Duration::ZERO;
     budget.terminal_physical_model_attempt_reserve = 0;
@@ -369,40 +383,7 @@ fn mutated_gene_names(
     parent: &ConductorPromptGenome,
     candidate: &ConductorPromptGenome,
 ) -> Vec<String> {
-    let mut genes = Vec::new();
-    macro_rules! changed {
-        ($field:ident) => {
-            if candidate.$field != parent.$field {
-                genes.push(stringify!($field).to_string());
-            }
-        };
-    }
-    changed!(graph_depth);
-    changed!(verification);
-    changed!(context_policy);
-    changed!(max_parallel_branches);
-    changed!(tool_policy);
-    changed!(retry_policy);
-    changed!(topology_strategy);
-    changed!(role_strategy);
-    changed!(commit_strategy);
-    changed!(max_step_attempts);
-    let mut budget_comparison = candidate.clone();
-    budget_comparison.tool_policy = parent.tool_policy;
-    if budget_comparison.effective_max_model_turns_per_step()
-        != parent.effective_max_model_turns_per_step()
-    {
-        genes.push("max_model_turns_per_step".to_string());
-    }
-    if budget_comparison.effective_max_tool_calls_per_step()
-        != parent.effective_max_tool_calls_per_step()
-    {
-        genes.push("max_tool_calls_per_step".to_string());
-    }
-    if candidate.custom_directive.trim() != parent.custom_directive.trim() {
-        genes.push("custom_directive".to_string());
-    }
-    genes
+    classify_prompt_mutation(parent, candidate).changed_genes
 }
 
 pub(super) fn build_training_receipt(
@@ -440,11 +421,9 @@ fn training_ineligibility(aggregate: &PairAggregateReceipt) -> Option<&'static s
     }
     let resource_bounded = aggregate.latency_ratio <= TRAIN_RESOURCE_RATIO_CEILING
         && aggregate.token_ratio <= TRAIN_RESOURCE_RATIO_CEILING;
-    let quality_gain = aggregate.candidate_wins > 0
-        && aggregate.behavior_delta > f64::EPSILON
-        && resource_bounded;
-    let efficiency_gain = (aggregate.latency_ratio <= 0.95
-        && aggregate.token_ratio <= 1.05)
+    let quality_gain =
+        aggregate.candidate_wins > 0 && aggregate.behavior_delta > f64::EPSILON && resource_bounded;
+    let efficiency_gain = (aggregate.latency_ratio <= 0.95 && aggregate.token_ratio <= 1.05)
         || (aggregate.token_ratio <= 0.95 && aggregate.latency_ratio <= 1.05);
     let measured_gain = quality_gain || efficiency_gain;
     if !measured_gain {
@@ -629,12 +608,8 @@ mod tests {
         let later = candidate_population_search_instruction(2, &history);
 
         assert!(later.contains("proposal 3 of 6"));
-        assert!(later.contains(
-            "proposal 1 accepted_distinct_route: {\"graph_depth\":\"deep\"}"
-        ));
-        assert!(later.contains(
-            "proposal 2 rejected_duplicate_route: {\"graph_depth\":\"deep\"}"
-        ));
+        assert!(later.contains("proposal 1 accepted_distinct_route: {\"graph_depth\":\"deep\"}"));
+        assert!(later.contains("proposal 2 rejected_duplicate_route: {\"graph_depth\":\"deep\"}"));
         assert!(later.contains("Novelty is a hard acceptance condition"));
     }
 
@@ -661,10 +636,7 @@ mod tests {
         assert_eq!(fast.model_call_timeout, std::time::Duration::from_secs(180));
         assert_eq!(candidate.max_duration, CANDIDATE_SEARCH_TIMEOUT);
         assert_eq!(candidate.model_call_timeout, CANDIDATE_MODEL_CALL_TIMEOUT);
-        assert_eq!(
-            candidate.no_progress_timeout,
-            CANDIDATE_MODEL_CALL_TIMEOUT
-        );
+        assert_eq!(candidate.no_progress_timeout, CANDIDATE_MODEL_CALL_TIMEOUT);
         assert!(CANDIDATE_RESPONSE_START_TIMEOUT < candidate.model_call_timeout);
         assert_eq!(candidate.max_model_calls, 12);
         assert_eq!(candidate.max_physical_model_attempts, 48);

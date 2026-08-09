@@ -129,6 +129,11 @@ pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
     ]
     .into_iter()
     .collect::<Metadata>();
-    metadata.extend(planned.decision.route_observability_metadata());
+    metadata.extend(
+        planned
+            .execution_plan
+            .action()
+            .route_observability_metadata(),
+    );
     metadata
 }
