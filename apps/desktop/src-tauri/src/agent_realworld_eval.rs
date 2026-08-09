@@ -43,6 +43,7 @@ mod workflow_gepa_candidate_probe;
 mod workflow_gepa_candidate_search;
 
 use execution::{execute_case, CaseExecutionInput};
+use direct_finalizer_receipts::DirectFinalizerExecutionReceipt;
 use http_fixture::HttpFixtureReceipt;
 use memory_receipts::{
     validate_memory_effect_suite, MemoryEffectCaseContract, MemoryEvaluationReceipt,
@@ -233,6 +234,10 @@ struct RawRun {
     setup_failure: Option<SetupFailure>,
     resolved_budget: ResolvedBudgetReceipt,
     strategy_receipt: Option<StrategyReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_finalizer_execution: Option<DirectFinalizerExecutionReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_finalizer_evidence_error: Option<String>,
     memory_evaluation_receipt: Option<MemoryEvaluationReceipt>,
     model_receipts: Vec<ModelReceipt>,
     metrics: RuntimeMetrics,
@@ -282,6 +287,8 @@ struct EventMetrics {
     tool_invalid: usize,
     resolved_budget: Option<ResolvedBudgetReceipt>,
     strategy_receipt: Option<StrategyReceipt>,
+    direct_finalizer_execution: Option<DirectFinalizerExecutionReceipt>,
+    direct_finalizer_evidence_error: Option<String>,
     memory_evaluation_receipt: Option<MemoryEvaluationReceipt>,
     model_receipts: Vec<ModelReceipt>,
     evidence_errors: Vec<String>,
@@ -879,6 +886,8 @@ fn interrupted_run(
         setup_failure: None,
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
+        direct_finalizer_execution: None,
+        direct_finalizer_evidence_error: None,
         memory_evaluation_receipt: None,
         model_receipts: Vec::new(),
         metrics: RuntimeMetrics::default(),
@@ -921,6 +930,8 @@ fn failed_run(
         setup_failure: Some(details.setup_failure),
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
+        direct_finalizer_execution: None,
+        direct_finalizer_evidence_error: None,
         memory_evaluation_receipt: None,
         model_receipts: Vec::new(),
         metrics: RuntimeMetrics {

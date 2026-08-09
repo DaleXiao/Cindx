@@ -35,6 +35,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Workflow GEPA V9 invalid instrumentation attempt](evaluations/CINDX_WORKFLOW_GEPA_V9_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md) | `0.2.28` | One authorized clean-source attempt; first product cell reserved before receipt projection rejected the deliberate matched constraint | `INVALID_INSTRUMENTATION`: zero completed product receipts and no quality, candidate, snapshot, promotion, or capability conclusion |
 | [Workflow GEPA V10 invalid instrumentation attempt](evaluations/CINDX_WORKFLOW_GEPA_V10_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md) | `0.2.28` | One coding pair completed before the first research arm exposed independently planned treatment shapes | `INVALID_INSTRUMENTATION`: provider compliance and plan variation remained confounded with execution; no report, candidate, snapshot, promotion, or capability conclusion |
 | [Workflow GEPA V11 invalid evidence attempt](evaluations/CINDX_WORKFLOW_GEPA_V11_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md) | `0.2.28` | Shared workflow-plan anchor and runtime-only Direct projection; one first-arm reservation on clean source `24b11ac` | `INVALID_EVIDENCE`: direct-finalizer assignment evidence could not bind a terminal completion, so zero product receipts and zero matched pairs were admitted; no GO/NO-GO, candidate, snapshot, promotion, or capability conclusion |
+| [Workflow GEPA V12 frozen protocol](evaluations/CINDX_WORKFLOW_GEPA_V12_ROUTE_CAUSAL_PROTOCOL_0.2.29_2026-08-09.md) | current source | V11's shared-plan treatment with independent route/task-graph and direct-finalizer evidence projection; all tasks, budgets, gates, and one-shot rules unchanged | `PROTOCOL_ONLY`: deterministic regression checks cover the V11 failure shape; no V12 provider-backed GO/NO-GO or capability result exists yet |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
@@ -44,7 +45,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
 | Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, behavior-only route phenotype, authority ceilings, and operation-count bounds | Proves learned-profile wiring from route through Task Graph, recoverable serving projection, and hard safety/budget boundaries only; provider-backed uplift remains unverified |
-| Workflow GEPA route-causal campaign V11 | current source | Frozen V7 task splits and product gates; shared conductor candidate and workflow proposal; runtime-only Direct/Workflow treatment; route-only candidates; durable external journal and 33-run maximum | Deterministic causal boundaries pass, but the authorized V11 attempt is `INVALID_EVIDENCE`: its first arm could not bind direct-finalizer evidence to terminal completion, so no matched causal result, snapshot, or profile promotion exists |
+| Workflow GEPA route-causal campaign V12 | current source | Frozen V7 task splits and product gates; shared conductor candidate and workflow proposal; runtime-only Direct/Workflow treatment; independent route and finalizer evidence; route-only candidates; durable external journal and 33-run maximum | Deterministic causal boundaries are frozen; V11 remains `INVALID_EVIDENCE`, and V12 has no provider-backed result yet |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Memory lifecycle contract | current source | Matched-regression recall quarantine with expiry, verified-user authority, pin and requirement retention, observed-use preference, and hard capacity bounds | Proves deterministic forgetting and recall eligibility only; it does not establish provider answer-quality uplift |
 | Delivery-frontier runtime contract | current source | Production adaptive scheduling follows only nodes required by the synthesis or verification target and stops with disconnected speculation still pending | Proves bounded graph execution and avoids orphan model work; it does not establish provider collaboration-quality uplift |
@@ -152,7 +153,7 @@ and production promotion remained sealed. This is valid targeted no-go evidence,
 not an intelligence-uplift result.
 
 Current source retains that frozen V7 product suite but emits
-`cindx.workflow-gepa-product-evidence.v11`. The first arm in each pair requests
+`cindx.workflow-gepa-product-evidence.v12`. The first arm in each pair requests
 one workflow-capable conductor plan; the second arm reuses that exact private
 in-memory anchor. Workflow executes it, while Direct is a runtime projection of
 that same candidate. Arm order is counterbalanced. Exact conductor-candidate and
@@ -168,8 +169,12 @@ sealed in order. This is a causal-boundary and preregistration improvement, not
 a capability result. The one authorized V11 attempt reserved its first arm but
 admitted zero product receipts because direct-finalizer assignment evidence
 could not bind a terminal completion. It is `INVALID_EVIDENCE`, supplies no
-GO/NO-GO, and leaves production routing unchanged. V9 failed receipt projection.
-V10 completed one pair but then exposed that independently requesting Direct
+GO/NO-GO, and leaves production routing unchanged. V12 projects route/task-graph
+evidence independently from direct-finalizer execution evidence, so a failed
+product task remains a zero-quality outcome when the route evidence itself is
+complete. It preserves V11's frozen suite, treatment, thresholds, and budgets
+and has not yet been run. V9 failed receipt projection. V10 completed one pair
+but then exposed that independently requesting Direct
 and Workflow confounded planning with execution. The three failures are not
 quality, efficiency, promotion, or frontier evidence.
 

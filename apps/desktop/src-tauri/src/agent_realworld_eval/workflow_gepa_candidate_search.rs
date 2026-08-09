@@ -93,7 +93,7 @@ pub(super) fn generate_candidate_population(
             index,
             &search_history,
         ));
-        let mutation_id = format!("workflow-gepa-v11-route-mutation-{}", index + 1);
+        let mutation_id = format!("workflow-gepa-v12-route-mutation-{}", index + 1);
         let stage = format!("workflow_gepa_v9_route_mutation_{}", index + 1);
         let proposal_control = candidate_proposal_control(&control)?;
         let proposal = (|| {
@@ -302,7 +302,7 @@ fn parse_candidate_response(
     match parent.learned_route_mutation_from_response(response, candidate_id, packets) {
         Ok(candidate) => Ok((candidate, response_sha256, false)),
         Err(initial_error) => {
-            let mutation_id = format!("workflow-gepa-v11-route-mutation-repair-{}", index + 1);
+            let mutation_id = format!("workflow-gepa-v12-route-mutation-repair-{}", index + 1);
             let stage = format!("workflow_gepa_v9_route_mutation_repair_{}", index + 1);
             let mut repair_prompt = parent.reflective_route_mutation_prompt(packets)?;
             repair_prompt.push_str(&format!(
