@@ -589,7 +589,10 @@ test("binds tool receipt status to a complete ordered lifecycle", () => {
 test("binds product postcondition receipts to the frozen suite and complete evidence", () => {
   const value = fixture();
   const check = { path: "out/result.json", equals: { status: "ok" } };
+  const immutable = { path: "spec.md", content: "frozen contract\n" };
+  value.suite.cases[0].files = [immutable];
   value.suite.cases[0].verification.json_files = [check];
+  value.suite.cases[0].verification.immutable_files = [immutable.path];
   value.suiteBytes = Buffer.from(JSON.stringify(value.suite));
   value.raw.suite_sha256 = hash(value.suiteBytes);
   const profileArtifacts = {
@@ -620,6 +623,12 @@ test("binds product postcondition receipts to the frozen suite and complete evid
     Buffer.from([0]),
     Buffer.from(check.path)
   ]);
+  const immutableSubject = Buffer.concat([
+    Buffer.from("cindx.agent-realworld-postcondition-subject.v1\0"),
+    Buffer.from("immutable_fixture"),
+    Buffer.from([0]),
+    Buffer.from(immutable.path)
+  ]);
   for (const run of value.raw.runs.filter((run) => run.treatment !== "direct")) {
     run.verification.passed_checks = 3;
     run.verification.total_checks = 3;
@@ -631,6 +640,15 @@ test("binds product postcondition receipts to the frozen suite and complete evid
         observed_sha256: hash(expected),
         artifact_sha256: hash(expected),
         bytes: Buffer.byteLength(expected),
+        passed: true
+      },
+      {
+        kind: "immutable_fixture",
+        subject_sha256: hash(immutableSubject),
+        expected_sha256: hash(immutable.content),
+        observed_sha256: hash(immutable.content),
+        artifact_sha256: hash(immutable.content),
+        bytes: Buffer.byteLength(immutable.content),
         passed: true
       }
     ];

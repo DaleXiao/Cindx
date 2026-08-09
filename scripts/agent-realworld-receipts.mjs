@@ -138,6 +138,14 @@ function frozenPostconditions(testCase) {
     ...(verification.exact_files || []).map((check) =>
       receipt("exact_file", check.path, check.content)
     ),
+    ...(verification.immutable_files || []).map((fixturePath) => {
+      const fixture = testCase.files?.find((candidate) => candidate.path === fixturePath);
+      requireFact(
+        typeof fixture?.content === "string",
+        `${testCase.id}: immutable postcondition is not a declared fixture`
+      );
+      return receipt("immutable_fixture", fixturePath, fixture.content);
+    }),
     ...(verification.file_contains || []).map((check) =>
       receipt("file_contains", check.path, JSON.stringify(check.values))
     ),
