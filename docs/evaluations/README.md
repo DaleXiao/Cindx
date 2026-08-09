@@ -158,7 +158,8 @@ revision and is no longer the current product decision.
   replaces prescribed route labels and fixed mutation directions with measured
   Conductor route choice and trajectory-grounded one-or-two-gene proposals. It
   also adds a durable external action journal and strict product/campaign caps.
-  It is `PROTOCOL_ONLY`: no V7 provider result or capability claim exists.
+  The protocol document remains the preregistered contract; the separate
+  `0.2.26` provider report below records its completed train-only `NO-GO` result.
 
 - [Cindx Workflow GEPA V7 interrupted campaign 0.2.25](CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.md)
   records the one authorized run on clean source `8be0fb1`. Both training seed
@@ -166,6 +167,17 @@ revision and is no longer the current product decision.
   population existed. It is `INTERRUPTED_CAMPAIGN` and supports no capability
   conclusion, snapshot, or production-profile change. The sanitized evidence is
   [retained here](CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.json).
+
+- [Cindx Workflow GEPA V7 provider evaluation 0.2.26](CINDX_WORKFLOW_GEPA_V7_0.2.26_2026-08-09.md)
+  records the separate authorized run on clean source `bc37fa9`. Candidate
+  generation completed in three calls, and all three distinct candidates
+  completed both matched training pairs with full quality and zero safety
+  violations. All six pairs tied, all candidate runs remained Direct, and no
+  candidate met the Pareto resource gate. The result is
+  `VALID_TARGETED_EVIDENCE`, `NO_GO_TRAINING`; validation, test, Grounded Direct
+  control, snapshot publication, and production promotion remained sealed. The
+  sanitized report is
+  [retained here](CINDX_WORKFLOW_GEPA_V7_0.2.26_2026-08-09.json).
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
