@@ -697,11 +697,14 @@ Therefore the current claim is:
   journal reserves every provider action before execution, with bounded product
   and campaign budgets. Train-only selection, unseen validation, four untouched
   test cases, and the sealed Grounded Direct control remain. Deterministic V7
-  checks pass. The one authorized provider campaign completed both training
+  checks pass. The first authorized provider campaign completed both training
   seeds but stopped on `no_progress` during candidate mutation before a
-  population existed. It was not rerun; validation, test, control, snapshot,
-  and production promotion remained sealed, so the intelligence conclusion is
-  unchanged.
+  population existed. A separate `0.2.26` campaign on source `bc37fa9` generated
+  three distinct candidates and completed all six matched training pairs with
+  full quality, completion, and zero safety violations. All pairs tied, all
+  candidates remained Direct, and none met the train Pareto resource gate, so
+  the valid decision is `NO_GO_TRAINING`. Validation, test, control, snapshot,
+  and production promotion remained sealed; no intelligence uplift is shown.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
