@@ -8,6 +8,7 @@ use std::process::Command;
 use std::time::Instant;
 use tauri::Manager;
 
+mod conductor_ownership_suite;
 mod direct_finalizer;
 mod direct_finalizer_campaign;
 mod direct_finalizer_campaign_contract;
@@ -633,7 +634,9 @@ fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
             (false, None) => {}
         }
     }
-    if suite.schema == MEMORY_EFFECT_SUITE_SCHEMA {
+    if conductor_ownership_suite::is_conductor_ownership_suite(suite) {
+        conductor_ownership_suite::validate_conductor_ownership_suite(suite)?;
+    } else if suite.schema == MEMORY_EFFECT_SUITE_SCHEMA {
         validate_memory_effect_suite(suite)?;
     } else {
         let required = BTreeSet::from([

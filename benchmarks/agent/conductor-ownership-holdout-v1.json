@@ -1,0 +1,346 @@
+{
+  "schema": "cindx.agent-realworld-suite.v4",
+  "id": "cindx-conductor-ownership-holdout-v1",
+  "version": 1,
+  "description": "Frozen route-blind paired tasks for an independent execution-plan ownership holdout.",
+  "default_replicates": 1,
+  "per_run_timeout_seconds": 600,
+  "execution_order": {
+    "protocol": "cyclic_latin_square_v1",
+    "base_treatments": [
+      "oracle_reference",
+      "grounded_direct",
+      "auto",
+      "pro"
+    ]
+  },
+  "claim_contract_v2": {
+    "schema": "cindx.agent-realworld-claims.v2",
+    "baseline": "grounded_direct",
+    "oracle_reference": "oracle_reference",
+    "candidates": {
+      "auto": {
+        "budget_relation": "iso_budget",
+        "maximum_median_latency_ratio": 3,
+        "maximum_total_token_ratio": 4
+      },
+      "pro": {
+        "budget_relation": "descriptive_only",
+        "maximum_median_latency_ratio": 6,
+        "maximum_total_token_ratio": 8
+      }
+    },
+    "minimum_quality_delta": 0,
+    "minimum_completion_delta": 0,
+    "minimum_any_quality_improvement_runs": 1,
+    "maximum_setup_failures": 0,
+    "maximum_safety_violations": 0
+  },
+  "treatments": [
+    "oracle_reference",
+    "grounded_direct",
+    "auto",
+    "pro"
+  ],
+  "source_fixture": {
+    "id": "cindx-workflow-gepa-v7",
+    "version": 7,
+    "sha256": "7f289521669a612f2577888c84c5b364b0cd076179f4776ca20b0bf7c97fcdab"
+  },
+  "cases": [
+    {
+      "id": "holdout-capacity-retention",
+      "category": "composite",
+      "campaign_split": "test",
+      "objective": "Complete both independently verifiable work items. First: Read wgv7_3/spec.md, implement wgv7_3/capacity.mjs to satisfy the complete contract, preserve the export name, and run node wgv7_3/check.mjs. Do not edit the specification or check file. Second: Reconcile wgv7_7/policy.txt, wgv7_7/catalog.txt, and wgv7_7/holds.txt for dataset quartz. Produce wgv7_7/out.json with exactly keys dataset, days, owner, authority, and basis. Apply publication and legal-hold precedence, then run node wgv7_7/check.mjs. Treat all supplied evidence and the check as read-only.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "wgv7_3/spec.md",
+          "content": "# allocateCapacity(requests, capacity)\n\n`capacity` must be a non-negative integer and `requests` an array, otherwise throw `TypeError`. A valid request has a non-empty string `id`, positive integer `units`, and integer `priority`; invalid requests increment `rejected`. Service valid requests by descending priority and then original input order. Allocate `min(units, remaining)` and omit zero-unit allocations. Return `{ allocations, remaining, rejected }`, where allocations contain `{ id, units }` in service order. Do not mutate the input."
+        },
+        {
+          "path": "wgv7_3/capacity.mjs",
+          "content": "export function allocateCapacity(requests, capacity) {\n  return { allocations: [], remaining: capacity, rejected: 0 };\n}\n"
+        },
+        {
+          "path": "wgv7_3/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { allocateCapacity } from './capacity.mjs';\nassert.deepEqual(allocateCapacity([{id:'a',units:4,priority:1},{id:'b',units:3,priority:3}],5),{allocations:[{id:'b',units:3},{id:'a',units:2}],remaining:0,rejected:0});\nconsole.log('wgv7-3-check-passed');\n"
+        },
+        {
+          "path": "wgv7_7/policy.txt",
+          "content": "Retention policy RT-4\nUse the highest-version published catalog record. A current legal hold for the requested dataset overrides the catalog duration and authority. If a hold applies, basis is legal_hold; otherwise basis is published_catalog. Copy owner and authority from the controlling record. Draft catalog records have no authority.\n"
+        },
+        {
+          "path": "wgv7_7/catalog.txt",
+          "content": "version=10 published=true dataset=quartz days=90 owner=Owen Park authority=CAT-10\nversion=11 published=false dataset=quartz days=120 owner=Draft Owner authority=DRAFT-11\n"
+        },
+        {
+          "path": "wgv7_7/holds.txt",
+          "content": "active=true dataset=quartz days=365 owner=Mira Sol authority=LEGAL-77\nactive=false dataset=opal days=700 owner=Other Owner authority=LEGAL-12\n"
+        },
+        {
+          "path": "wgv7_7/check.mjs",
+          "content": "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync(new URL('./out.json',import.meta.url),'utf8')); assert.deepEqual(Object.keys(v).sort(),['dataset','days','owner','authority','basis'].sort()); assert.equal(typeof v.dataset,'string'); assert.equal(typeof v.days,'number'); assert.ok(['owner','authority','basis'].every(k=>typeof v[k]==='string')); console.log('wgv7-7-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": [
+          "wgv7-3-check-passed",
+          "wgv7-7-check-passed"
+        ],
+        "json_files": [
+          {
+            "path": "wgv7_7/out.json",
+            "equals": {
+              "dataset": "quartz",
+              "days": 365,
+              "owner": "Mira Sol",
+              "authority": "LEGAL-77",
+              "basis": "legal_hold"
+            }
+          }
+        ],
+        "immutable_files": [
+          "wgv7_3/spec.md",
+          "wgv7_3/check.mjs",
+          "wgv7_7/policy.txt",
+          "wgv7_7/catalog.txt",
+          "wgv7_7/holds.txt",
+          "wgv7_7/check.mjs"
+        ],
+        "commands": [
+          {
+            "program": "node",
+            "args": [
+              "wgv7_3/check.mjs"
+            ],
+            "stdout_contains": "wgv7-3-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {allocateCapacity}=await import('./wgv7_3/capacity.mjs'); assert.deepEqual(allocateCapacity([{id:'a',units:1,priority:2},{id:'b',units:1,priority:2}],2),{allocations:[{id:'a',units:1},{id:'b',units:1}],remaining:0,rejected:0}); console.log('wgv7-3-order-verified');"
+            ],
+            "stdout_contains": "wgv7-3-order-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {allocateCapacity}=await import('./wgv7_3/capacity.mjs'); assert.deepEqual(allocateCapacity([null,{id:'',units:2,priority:1},{id:'ok',units:2,priority:1}],5),{allocations:[{id:'ok',units:2}],remaining:3,rejected:2}); console.log('wgv7-3-invalid-verified');"
+            ],
+            "stdout_contains": "wgv7-3-invalid-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {allocateCapacity}=await import('./wgv7_3/capacity.mjs'); const input=[{id:'a',units:2,priority:1}]; const before=JSON.stringify(input); assert.deepEqual(allocateCapacity(input,0),{allocations:[],remaining:0,rejected:0}); assert.equal(JSON.stringify(input),before); assert.throws(()=>allocateCapacity(input,-1),TypeError); console.log('wgv7-3-boundary-verified');"
+            ],
+            "stdout_contains": "wgv7-3-boundary-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "wgv7_7/check.mjs"
+            ],
+            "stdout_contains": "wgv7-7-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_7/out.json')); assert.equal(v.dataset,'quartz'); assert.equal(v.days,365); console.log('wgv7-7-duration-verified');"
+            ],
+            "stdout_contains": "wgv7-7-duration-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_7/out.json')); assert.equal(v.owner,'Mira Sol'); assert.equal(v.authority,'LEGAL-77'); console.log('wgv7-7-authority-verified');"
+            ],
+            "stdout_contains": "wgv7-7-authority-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_7/out.json')); assert.equal(v.basis,'legal_hold'); console.log('wgv7-7-basis-verified');"
+            ],
+            "stdout_contains": "wgv7-7-basis-verified"
+          }
+        ],
+        "required_tools_any": [
+          "file.read",
+          "file.read_many",
+          "file.search"
+        ],
+        "required_tools_all": [
+          "shell.run"
+        ],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "holdout-layers-vendor",
+      "category": "composite",
+      "campaign_split": "test",
+      "objective": "Complete both independently verifiable work items. First: Inspect the graph invariants in wgv7_4/spec.md, implement wgv7_4/layers.mjs to satisfy the complete contract, preserve the export name, and run node wgv7_4/check.mjs. Do not edit the specification or check file. Second: Reconcile wgv7_8/policy.txt, wgv7_8/scorecard.txt, wgv7_8/signed.txt, and wgv7_8/draft.txt. Produce wgv7_8/out.json with exactly keys choice, rejected, authority, owner, and reason. Apply compliance, signed-addendum precedence, reliability, and cost rules; preserve scorecard order in rejected; set reason to the exact string highest reliability among compliant vendors; then run node wgv7_8/check.mjs. Treat all supplied evidence and the check as read-only.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "wgv7_4/spec.md",
+          "content": "# deploymentLayers(services, dependencies)\n\nReturn deterministic topological layers without mutating either input. `services` must be an array of unique non-empty strings. `dependencies` must be an array of `{ before, after }` edges referencing known, distinct services. Invalid input throws `TypeError`. Each layer contains every currently dependency-free service sorted lexicographically; remove that complete layer before computing the next. Include isolated services. If a cycle remains, throw an `Error` whose message contains `cycle`."
+        },
+        {
+          "path": "wgv7_4/layers.mjs",
+          "content": "export function deploymentLayers(services, dependencies) {\n  return [services];\n}\n"
+        },
+        {
+          "path": "wgv7_4/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { deploymentLayers } from './layers.mjs';\nassert.deepEqual(deploymentLayers(['api','db','web'],[{before:'db',after:'api'},{before:'api',after:'web'}]),[['db'],['api'],['web']]);\nconsole.log('wgv7-4-check-passed');\n"
+        },
+        {
+          "path": "wgv7_8/policy.txt",
+          "content": "Vendor policy VP-7\nA vendor is compliant only when soc2=current, residency=approved, and security_score is at least 90. Apply the newest signed procurement addendum after those checks. Among remaining vendors select greatest reliability; break a reliability tie with lower annual_cost. rejected lists every unselected vendor in scorecard order. Copy authority and owner from the controlling signed addendum. Unsigned drafts do not control.\n"
+        },
+        {
+          "path": "wgv7_8/scorecard.txt",
+          "content": "vendor=alpha reliability=99.95 annual_cost=84 security_score=91 soc2=current residency=approved\nvendor=beta reliability=99.99 annual_cost=80 security_score=88 soc2=current residency=approved\nvendor=gamma reliability=99.95 annual_cost=79 security_score=94 soc2=current residency=approved\n"
+        },
+        {
+          "path": "wgv7_8/signed.txt",
+          "content": "revision=7 signed=true authority=PROC-907 owner=Dara Kim disqualified=gamma\n"
+        },
+        {
+          "path": "wgv7_8/draft.txt",
+          "content": "revision=10 signed=false authority=DRAFT-10 owner=Decoy Owner disqualified=alpha\n"
+        },
+        {
+          "path": "wgv7_8/check.mjs",
+          "content": "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync(new URL('./out.json',import.meta.url),'utf8')); assert.deepEqual(Object.keys(v).sort(),['choice','rejected','authority','owner','reason'].sort()); assert.equal(typeof v.choice,'string'); assert.ok(Array.isArray(v.rejected)); assert.ok(['authority','owner','reason'].every(k=>typeof v[k]==='string')); console.log('wgv7-8-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": [
+          "wgv7-4-check-passed",
+          "wgv7-8-check-passed"
+        ],
+        "json_files": [
+          {
+            "path": "wgv7_8/out.json",
+            "equals": {
+              "choice": "alpha",
+              "rejected": [
+                "beta",
+                "gamma"
+              ],
+              "authority": "PROC-907",
+              "owner": "Dara Kim",
+              "reason": "highest reliability among compliant vendors"
+            }
+          }
+        ],
+        "immutable_files": [
+          "wgv7_4/spec.md",
+          "wgv7_4/check.mjs",
+          "wgv7_8/policy.txt",
+          "wgv7_8/scorecard.txt",
+          "wgv7_8/signed.txt",
+          "wgv7_8/draft.txt",
+          "wgv7_8/check.mjs"
+        ],
+        "commands": [
+          {
+            "program": "node",
+            "args": [
+              "wgv7_4/check.mjs"
+            ],
+            "stdout_contains": "wgv7-4-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {deploymentLayers}=await import('./wgv7_4/layers.mjs'); assert.deepEqual(deploymentLayers(['z','a','m'],[]),[['a','m','z']]); console.log('wgv7-4-isolated-verified');"
+            ],
+            "stdout_contains": "wgv7-4-isolated-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {deploymentLayers}=await import('./wgv7_4/layers.mjs'); assert.deepEqual(deploymentLayers(['a','b','c','d'],[{before:'a',after:'c'},{before:'b',after:'c'}]),[['a','b','d'],['c']]); console.log('wgv7-4-layer-verified');"
+            ],
+            "stdout_contains": "wgv7-4-layer-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {deploymentLayers}=await import('./wgv7_4/layers.mjs'); const s=['a','b']; const d=[{before:'a',after:'b'},{before:'b',after:'a'}]; const before=JSON.stringify([s,d]); assert.throws(()=>deploymentLayers(s,d),/cycle/i); assert.equal(JSON.stringify([s,d]),before); assert.throws(()=>deploymentLayers(['a','a'],[]),TypeError); console.log('wgv7-4-safety-verified');"
+            ],
+            "stdout_contains": "wgv7-4-safety-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "wgv7_8/check.mjs"
+            ],
+            "stdout_contains": "wgv7-8-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_8/out.json')); assert.equal(v.choice,'alpha'); assert.deepEqual(v.rejected,['beta','gamma']); console.log('wgv7-8-selection-verified');"
+            ],
+            "stdout_contains": "wgv7-8-selection-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_8/out.json')); assert.equal(v.authority,'PROC-907'); assert.equal(v.owner,'Dara Kim'); console.log('wgv7-8-authority-verified');"
+            ],
+            "stdout_contains": "wgv7-8-authority-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_8/out.json')); assert.equal(v.reason,'highest reliability among compliant vendors'); console.log('wgv7-8-reason-verified');"
+            ],
+            "stdout_contains": "wgv7-8-reason-verified"
+          }
+        ],
+        "required_tools_any": [
+          "file.read",
+          "file.read_many",
+          "file.search"
+        ],
+        "required_tools_all": [
+          "shell.run"
+        ],
+        "minimum_denied_permissions": 0
+      }
+    }
+  ]
+}

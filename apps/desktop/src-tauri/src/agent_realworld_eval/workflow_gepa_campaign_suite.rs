@@ -291,7 +291,7 @@ fn validate_route_blind_case(case: &RealworldCase) -> Result<(), String> {
     Ok(())
 }
 
-fn leaks_route_answer(value: &str) -> bool {
+pub(super) fn leaks_route_answer(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     [
         "multi-model",

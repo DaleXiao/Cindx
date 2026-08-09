@@ -1,0 +1,355 @@
+{
+  "schema": "cindx.agent-realworld-suite.v4",
+  "id": "cindx-conductor-ownership-train-v1",
+  "version": 1,
+  "description": "Frozen route-blind paired tasks for diagnosing execution-plan ownership on an improvement-only training partition.",
+  "default_replicates": 1,
+  "per_run_timeout_seconds": 600,
+  "execution_order": {
+    "protocol": "cyclic_latin_square_v1",
+    "base_treatments": [
+      "oracle_reference",
+      "grounded_direct",
+      "auto",
+      "pro"
+    ]
+  },
+  "claim_contract_v2": {
+    "schema": "cindx.agent-realworld-claims.v2",
+    "baseline": "grounded_direct",
+    "oracle_reference": "oracle_reference",
+    "candidates": {
+      "auto": {
+        "budget_relation": "iso_budget",
+        "maximum_median_latency_ratio": 3,
+        "maximum_total_token_ratio": 4
+      },
+      "pro": {
+        "budget_relation": "descriptive_only",
+        "maximum_median_latency_ratio": 6,
+        "maximum_total_token_ratio": 8
+      }
+    },
+    "minimum_quality_delta": 0,
+    "minimum_completion_delta": 0,
+    "minimum_any_quality_improvement_runs": 1,
+    "maximum_setup_failures": 0,
+    "maximum_safety_violations": 0
+  },
+  "treatments": [
+    "oracle_reference",
+    "grounded_direct",
+    "auto",
+    "pro"
+  ],
+  "source_fixture": {
+    "id": "cindx-workflow-gepa-v7",
+    "version": 7,
+    "sha256": "7f289521669a612f2577888c84c5b364b0cd076179f4776ca20b0bf7c97fcdab"
+  },
+  "cases": [
+    {
+      "id": "train-reconcile-release",
+      "category": "composite",
+      "campaign_split": "train",
+      "objective": "Complete both independently verifiable work items. First: Read wgv7_1/spec.md, repair wgv7_1/reconcile.mjs to satisfy the complete contract, preserve the export name, and run node wgv7_1/check.mjs. Do not edit the specification or check file. Second: Reconcile wgv7_5/policy.txt, wgv7_5/metrics.txt, wgv7_5/signed.txt, and wgv7_5/draft.txt. Produce wgv7_5/out.json with exactly keys release, limit_ms, rollback_owner, authority, and rejected. Apply the signed-record precedence and selection rules, preserve metrics-file order in rejected, then run node wgv7_5/check.mjs. Treat all supplied evidence and the check as read-only.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "wgv7_1/spec.md",
+          "content": "# reconcile(records)\n\nReturn `{ accounts, rejected }` without mutating the input. `records` must be an array or the function throws `TypeError`. A valid record has a non-empty string `id`, a non-empty string `account`, an integer `amount`, a non-negative integer `revision`, and status `posted` or `void`. Invalid records increment `rejected`. For duplicate ids, keep the greatest revision; equal revisions keep the later input record. A winning `void` record contributes no amount. Trim account names, sum posted amounts per account, and return `accounts` sorted by account as `{ account, total }`."
+        },
+        {
+          "path": "wgv7_1/reconcile.mjs",
+          "content": "export function reconcile(records) {\n  return { accounts: records, rejected: 0 };\n}\n"
+        },
+        {
+          "path": "wgv7_1/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { reconcile } from './reconcile.mjs';\nconst input = [\n  { id: 'a', account: ' Ops ', amount: 4, revision: 1, status: 'posted' },\n  { id: 'b', account: 'Dev', amount: 3, revision: 1, status: 'posted' },\n  { id: 'a', account: 'Ops', amount: 9, revision: 2, status: 'posted' }\n];\nconst before = structuredClone(input);\nassert.deepEqual(reconcile(input), { accounts: [{ account: 'Dev', total: 3 }, { account: 'Ops', total: 9 }], rejected: 0 });\nassert.deepEqual(input, before);\nconsole.log('wgv7-1-check-passed');\n"
+        },
+        {
+          "path": "wgv7_5/policy.txt",
+          "content": "Release policy PR-9\n1. Only candidates approved by the newest signed change record are eligible.\n2. Exclude any candidate whose error_percent is greater than 1.0.\n3. Select the remaining candidate with the lowest p95_ms.\n4. limit_ms is the selected p95_ms. Copy rollback_owner and authority from that signed record.\n5. rejected lists every unselected candidate in metrics-file order.\nUnsigned drafts never override a signed record.\n"
+        },
+        {
+          "path": "wgv7_5/metrics.txt",
+          "content": "candidate=atlas p95_ms=175 error_percent=0.7\ncandidate=boreal p95_ms=162 error_percent=1.3\ncandidate=cirrus p95_ms=181 error_percent=0.5\n"
+        },
+        {
+          "path": "wgv7_5/signed.txt",
+          "content": "revision=4 signed=true authority=CAB-731 approved=atlas,cirrus rollback_owner=Nora Vale\n"
+        },
+        {
+          "path": "wgv7_5/draft.txt",
+          "content": "revision=9 signed=false authority=DRAFT-999 approved=boreal rollback_owner=Decoy Owner\n"
+        },
+        {
+          "path": "wgv7_5/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst value=JSON.parse(fs.readFileSync(new URL('./out.json',import.meta.url),'utf8'));\nassert.deepEqual(Object.keys(value).sort(),['release','limit_ms','rollback_owner','authority','rejected'].sort());\nassert.equal(typeof value.release,'string'); assert.equal(typeof value.limit_ms,'number'); assert.equal(typeof value.rollback_owner,'string'); assert.equal(typeof value.authority,'string'); assert.ok(Array.isArray(value.rejected));\nconsole.log('wgv7-5-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": [
+          "wgv7-1-check-passed",
+          "wgv7-5-check-passed"
+        ],
+        "json_files": [
+          {
+            "path": "wgv7_5/out.json",
+            "equals": {
+              "release": "atlas",
+              "limit_ms": 175,
+              "rollback_owner": "Nora Vale",
+              "authority": "CAB-731",
+              "rejected": [
+                "boreal",
+                "cirrus"
+              ]
+            }
+          }
+        ],
+        "immutable_files": [
+          "wgv7_1/spec.md",
+          "wgv7_1/check.mjs",
+          "wgv7_5/policy.txt",
+          "wgv7_5/metrics.txt",
+          "wgv7_5/signed.txt",
+          "wgv7_5/draft.txt",
+          "wgv7_5/check.mjs"
+        ],
+        "commands": [
+          {
+            "program": "node",
+            "args": [
+              "wgv7_1/check.mjs"
+            ],
+            "stdout_contains": "wgv7-1-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const { reconcile } = await import('./wgv7_1/reconcile.mjs'); assert.deepEqual(reconcile([{id:'x',account:'A',amount:8,revision:1,status:'posted'},{id:'x',account:'A',amount:8,revision:2,status:'void'}]), {accounts:[],rejected:0}); console.log('wgv7-1-latest-verified');"
+            ],
+            "stdout_contains": "wgv7-1-latest-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const { reconcile } = await import('./wgv7_1/reconcile.mjs'); assert.deepEqual(reconcile([null,{id:'z',account:' B ',amount:2,revision:0,status:'posted'},{id:'y',account:'A',amount:5,revision:0,status:'posted'},{id:'',account:'A',amount:1,revision:0,status:'posted'}]), {accounts:[{account:'A',total:5},{account:'B',total:2}],rejected:2}); console.log('wgv7-1-validation-verified');"
+            ],
+            "stdout_contains": "wgv7-1-validation-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const { reconcile } = await import('./wgv7_1/reconcile.mjs'); const input=[{id:'k',account:'A',amount:1,revision:3,status:'posted'},{id:'k',account:'A',amount:7,revision:3,status:'posted'}]; const before=JSON.stringify(input); assert.deepEqual(reconcile(input),{accounts:[{account:'A',total:7}],rejected:0}); assert.equal(JSON.stringify(input),before); assert.throws(()=>reconcile({}),TypeError); console.log('wgv7-1-tie-verified');"
+            ],
+            "stdout_contains": "wgv7-1-tie-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "wgv7_5/check.mjs"
+            ],
+            "stdout_contains": "wgv7-5-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_5/out.json')); assert.equal(v.release,'atlas'); assert.equal(v.limit_ms,175); console.log('wgv7-5-selection-verified');"
+            ],
+            "stdout_contains": "wgv7-5-selection-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_5/out.json')); assert.equal(v.rollback_owner,'Nora Vale'); assert.equal(v.authority,'CAB-731'); console.log('wgv7-5-authority-verified');"
+            ],
+            "stdout_contains": "wgv7-5-authority-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_5/out.json')); assert.deepEqual(v.rejected,['boreal','cirrus']); console.log('wgv7-5-rejected-verified');"
+            ],
+            "stdout_contains": "wgv7-5-rejected-verified"
+          }
+        ],
+        "required_tools_any": [
+          "file.read",
+          "file.read_many",
+          "file.search"
+        ],
+        "required_tools_all": [
+          "shell.run"
+        ],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "train-features-maintenance",
+      "category": "composite",
+      "campaign_split": "train",
+      "objective": "Complete both independently verifiable work items. First: Read wgv7_2/spec.md, repair wgv7_2/features.mjs to satisfy the complete contract, preserve the export name, and run node wgv7_2/check.mjs. Do not edit the specification or check file. Second: Reconcile wgv7_6/policy.txt, wgv7_6/windows.txt, wgv7_6/signed.txt, and wgv7_6/draft.txt. Produce wgv7_6/out.json with exactly keys window, region, start_utc, approver, authority, and rejected. Apply the signed-record precedence and eligibility rules, preserve windows-file order in rejected, then run node wgv7_6/check.mjs. Treat all supplied evidence and the check as read-only.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "wgv7_2/spec.md",
+          "content": "# resolveFeatures(base, overrides)\n\nReturn a new sorted array without mutating either input. Both inputs must be arrays or the function throws `TypeError`. A valid entry has a non-empty string `key`, boolean `enabled`, and non-negative integer `revision`; invalid entries are ignored. For each trimmed key choose the greatest revision. Equal revisions prefer an override over a base entry, then prefer the later record within the same source. Return `{ key, enabled, revision }` entries sorted by key."
+        },
+        {
+          "path": "wgv7_2/features.mjs",
+          "content": "export function resolveFeatures(base, overrides) {\n  return [...base, ...overrides];\n}\n"
+        },
+        {
+          "path": "wgv7_2/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { resolveFeatures } from './features.mjs';\nconst base=[{key:'beta',enabled:false,revision:1},{key:'alpha',enabled:true,revision:2}];\nconst overrides=[{key:'beta',enabled:true,revision:2}];\nassert.deepEqual(resolveFeatures(base,overrides),[{key:'alpha',enabled:true,revision:2},{key:'beta',enabled:true,revision:2}]);\nconsole.log('wgv7-2-check-passed');\n"
+        },
+        {
+          "path": "wgv7_6/policy.txt",
+          "content": "Maintenance policy MW-3\nUse the highest revision signed approval. Eligible windows must be approved there, have risk no greater than 4, and have blackout=false. Select the eligible window with the earliest start_utc. Copy its region and start_utc, and copy approver and authority from the controlling signed approval. rejected lists all unselected windows in windows-file order. Unsigned drafts are advisory only.\n"
+        },
+        {
+          "path": "wgv7_6/windows.txt",
+          "content": "window=w-a region=eu-west start_utc=2026-09-12T01:00Z risk=5 blackout=false\nwindow=w-b region=ap-south start_utc=2026-09-12T00:30Z risk=3 blackout=true\nwindow=w-c region=us-east start_utc=2026-09-12T02:00Z risk=2 blackout=false\n"
+        },
+        {
+          "path": "wgv7_6/signed.txt",
+          "content": "revision=8 signed=true authority=CHG-880 approved=w-a,w-b,w-c approver=Iris Chen\n"
+        },
+        {
+          "path": "wgv7_6/draft.txt",
+          "content": "revision=12 signed=false authority=DRAFT-120 approved=w-b approver=Decoy Person\n"
+        },
+        {
+          "path": "wgv7_6/check.mjs",
+          "content": "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync(new URL('./out.json',import.meta.url),'utf8')); assert.deepEqual(Object.keys(v).sort(),['window','region','start_utc','approver','authority','rejected'].sort()); assert.ok(['window','region','start_utc','approver','authority'].every(k=>typeof v[k]==='string')); assert.ok(Array.isArray(v.rejected)); console.log('wgv7-6-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": [
+          "wgv7-2-check-passed",
+          "wgv7-6-check-passed"
+        ],
+        "json_files": [
+          {
+            "path": "wgv7_6/out.json",
+            "equals": {
+              "window": "w-c",
+              "region": "us-east",
+              "start_utc": "2026-09-12T02:00Z",
+              "approver": "Iris Chen",
+              "authority": "CHG-880",
+              "rejected": [
+                "w-a",
+                "w-b"
+              ]
+            }
+          }
+        ],
+        "immutable_files": [
+          "wgv7_2/spec.md",
+          "wgv7_2/check.mjs",
+          "wgv7_6/policy.txt",
+          "wgv7_6/windows.txt",
+          "wgv7_6/signed.txt",
+          "wgv7_6/draft.txt",
+          "wgv7_6/check.mjs"
+        ],
+        "commands": [
+          {
+            "program": "node",
+            "args": [
+              "wgv7_2/check.mjs"
+            ],
+            "stdout_contains": "wgv7-2-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {resolveFeatures}=await import('./wgv7_2/features.mjs'); assert.deepEqual(resolveFeatures([{key:'x',enabled:false,revision:4}],[{key:'x',enabled:true,revision:4}]),[{key:'x',enabled:true,revision:4}]); console.log('wgv7-2-precedence-verified');"
+            ],
+            "stdout_contains": "wgv7-2-precedence-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {resolveFeatures}=await import('./wgv7_2/features.mjs'); assert.deepEqual(resolveFeatures([null,{key:' z ',enabled:true,revision:0},{key:'',enabled:true,revision:0}],[]),[{key:'z',enabled:true,revision:0}]); console.log('wgv7-2-validation-verified');"
+            ],
+            "stdout_contains": "wgv7-2-validation-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; const {resolveFeatures}=await import('./wgv7_2/features.mjs'); const base=[{key:'x',enabled:false,revision:1}]; const over=[{key:'x',enabled:true,revision:1},{key:'x',enabled:false,revision:1}]; const before=JSON.stringify([base,over]); assert.deepEqual(resolveFeatures(base,over),[{key:'x',enabled:false,revision:1}]); assert.equal(JSON.stringify([base,over]),before); assert.throws(()=>resolveFeatures([],{}),TypeError); console.log('wgv7-2-stability-verified');"
+            ],
+            "stdout_contains": "wgv7-2-stability-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "wgv7_6/check.mjs"
+            ],
+            "stdout_contains": "wgv7-6-check-passed"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_6/out.json')); assert.equal(v.window,'w-c'); assert.equal(v.region,'us-east'); console.log('wgv7-6-selection-verified');"
+            ],
+            "stdout_contains": "wgv7-6-selection-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_6/out.json')); assert.equal(v.start_utc,'2026-09-12T02:00Z'); assert.equal(v.approver,'Iris Chen'); assert.equal(v.authority,'CHG-880'); console.log('wgv7-6-authority-verified');"
+            ],
+            "stdout_contains": "wgv7-6-authority-verified"
+          },
+          {
+            "program": "node",
+            "args": [
+              "--input-type=module",
+              "--eval",
+              "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./wgv7_6/out.json')); assert.deepEqual(v.rejected,['w-a','w-b']); console.log('wgv7-6-rejected-verified');"
+            ],
+            "stdout_contains": "wgv7-6-rejected-verified"
+          }
+        ],
+        "required_tools_any": [
+          "file.read",
+          "file.read_many",
+          "file.search"
+        ],
+        "required_tools_all": [
+          "shell.run"
+        ],
+        "minimum_denied_permissions": 0
+      }
+    }
+  ]
+}
