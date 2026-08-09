@@ -15,7 +15,7 @@ use orchestrator::{
     PromptInstanceParetoArchive,
 };
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub(super) const TARGET_CANDIDATE_POPULATION: usize = 3;
@@ -57,6 +57,13 @@ pub(super) struct GeneratedCandidatePopulation {
     pub(super) total_tokens: u64,
 }
 
+#[derive(Debug, Clone)]
+struct CandidateSearchAttempt {
+    proposal_index: usize,
+    outcome: &'static str,
+    mutation_assignment: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CandidateTrainingReceipt {
     pub(super) candidate: CandidateIdentityReceipt,
@@ -81,12 +88,12 @@ pub(super) fn generate_candidate_population(
     let mut seen_routes = BTreeSet::from([seed_route_sha256]);
     let mut population = Vec::new();
     let mut rejections = Vec::new();
+    let mut search_history = Vec::new();
     for index in 0..MAX_CANDIDATE_PROPOSALS {
         let mut prompt = parent.reflective_mutation_prompt(packets)?;
-        prompt.push_str(&format!(
-            "\n\nPopulation search instruction: this is proposal {} of {}. Rank the bottlenecks that are directly supported by the supplied trajectories, choose the single highest-leverage generalizable bottleneck that prior proposals may have missed, and change only the one or two genes causally responsible. Do not follow a preselected optimization direction and do not copy benchmark content.",
-            index + 1,
-            MAX_CANDIDATE_PROPOSALS,
+        prompt.push_str(&candidate_population_search_instruction(
+            index,
+            &search_history,
         ));
         let mutation_id = format!("workflow-gepa-v7-mutation-{}", index + 1);
         let stage = format!("workflow_gepa_v7_mutation_{}", index + 1);
@@ -131,7 +138,14 @@ pub(super) fn generate_candidate_population(
             }
         };
         let mutated_genes = mutated_gene_names(parent, &genome);
+        let mutation_assignment =
+            candidate_mutation_assignment(&genome, &mutated_genes)?;
         if !(1..=2).contains(&mutated_genes.len()) {
+            search_history.push(CandidateSearchAttempt {
+                proposal_index: index + 1,
+                outcome: "rejected_changed_gene_count",
+                mutation_assignment,
+            });
             rejections.push(format!(
                 "proposal {}: changed {} genes after normalization",
                 index + 1,
@@ -142,9 +156,19 @@ pub(super) fn generate_candidate_population(
         let route_profile_sha256 =
             genome.route_decision_profile_sha256(AgentPolicy::Pro.label())?;
         if !seen_routes.insert(route_profile_sha256.clone()) {
+            search_history.push(CandidateSearchAttempt {
+                proposal_index: index + 1,
+                outcome: "rejected_duplicate_route",
+                mutation_assignment,
+            });
             rejections.push(format!("proposal {}: duplicate route phenotype", index + 1));
             continue;
         }
+        search_history.push(CandidateSearchAttempt {
+            proposal_index: index + 1,
+            outcome: "accepted_distinct_route",
+            mutation_assignment,
+        });
         let snapshot = FrozenPromptProfileSnapshot::new_gepa(
             AgentPolicy::Pro.label(),
             genome.clone(),
@@ -189,6 +213,69 @@ pub(super) fn generate_candidate_population(
         physical_attempts: resources.physical_attempts,
         total_tokens: resources.total_tokens,
     })
+}
+
+fn candidate_population_search_instruction(
+    index: usize,
+    history: &[CandidateSearchAttempt],
+) -> String {
+    let prior_attempts = if history.is_empty() {
+        "- none; establish the first evidence-supported mutation".to_string()
+    } else {
+        history
+            .iter()
+            .map(|attempt| {
+                format!(
+                    "- proposal {} {}: {}",
+                    attempt.proposal_index, attempt.outcome, attempt.mutation_assignment
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        concat!(
+            "\n\nPopulation search instruction: this is proposal {} of {}. ",
+            "Rank only bottlenecks directly supported by the supplied trajectories, choose one high-leverage generalizable bottleneck, and change only the one or two genes causally responsible. ",
+            "Do not copy benchmark content or widen authority merely to create variety.\n\n",
+            "Normalized proposals already tried in this same search:\n{}\n\n",
+            "Novelty is a hard acceptance condition. Do not repeat a canonical gene/value assignment listed above. ",
+            "Prefer an evidence-supported intervention that changes at least one gene not used by an accepted or duplicate-route proposal. ",
+            "A different wording with the same executable route will be rejected."
+        ),
+        index + 1,
+        MAX_CANDIDATE_PROPOSALS,
+        prior_attempts,
+    )
+}
+
+fn candidate_mutation_assignment(
+    candidate: &ConductorPromptGenome,
+    mutated_genes: &[String],
+) -> Result<String, String> {
+    let candidate = serde_json::to_value(candidate)
+        .map_err(|error| format!("failed to encode candidate mutation: {error}"))?;
+    let candidate = candidate
+        .as_object()
+        .ok_or_else(|| "candidate mutation did not encode as an object".to_string())?;
+    let mut assignment = BTreeMap::new();
+    for gene in mutated_genes {
+        let value = candidate
+            .get(gene)
+            .cloned()
+            .ok_or_else(|| format!("candidate mutation omitted gene {gene}"))?;
+        let value = if gene == "custom_directive" {
+            serde_json::Value::String(format!(
+                "sha256:{}",
+                sha256_hex(value.as_str().unwrap_or_default().as_bytes())
+            ))
+        } else {
+            value
+        };
+        assignment.insert(gene.clone(), value);
+    }
+    serde_json::to_string(&assignment)
+        .map_err(|error| format!("failed to encode candidate mutation assignment: {error}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -519,6 +606,51 @@ mod tests {
         candidate.max_step_attempts += 1;
         candidate.custom_directive = "Use the strongest observed evidence.".to_string();
         assert_eq!(mutated_gene_names(&parent, &candidate).len(), 3);
+    }
+
+    #[test]
+    fn population_search_prompt_carries_forward_normalized_attempts() {
+        let first = candidate_population_search_instruction(0, &[]);
+        assert!(first.contains("proposal 1 of 6"));
+        assert!(first.contains("none; establish the first evidence-supported mutation"));
+
+        let history = vec![
+            CandidateSearchAttempt {
+                proposal_index: 1,
+                outcome: "accepted_distinct_route",
+                mutation_assignment: "{\"graph_depth\":\"deep\"}".to_string(),
+            },
+            CandidateSearchAttempt {
+                proposal_index: 2,
+                outcome: "rejected_duplicate_route",
+                mutation_assignment: "{\"graph_depth\":\"deep\"}".to_string(),
+            },
+        ];
+        let later = candidate_population_search_instruction(2, &history);
+
+        assert!(later.contains("proposal 3 of 6"));
+        assert!(later.contains(
+            "proposal 1 accepted_distinct_route: {\"graph_depth\":\"deep\"}"
+        ));
+        assert!(later.contains(
+            "proposal 2 rejected_duplicate_route: {\"graph_depth\":\"deep\"}"
+        ));
+        assert!(later.contains("Novelty is a hard acceptance condition"));
+    }
+
+    #[test]
+    fn mutation_assignment_is_canonical_and_hides_directive_text() {
+        let parent = ConductorPromptGenome::seed_for_effort("pro");
+        let mut candidate = parent.clone();
+        candidate.graph_depth = orchestrator::PromptGraphDepth::Lean;
+        candidate.custom_directive = "private trajectory-derived wording".to_string();
+        let genes = mutated_gene_names(&parent, &candidate);
+        let assignment = candidate_mutation_assignment(&candidate, &genes).unwrap();
+
+        assert_eq!(genes, vec!["graph_depth", "custom_directive"]);
+        assert!(assignment.contains("\"graph_depth\":\"lean\""));
+        assert!(assignment.contains("\"custom_directive\":\"sha256:"));
+        assert!(!assignment.contains("private trajectory-derived wording"));
     }
 
     #[test]
