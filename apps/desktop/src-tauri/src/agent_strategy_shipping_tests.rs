@@ -11,8 +11,8 @@ use orchestrator::{
 };
 
 #[test]
-fn run_decision_prompt_applies_only_learned_workflow_behavior() {
-    let marker = "learned-workflow-directive-must-route";
+fn run_decision_prompt_applies_only_the_learned_route_directive() {
+    let marker = "learned-route-directive-must-route";
     let seed = ConductorPromptGenome::seed_for_effort("auto");
     let neutral_route_sha256 = seed.route_decision_profile_sha256("auto").unwrap();
     assert!(run_decision_evolved_directive(&seed, AgentPolicy::Auto)
@@ -35,7 +35,8 @@ fn run_decision_prompt_applies_only_learned_workflow_behavior() {
     );
 
     let mut profile = ConductorPromptGenome::seed_for_effort("auto");
-    profile.custom_directive = marker.to_string();
+    profile.custom_directive = "workflow execution guidance".to_string();
+    profile.route_directive = Some(marker.to_string());
     let actual_profile_sha256 = prompt_genome_sha256(&profile).expect("profile should hash");
     let route_profile_sha256 = profile.route_decision_profile_sha256("auto").unwrap();
     let request = AgentRunDecisionRequest {
@@ -49,6 +50,7 @@ fn run_decision_prompt_applies_only_learned_workflow_behavior() {
         evolved_directive: run_decision_evolved_directive(&profile, AgentPolicy::Auto).unwrap(),
         historical_evidence: String::new(),
         matched_collaboration_evidence: std::sync::Arc::new(Default::default()),
+        required_execution: None,
         execution_constraints: String::new(),
         route_requirements: AgentRouteRequirements::default(),
         budget_fingerprint: None,
@@ -78,9 +80,11 @@ fn learned_profile_provenance_is_neutral_to_route_and_matched_admission() {
     let route_a = profile_a.route_decision_profile_sha256("auto").unwrap();
     let route_b = profile_b.route_decision_profile_sha256("auto").unwrap();
     assert_eq!(route_a, route_b);
-    assert_ne!(
+    assert_eq!(
         route_a,
-        prompt_genome_sha256(&ConductorPromptGenome::seed_for_effort("auto")).unwrap()
+        ConductorPromptGenome::seed_for_effort("auto")
+            .route_decision_profile_sha256("auto")
+            .unwrap()
     );
     assert_eq!(
         run_decision_evolved_directive(&profile_a, AgentPolicy::Auto).unwrap(),

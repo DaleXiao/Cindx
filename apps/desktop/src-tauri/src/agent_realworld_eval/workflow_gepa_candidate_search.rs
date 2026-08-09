@@ -8,17 +8,16 @@ use crate::prompt_mutation_runtime::run_background_prompt_mutation_stage_with_li
 use agent_core::Metadata;
 use agent_runtime::AgentRunControl;
 use orchestrator::{
-    assess_prompt_execution_intervention, classify_prompt_mutation, prompt_genome_sha256,
-    sha256_hex, AgentEvaluationCaseScore, AgentEvaluationEvidenceSource,
-    AgentEvaluationReflectionPacket, AgentEvaluationSplit, AgentPolicy, ConductorPromptGenome,
-    FrozenPromptProfileSnapshot, PromptExecutionDiagnosticPlan, PromptExecutionInterventionReceipt,
-    PromptInstanceParetoArchive,
+    assess_prompt_route_intervention, classify_prompt_mutation, prompt_genome_sha256, sha256_hex,
+    AgentEvaluationCaseScore, AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket,
+    AgentEvaluationSplit, AgentPolicy, ConductorPromptGenome, FrozenPromptProfileSnapshot,
+    PromptInstanceParetoArchive, PromptRouteInterventionReceipt,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-pub(super) const TARGET_CANDIDATE_POPULATION: usize = 3;
+pub(super) const TARGET_CANDIDATE_POPULATION: usize = 2;
 const MAX_CANDIDATE_PROPOSALS: usize = 6;
 const MODEL_CALLS_PER_PROPOSAL: usize = 2;
 const CANDIDATE_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
@@ -38,7 +37,7 @@ pub(super) struct CandidateIdentityReceipt {
     pub(super) mutation_repaired: bool,
     pub(super) proposal_index: usize,
     pub(super) mutated_genes: Vec<String>,
-    pub(super) intervention: PromptExecutionInterventionReceipt,
+    pub(super) intervention: PromptRouteInterventionReceipt,
     pub(super) snapshot_artifact_sha256: String,
 }
 
@@ -81,7 +80,6 @@ pub(super) fn generate_candidate_population(
     packets: &[AgentEvaluationReflectionPacket],
     training_dataset_sha256: &str,
     reflection_evidence_sha256: &str,
-    diagnostic_plans: &[PromptExecutionDiagnosticPlan],
 ) -> Result<GeneratedCandidatePopulation, String> {
     let control = Arc::new(AgentRunControl::with_budget(candidate_search_budget()));
     let seed_route_sha256 = parent.route_decision_profile_sha256(AgentPolicy::Pro.label())?;
@@ -90,13 +88,13 @@ pub(super) fn generate_candidate_population(
     let mut rejections = Vec::new();
     let mut search_history = Vec::new();
     for index in 0..MAX_CANDIDATE_PROPOSALS {
-        let mut prompt = parent.reflective_mutation_prompt(packets)?;
+        let mut prompt = parent.reflective_route_mutation_prompt(packets)?;
         prompt.push_str(&candidate_population_search_instruction(
             index,
             &search_history,
         ));
-        let mutation_id = format!("workflow-gepa-v7-mutation-{}", index + 1);
-        let stage = format!("workflow_gepa_v7_mutation_{}", index + 1);
+        let mutation_id = format!("workflow-gepa-v9-route-mutation-{}", index + 1);
+        let stage = format!("workflow_gepa_v9_route_mutation_{}", index + 1);
         let proposal_control = candidate_proposal_control(&control)?;
         let proposal = (|| {
             let response = run_background_prompt_mutation_stage_with_liveness(
@@ -139,29 +137,25 @@ pub(super) fn generate_candidate_population(
         };
         let mutated_genes = mutated_gene_names(parent, &genome);
         let mutation_assignment = candidate_mutation_assignment(&genome, &mutated_genes)?;
-        if !(1..=2).contains(&mutated_genes.len()) {
+        if mutated_genes != ["route_directive"] {
             search_history.push(CandidateSearchAttempt {
                 proposal_index: index + 1,
                 outcome: "rejected_changed_gene_count",
                 mutation_assignment,
             });
             rejections.push(format!(
-                "proposal {}: changed {} genes after normalization",
+                "proposal {}: route learning changed {:?} instead of only route_directive",
                 index + 1,
-                mutated_genes.len(),
+                mutated_genes,
             ));
             continue;
         }
-        let intervention = assess_prompt_execution_intervention(
-            parent,
-            &genome,
-            AgentPolicy::Pro.label(),
-            diagnostic_plans,
-        )?;
+        let intervention =
+            assess_prompt_route_intervention(parent, &genome, AgentPolicy::Pro.label())?;
         if !intervention.eligible {
             search_history.push(CandidateSearchAttempt {
                 proposal_index: index + 1,
-                outcome: "rejected_no_execution_plan_intervention",
+                outcome: "rejected_noncausal_route_intervention",
                 mutation_assignment,
             });
             rejections.push(format!("proposal {}: {}", index + 1, intervention.reason,));
@@ -251,12 +245,11 @@ fn candidate_population_search_instruction(
     format!(
         concat!(
             "\n\nPopulation search instruction: this is proposal {} of {}. ",
-            "Rank only bottlenecks directly supported by the supplied trajectories, choose one high-leverage generalizable bottleneck, and change only the one or two genes causally responsible. ",
+            "Infer a general Direct-versus-Workflow routing policy only from the matched treatment contrast. Change only route_directive. ",
             "Do not copy benchmark content or widen authority merely to create variety.\n\n",
             "Normalized proposals already tried in this same search:\n{}\n\n",
             "Novelty is a hard acceptance condition. Do not repeat a canonical gene/value assignment listed above. ",
-            "Prefer an evidence-supported intervention that changes at least one gene not used by an accepted or duplicate-route proposal. ",
-            "A different wording with the same executable route will be rejected."
+            "Prefer a materially distinct, evidence-supported routing policy rather than wording variation. A duplicate route policy will be rejected."
         ),
         index + 1,
         MAX_CANDIDATE_PROPOSALS,
@@ -279,7 +272,7 @@ fn candidate_mutation_assignment(
             .get(gene)
             .cloned()
             .ok_or_else(|| format!("candidate mutation omitted gene {gene}"))?;
-        let value = if gene == "custom_directive" {
+        let value = if gene == "custom_directive" || gene == "route_directive" {
             serde_json::Value::String(format!(
                 "sha256:{}",
                 sha256_hex(value.as_str().unwrap_or_default().as_bytes())
@@ -305,12 +298,17 @@ fn parse_candidate_response(
     control: &Arc<AgentRunControl>,
 ) -> Result<(ConductorPromptGenome, String, bool), String> {
     let response_sha256 = sha256_hex(response.as_bytes());
-    let candidate_id = format!("learned-pro-v7-{}", &response_sha256[..16]);
-    match parent.learned_reflective_mutation_from_response(response, candidate_id, packets) {
+    let candidate_id = format!("learned-pro-v9-route-{}", &response_sha256[..16]);
+    match parent.learned_route_mutation_from_response(response, candidate_id, packets) {
         Ok(candidate) => Ok((candidate, response_sha256, false)),
         Err(initial_error) => {
-            let mutation_id = format!("workflow-gepa-v7-mutation-repair-{}", index + 1);
-            let stage = format!("workflow_gepa_v7_mutation_repair_{}", index + 1);
+            let mutation_id = format!("workflow-gepa-v9-route-mutation-repair-{}", index + 1);
+            let stage = format!("workflow_gepa_v9_route_mutation_repair_{}", index + 1);
+            let mut repair_prompt = parent.reflective_route_mutation_prompt(packets)?;
+            repair_prompt.push_str(&format!(
+                "\n\nYour prior response was invalid: {initial_error}. Return a corrected full genome JSON. Change only route_directive. Invalid response SHA-256: {}.",
+                response_sha256,
+            ));
             let repaired = run_background_prompt_mutation_stage_with_liveness(
                 state,
                 provider,
@@ -318,17 +316,14 @@ fn parse_candidate_response(
                 run_context,
                 &mutation_id,
                 &stage,
-                parent.mutation_repair_prompt(response, &initial_error),
+                repair_prompt,
                 control,
                 Some(CANDIDATE_RESPONSE_START_TIMEOUT),
             )?;
             let repaired_sha256 = sha256_hex(repaired.as_bytes());
-            let repaired_id = format!("learned-pro-v7-{}", &repaired_sha256[..16]);
-            let candidate = parent.learned_reflective_mutation_from_response(
-                &repaired,
-                repaired_id,
-                packets,
-            )?;
+            let repaired_id = format!("learned-pro-v9-route-{}", &repaired_sha256[..16]);
+            let candidate =
+                parent.learned_route_mutation_from_response(&repaired, repaired_id, packets)?;
             Ok((candidate, repaired_sha256, true))
         }
     }

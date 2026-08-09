@@ -558,6 +558,62 @@ mod tests {
     }
 
     #[test]
+    fn route_mutation_requires_matched_evidence_and_changes_only_route_policy() {
+        let parent = ConductorPromptGenome::seed_for_effort("pro");
+        let mut direct = reflection_packet("Compare two implementation strategies");
+        direct.candidate_id = "forced_direct".to_string();
+        let mut workflow = direct.clone();
+        workflow.candidate_id = "forced_workflow".to_string();
+        let packets = [direct.clone(), workflow.clone()];
+
+        let prompt = parent.reflective_route_mutation_prompt(&packets).unwrap();
+        assert!(prompt.contains("forced_direct"));
+        assert!(prompt.contains("forced_workflow"));
+
+        let mut response = parent.clone();
+        response.route_directive = Some(
+            "Use Workflow only when independent work or verification has a concrete quality advantage over Direct."
+                .to_string(),
+        );
+        let candidate = parent
+            .learned_route_mutation_from_response(
+                &serde_json::to_string(&response).unwrap(),
+                "route-candidate",
+                &packets,
+            )
+            .unwrap();
+        assert_eq!(candidate.graph_depth, parent.graph_depth);
+        assert_ne!(
+            candidate.route_decision_profile_sha256("pro").unwrap(),
+            parent.route_decision_profile_sha256("pro").unwrap()
+        );
+        assert_eq!(
+            candidate.workflow_execution_profile_sha256().unwrap(),
+            parent.workflow_execution_profile_sha256().unwrap()
+        );
+
+        response.graph_depth = PromptGraphDepth::Balanced;
+        assert!(parent
+            .learned_route_mutation_from_response(
+                &serde_json::to_string(&response).unwrap(),
+                "invalid-route-candidate",
+                &packets,
+            )
+            .unwrap_err()
+            .contains("outside route_directive"));
+
+        assert!(parent
+            .reflective_route_mutation_prompt(&[direct])
+            .unwrap_err()
+            .contains("incomplete treatment pair"));
+        workflow.run_id = "different-run".to_string();
+        assert!(parent
+            .reflective_route_mutation_prompt(&[workflow])
+            .unwrap_err()
+            .contains("incomplete treatment pair"));
+    }
+
+    #[test]
     fn reflection_selection_is_deterministic_and_uses_unique_paired_feedback() {
         let profile_id = "seed-auto-v1";
         let packet = |run_id: &str, candidate_id: &str| AgentEvaluationReflectionPacket {

@@ -332,16 +332,21 @@ test, and snapshot publication. Any successor campaign requires a new frozen
 protocol and separate explicit authorization. V6 is that frozen successor
 protocol, but no V6 provider run has occurred.
 
-The current implementation retains the frozen V7 product suite and uses the V8
-evidence schema. It adds a pre-mutation learning-readiness gate and a
-pre-product-run intervention gate. Product seed receipts must bind the exact
-semantic execution plan, route-decision profile, and any actually exercised
-workflow-execution profile. Direct-only seed evidence returns a valid dormant
-no-go without mutation; identity mismatch fails closed. A generated candidate
-is not product-evaluated unless the zero-provider check proves a changed semantic
-plan on at least one frozen Workflow diagnostic. Because current workflow genes
-feed both route and Task Graph construction, the receipt records both coupled
-layers and forbids single-layer attribution.
+The current implementation retains the frozen V7 product suite and uses the V9
+route-causal evidence schema. Before mutation, each training case executes a
+matched required-Direct and required-Workflow Pro pair. The two arms must bind
+the same task, workspace prestate, prompt profile, route profile, provider
+configuration, and budget while recording the explicit runtime treatment and
+the requested execution mode. Incomplete pairs, treatment drift, or profile
+drift fail closed. The campaign stops before mutation unless Workflow wins at
+least one externally verified matched quality outcome.
+
+Only after that positive treatment signal may GEPA propose two distinct route
+policies. A retained candidate changes exactly `route_directive`; the workflow
+execution, tool, safety, finalizer, and budget phenotype remains identical. The
+existing train, unseen-validation, Grounded Direct, untouched-test, and resource
+gates retain their order. The complete path uses at most 33 product runs under
+the existing hard cap of 35.
 
 The deterministic gates can be exercised without provider access:
 
@@ -351,17 +356,19 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml \
   --features realworld-eval --lib
 ```
 
-Passing them proves schema, identity, dormant-layer, and intervention behavior;
-it does not prove answer-quality uplift and does not authorize a provider run.
+Passing them proves schema, matched-treatment, profile-identity, route-only
+intervention, and fail-closed behavior; it does not prove answer-quality uplift
+and does not authorize a provider run.
 
-For provenance, the first V5 campaign used a clean exact revision and a fresh
-outside-Git directory. The command is retained to document that run, not to
-authorize a repeat after validation evidence has been observed:
+The separately authorized V9 one-shot campaign uses a clean exact revision and
+three fresh outside-Git paths. The resulting journal and report must be retained
+even when the command exits with a preregistered no-go:
 
 ```sh
-run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v5.XXXXXX)"
+run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v9.XXXXXX)"
 CINDX_WORKFLOW_GEPA_REPORT="$run_dir/report.json" \
 CINDX_WORKFLOW_GEPA_SNAPSHOT="$run_dir/snapshot.json" \
+CINDX_WORKFLOW_GEPA_JOURNAL="$run_dir/journal.json" \
 cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml \
   --no-default-features --features realworld-eval \
   --bin cindx-workflow-gepa-eval

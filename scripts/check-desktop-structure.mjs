@@ -992,6 +992,7 @@ const toolsModuleBudgets = new Map([
   ["browser_session_retirement.rs", 100],
   ["desktop_control.rs", 1_350],
   ["file_batch.rs", 230],
+  ["file_batch_evidence_tests.rs", 90],
   ["file_batch_projection.rs", 320],
   ["file_batch_request.rs", 130],
   ["file_batch_tests.rs", 220],

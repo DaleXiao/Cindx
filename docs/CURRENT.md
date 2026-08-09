@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.2.27`
+Current application version: `0.2.28`
 
 Last code-fact review: `2026-08-09`
 
@@ -724,15 +724,15 @@ Therefore the current claim is:
   candidates remained Direct, and none met the train Pareto resource gate, so
   the valid decision is `NO_GO_TRAINING`. Validation, test, control, snapshot,
   and production promotion remained sealed; no intelligence uplift is shown.
-- Current source now emits the V7 suite through a V8 evidence receipt. Before
-  mutation, typed seed diagnostics must bind the actual execution-plan semantic
-  digest, route profile, and any exercised workflow profile. Direct-only seeds
-  stop as `valid_no_go_dormant_learning_layer`; missing or foreign identities
-  fail closed. Before an expensive candidate run, a zero-provider gate requires
-  a real semantic plan change on at least one frozen workflow diagnostic. The
-  current genome still couples route-decision and workflow-execution genes, so
-  any future result evaluates that coupled treatment and cannot attribute a gain
-  to one layer. No V8 provider campaign has run and no uplift is claimed.
+- Current source now emits the V7 suite through a V9 route-causal evidence
+  receipt. The training split first runs matched required-Direct and
+  required-Workflow Pro treatments under the same task, workspace, profile,
+  route identity, models, and budget. It stops before mutation unless Workflow
+  records at least one externally verified quality win. GEPA can then change
+  only `route_directive`; workflow construction and all authority and budget
+  genes remain fixed. Candidate selection stays train-only, with the existing
+  unseen validation, Grounded Direct control, and untouched test gates. No V9
+  provider campaign has run and no uplift is claimed.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits
@@ -759,10 +759,10 @@ Therefore the current claim is:
 - The compatibility value policy remains computed as a read-only shadow for
   comparison and learning diagnostics. It cannot select or rewrite the V2
   executable action. Provider-backed matched evidence is still required to show
-  whether this ownership change improves Auto/Pro outcomes. Workflow GEPA also
-  remains a coupled route-plus-workflow treatment;
-  the current causal gate prevents false attribution but does not yet split the
-  production genome into independently deployable layers.
+  whether this ownership change improves Auto/Pro outcomes. V9 splits the
+  learned route directive from workflow execution and can identify route-policy
+  effects, but no provider result yet shows that the separated policy improves
+  product outcomes.
 
 These are current constraints, not roadmap promises. A later change may remove
 them only with code and verification evidence in the same revision.

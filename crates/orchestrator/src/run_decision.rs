@@ -621,6 +621,9 @@ pub struct AgentRunDecisionRequest {
     pub route_requirements: AgentRouteRequirements,
     pub budget_fingerprint: Option<String>,
     pub prompt_profile_sha256: String,
+    /// Evaluation-only treatment constraint. Production requests leave this
+    /// unset and retain Conductor authority.
+    pub required_execution: Option<AgentExecutionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -862,6 +865,15 @@ impl AgentRunDecisionHarness {
         } else {
             request.execution_constraints.as_str()
         };
+        let required_execution = match request.required_execution {
+            Some(AgentExecutionMode::Direct) => {
+                "Matched causal treatment: execution must be direct and workflow_plan must be null."
+            }
+            Some(AgentExecutionMode::Workflow) => {
+                "Matched causal treatment: execution must be workflow and workflow_plan must contain the best bounded graph for this request."
+            }
+            None => "No evaluation treatment is active; choose Direct or Workflow autonomously.",
+        };
         format!(
             concat!(
                 "You are the Cindx runtime Conductor. Decide how to execute the request; do not answer it. Return only one strict JSON object.\n",
@@ -874,6 +886,7 @@ impl AgentRunDecisionHarness {
                 "You own the final quality and collaboration decision. Auto should require at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence before choosing workflow; Pro should require at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 records a read-only counterfactual observation from your estimate and independently scored matched team-versus-direct evidence; it cannot downshift or replace a valid decision. Runtime may override only explicit safety, capability, resource, or evaluation constraints, and records every override. If you cannot justify collaboration, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
                 "Runtime execution constraints are facts, not suggestions. Do not assign required effects or interactive work to a worker that cannot perform them:\n{execution_constraints}\n\n",
+                "Evaluation execution treatment: {required_execution}\n\n",
                 "Runtime request requirements are authoritative: minimum_tool_requirement={minimum_tool_requirement}, effect_authority={effect_authority}, image_input_required={image_input_required}. The selected decision and primary model must satisfy them; do not downgrade them and never request effects when effect_authority=forbidden.\n\n",
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
                 "Return this shape exactly:\n",
@@ -893,6 +906,7 @@ impl AgentRunDecisionHarness {
             },
             historical_evidence = historical_evidence,
             execution_constraints = execution_constraints,
+            required_execution = required_execution,
             minimum_tool_requirement = request.route_requirements.minimum_tool_requirement.label(),
             effect_authority = request.route_requirements.effect_authority.label(),
             image_input_required = request.route_requirements.image_input_required,
@@ -932,6 +946,13 @@ impl AgentRunDecisionHarness {
         let mut decision = serde_json::from_value::<AgentRunDecision>(payload.clone())
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
         decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
+        if self
+            .request
+            .required_execution
+            .is_some_and(|required| decision.execution != required)
+        {
+            return Err("run decision violates the matched execution treatment".to_string());
+        }
         self.request
             .route_requirements
             .validate_decision(&decision, &self.request.model_candidates)?;
@@ -1039,6 +1060,7 @@ mod tests {
             route_requirements: AgentRouteRequirements::default(),
             budget_fingerprint: Some("0".repeat(64)),
             prompt_profile_sha256: "1".repeat(64),
+            required_execution: None,
         }
     }
 
@@ -1095,6 +1117,24 @@ mod tests {
                 .min_distinct_contributions,
             2
         );
+    }
+
+    #[test]
+    fn matched_execution_treatment_is_explicit_and_fails_closed() {
+        let mut constrained = request();
+        constrained.required_execution = Some(AgentExecutionMode::Workflow);
+        let harness = AgentRunDecisionHarness::new(constrained);
+        assert!(harness
+            .planning_prompt()
+            .contains("execution must be workflow"));
+
+        let direct = serde_json::to_string(&AgentRunDecision::direct("executor"))
+            .expect("direct decision should serialize");
+        let error = harness
+            .parse(&direct)
+            .expect_err("a Direct response must not enter the Workflow treatment arm");
+
+        assert!(error.contains("matched execution treatment"));
     }
 
     #[test]

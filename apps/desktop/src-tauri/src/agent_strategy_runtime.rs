@@ -238,6 +238,7 @@ pub(crate) fn plan_agent_run(
         evolved_directive: evolved_route_directive,
         historical_evidence,
         matched_collaboration_evidence,
+        required_execution: execution_constraint.required_execution(),
         route_requirements,
         execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
             .to_string(),
@@ -349,6 +350,8 @@ pub(crate) fn plan_agent_run(
         decision
             .validate(&allowed_models, max_parallelism)
             .map_err(CollaborationStageError::Failed)?;
+    } else if execution_constraint.is_matched_route() {
+        decision_reason = ExecutionPlanDecisionReason::MatchedRouteEvaluation;
     }
     let planned = finalize_planned_run(
         prompt,

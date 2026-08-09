@@ -1,5 +1,6 @@
 use super::workflow_gepa_campaign_contract::{CampaignSplit, ProductRunReceipt};
 use super::workflow_gepa_campaign_contract::{CAMPAIGN_SUITE_ID, CAMPAIGN_VERSION};
+use super::workflow_gepa_campaign_execution::MatchedRoutePairRun;
 use super::{RawRun, RealworldCase, RealworldSuite};
 use orchestrator::{
     sha256_hex, ActionableSideInformation, AgentEvaluationCheck, AgentEvaluationEvidenceSource,
@@ -10,27 +11,50 @@ use std::collections::BTreeMap;
 
 const MAX_REFLECTION_OUTPUT_CHARS: usize = 8_000;
 
-pub(super) fn training_reflection_packets(
+pub(super) fn route_treatment_reflection_packets(
     suite: &RealworldSuite,
     seed_profile: &ConductorPromptGenome,
-    runs: &[(usize, RawRun)],
+    pairs: &[(usize, MatchedRoutePairRun)],
 ) -> Result<Vec<AgentEvaluationReflectionPacket>, String> {
-    let mut packets = Vec::new();
-    for (seed, run) in runs {
+    let mut packets = Vec::with_capacity(pairs.len().saturating_mul(2));
+    for (seed, pair) in pairs {
         let case = suite
             .cases
             .iter()
-            .find(|case| case.id == run.case_id)
-            .ok_or_else(|| format!("training run {} is absent from the suite", run.case_id))?;
-        if CampaignSplit::parse(case)? != CampaignSplit::Train {
+            .find(|case| case.id == pair.direct.case_id)
+            .ok_or_else(|| {
+                format!(
+                    "training pair {} is absent from the suite",
+                    pair.direct.case_id
+                )
+            })?;
+        if CampaignSplit::parse(case)? != CampaignSplit::Train
+            || pair.direct.case_id != pair.workflow.case_id
+        {
             return Err(format!(
-                "non-training case {} cannot enter GEPA reflection",
+                "matched route pair {} is not a valid training pair",
                 case.id
             ));
         }
-        packets.push(reflection_packet(case, seed_profile, *seed as u64, run)?);
+        let run_id = format!("route-treatment-{}-{seed}", case.id);
+        packets.push(reflection_packet(
+            case,
+            seed_profile,
+            *seed as u64,
+            "forced_direct",
+            &run_id,
+            &pair.direct,
+        )?);
+        packets.push(reflection_packet(
+            case,
+            seed_profile,
+            *seed as u64,
+            "forced_workflow",
+            &run_id,
+            &pair.workflow,
+        )?);
     }
-    if packets.len() != 2
+    if packets.len() != 4
         || packets
             .iter()
             .map(|packet| packet.category.as_str())
@@ -39,7 +63,8 @@ pub(super) fn training_reflection_packets(
             != 2
     {
         return Err(
-            "Workflow GEPA reflection requires one coding and one research product run".to_string(),
+            "route learning requires matched Direct and Workflow runs for one coding and one research case"
+                .to_string(),
         );
     }
     Ok(packets)
@@ -49,6 +74,8 @@ fn reflection_packet(
     case: &RealworldCase,
     seed_profile: &ConductorPromptGenome,
     seed: u64,
+    candidate_id: &str,
+    run_id: &str,
     run: &RawRun,
 ) -> Result<AgentEvaluationReflectionPacket, String> {
     let receipt = ProductRunReceipt::from_run(run, CampaignSplit::Train, 1)?;
@@ -152,9 +179,9 @@ fn reflection_packet(
         suite_version: CAMPAIGN_VERSION,
         case_id: case.id.clone(),
         category: case.category.clone(),
-        run_id: format!("train-{}-{seed}", case.id),
+        run_id: run_id.to_string(),
         seed,
-        candidate_id: seed_profile.id.clone(),
+        candidate_id: candidate_id.to_string(),
         candidate_fingerprint: orchestrator::prompt_genome_sha256(seed_profile)?,
         model_fingerprints,
         input: public_input,

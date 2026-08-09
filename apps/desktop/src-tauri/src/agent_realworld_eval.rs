@@ -482,6 +482,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                         frozen_profile: frozen_profile.as_ref(),
                         project_scope: None,
                         run_budget: None,
+                        execution_constraint: None,
                     },
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;

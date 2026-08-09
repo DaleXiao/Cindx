@@ -66,6 +66,7 @@ pub enum ExecutionPlanDecisionReason {
     HardBudgetConstraint,
     RuntimeGroundedDirect,
     MatchedMemoryEvaluation,
+    MatchedRouteEvaluation,
     DegradedFallback,
 }
 
@@ -77,9 +78,9 @@ impl ExecutionPlanDecisionReason {
             Self::HardSafetyConstraint
             | Self::HardCapabilityConstraint
             | Self::HardBudgetConstraint => ExecutionPlanAuthority::HardConstraintGuard,
-            Self::RuntimeGroundedDirect | Self::MatchedMemoryEvaluation => {
-                ExecutionPlanAuthority::RuntimeConstraint
-            }
+            Self::RuntimeGroundedDirect
+            | Self::MatchedMemoryEvaluation
+            | Self::MatchedRouteEvaluation => ExecutionPlanAuthority::RuntimeConstraint,
             Self::DegradedFallback => ExecutionPlanAuthority::DegradedFallback,
         }
     }
@@ -93,6 +94,7 @@ impl ExecutionPlanDecisionReason {
             Self::HardBudgetConstraint => "hard_budget_constraint",
             Self::RuntimeGroundedDirect => "runtime_grounded_direct",
             Self::MatchedMemoryEvaluation => "matched_memory_evaluation",
+            Self::MatchedRouteEvaluation => "matched_route_evaluation",
             Self::DegradedFallback => "degraded_fallback",
         }
     }
