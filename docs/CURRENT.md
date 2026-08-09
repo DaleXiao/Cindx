@@ -724,7 +724,7 @@ Therefore the current claim is:
   candidates remained Direct, and none met the train Pareto resource gate, so
   the valid decision is `NO_GO_TRAINING`. Validation, test, control, snapshot,
   and production promotion remained sealed; no intelligence uplift is shown.
-- Current source now emits the V7 suite through a V11 route-causal evidence
+- Current source now emits the V7 suite through a V12 route-causal evidence
   receipt. The first arm creates one workflow-capable conductor candidate and
   proposal; the counterbalanced second arm reuses that exact private in-memory
   anchor. Workflow executes it and Direct is projected by the runtime after planning.
@@ -740,7 +740,13 @@ Therefore the current claim is:
   corrected that causal boundary, but its single authorized run admitted zero
   product receipts because direct-finalizer assignment evidence could not bind
   a terminal completion. It is `INVALID_EVIDENCE`, not GO or NO-GO; production
-  routing remains unchanged and no V11 uplift is claimed.
+  routing remains unchanged and no V11 uplift is claimed. V12 preserves every
+  V11 treatment, task, budget, and gate while projecting route/task-graph
+  evidence independently from direct-finalizer execution evidence. A failed
+  task therefore remains a zero-quality product outcome instead of erasing an
+  otherwise complete route receipt; malformed finalizer evidence remains
+  visible on its own receipt surface. V12 is frozen but has not yet produced a
+  provider-backed result.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits

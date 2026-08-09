@@ -1,6 +1,3 @@
-use super::direct_finalizer_receipts::{
-    project_direct_finalizer_execution, DirectFinalizerExecutionReceipt,
-};
 use super::{metadata_u64, Treatment};
 use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::*;
@@ -88,8 +85,6 @@ pub(super) struct StrategyReceipt {
     pub(super) paired_evidence_sha256: Option<String>,
     pub(super) promotion_gate_protocol: Option<String>,
     pub(super) workflow_profile_exercised: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) direct_finalizer_execution: Option<DirectFinalizerExecutionReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -234,14 +229,6 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     )?
     .to_string();
     let mut workflow_profile_exercised = false;
-    let direct_finalizer_execution = project_direct_finalizer_execution(
-        event,
-        &events[decision_index.saturating_add(1)..],
-        &decision,
-        &genome,
-        &profile_sha256,
-    )?;
-
     let learned = match (frozen_profile, profile_source.as_str()) {
         (Some(snapshot), "evaluation_frozen_profile") => {
             snapshot.validate()?;
@@ -490,7 +477,6 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
         paired_evidence_sha256: learned.map(|snapshot| snapshot.paired_evidence_sha256.clone()),
         promotion_gate_protocol: learned.map(|snapshot| snapshot.promotion_gate_protocol.clone()),
         workflow_profile_exercised,
-        direct_finalizer_execution,
     }))
 }
 
@@ -1156,7 +1142,6 @@ mod tests {
         );
         assert_eq!(receipt.execution_mode, "direct");
         assert!(receipt.learned_artifact_sha256.is_none());
-        assert!(receipt.direct_finalizer_execution.is_none());
         assert!(!serde_json::to_string(&receipt)
             .unwrap()
             .contains("direct_finalizer_execution"));

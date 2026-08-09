@@ -585,7 +585,7 @@ generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
 The feature-gated Workflow GEPA campaign keeps the frozen V7 task suite and
-product gates while the current source emits a V11 evidence receipt. Six modules
+product gates while the current source emits a V12 evidence receipt. Six modules
 retain one-way responsibilities: the runner owns protocol order, the suite
 module validates public requirements and frozen strata, the evidence module
 converts external product verification into redacted reflection packets, the
@@ -600,7 +600,16 @@ authorized V11 run is retained as `INVALID_EVIDENCE`: it reserved the first arm
 but direct-finalizer assignment evidence could not bind a terminal completion,
 so no product receipt or matched causal result was admitted.
 
-Before mutation, V11 asks the first arm in each pair for one workflow-capable
+V12 separates two evidence surfaces that V11 coupled: `StrategyReceipt` owns
+only route and task-graph identity, while direct-finalizer execution and its
+projection error are recorded independently on the raw run. Route campaigns
+still require complete strategy, execution-plan, provider, tool, verification,
+and budget evidence. A failed terminal-finalizer path remains a failed product
+outcome in the matched denominator instead of invalidating the route receipt;
+the campaign makes no direct-finalizer treatment claim from that independent
+diagnostic.
+
+Before mutation, V12 asks the first arm in each pair for one workflow-capable
 conductor candidate and proposal, then injects that exact private in-memory
 anchor into the second arm. Workflow executes the proposal unchanged; Direct is
 a runtime projection of the same plan anchor after planning. Arm order is

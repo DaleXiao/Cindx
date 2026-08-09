@@ -1,3 +1,4 @@
+use super::Treatment;
 use crate::agent_finalizer_runtime::direct_finalizer_policy::DIRECT_FINALIZER_RECEIPT_SCHEMA;
 use crate::prompt_profile_serving::restore_prompt_profile_selection;
 use agent_core::{Event, EventKind, Metadata};
@@ -31,6 +32,37 @@ struct PersistedReceipt {
     phenotype_sha256: String,
     instruction_sha256: String,
     steer_epoch: u64,
+}
+
+pub(super) fn direct_finalizer_receipt_from_events(
+    events: &[Event],
+    treatment: Treatment,
+) -> Result<Option<DirectFinalizerExecutionReceipt>, String> {
+    if treatment.is_oracle_reference() {
+        return Ok(None);
+    }
+    let (decision_index, event) = events
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, event)| event.summary == "Agent run decision selected")
+        .ok_or_else(|| "agent strategy receipt is missing".to_string())?;
+    let decision_json = required_metadata_any(&event.metadata, &["run_decision", "decision"])?;
+    let decision = serde_json::from_str::<AgentRunDecision>(decision_json)
+        .map_err(|error| format!("agent strategy decision receipt is invalid: {error}"))?;
+    let genome_json = required_metadata(&event.metadata, "prompt_genome")?;
+    let genome = serde_json::from_str::<ConductorPromptGenome>(genome_json)
+        .map_err(|error| format!("agent strategy profile receipt is invalid: {error}"))?;
+    genome.validate()?;
+    let profile_sha256 = prompt_genome_sha256(&genome)?;
+
+    project_direct_finalizer_execution(
+        event,
+        &events[decision_index.saturating_add(1)..],
+        &decision,
+        &genome,
+        &profile_sha256,
+    )
 }
 
 pub(super) fn project_direct_finalizer_execution(
@@ -207,6 +239,12 @@ fn verification_label(value: PromptVerification) -> &'static str {
 fn required_metadata<'a>(metadata: &'a Metadata, key: &str) -> Result<&'a str, String> {
     optional_nonempty(metadata, key)
         .ok_or_else(|| format!("required receipt field {key} is missing"))
+}
+
+fn required_metadata_any<'a>(metadata: &'a Metadata, keys: &[&str]) -> Result<&'a str, String> {
+    keys.iter()
+        .find_map(|key| optional_nonempty(metadata, key))
+        .ok_or_else(|| format!("required receipt field {} is missing", keys.join(" or ")))
 }
 
 fn optional_nonempty<'a>(metadata: &'a Metadata, key: &str) -> Option<&'a str> {

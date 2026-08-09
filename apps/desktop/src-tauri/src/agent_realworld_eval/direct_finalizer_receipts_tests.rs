@@ -1,6 +1,9 @@
-use super::direct_finalizer_receipts::DirectFinalizerExecutionReceipt;
+use super::direct_finalizer_receipts::{
+    direct_finalizer_receipt_from_events, DirectFinalizerExecutionReceipt,
+};
 use super::receipts::strategy_receipt_from_events;
-use super::Treatment;
+use super::runtime::project_route_and_finalizer_evidence;
+use super::{EventMetrics, Treatment};
 use crate::agent_finalizer_runtime::direct_finalizer_policy::{
     insert_direct_finalizer_receipt_metadata, install_direct_finalizer_policy_metadata,
     selected_direct_finalizer_policy,
@@ -143,10 +146,8 @@ fn strategy_events() -> Vec<Event> {
 }
 
 fn execution_receipt(events: &[Event]) -> DirectFinalizerExecutionReceipt {
-    strategy_receipt_from_events(events, Treatment::Auto, None)
-        .expect("strategy receipt")
-        .expect("product strategy")
-        .direct_finalizer_execution
+    direct_finalizer_receipt_from_events(events, Treatment::Auto)
+        .expect("direct-finalizer receipt projection")
         .expect("direct phenotype execution receipt")
 }
 
@@ -182,7 +183,7 @@ fn rejects_a_mismatched_finished_request() {
         "different-finalizer-request".to_string(),
     );
 
-    assert!(strategy_receipt_from_events(&events, Treatment::Auto, None)
+    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
         .unwrap_err()
         .contains("matching direct-finalizer finished event is missing"));
 }
@@ -195,7 +196,7 @@ fn rejects_a_tampered_assignment_receipt() {
         "0".repeat(64),
     );
 
-    assert!(strategy_receipt_from_events(&events, Treatment::Auto, None)
+    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
         .unwrap_err()
         .contains("assignment receipt digest mismatch"));
 }
@@ -210,10 +211,12 @@ fn fallback_terminal_keeps_the_route_receipt_without_claiming_finalizer_executio
         .metadata
         .remove("direct_finalizer_profile_exercised");
 
-    let receipt = strategy_receipt_from_events(&events, Treatment::Auto, None)
-        .unwrap()
-        .expect("strategy receipt");
-    assert!(receipt.direct_finalizer_execution.is_none());
+    strategy_receipt_from_events(&events, Treatment::Auto, None)
+        .expect("strategy receipt")
+        .expect("product strategy");
+    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
+        .expect("direct-finalizer receipt projection")
+        .is_none());
 }
 
 #[test]
@@ -223,10 +226,12 @@ fn assigned_but_unexercised_finalizer_keeps_the_route_receipt() {
         .metadata
         .remove("direct_finalizer_profile_exercised");
 
-    let receipt = strategy_receipt_from_events(&events, Treatment::Auto, None)
-        .unwrap()
-        .expect("strategy receipt");
-    assert!(receipt.direct_finalizer_execution.is_none());
+    strategy_receipt_from_events(&events, Treatment::Auto, None)
+        .expect("strategy receipt")
+        .expect("product strategy");
+    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
+        .expect("direct-finalizer receipt projection")
+        .is_none());
 }
 
 #[test]
@@ -236,7 +241,29 @@ fn exercised_finalizer_cannot_claim_a_fallback_terminal() {
         .metadata
         .insert("finalizer_fallback".to_string(), "true".to_string());
 
-    assert!(strategy_receipt_from_events(&events, Treatment::Auto, None)
+    strategy_receipt_from_events(&events, Treatment::Auto, None)
+        .expect("strategy receipt")
+        .expect("product strategy");
+    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
         .unwrap_err()
         .contains("execution claim is attached to a fallback terminal"));
+}
+
+#[test]
+fn missing_finalizer_terminal_does_not_invalidate_route_evidence() {
+    let mut events = strategy_events();
+    events.pop();
+
+    let mut metrics = EventMetrics::default();
+    project_route_and_finalizer_evidence(&mut metrics, &events, Treatment::Auto, None, None);
+
+    let route = metrics
+        .strategy_receipt
+        .expect("route evidence must remain projectable");
+    assert_eq!(route.execution_mode, "direct");
+    assert!(metrics.evidence_errors.is_empty());
+    assert!(metrics
+        .direct_finalizer_evidence_error
+        .expect("independent finalizer diagnostic")
+        .contains("direct-finalizer evidence is missing its terminal completion"));
 }

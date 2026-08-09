@@ -1,4 +1,5 @@
 use super::memory_receipts::memory_evaluation_receipt_from_events;
+use super::direct_finalizer_receipts::direct_finalizer_receipt_from_events;
 use super::receipts::{
     is_receipt_bearing_event, model_receipts_from_metadata, resolved_budget_from_events,
     strategy_receipt_from_events_with_constraint, successful_response_count,
@@ -14,6 +15,7 @@ use crate::{
     AppState, EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
 };
 use agent_runtime::RunBudget;
+use agent_core::Event;
 use std::path::Path;
 
 const MAX_DRIVER_ROUNDS: usize = 24;
@@ -291,15 +293,13 @@ pub(super) fn collect_event_metrics(
         Ok(receipt) => metrics.resolved_budget = Some(receipt),
         Err(error) => metrics.evidence_errors.push(error),
     }
-    match strategy_receipt_from_events_with_constraint(
+    project_route_and_finalizer_evidence(
+        &mut metrics,
         &events,
         treatment,
         frozen_profile,
         expected_execution_constraint,
-    ) {
-        Ok(receipt) => metrics.strategy_receipt = receipt,
-        Err(error) => metrics.evidence_errors.push(error),
-    }
+    );
     match memory_evaluation_receipt_from_events(&events, treatment) {
         Ok(receipt) => metrics.memory_evaluation_receipt = receipt,
         Err(error) => metrics.evidence_errors.push(error),
@@ -310,6 +310,28 @@ pub(super) fn collect_event_metrics(
             .saturating_add(metrics.completion_tokens);
     }
     Ok(metrics)
+}
+
+pub(super) fn project_route_and_finalizer_evidence(
+    metrics: &mut EventMetrics,
+    events: &[Event],
+    treatment: Treatment,
+    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
+    expected_execution_constraint: Option<AgentExecutionConstraint>,
+) {
+    match strategy_receipt_from_events_with_constraint(
+        events,
+        treatment,
+        frozen_profile,
+        expected_execution_constraint,
+    ) {
+        Ok(receipt) => metrics.strategy_receipt = receipt,
+        Err(error) => metrics.evidence_errors.push(error),
+    }
+    match direct_finalizer_receipt_from_events(events, treatment) {
+        Ok(receipt) => metrics.direct_finalizer_execution = receipt,
+        Err(error) => metrics.direct_finalizer_evidence_error = Some(error),
+    }
 }
 
 pub(super) fn event_sequence_floor(state: &tauri::State<'_, AppState>) -> Result<u64, String> {

@@ -183,6 +183,8 @@ pub(super) fn execute_case(
             setup_failure: None,
             resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
             strategy_receipt: None,
+            direct_finalizer_execution: None,
+            direct_finalizer_evidence_error: None,
             memory_evaluation_receipt: None,
             model_receipts,
             metrics: RuntimeMetrics {
@@ -442,6 +444,8 @@ pub(super) fn execute_case(
                 .unwrap_or_else(|| ResolvedBudgetReceipt::for_treatment(treatment))
         }),
         strategy_receipt: event_metrics.strategy_receipt,
+        direct_finalizer_execution: event_metrics.direct_finalizer_execution,
+        direct_finalizer_evidence_error: event_metrics.direct_finalizer_evidence_error,
         memory_evaluation_receipt: event_metrics.memory_evaluation_receipt,
         model_receipts: event_metrics.model_receipts,
         metrics: RuntimeMetrics {

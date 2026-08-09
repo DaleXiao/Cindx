@@ -332,7 +332,7 @@ test, and snapshot publication. Any successor campaign requires a new frozen
 protocol and separate explicit authorization. V6 is that frozen successor
 protocol, but no V6 provider run has occurred.
 
-The current implementation retains the frozen V7 product suite and uses the V11
+The current implementation retains the frozen V7 product suite and uses the V12
 route-causal evidence schema. Before mutation, each training pair shares one
 workflow-capable conductor candidate and proposal. Workflow executes the anchor;
 Direct is projected after planning. Exact candidate and proposal hashes, task,
@@ -367,12 +367,20 @@ assignment evidence could not bind a terminal completion, leaving the durable
 journal pending with one reservation. The result is `INVALID_EVIDENCE`, not a
 GO or NO-GO; V11 must not be replayed and production routing remains unchanged.
 
-The consumed V11 one-shot campaign used a clean exact revision and
-three fresh outside-Git paths. The resulting journal and report must be retained
-even when the command exits with a preregistered no-go:
+V12 changes no product treatment or gate. It independently projects the
+route/task-graph receipt and direct-finalizer execution receipt. The former
+continues to require a valid strategy, execution plan, provider receipts,
+external checks, and budget identity. A missing finalizer terminal on a failed
+task is retained as a separate diagnostic while completion and external quality
+remain in the denominator. The V11 failure shape has a deterministic regression
+test; this does not authorize or predict a provider result.
+
+The V12 one-shot campaign requires a clean exact revision and three fresh
+outside-Git paths. The resulting journal and report must be retained even when
+the command exits with a preregistered no-go:
 
 ```sh
-run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v11.XXXXXX)"
+run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v12.XXXXXX)"
 CINDX_WORKFLOW_GEPA_REPORT="$run_dir/report.json" \
 CINDX_WORKFLOW_GEPA_SNAPSHOT="$run_dir/snapshot.json" \
 CINDX_WORKFLOW_GEPA_JOURNAL="$run_dir/journal.json" \
