@@ -105,11 +105,16 @@ revision and is no longer the current product decision.
 
 ## Current Targeted Causal Evidence
 
-- [Cindx Dynamic Collaboration V1 frozen protocol 0.2.27](CINDX_DYNAMIC_COLLABORATION_V1_PROTOCOL_0.2.27_2026-08-09.md)
-  preregisters one complete eight-cell route-blind matrix for the unified
-  run-decision and Workflow proposal path. It requires a receipt-bound Workflow,
-  matched non-regression, and at least one quality or completion win before any
-  incremental-value claim. Its current state is `PROTOCOL_ONLY`.
+- [Cindx Dynamic Collaboration V1 result 0.2.27](CINDX_DYNAMIC_COLLABORATION_V1_0.2.27_2026-08-09.md)
+  records the completed eight-cell route-blind matrix under the
+  [frozen protocol](CINDX_DYNAMIC_COLLABORATION_V1_PROTOCOL_0.2.27_2026-08-09.md).
+  It is `VALID_TARGETED_EVIDENCE`, `NO_GO_NOT_EXERCISED`: both Grounded Direct
+  controls and every Auto/Pro cell completed with full quality, full external
+  effects, and zero safety violations, but all four Auto/Pro cells executed
+  Direct. Auto used `1.6028x` the median latency and `1.1208x` the tokens of
+  Grounded Direct; Pro produced no matched quality or completion win. No
+  Workflow, GEPA, memory, general intelligence, or Fugu parity claim is admitted.
+- [Sanitized Dynamic Collaboration V1 machine-readable result](CINDX_DYNAMIC_COLLABORATION_V1_0.2.27_2026-08-09.json)
 
 - [Cindx Conductor ownership targeted evaluation 0.2.27](CINDX_CONDUCTOR_OWNERSHIP_V1_0.2.27_2026-08-09.md)
   records one frozen old/current train diagnosis and one independent
