@@ -10,6 +10,8 @@ mod preparation;
 mod recording;
 #[path = "agent_strategy_requirements.rs"]
 mod requirements;
+#[path = "agent_strategy_workflow_proposal.rs"]
+mod workflow_proposal;
 
 #[cfg(test)]
 pub(crate) use self::causal_route::causal_route_event_metadata;
@@ -45,7 +47,7 @@ use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
     AgentRunDecisionHarness, AgentRunDecisionRequest, ConductorExecutionContract,
     ConductorPromptGenome, ExecutionPlan, ExecutionPlanDecisionReason, RoutingContext,
-    RoutingDecision,
+    RoutingDecision, WorkflowPlanProposal,
 };
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,7 @@ pub(crate) struct PlannedAgentRun {
     pub(crate) attempted_conductor_models: Vec<String>,
     pub(crate) selected_conductor_model: Option<String>,
     pub(crate) route_requirements: AgentRouteRequirements,
+    pub(crate) workflow_plan: Option<WorkflowPlanProposal>,
 }
 
 pub(crate) struct AgentRunPlanningRequest<'a> {
@@ -143,6 +146,7 @@ pub(crate) fn plan_agent_run(
                 attempted_conductor_models: Vec::new(),
                 selected_conductor_model: None,
                 route_requirements,
+                workflow_plan: None,
                 budget_fingerprint,
                 recent_context: recent_context.clone(),
                 route_prompt_profile_sha256: route_prompt_profile_sha256.clone(),
@@ -186,6 +190,7 @@ pub(crate) fn plan_agent_run(
                 attempted_conductor_models: Vec::new(),
                 selected_conductor_model: None,
                 route_requirements,
+                workflow_plan: None,
                 budget_fingerprint,
                 recent_context: recent_context.clone(),
                 route_prompt_profile_sha256: route_prompt_profile_sha256.clone(),
@@ -293,48 +298,49 @@ pub(crate) fn plan_agent_run(
         source,
         mut decision_reason,
         degradation_reason,
-    ) =
-        match outcome {
-            ConductorDecisionOutcome::Selected(draft) => {
-                let source =
-                    requirements::selected_conductor_source(attempted_conductor_models.len());
-                (
-                    draft.conductor_candidate.clone(),
-                    draft.conductor_candidate,
-                    Some(draft.compatibility_route),
-                    source,
-                    ExecutionPlanDecisionReason::ConductorSelection,
-                    None,
-                )
-            }
-            ConductorDecisionOutcome::Exhausted => {
-                let reason = if failure_reasons.is_empty() {
-                    "no configured conductor model was available".to_string()
-                } else {
-                    failure_reasons.join(" | ")
-                };
-                let decision = AgentRunDecision::degraded_conductor_fallback(
-                    fallback_model,
-                    effort.label(),
-                    allowed_models.len(),
-                    max_parallelism,
-                    &reason,
-                );
-                let source = if decision.execution == AgentExecutionMode::Workflow {
-                    AgentPlanningSource::DegradedWorkflow
-                } else {
-                    AgentPlanningSource::DegradedDirect
-                };
-                (
-                    decision.clone(),
-                    decision,
-                    None,
-                    source,
-                    ExecutionPlanDecisionReason::DegradedFallback,
-                    Some(reason),
-                )
-            }
-        };
+        workflow_plan,
+    ) = match outcome {
+        ConductorDecisionOutcome::Selected(draft) => {
+            let source = requirements::selected_conductor_source(attempted_conductor_models.len());
+            (
+                draft.conductor_candidate.clone(),
+                draft.conductor_candidate,
+                Some(draft.compatibility_route),
+                source,
+                ExecutionPlanDecisionReason::ConductorSelection,
+                None,
+                draft.workflow_plan,
+            )
+        }
+        ConductorDecisionOutcome::Exhausted => {
+            let reason = if failure_reasons.is_empty() {
+                "no configured conductor model was available".to_string()
+            } else {
+                failure_reasons.join(" | ")
+            };
+            let decision = AgentRunDecision::degraded_conductor_fallback(
+                fallback_model,
+                effort.label(),
+                allowed_models.len(),
+                max_parallelism,
+                &reason,
+            );
+            let source = if decision.execution == AgentExecutionMode::Workflow {
+                AgentPlanningSource::DegradedWorkflow
+            } else {
+                AgentPlanningSource::DegradedDirect
+            };
+            (
+                decision.clone(),
+                decision,
+                None,
+                source,
+                ExecutionPlanDecisionReason::DegradedFallback,
+                Some(reason),
+                None,
+            )
+        }
+    };
     let decision = execution_constraint
         .apply(decision, effort)
         .map_err(CollaborationStageError::Failed)?;
@@ -360,6 +366,7 @@ pub(crate) fn plan_agent_run(
             attempted_conductor_models,
             selected_conductor_model,
             route_requirements,
+            workflow_plan,
             budget_fingerprint,
             recent_context,
             route_prompt_profile_sha256,

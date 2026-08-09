@@ -172,6 +172,42 @@ impl ConductorHarness {
         )
     }
 
+    pub fn plan_from_proposal(
+        &self,
+        proposal: &WorkflowPlanProposal,
+    ) -> Result<WorkflowPlanIr, String> {
+        if self.request.prompt_evolution_enabled {
+            self.request.prompt_genome.validate()?;
+        }
+        let semantics = proposal
+            .steps
+            .iter()
+            .map(|step| ConductorStepSemantics {
+                output_kind: Some(step.output_kind.clone()),
+                tool_policy: Some(step.tool_policy),
+            })
+            .collect::<Vec<_>>();
+        let workflow = AdaptiveWorkflow {
+            steps: proposal
+                .steps
+                .iter()
+                .map(|step| AdaptiveWorkflowStep {
+                    id: step.id.trim().to_string(),
+                    role: step.role.trim().to_ascii_lowercase(),
+                    model: step.model.trim().to_string(),
+                    subtask: step.subtask.trim().to_string(),
+                    access: step
+                        .access
+                        .iter()
+                        .map(|dependency| dependency.trim().to_string())
+                        .collect(),
+                })
+                .collect(),
+        };
+        self.validate_shape(&workflow)?;
+        self.build_plan(&workflow, Some(&semantics))
+    }
+
     pub fn parse_plan(&self, response: &str) -> Result<WorkflowPlanIr, String> {
         if self.request.prompt_evolution_enabled {
             self.request.prompt_genome.validate()?;

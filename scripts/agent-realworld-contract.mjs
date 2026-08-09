@@ -387,6 +387,54 @@ function validateStrategyReceipt(run, key, profileArtifacts, suite) {
     !run.completed || receipt.execution_mode !== "workflow" || receipt.workflow_profile_exercised,
     `${key}: workflow strategy did not exercise the selected profile`
   );
+  if (Object.hasOwn(receipt, "workflow_execution_completed")) {
+    requireFact(
+      typeof receipt.workflow_execution_completed === "boolean",
+      `${key}: workflow completion receipt is invalid`
+    );
+    for (const field of [
+      "workflow_step_count",
+      "workflow_verifier_steps",
+      "workflow_synthesis_steps"
+    ]) {
+      requireFact(
+        Number.isInteger(receipt[field]) && receipt[field] >= 0,
+        `${key}: strategy ${field} is invalid`
+      );
+    }
+    requireFact(
+      Array.isArray(receipt.workflow_root_roles) &&
+        receipt.workflow_root_roles.every((role) => typeof role === "string" && role.length > 0),
+      `${key}: workflow root-role receipt is invalid`
+    );
+    if (receipt.execution_mode === "direct") {
+      requireFact(
+        receipt.workflow_plan_source === null &&
+          receipt.workflow_plan_sha256 === null &&
+          receipt.workflow_step_count === 0 &&
+          receipt.workflow_root_roles.length === 0 &&
+          receipt.workflow_verifier_steps === 0 &&
+          receipt.workflow_synthesis_steps === 0 &&
+          receipt.workflow_execution_completed === false,
+        `${key}: direct strategy claimed materialized workflow evidence`
+      );
+    } else if (receipt.workflow_profile_exercised) {
+      requireFact(
+        sha256Pattern.test(receipt.workflow_proposal_sha256) &&
+          sha256Pattern.test(receipt.workflow_plan_sha256) &&
+          typeof receipt.workflow_plan_source === "string" &&
+          receipt.workflow_plan_source.length > 0 &&
+          receipt.workflow_step_count > 1 &&
+          receipt.workflow_root_roles.length > 0 &&
+          receipt.workflow_synthesis_steps === 1,
+        `${key}: workflow strategy lacks bound materialization evidence`
+      );
+      requireFact(
+        !run.completed || receipt.workflow_execution_completed,
+        `${key}: completed run lacks a completed workflow receipt`
+      );
+    }
+  }
   const executionConstraint = receipt.execution_constraint ?? "native";
   requireFact(
     executionConstraint === "native" || executionConstraint === "grounded_direct",

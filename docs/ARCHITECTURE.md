@@ -325,6 +325,21 @@ for whether those segments require effects.
 
 - Fast constructs a direct decision without a conductor call.
 - Auto and Pro ask configured conductor candidates for this schema.
+- A Workflow candidate carries a typed `WorkflowPlanProposal` in the same
+  provider response. The proposal names independent roots, prior-only
+  dependencies, optional verification, and one final tool-free synthesis. Its
+  roots must match the decision's contribution and parallelism declarations;
+  every root must reach synthesis, and independent verification must both audit
+  every root and feed synthesis. The desktop adapter binds the serialized
+  proposal and digest to the canonical strategy event, revalidates it against
+  the final `run_decision` and configured model pool, and lets
+  `ConductorHarness` materialize the executable `WorkflowPlanIr` without another
+  provider call. Checkpoint resume continues to use the persisted executable
+  plan. Missing legacy proposals and proposals rejected by the executable
+  workflow budget retain the existing bounded planner fallback. Workflow
+  observability records the source actually materialized, not merely the route
+  proposal claim; evaluation receipts bind that plan digest and its completion
+  event so a fallback planner cannot masquerade as route-owned execution.
 - After validation, the Conductor candidate is the sole native Auto/Pro quality
   and collaboration decision. Deterministic capability and bounded-execution
   checks may reject an invalid candidate into bounded repair or degraded

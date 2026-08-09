@@ -105,6 +105,12 @@ revision and is no longer the current product decision.
 
 ## Current Targeted Causal Evidence
 
+- [Cindx Dynamic Collaboration V1 frozen protocol 0.2.27](CINDX_DYNAMIC_COLLABORATION_V1_PROTOCOL_0.2.27_2026-08-09.md)
+  preregisters one complete eight-cell route-blind matrix for the unified
+  run-decision and Workflow proposal path. It requires a receipt-bound Workflow,
+  matched non-regression, and at least one quality or completion win before any
+  incremental-value claim. Its current state is `PROTOCOL_ONLY`.
+
 - [Cindx Conductor ownership targeted evaluation 0.2.27](CINDX_CONDUCTOR_OWNERSHIP_V1_0.2.27_2026-08-09.md)
   records one frozen old/current train diagnosis and one independent
   control/candidate holdout for the Conductor-owned execution plan. It is

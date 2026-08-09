@@ -2,7 +2,7 @@ use super::{causal_route, requirements, AgentPlanningSource, PlannedAgentRun};
 use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
     CausalRouteSelectionV2, ConductorPromptGenome, ExecutionPlan, ExecutionPlanDecisionReason,
-    ModelCandidate,
+    ModelCandidate, WorkflowPlanProposal,
 };
 
 pub(super) struct PlannedRunFinalizeInput {
@@ -18,6 +18,7 @@ pub(super) struct PlannedRunFinalizeInput {
     pub(super) attempted_conductor_models: Vec<String>,
     pub(super) selected_conductor_model: Option<String>,
     pub(super) route_requirements: AgentRouteRequirements,
+    pub(super) workflow_plan: Option<WorkflowPlanProposal>,
     pub(super) budget_fingerprint: Option<String>,
     pub(super) recent_context: String,
     pub(super) route_prompt_profile_sha256: String,
@@ -41,6 +42,7 @@ pub(super) fn finalize_planned_run(
         attempted_conductor_models,
         selected_conductor_model,
         route_requirements,
+        workflow_plan,
         budget_fingerprint,
         recent_context,
         route_prompt_profile_sha256,
@@ -76,6 +78,9 @@ pub(super) fn finalize_planned_run(
     let workflow_execution_profile_sha256 = (decision.execution == AgentExecutionMode::Workflow)
         .then(|| prompt_genome.workflow_execution_profile_sha256())
         .transpose()?;
+    let workflow_plan = (decision.execution == AgentExecutionMode::Workflow)
+        .then_some(workflow_plan)
+        .flatten();
     let execution_plan = ExecutionPlan::new(
         conductor_candidate,
         decision,
@@ -96,5 +101,6 @@ pub(super) fn finalize_planned_run(
         attempted_conductor_models,
         selected_conductor_model,
         route_requirements,
+        workflow_plan,
     })
 }

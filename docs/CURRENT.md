@@ -26,7 +26,13 @@ only the revision recorded in each report.
   Confidence, independent demand, and matched team-versus-direct evidence are
   visible to the Conductor and the shadow receipt, but the compatibility policy
   cannot replace a valid Conductor action. The plan records a typed decision
-  receipt binding the candidate and executable action. Production authority is
+  receipt binding the candidate and executable action. A Workflow candidate
+  must include its concrete bounded branch graph in the same Conductor response.
+  The proposal is validated against the final decision, bound to the strategy
+  event by a SHA-256 receipt, and materialized by the workflow harness without a
+  second planning call. Historical checkpoints retain their persisted plan, and
+  only an absent or rejected legacy proposal may use the bounded legacy planner
+  fallback. Production authority is
   Conductor, fixed Fast policy, an explicit evaluation/runtime constraint, or a
   degraded fallback; invalid safety, capability, or budget candidates fail
   closed into bounded repair rather than being silently rewritten.
