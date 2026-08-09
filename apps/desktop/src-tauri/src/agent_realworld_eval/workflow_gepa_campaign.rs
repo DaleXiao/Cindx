@@ -5,10 +5,10 @@ use super::workflow_gepa_campaign_contract::{
     PairAggregateReceipt, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
     TEST_REPLICATES,
 };
-use super::workflow_gepa_campaign_evidence::training_reflection_packets;
+use super::workflow_gepa_campaign_evidence::route_treatment_reflection_packets;
 use super::workflow_gepa_campaign_execution::{
-    execute_journaled_campaign_case, execute_product_pair, preflight_matched_workspaces,
-    project_scope, EvaluationDataEnvironment,
+    execute_journaled_campaign_case, execute_matched_route_pair, execute_product_pair,
+    preflight_matched_workspaces, EvaluationDataEnvironment,
 };
 use super::workflow_gepa_campaign_journal::{
     CampaignBudgetReceipt, CampaignJournal, CampaignUsageReceipt,
@@ -35,7 +35,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v8";
+const REPORT_SCHEMA: &str = "cindx.workflow-gepa-product-evidence.v9";
 
 #[derive(Debug, Serialize)]
 struct WorkflowGepaCampaignReceipt {
@@ -50,6 +50,8 @@ struct WorkflowGepaCampaignReceipt {
     campaign_budget: CampaignBudgetReceipt,
     campaign_usage: CampaignUsageReceipt,
     train_runs: Vec<ProductRunReceipt>,
+    route_treatment_pairs: Vec<ProductPairReceipt>,
+    route_treatment_signal: bool,
     learning_readiness: PromptLearningReadinessReceipt,
     reflection_evidence_sha256: String,
     candidate_population: Vec<CandidateTrainingReceipt>,
@@ -139,7 +141,7 @@ pub(super) fn run() -> Result<(), String> {
     )?;
 
     let temp = tempfile::Builder::new()
-        .prefix("cindx-workflow-gepa-v7-")
+        .prefix("cindx-workflow-gepa-v9-route-")
         .tempdir()
         .map_err(|error| format!("failed to create campaign workspace: {error}"))?;
     let suite_root = temp.path();
@@ -160,38 +162,41 @@ pub(super) fn run() -> Result<(), String> {
     let seed_profile = ConductorPromptGenome::seed_for_effort(policy.label());
     let mut execution_index = 1usize;
 
-    let mut train_raw = Vec::new();
+    let mut train_route_pairs = Vec::new();
     let mut train_runs = Vec::new();
-    for case in cases_for_split(&suite, CampaignSplit::Train)? {
-        eprintln!("[workflow-gepa-v7] train seed: {}", case.id);
-        let run_execution_index = execution_index;
-        let root = suite_root.join(format!("train-{}", case.id));
-        materialize_case(&root, case)?;
-        let project_scope = project_scope(CampaignSplit::Train, case, 1, "seed");
-        let (run, receipt) = execute_journaled_campaign_case(
+    for (pair_index, case) in cases_for_split(&suite, CampaignSplit::Train)?
+        .into_iter()
+        .enumerate()
+    {
+        eprintln!("[workflow-gepa-v9] matched route train pair: {}", case.id);
+        let pair = execute_matched_route_pair(
             &app,
             &state,
             &runtime_provider,
             &evaluation_database,
-            &root,
+            suite_root,
             case,
-            run_execution_index,
-            1,
-            1,
-            &suite_sha256,
-            None,
-            Treatment::Pro,
-            &project_scope,
             CampaignSplit::Train,
-            &format!("{project_scope}-train-seed"),
+            1,
+            pair_index,
+            &mut execution_index,
+            &suite_sha256,
             &mut journal,
         )?;
-        execution_index = execution_index.saturating_add(1);
-        train_runs.push(receipt);
-        train_raw.push((run_execution_index, run));
+        train_runs.push(pair.pair.seed.clone());
+        train_runs.push(pair.pair.candidate.clone());
+        train_route_pairs.push((pair_index + 1, pair));
     }
 
-    let reflection_packets = training_reflection_packets(&suite, &seed_profile, &train_raw)?;
+    let reflection_packets =
+        route_treatment_reflection_packets(&suite, &seed_profile, &train_route_pairs)?;
+    let route_treatment_pairs = train_route_pairs
+        .iter()
+        .map(|(_, pair)| pair.pair.clone())
+        .collect::<Vec<_>>();
+    let route_treatment_signal = route_treatment_pairs
+        .iter()
+        .any(|pair| pair.outcome == "candidate_win");
     let reflection_evidence_sha256 = sha256_hex(
         &serde_json::to_vec(&reflection_packets)
             .map_err(|error| format!("failed to encode reflection evidence: {error}"))?,
@@ -200,12 +205,11 @@ pub(super) fn run() -> Result<(), String> {
         .iter()
         .map(ProductRunReceipt::execution_diagnostic)
         .collect::<Result<Vec<_>, String>>()?;
-    let seed_workflow_profile_sha256 = seed_profile.workflow_execution_profile_sha256()?;
     let seed_route_profile_sha256 = seed_profile.route_decision_profile_sha256(policy.label())?;
     let learning_readiness = assess_prompt_learning_readiness(
-        PromptLearningLayer::WorkflowExecution,
+        PromptLearningLayer::RouteDecision,
         Some(&seed_route_profile_sha256),
-        Some(&seed_workflow_profile_sha256),
+        None,
         &diagnostic_plans,
     )?;
     if !learning_readiness.eligible {
@@ -228,6 +232,8 @@ pub(super) fn run() -> Result<(), String> {
             campaign_budget: journal.budget(),
             campaign_usage: journal.usage(),
             train_runs,
+            route_treatment_pairs,
+            route_treatment_signal,
             learning_readiness,
             reflection_evidence_sha256,
             candidate_population: Vec::new(),
@@ -252,6 +258,46 @@ pub(super) fn run() -> Result<(), String> {
             "workflow GEPA stopped before mutation: {readiness_reason}"
         ));
     }
+    if !route_treatment_signal {
+        let receipt = WorkflowGepaCampaignReceipt {
+            schema: REPORT_SCHEMA,
+            source_commit,
+            suite_id: suite.id,
+            suite_sha256,
+            training_dataset_sha256,
+            provider_id: provider.provider_id,
+            provider_endpoint_sha256,
+            configured_model_sha256,
+            campaign_budget: journal.budget(),
+            campaign_usage: journal.usage(),
+            train_runs,
+            route_treatment_pairs,
+            route_treatment_signal,
+            learning_readiness,
+            reflection_evidence_sha256,
+            candidate_population: Vec::new(),
+            selected_candidate: None,
+            validation_pairs: Vec::new(),
+            validation: None,
+            validation_gate_passed: false,
+            test_pairs: Vec::new(),
+            test: None,
+            test_gate_passed: false,
+            grounded_direct_control: None,
+            grounded_direct_control_passed: false,
+            final_test_was_untouched_during_learning: true,
+            candidate_selected_from_train_only: false,
+            candidate_snapshot_published: false,
+            production_promotion_claimed: false,
+            status: "valid_no_go_no_positive_workflow_treatment".to_string(),
+        };
+        let report_sha256 = write_report(&report_path, &receipt)?;
+        journal.finish(&receipt.status, report_sha256)?;
+        return Err(
+            "matched forced Workflow produced no verified training quality win over forced Direct"
+                .to_string(),
+        );
+    }
     let run_context = mutation_run_context();
     journal.begin_mutation_search()?;
     let generated_population = generate_candidate_population(
@@ -262,7 +308,6 @@ pub(super) fn run() -> Result<(), String> {
         &reflection_packets,
         &training_dataset_sha256,
         &reflection_evidence_sha256,
-        &diagnostic_plans,
     )?;
     journal.complete_mutation_search(
         generated_population.model_calls,
@@ -292,7 +337,7 @@ pub(super) fn run() -> Result<(), String> {
         let mut train_pairs = Vec::with_capacity(train_cases.len());
         for (case_index, case) in train_cases.iter().enumerate() {
             eprintln!(
-                "[workflow-gepa-v7] train candidate={}: {}",
+                "[workflow-gepa-v9] train candidate={}: {}",
                 candidate_index + 1,
                 case.id
             );
@@ -333,6 +378,8 @@ pub(super) fn run() -> Result<(), String> {
                     campaign_budget: journal.budget(),
                     campaign_usage: journal.usage(),
                     train_runs,
+                    route_treatment_pairs,
+                    route_treatment_signal,
                     learning_readiness,
                     reflection_evidence_sha256,
                     candidate_population,
@@ -379,7 +426,7 @@ pub(super) fn run() -> Result<(), String> {
         .into_iter()
         .enumerate()
     {
-        eprintln!("[workflow-gepa-v7] validation pair: {}", case.id);
+        eprintln!("[workflow-gepa-v9] validation pair: {}", case.id);
         validation_pairs.push(execute_product_pair(
             &app,
             &state,
@@ -414,6 +461,8 @@ pub(super) fn run() -> Result<(), String> {
             campaign_budget: journal.budget(),
             campaign_usage: journal.usage(),
             train_runs,
+            route_treatment_pairs,
+            route_treatment_signal,
             learning_readiness,
             reflection_evidence_sha256,
             candidate_population,
@@ -472,7 +521,7 @@ pub(super) fn run() -> Result<(), String> {
         for replicate in 1..=TEST_REPLICATES {
             for case in cases_for_split(&suite, CampaignSplit::Test)? {
                 eprintln!(
-                    "[workflow-gepa-v7] untouched test pair replicate={replicate}: {}",
+                    "[workflow-gepa-v9] untouched test pair replicate={replicate}: {}",
                     case.id
                 );
                 test_pairs.push(execute_product_pair(
@@ -530,6 +579,8 @@ pub(super) fn run() -> Result<(), String> {
         campaign_budget: journal.budget(),
         campaign_usage: journal.usage(),
         train_runs,
+        route_treatment_pairs,
+        route_treatment_signal,
         learning_readiness,
         reflection_evidence_sha256,
         candidate_population,
@@ -553,7 +604,7 @@ pub(super) fn run() -> Result<(), String> {
     grounded_result?;
     test_result?;
     eprintln!(
-        "[workflow-gepa-v7] passed report={} snapshot={}",
+        "[workflow-gepa-v9] passed report={} snapshot={}",
         report_path.display(),
         snapshot_path.display()
     );
@@ -565,7 +616,7 @@ fn mutation_run_context() -> Metadata {
         ("project_id".to_string(), CAMPAIGN_PROJECT_ID.to_string()),
         (
             "session_id".to_string(),
-            "session-workflow-gepa-v7".to_string(),
+            "session-workflow-gepa-v9".to_string(),
         ),
         ("effort".to_string(), AgentPolicy::Pro.label().to_string()),
         ("steer_epoch".to_string(), "0".to_string()),

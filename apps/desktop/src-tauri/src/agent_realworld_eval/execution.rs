@@ -1,6 +1,8 @@
 use super::http_fixture::HttpFixture;
 use super::receipts::{model_receipts_from_metadata, ResolvedBudgetReceipt};
-use super::runtime::{collect_event_metrics, event_sequence_floor, run_product_task};
+use super::runtime::{
+    collect_event_metrics, event_sequence_floor, run_product_task_with_execution_constraint,
+};
 use super::setup::{
     add_recall_session, configure_run_project, seed_memory_fixture_for_case, SetupFailure,
     SetupFailureCode, SetupFailureStage,
@@ -11,6 +13,7 @@ use super::{
     EventMetrics, ExecutionCell, FailedRunDetails, RawRun, RealworldCase, RuntimeMetrics,
     Treatment,
 };
+use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::app_state::AppState;
 use crate::collaboration_execution::complete_collaboration_model_with_control;
 use crate::configuration_models::ProviderConfig;
@@ -34,6 +37,7 @@ pub(super) struct CaseExecutionInput<'a> {
     pub(super) frozen_profile: Option<&'a FrozenPromptProfileSnapshot>,
     pub(super) project_scope: Option<&'a str>,
     pub(super) run_budget: Option<RunBudget>,
+    pub(super) execution_constraint: Option<AgentExecutionConstraint>,
 }
 
 pub(super) fn execute_case(
@@ -52,6 +56,7 @@ pub(super) fn execute_case(
         frozen_profile,
         project_scope,
         run_budget,
+        execution_constraint,
     } = input;
     let input_sha256 = case_input_sha256(case);
     let started = Instant::now();
@@ -360,7 +365,7 @@ pub(super) fn execute_case(
             )
         }
     };
-    let product = run_product_task(
+    let product = run_product_task_with_execution_constraint(
         app.handle(),
         state,
         &session_id,
@@ -368,6 +373,7 @@ pub(super) fn execute_case(
         treatment,
         case.permission_policy,
         run_budget,
+        execution_constraint,
     );
     let output = product.state.latest_answer.clone().unwrap_or_default();
     let mut event_metrics = match collect_event_metrics(

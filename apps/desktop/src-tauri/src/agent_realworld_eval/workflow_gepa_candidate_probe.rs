@@ -10,8 +10,9 @@ use crate::configuration_models::SidecarConfig;
 use crate::configuration_persistence::load_provider_config;
 use agent_core::Metadata;
 use orchestrator::{
-    prompt_genome_sha256, sha256_hex, AgentEvaluationReflectionPacket, AgentPolicy,
-    ConductorPromptGenome, FrozenPromptProfileSnapshot, PromptExecutionDiagnosticPlan,
+    prompt_genome_sha256, sha256_hex, validate_matched_route_reflection_packets,
+    AgentEvaluationReflectionPacket, AgentPolicy, ConductorPromptGenome,
+    FrozenPromptProfileSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -19,17 +20,15 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
-const INPUT_SCHEMA: &str = "cindx.workflow-gepa-candidate-input.v2";
+const INPUT_SCHEMA: &str = "cindx.workflow-gepa-candidate-input.v3";
 const OUTPUT_SCHEMA: &str = "cindx.workflow-gepa-candidate-probe.v1";
 const MAX_INPUT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REFLECTION_PACKETS: usize = 64;
-const MAX_DIAGNOSTIC_PLANS: usize = 64;
 
 #[derive(Debug, Deserialize)]
 struct CandidateProbeInput {
     schema: String,
     packets: Vec<AgentEvaluationReflectionPacket>,
-    diagnostic_plans: Vec<PromptExecutionDiagnosticPlan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,7 +151,6 @@ pub(super) fn run() -> Result<(), String> {
         &input.packets,
         &input_sha256,
         &reflection_evidence_sha256,
-        &input.diagnostic_plans,
     )?;
     validate_generated_population(&generated.candidates, &parent)?;
 
@@ -206,15 +204,7 @@ fn validate_input(input: &CandidateProbeInput) -> Result<(), String> {
             MAX_REFLECTION_PACKETS
         ));
     }
-    if input.diagnostic_plans.is_empty() || input.diagnostic_plans.len() > MAX_DIAGNOSTIC_PLANS {
-        return Err(format!(
-            "candidate probe requires 1..={MAX_DIAGNOSTIC_PLANS} execution diagnostics"
-        ));
-    }
-    for diagnostic in &input.diagnostic_plans {
-        diagnostic.validate()?;
-    }
-    Ok(())
+    validate_matched_route_reflection_packets(&input.packets)
 }
 
 fn validate_generated_population(
@@ -291,7 +281,6 @@ mod tests {
         let input = CandidateProbeInput {
             schema: INPUT_SCHEMA.to_string(),
             packets: Vec::new(),
-            diagnostic_plans: Vec::new(),
         };
         assert_eq!(
             validate_input(&input).unwrap_err(),
@@ -301,7 +290,6 @@ mod tests {
         let wrong_schema = CandidateProbeInput {
             schema: "cindx.workflow-gepa-candidate-input.v0".to_string(),
             packets: Vec::new(),
-            diagnostic_plans: Vec::new(),
         };
         assert!(validate_input(&wrong_schema)
             .unwrap_err()

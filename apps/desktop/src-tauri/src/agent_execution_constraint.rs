@@ -1,6 +1,7 @@
 use agent_core::Metadata;
 use orchestrator::{
-    AgentPolicy, AgentRunDecision, AgentToolRequirement, MemoryRecallPlan, MemoryRecallPolicy,
+    AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentToolRequirement, MemoryRecallPlan,
+    MemoryRecallPolicy,
 };
 
 pub(crate) const AGENT_EXECUTION_CONSTRAINT_KEY: &str = "execution_constraint";
@@ -11,6 +12,8 @@ pub(crate) enum AgentExecutionConstraint {
     Native,
     GroundedDirect,
     MatchedMemoryEffect,
+    MatchedDirect,
+    MatchedWorkflow,
 }
 
 impl AgentExecutionConstraint {
@@ -22,11 +25,25 @@ impl AgentExecutionConstraint {
         matches!(self, Self::MatchedMemoryEffect)
     }
 
+    pub(crate) const fn is_matched_route(self) -> bool {
+        matches!(self, Self::MatchedDirect | Self::MatchedWorkflow)
+    }
+
+    pub(crate) const fn required_execution(self) -> Option<AgentExecutionMode> {
+        match self {
+            Self::MatchedDirect => Some(AgentExecutionMode::Direct),
+            Self::MatchedWorkflow => Some(AgentExecutionMode::Workflow),
+            Self::Native | Self::GroundedDirect | Self::MatchedMemoryEffect => None,
+        }
+    }
+
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Native => "native",
             Self::GroundedDirect => "grounded_direct",
             Self::MatchedMemoryEffect => "matched_memory_effect",
+            Self::MatchedDirect => "matched_direct",
+            Self::MatchedWorkflow => "matched_workflow",
         }
     }
 
@@ -35,7 +52,10 @@ impl AgentExecutionConstraint {
             Self::Native => {
                 run_context.remove(AGENT_EXECUTION_CONSTRAINT_KEY);
             }
-            Self::GroundedDirect | Self::MatchedMemoryEffect => {
+            Self::GroundedDirect
+            | Self::MatchedMemoryEffect
+            | Self::MatchedDirect
+            | Self::MatchedWorkflow => {
                 run_context.insert(
                     AGENT_EXECUTION_CONSTRAINT_KEY.to_string(),
                     self.label().to_string(),
@@ -52,6 +72,8 @@ impl AgentExecutionConstraint {
             None => Ok(Self::Native),
             Some("grounded_direct") => Ok(Self::GroundedDirect),
             Some("matched_memory_effect") => Ok(Self::MatchedMemoryEffect),
+            Some("matched_direct") => Ok(Self::MatchedDirect),
+            Some("matched_workflow") => Ok(Self::MatchedWorkflow),
             Some(value) => Err(format!("unsupported agent execution constraint {value}")),
         }
     }
@@ -81,7 +103,30 @@ impl AgentExecutionConstraint {
                     "fixed matched-memory evaluation route for causal attribution".to_string();
                 Ok(matched)
             }
+            Self::MatchedDirect | Self::MatchedWorkflow if effort != AgentPolicy::Pro => {
+                Err("matched route evaluation requires the Pro policy and budget".to_string())
+            }
+            Self::MatchedDirect | Self::MatchedWorkflow => {
+                let required = self
+                    .required_execution()
+                    .expect("matched route constraints have a required execution mode");
+                if decision.execution != required {
+                    return Err(format!(
+                        "matched route evaluation required {} but conductor returned {}",
+                        execution_mode_label(required),
+                        execution_mode_label(decision.execution),
+                    ));
+                }
+                Ok(decision)
+            }
         }
+    }
+}
+
+const fn execution_mode_label(mode: AgentExecutionMode) -> &'static str {
+    match mode {
+        AgentExecutionMode::Direct => "direct",
+        AgentExecutionMode::Workflow => "workflow",
     }
 }
 
@@ -162,6 +207,23 @@ mod tests {
             "durable project requirements and prior-session facts"
         );
         assert!(AgentExecutionConstraint::MatchedMemoryEffect
+            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro)
+            .is_err());
+    }
+
+    #[test]
+    fn matched_route_constraints_are_pro_only_and_validate_without_rewriting() {
+        let direct = AgentRunDecision::direct("executor");
+        assert_eq!(
+            AgentExecutionConstraint::MatchedDirect
+                .apply(direct.clone(), AgentPolicy::Pro)
+                .expect("matched direct should accept a direct conductor decision"),
+            direct
+        );
+        assert!(AgentExecutionConstraint::MatchedDirect
+            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Auto)
+            .is_err());
+        assert!(AgentExecutionConstraint::MatchedWorkflow
             .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro)
             .is_err());
     }

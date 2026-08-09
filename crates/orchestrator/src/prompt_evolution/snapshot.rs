@@ -252,7 +252,15 @@ impl FrozenPromptProfileSnapshot {
 
 pub fn prompt_genome_sha256(genome: &ConductorPromptGenome) -> Result<String, String> {
     genome.validate()?;
-    serde_json::to_vec(genome)
+    let mut canonical = genome.clone();
+    if canonical
+        .route_directive
+        .as_deref()
+        .is_some_and(|directive| directive.trim().is_empty())
+    {
+        canonical.route_directive = None;
+    }
+    serde_json::to_vec(&canonical)
         .map(|encoded| sha256_hex(&encoded))
         .map_err(|error| format!("prompt genome serialization failed: {error}"))
 }
@@ -268,6 +276,27 @@ fn is_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::{ProTeacherAttestationV1, PromptProToAutoDistillationProvenanceV1};
+
+    #[test]
+    fn empty_route_directive_preserves_legacy_genome_identity() {
+        let current = ConductorPromptGenome::seed_for_effort("pro");
+        let mut legacy = current.clone();
+        legacy.route_directive = None;
+
+        assert_eq!(
+            prompt_genome_sha256(&current).unwrap(),
+            prompt_genome_sha256(&legacy).unwrap()
+        );
+
+        let mut learned = current;
+        learned.route_directive = Some(
+            "Use Workflow only when matched evidence predicts a verified quality gain.".to_string(),
+        );
+        assert_ne!(
+            prompt_genome_sha256(&learned).unwrap(),
+            prompt_genome_sha256(&legacy).unwrap()
+        );
+    }
 
     fn evolved_genome(effort: &str) -> ConductorPromptGenome {
         ConductorPromptGenome::seed_for_effort(effort)

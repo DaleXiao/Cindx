@@ -203,6 +203,13 @@ revision and is no longer the current product decision.
   sanitized report is
   [retained here](CINDX_WORKFLOW_GEPA_V7_0.2.26_2026-08-09.json).
 
+- [Cindx Workflow GEPA V9 route-causal protocol 0.2.28](CINDX_WORKFLOW_GEPA_V9_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md)
+  freezes matched required-Direct versus required-Workflow training treatments,
+  a positive-Workflow-signal stop gate, and route-only GEPA before any provider
+  execution. It reuses the frozen V7 task splits and product gates. It is
+  `PROTOCOL_ONLY`; no V9 provider result, snapshot, promotion, or uplift claim
+  exists yet.
+
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
   `2647daafae98e99d31c101886d2836e446d83d96`. It is

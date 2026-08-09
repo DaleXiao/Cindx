@@ -434,12 +434,16 @@ fn workflow_proposal_is_bound_to_context_and_direct_clears_it() {
         "conductor_workflow_proposal_sha256".to_string(),
         "0".repeat(64),
     );
-    assert!(route_workflow_proposal_from_context(&tampered, false, &["executor".to_string()])
-        .expect_err("tampered route proposal receipt must fail closed")
-        .contains("receipt is inconsistent"));
-    assert!(route_workflow_proposal_from_context(&tampered, true, &["executor".to_string()])
-        .expect("checkpoint resume owns its persisted plan")
-        .is_none());
+    assert!(
+        route_workflow_proposal_from_context(&tampered, false, &["executor".to_string()])
+            .expect_err("tampered route proposal receipt must fail closed")
+            .contains("receipt is inconsistent")
+    );
+    assert!(
+        route_workflow_proposal_from_context(&tampered, true, &["executor".to_string()])
+            .expect("checkpoint resume owns its persisted plan")
+            .is_none()
+    );
 
     let mut semantically_tampered = context.clone();
     let mut proposal = planned.workflow_plan.clone().expect("workflow proposal");
@@ -1194,6 +1198,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             evolved_directive: String::new(),
             historical_evidence: String::new(),
             matched_collaboration_evidence: Arc::new(Default::default()),
+            required_execution: None,
             execution_constraints: "isolated workers are read-only".to_string(),
             route_requirements: AgentRouteRequirements::default(),
             budget_fingerprint: None,
@@ -4379,9 +4384,9 @@ fn completed_gepa_canary_persists_a_verified_frozen_profile() {
         datasets: BTreeMap::new(),
     };
     let candidate_prompt_sha256 =
-        sha256_hex(&serde_json::to_vec(&candidate).expect("candidate should serialize"));
+        prompt_genome_sha256(&candidate).expect("candidate should have a canonical identity");
     let stable_prompt_sha256 =
-        sha256_hex(&serde_json::to_vec(&stable).expect("stable profile should serialize"));
+        prompt_genome_sha256(&stable).expect("stable profile should have a canonical identity");
     for index in 0..14 {
         let split = if index < 6 {
             PromptEvaluationSplit::Train

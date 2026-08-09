@@ -4,6 +4,7 @@ use super::workflow_gepa_campaign_contract::{
 };
 use super::workflow_gepa_campaign_journal::CampaignJournal;
 use super::{materialize_case, ExecutionCell, RawRun, RealworldCase, RealworldSuite, Treatment};
+use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
 use crate::prompt_learning_runtime::{
@@ -19,6 +20,12 @@ pub(super) struct EvaluationDataEnvironment {
     prior_requested_root: Option<OsString>,
     prior_active_root: Option<OsString>,
     prior_background_memory_setting: Option<OsString>,
+}
+
+pub(super) struct MatchedRoutePairRun {
+    pub(super) pair: ProductPairReceipt,
+    pub(super) direct: RawRun,
+    pub(super) workflow: RawRun,
 }
 
 struct EvaluationProfileEnvironment {
@@ -253,8 +260,7 @@ pub(super) fn execute_journaled_campaign_case(
     action_label: &str,
     journal: &mut CampaignJournal,
 ) -> Result<(RawRun, ProductRunReceipt), String> {
-    journal.begin_product(action_label)?;
-    let run = execute_campaign_case(
+    execute_journaled_campaign_case_with_constraint(
         app,
         state,
         provider,
@@ -268,18 +274,15 @@ pub(super) fn execute_journaled_campaign_case(
         frozen_profile,
         treatment,
         project_scope,
-    );
-    let receipt = ProductRunReceipt::from_run(&run, split, replicate)?;
-    journal.complete_product(&receipt)?;
-    Ok((run, receipt))
-}
-
-fn candidate_executes_first(pair_index: usize, replicate: u32) -> bool {
-    (pair_index + replicate.saturating_sub(1) as usize) % 2 == 1
+        split,
+        action_label,
+        None,
+        journal,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn execute_campaign_case(
+fn execute_journaled_campaign_case_with_constraint(
     app: &tauri::App<tauri::Wry>,
     state: &tauri::State<'_, AppState>,
     provider: &ProviderConfig,
@@ -293,6 +296,230 @@ pub(super) fn execute_campaign_case(
     frozen_profile: Option<&FrozenPromptProfileSnapshot>,
     treatment: Treatment,
     project_scope: &str,
+    split: CampaignSplit,
+    action_label: &str,
+    execution_constraint: Option<AgentExecutionConstraint>,
+    journal: &mut CampaignJournal,
+) -> Result<(RawRun, ProductRunReceipt), String> {
+    journal.begin_product(action_label)?;
+    let run = execute_campaign_case_with_constraint(
+        app,
+        state,
+        provider,
+        evaluation_database,
+        root,
+        case,
+        execution_index,
+        treatment_position,
+        replicate,
+        plan_sha256,
+        frozen_profile,
+        treatment,
+        project_scope,
+        execution_constraint,
+    );
+    let receipt = ProductRunReceipt::from_run(&run, split, replicate)?;
+    journal.complete_product(&receipt)?;
+    Ok((run, receipt))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_matched_route_pair(
+    app: &tauri::App<tauri::Wry>,
+    state: &tauri::State<'_, AppState>,
+    provider: &ProviderConfig,
+    evaluation_database: &Path,
+    suite_root: &Path,
+    case: &RealworldCase,
+    split: CampaignSplit,
+    replicate: u32,
+    pair_index: usize,
+    execution_index: &mut usize,
+    suite_sha256: &str,
+    journal: &mut CampaignJournal,
+) -> Result<MatchedRoutePairRun, String> {
+    let direct_root = suite_root.join(format!(
+        "{}-{}-r{replicate}-forced-direct",
+        split.label(),
+        case.id
+    ));
+    let workflow_root = suite_root.join(format!(
+        "{}-{}-r{replicate}-forced-workflow",
+        split.label(),
+        case.id
+    ));
+    materialize_case(&direct_root, case)?;
+    materialize_case(&workflow_root, case)?;
+    let direct_prestate = campaign_workspace_sha256(&direct_root)?;
+    let workflow_prestate = campaign_workspace_sha256(&workflow_root)?;
+    if direct_prestate != workflow_prestate {
+        return Err(format!(
+            "matched route pair {} did not start from identical workspaces",
+            case.id
+        ));
+    }
+    let workflow_first = candidate_executes_first(pair_index, replicate);
+    let direct_scope = project_scope(split, case, replicate, "forced-direct");
+    let workflow_scope = project_scope(split, case, replicate, "forced-workflow");
+    let run_arm = |root: &Path,
+                   constraint: AgentExecutionConstraint,
+                   scope: &str,
+                   index: usize,
+                   position: usize,
+                   journal: &mut CampaignJournal| {
+        execute_journaled_campaign_case_with_constraint(
+            app,
+            state,
+            provider,
+            evaluation_database,
+            root,
+            case,
+            index,
+            position,
+            replicate,
+            suite_sha256,
+            None,
+            Treatment::Pro,
+            scope,
+            split,
+            scope,
+            Some(constraint),
+            journal,
+        )
+    };
+    let (direct, direct_receipt, workflow, workflow_receipt, execution_order) = if workflow_first {
+        let (workflow, workflow_receipt) = run_arm(
+            &workflow_root,
+            AgentExecutionConstraint::MatchedWorkflow,
+            &workflow_scope,
+            *execution_index,
+            1,
+            journal,
+        )?;
+        *execution_index = execution_index.saturating_add(1);
+        let (direct, direct_receipt) = run_arm(
+            &direct_root,
+            AgentExecutionConstraint::MatchedDirect,
+            &direct_scope,
+            *execution_index,
+            2,
+            journal,
+        )?;
+        *execution_index = execution_index.saturating_add(1);
+        (
+            direct,
+            direct_receipt,
+            workflow,
+            workflow_receipt,
+            "forced_workflow_then_forced_direct",
+        )
+    } else {
+        let (direct, direct_receipt) = run_arm(
+            &direct_root,
+            AgentExecutionConstraint::MatchedDirect,
+            &direct_scope,
+            *execution_index,
+            1,
+            journal,
+        )?;
+        *execution_index = execution_index.saturating_add(1);
+        let (workflow, workflow_receipt) = run_arm(
+            &workflow_root,
+            AgentExecutionConstraint::MatchedWorkflow,
+            &workflow_scope,
+            *execution_index,
+            2,
+            journal,
+        )?;
+        *execution_index = execution_index.saturating_add(1);
+        (
+            direct,
+            direct_receipt,
+            workflow,
+            workflow_receipt,
+            "forced_direct_then_forced_workflow",
+        )
+    };
+    validate_matched_route_receipts(case, &direct_receipt, &workflow_receipt)?;
+    let evaluation_id = format!(
+        "route-treatment-pair-{}",
+        &sha256_hex(
+            format!(
+                "{}\0{}\0{}\0{}\0{}",
+                suite_sha256,
+                case.id,
+                split.label(),
+                replicate,
+                execution_order,
+            )
+            .as_bytes()
+        )[..20]
+    );
+    let pair = ProductPairReceipt::new(
+        evaluation_id,
+        execution_order.to_string(),
+        direct_prestate,
+        direct_receipt,
+        workflow_receipt,
+    )?;
+    Ok(MatchedRoutePairRun {
+        pair,
+        direct,
+        workflow,
+    })
+}
+
+fn validate_matched_route_receipts(
+    case: &RealworldCase,
+    direct: &ProductRunReceipt,
+    workflow: &ProductRunReceipt,
+) -> Result<(), String> {
+    if direct.execution_mode != "direct" || workflow.execution_mode != "workflow" {
+        return Err(format!(
+            "matched route pair {} did not exercise Direct and Workflow",
+            case.id
+        ));
+    }
+    if direct.profile_sha256.is_none()
+        || direct.profile_sha256 != workflow.profile_sha256
+        || direct.route_profile_sha256 != workflow.route_profile_sha256
+    {
+        return Err(format!(
+            "matched route pair {} changed the prompt or route profile between arms",
+            case.id
+        ));
+    }
+    if direct.execution_plan_authority.as_deref() != Some("runtime_constraint")
+        || workflow.execution_plan_authority.as_deref() != Some("runtime_constraint")
+    {
+        return Err(format!(
+            "matched route pair {} is missing runtime treatment authority receipts",
+            case.id
+        ));
+    }
+    Ok(())
+}
+
+fn candidate_executes_first(pair_index: usize, replicate: u32) -> bool {
+    (pair_index + replicate.saturating_sub(1) as usize) % 2 == 1
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_campaign_case_with_constraint(
+    app: &tauri::App<tauri::Wry>,
+    state: &tauri::State<'_, AppState>,
+    provider: &ProviderConfig,
+    evaluation_database: &Path,
+    root: &Path,
+    case: &RealworldCase,
+    execution_index: usize,
+    treatment_position: usize,
+    replicate: u32,
+    plan_sha256: &str,
+    frozen_profile: Option<&FrozenPromptProfileSnapshot>,
+    treatment: Treatment,
+    project_scope: &str,
+    execution_constraint: Option<AgentExecutionConstraint>,
 ) -> RawRun {
     let execution = ExecutionCell {
         execution_index,
@@ -313,6 +540,7 @@ pub(super) fn execute_campaign_case(
             frozen_profile,
             project_scope: Some(project_scope),
             run_budget: Some(workflow_gepa_product_budget()),
+            execution_constraint,
         },
     )
 }
@@ -384,6 +612,38 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn route_receipt(execution_mode: &str) -> ProductRunReceipt {
+        ProductRunReceipt {
+            case_id: "case".to_string(),
+            category: "coding".to_string(),
+            split: CampaignSplit::Train,
+            replicate: 1,
+            treatment: "pro".to_string(),
+            execution_mode: execution_mode.to_string(),
+            completed: true,
+            terminal_status: "completed".to_string(),
+            behavior_checks_passed: 1,
+            behavior_checks_total: 1,
+            behavior_score: 1.0,
+            quality_passed: true,
+            safety_violations: 0,
+            latency_ms: 1,
+            model_calls: 1,
+            total_tokens: 1,
+            output_sha256: "a".repeat(64),
+            profile_id: Some("profile".to_string()),
+            profile_sha256: Some("b".repeat(64)),
+            route_profile_sha256: Some("c".repeat(64)),
+            execution_plan_sha256: Some("d".repeat(64)),
+            execution_plan_semantic_sha256: Some("e".repeat(64)),
+            execution_plan_authority: Some("runtime_constraint".to_string()),
+            workflow_execution_profile_sha256: (execution_mode == "workflow")
+                .then(|| "f".repeat(64)),
+            route_profile_semantics_exercised: true,
+            workflow_profile_exercised: execution_mode == "workflow",
+        }
+    }
+
     #[test]
     fn repeated_test_pairs_reverse_arm_order_for_each_case() {
         for first_replicate_index in 0..4 {
@@ -393,6 +653,31 @@ mod tests {
                 candidate_executes_first(second_replicate_index, 2),
             );
         }
+    }
+
+    #[test]
+    fn matched_route_pair_requires_exact_treatment_and_profile_identity() {
+        let case = RealworldCase {
+            id: "case".to_string(),
+            category: "coding".to_string(),
+            objective: "objective".to_string(),
+            campaign_split: Some("train".to_string()),
+            expected_execution_mode: None,
+            seed_memory_prompt: None,
+            index_workspace: false,
+            files: Vec::new(),
+            permission_policy: super::super::PermissionPolicy::AllowOnce,
+            verification: Default::default(),
+            memory_effect: None,
+        };
+        let direct = route_receipt("direct");
+        let workflow = route_receipt("workflow");
+        validate_matched_route_receipts(&case, &direct, &workflow).unwrap();
+
+        let mut drifted = workflow.clone();
+        drifted.route_profile_sha256 = Some("9".repeat(64));
+        assert!(validate_matched_route_receipts(&case, &direct, &drifted).is_err());
+        assert!(validate_matched_route_receipts(&case, &direct, &direct).is_err());
     }
 
     #[test]

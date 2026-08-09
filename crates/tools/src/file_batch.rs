@@ -2,6 +2,8 @@ mod file_batch_projection;
 mod file_batch_request;
 
 #[cfg(test)]
+mod file_batch_evidence_tests;
+#[cfg(test)]
 mod file_batch_tests;
 
 use std::path::PathBuf;

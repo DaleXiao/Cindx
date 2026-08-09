@@ -553,15 +553,16 @@ genome, source/deployment revisions, and optional distillation evidence lease
 before recording an outcome. Fast and disabled evolution bypass the deployment
 store.
 
-Prompt genomes currently have one normalized execution phenotype shared by
-route and workflow construction. The system represents the two uses with
+Prompt genomes now separate a bounded `route_directive` from the normalized
+workflow-execution phenotype. New seeds use an explicit empty route directive;
+route evolution can therefore change the Conductor's Direct-versus-Workflow
+policy without changing topology, roles, context, tools, retries, verification,
+budgets, or finalization. Legacy snapshots that predate the field retain their
+coupled behavior and identity for replay compatibility. Route and workflow use
 separate `route_decision_profile_sha256` and
-`workflow_execution_profile_sha256` identities instead of treating the shared
-payload as proof of one isolated learning layer. When that phenotype differs
-from the effort's seed, the Conductor receives its behavior-only directive and
-the route identity; profile id, generation, and Direct-finalizer-only genes are
-omitted. An admitted workflow freezes the separate workflow identity in its
-`ExecutionPlan`, while assignment receipts retain full lineage.
+`workflow_execution_profile_sha256` identities. An admitted workflow freezes
+the workflow identity in its `ExecutionPlan`, while assignment receipts retain
+the full profile lineage.
 Inside `ConductorHarness`, model-returned tool policy is intersected with the
 genome ceiling. The normalized phenotype removes behaviorally duplicate
 mutations, while route schema validation, effect authority, configured model
@@ -584,7 +585,7 @@ generalization denominator. Legacy events without this field retain their
 recorded decision class for replay compatibility.
 
 The feature-gated Workflow GEPA campaign keeps the frozen V7 task suite and
-product gates while the current source emits a V8 evidence receipt. Six modules
+product gates while the current source emits a V9 evidence receipt. Six modules
 retain one-way responsibilities: the runner owns protocol order, the suite
 module validates public requirements and frozen strata, the evidence module
 converts external product verification into redacted reflection packets, the
@@ -593,25 +594,24 @@ execution module isolates and counterbalances matched cells, and the contract
 module computes gates from sanitized receipts. V2 and the first V4 attempt are
 retained only as `INVALID_EVALUATOR` history; V3 and the second V4 attempt remain
 `INVALID_TASK_SPEC` history. V5 and V7 provider runs remain valid targeted no-go
-evidence and are not reinterpreted by the V8 receipt change.
+evidence and are not reinterpreted by the V9 mechanism change.
 
-Before mutation or any candidate product run, V8 derives typed diagnostic plans
-from the actual seed product receipts. Each plan binds the semantic
-`ExecutionPlan`, route-decision profile, and, only for an executed workflow, the
-workflow-execution profile. A direct-only seed is a valid
-`valid_no_go_dormant_learning_layer` result: workflow genes were not exercised,
-so mutation stops without provider spending. Foreign or missing identities fail
-closed as `invalid_learning_diagnostic_identity`.
+Before mutation, V9 runs each training task through explicit matched Direct and
+Workflow treatments. Both arms share the same task, workspace prestate, Pro
+profile, route identity, provider configuration, and budget. The evaluation-only
+constraint is part of the Conductor request and receipt; production leaves it
+unset. The Conductor must return the required execution mode and constructs the
+bounded workflow graph itself. A wrong mode, missing arm, duplicate arm, or
+profile drift fails closed.
 
-Candidate generation then performs a zero-provider intervention check on the
-same frozen diagnostics. A workflow-campaign mutation must change exactly the
-route-decision and workflow-execution layers, preserve the parent identities,
-and produce a different semantic execution plan for at least one previously
-executed workflow. Custom untyped directives and Direct-finalizer changes are
-rejected from this campaign. Because the production genome still supplies one
-phenotype to both route and workflow construction, an admitted candidate is a
-coupled route-plus-workflow intervention. Later product evidence may evaluate
-the coupled treatment, but it cannot attribute a gain to either layer alone.
+The campaign stops before GEPA unless Workflow records an externally verified
+quality win over Direct on at least one matched training task. If the treatment
+is positive, reflection receives only complete same-run Direct/Workflow pairs.
+A candidate must change exactly `route_directive`, preserve the workflow profile
+and every authority/budget field, avoid case and model leakage, and produce a
+distinct route identity. Native seed-versus-candidate product pairs then measure
+whether that learned route policy improves outcomes. A tie or merely executing
+more graph work earns no credit.
 
 Seed and candidate runs use separately materialized workspaces with equal
 prestate fingerprints, candidate-specific project scopes, and alternating pair

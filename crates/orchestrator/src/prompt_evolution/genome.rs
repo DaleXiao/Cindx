@@ -1,6 +1,6 @@
 use crate::AgentEvaluationReflectionPacket;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const PROMPT_GENOME_SCHEMA: &str = "cindx.prompt-genome.v1";
 
@@ -141,6 +141,11 @@ pub struct ConductorPromptGenome {
     #[serde(default = "default_max_tool_calls_per_step")]
     pub max_tool_calls_per_step: usize,
     pub require_final_synthesis: bool,
+    /// `None` preserves the legacy coupled route/workflow phenotype for old
+    /// snapshots. New seeds use `Some("")`, so route learning can change this
+    /// policy without changing the executable workflow profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_directive: Option<String>,
     #[serde(default)]
     pub custom_directive: String,
 }
@@ -241,6 +246,7 @@ impl ConductorPromptGenome {
             max_model_turns_per_step,
             max_tool_calls_per_step,
             require_final_synthesis: true,
+            route_directive: Some(String::new()),
             custom_directive: String::new(),
         }
     }
@@ -270,6 +276,13 @@ impl ConductorPromptGenome {
         }
         if self.custom_directive.chars().count() > 1_200 {
             return Err("prompt genome custom directive exceeds 1200 characters".to_string());
+        }
+        if self
+            .route_directive
+            .as_deref()
+            .is_some_and(|directive| directive.chars().count() > 1_200)
+        {
+            return Err("prompt genome route directive exceeds 1200 characters".to_string());
         }
         Ok(())
     }
@@ -473,11 +486,38 @@ impl ConductorPromptGenome {
                 "A trajectory with suite_id=cindx.prompt-failure-curriculum.v1 is a negative failure seed only: contrast it with the successful anchor, never treat it as a teacher, success, permission to retry, or reason to widen authority or budget. ",
                 "Diagnose which parent instruction or harness gene caused each failure, preserve behavior that passed, and generalize across examples rather than memorizing answers. ",
                 "Return one strict JSON object matching the parent genome schema and no commentary. ",
+                "Preserve route_directive exactly; this mutation changes workflow execution only. ",
                 "Change one or two mutable genes only: graph_depth, verification, context_policy, max_parallel_branches, tool_policy, retry_policy, topology_strategy, role_strategy, commit_strategy, max_step_attempts, max_model_turns_per_step, max_tool_calls_per_step, or custom_directive. ",
                 "Keep max_parallel_branches between 1 and 3, max_step_attempts and max_model_turns_per_step between 1 and 4, max_tool_calls_per_step between 0 and 8, custom_directive under 1200 characters, ",
                 "and use only these exact enum values: graph_depth=lean|balanced|deep, verification=minimal|evidence|adversarial, context_policy=recent|relevant|comprehensive, tool_policy=disabled|evidence_only|read_only_exploration, retry_policy=fail_fast|same_model|alternate_model, topology_strategy=serial|adaptive_dag|parallel_deliberation, role_strategy=flexible|specialists|diverse_specialists, commit_strategy=adaptive|quorum|exhaustive. ",
                 "and never embed user requests, secrets, benchmark answers, case ids, or model names.\n\n",
                 "Parent genome:\n{}\n\nFeedback trajectories:\n{}"
+            ),
+            serde_json::to_string_pretty(self)
+                .map_err(|error| format!("could not serialize parent genome: {error}"))?,
+            trajectories,
+        ))
+    }
+
+    pub fn reflective_route_mutation_prompt(
+        &self,
+        trajectories: &[AgentEvaluationReflectionPacket],
+    ) -> Result<String, String> {
+        self.validate()?;
+        validate_matched_route_reflection_packets(trajectories)?;
+        let trajectories = serde_json::to_string_pretty(trajectories)
+            .map_err(|error| format!("could not serialize route trajectories: {error}"))?;
+        Ok(format!(
+            concat!(
+                "You are applying GEPA-style reflective evolution to only the Cindx route policy. ",
+                "Matched trajectories share suite_id, case_id, and run_id while candidate_id identifies forced_direct or forced_workflow. ",
+                "Compare externally verified quality, completion, safety, latency, and total tokens. ",
+                "Generalize when collaboration is worth its coordination cost; retain Direct for simple or non-improving cases. ",
+                "Return one strict JSON object matching the parent genome and no commentary. ",
+                "Change exactly one field: route_directive. Preserve every workflow-execution, finalizer, identity-independent, safety, tool, and budget field. ",
+                "The route_directive must be a general decision instruction under 1200 characters. It must not contain case ids, fixture paths, benchmark answers, secrets, provider names, or model names. ",
+                "It may guide the Conductor's Direct versus Workflow decision but cannot prescribe tools, relax permissions, or widen budgets.\n\n",
+                "Parent genome:\n{}\n\nMatched treatment trajectories:\n{}"
             ),
             serde_json::to_string_pretty(self)
                 .map_err(|error| format!("could not serialize parent genome: {error}"))?,
@@ -515,6 +555,9 @@ impl ConductorPromptGenome {
             .ok_or_else(|| "prompt mutation returned incomplete JSON".to_string())?;
         let mut mutation = serde_json::from_str::<Self>(&response[start..=end])
             .map_err(|error| format!("prompt mutation JSON is invalid: {error}"))?;
+        if mutation.route_directive.is_none() {
+            mutation.route_directive = self.route_directive.clone();
+        }
         mutation.schema = PROMPT_GENOME_SCHEMA.to_string();
         mutation.id = id.into();
         mutation.generation = self.generation.saturating_add(1);
@@ -525,6 +568,9 @@ impl ConductorPromptGenome {
             return Err(
                 "workflow prompt mutation must not change the direct finalizer gene".to_string(),
             );
+        }
+        if mutation.route_directive != self.route_directive {
+            return Err("workflow prompt mutation must not change route_directive".to_string());
         }
 
         // Count the genes the response explicitly changed before policy-derived
@@ -576,6 +622,58 @@ impl ConductorPromptGenome {
             return Ok(mutation);
         }
         validate_reflective_directive(&mutation.custom_directive, trajectories)?;
+        Ok(mutation)
+    }
+
+    pub fn learned_route_mutation_from_response(
+        &self,
+        response: &str,
+        id: impl Into<String>,
+        trajectories: &[AgentEvaluationReflectionPacket],
+    ) -> Result<Self, String> {
+        self.validate()?;
+        let start = response
+            .find('{')
+            .ok_or_else(|| "route mutation did not return a JSON object".to_string())?;
+        let end = response
+            .rfind('}')
+            .filter(|end| *end >= start)
+            .ok_or_else(|| "route mutation returned incomplete JSON".to_string())?;
+        let mut mutation = serde_json::from_str::<Self>(&response[start..=end])
+            .map_err(|error| format!("route mutation JSON is invalid: {error}"))?;
+        mutation.schema = PROMPT_GENOME_SCHEMA.to_string();
+        mutation.id = id.into();
+        mutation.generation = self.generation.saturating_add(1);
+        mutation.parents = vec![self.id.clone()];
+        mutation.validate()?;
+
+        let mut expected = self.clone();
+        expected.id = mutation.id.clone();
+        expected.generation = mutation.generation;
+        expected.parents = mutation.parents.clone();
+        expected.route_directive = mutation.route_directive.clone();
+        if mutation != expected {
+            return Err("route mutation changed fields outside route_directive".to_string());
+        }
+        let directive = mutation
+            .route_directive
+            .as_deref()
+            .map(str::trim)
+            .filter(|directive| !directive.is_empty())
+            .ok_or_else(|| "route mutation must provide a non-empty route_directive".to_string())?;
+        validate_reflective_directive(directive, trajectories)?;
+        if mutation.route_decision_profile_sha256("pro")?
+            == self.route_decision_profile_sha256("pro")?
+        {
+            return Err("route mutation must change the route phenotype".to_string());
+        }
+        if mutation.workflow_execution_profile_sha256()?
+            != self.workflow_execution_profile_sha256()?
+        {
+            return Err(
+                "route mutation must preserve the workflow execution phenotype".to_string(),
+            );
+        }
         Ok(mutation)
     }
 
@@ -754,6 +852,7 @@ impl ConductorPromptGenome {
                 .effective_max_tool_calls_per_step()
                 .min(right.effective_max_tool_calls_per_step()),
             require_final_synthesis: left.require_final_synthesis || right.require_final_synthesis,
+            route_directive: left.route_directive.clone(),
             custom_directive: String::new(),
         };
         child.normalize_behavioral_budgets();
@@ -883,6 +982,61 @@ impl ConductorPromptGenome {
         child.custom_directive.clear();
         child
     }
+}
+
+pub fn validate_matched_route_reflection_packets(
+    trajectories: &[AgentEvaluationReflectionPacket],
+) -> Result<(), String> {
+    if trajectories.is_empty() {
+        return Err("reflective route mutation requires matched feedback trajectories".to_string());
+    }
+    type PairKey = (String, u32, String, String, u64);
+    let mut pairs: BTreeMap<
+        PairKey,
+        (
+            Option<&AgentEvaluationReflectionPacket>,
+            Option<&AgentEvaluationReflectionPacket>,
+        ),
+    > = BTreeMap::new();
+    for trajectory in trajectories {
+        let key = (
+            trajectory.suite_id.clone(),
+            trajectory.suite_version,
+            trajectory.case_id.clone(),
+            trajectory.run_id.clone(),
+            trajectory.seed,
+        );
+        let pair = pairs.entry(key).or_default();
+        let slot =
+            match trajectory.candidate_id.as_str() {
+                "forced_direct" => &mut pair.0,
+                "forced_workflow" => &mut pair.1,
+                _ => return Err(
+                    "route mutation evidence must use forced_direct and forced_workflow treatments"
+                        .to_string(),
+                ),
+            };
+        if slot.replace(trajectory).is_some() {
+            return Err("route mutation evidence contains a duplicate treatment arm".to_string());
+        }
+    }
+    for (direct, workflow) in pairs.values() {
+        let (Some(direct), Some(workflow)) = (direct, workflow) else {
+            return Err(
+                "route mutation evidence contains an incomplete treatment pair".to_string(),
+            );
+        };
+        if direct.category != workflow.category
+            || direct.input != workflow.input
+            || direct.candidate_fingerprint != workflow.candidate_fingerprint
+        {
+            return Err(
+                "route mutation treatment arms do not share an identical task and parent profile"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn normalized_leakage_text(value: &str) -> String {

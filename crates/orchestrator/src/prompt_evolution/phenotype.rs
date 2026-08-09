@@ -6,6 +6,8 @@ pub const PROMPT_EXECUTION_INTERVENTION_SCHEMA: &str = "cindx.prompt-execution-i
 pub const PROMPT_EXECUTION_DIAGNOSTIC_SCHEMA: &str = "cindx.prompt-execution-diagnostic.v2";
 pub const PROMPT_LEARNING_READINESS_SCHEMA: &str = "cindx.prompt-learning-readiness.v2";
 const ROUTE_DECISION_PHENOTYPE_SCHEMA: &str = "cindx.prompt-route-decision-phenotype.v1";
+const ROUTE_DECISION_PHENOTYPE_SCHEMA_V2: &str = "cindx.prompt-route-decision-phenotype.v2";
+pub const PROMPT_ROUTE_INTERVENTION_SCHEMA: &str = "cindx.prompt-route-intervention.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DirectFinalizerPromptPhenotype {
@@ -123,11 +125,16 @@ pub struct PromptMutationClassification {
 impl PromptMutationClassification {
     pub fn workflow_campaign_eligible(&self) -> bool {
         !self.changed_genes.is_empty()
-            && self.layers.len() == 2
-            && self.layers.contains(&PromptLearningLayer::RouteDecision)
+            && self.layers.len() == 1
             && self
                 .layers
                 .contains(&PromptLearningLayer::WorkflowExecution)
+    }
+
+    pub fn route_campaign_eligible(&self) -> bool {
+        self.changed_genes == ["route_directive"]
+            && self.layers.len() == 1
+            && self.layers.contains(&PromptLearningLayer::RouteDecision)
     }
 }
 
@@ -163,11 +170,30 @@ pub struct PromptLearningReadinessReceipt {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromptRouteInterventionReceipt {
+    pub schema: String,
+    pub changed_genes: Vec<String>,
+    pub parent_route_profile_sha256: String,
+    pub candidate_route_profile_sha256: String,
+    pub parent_workflow_profile_sha256: String,
+    pub candidate_workflow_profile_sha256: String,
+    pub eligible: bool,
+    pub reason: String,
+}
+
 #[derive(Serialize)]
 struct RouteDecisionPromptPhenotype<'a> {
     schema: &'static str,
     effort: &'a str,
     workflow: PromptGenomeExecutionPhenotype,
+}
+
+#[derive(Serialize)]
+struct RouteDecisionPromptPhenotypeV2<'a> {
+    schema: &'static str,
+    effort: &'a str,
+    route_directive: &'a str,
 }
 
 impl ConductorPromptGenome {
@@ -212,6 +238,11 @@ impl ConductorPromptGenome {
     pub fn route_decision_directive(&self, effort: &str) -> Result<Option<String>, String> {
         let effort = normalized_route_effort(effort)?;
         self.validate()?;
+        if let Some(directive) = self.route_directive.as_deref() {
+            let directive = directive.trim();
+            return Ok((!directive.is_empty())
+                .then(|| format!("Learned collaboration route policy. {directive}")));
+        }
         let seed = Self::seed_for_effort(effort);
         if self.execution_phenotype() == seed.execution_phenotype() {
             return Ok(None);
@@ -225,7 +256,17 @@ impl ConductorPromptGenome {
     pub fn route_decision_profile_sha256(&self, effort: &str) -> Result<String, String> {
         let effort = normalized_route_effort(effort)?;
         self.validate()?;
-        let seed = Self::seed_for_effort(effort);
+        if let Some(directive) = self.route_directive.as_deref() {
+            return serde_json::to_vec(&RouteDecisionPromptPhenotypeV2 {
+                schema: ROUTE_DECISION_PHENOTYPE_SCHEMA_V2,
+                effort,
+                route_directive: directive.trim(),
+            })
+            .map(|encoded| crate::sha256_hex(&encoded))
+            .map_err(|error| format!("route decision phenotype serialization failed: {error}"));
+        }
+        let mut seed = Self::seed_for_effort(effort);
+        seed.route_directive = None;
         let workflow = self.execution_phenotype();
         if workflow == seed.execution_phenotype() {
             return prompt_genome_sha256(&seed);
@@ -250,7 +291,6 @@ pub fn classify_prompt_mutation(
         ($field:ident) => {
             if candidate.$field != parent.$field {
                 changed_genes.push(stringify!($field).to_string());
-                layers.insert(PromptLearningLayer::RouteDecision);
                 layers.insert(PromptLearningLayer::WorkflowExecution);
             }
         };
@@ -271,20 +311,21 @@ pub fn classify_prompt_mutation(
         != parent.effective_max_model_turns_per_step()
     {
         changed_genes.push("max_model_turns_per_step".to_string());
-        layers.insert(PromptLearningLayer::RouteDecision);
         layers.insert(PromptLearningLayer::WorkflowExecution);
     }
     if budget_comparison.effective_max_tool_calls_per_step()
         != parent.effective_max_tool_calls_per_step()
     {
         changed_genes.push("max_tool_calls_per_step".to_string());
-        layers.insert(PromptLearningLayer::RouteDecision);
         layers.insert(PromptLearningLayer::WorkflowExecution);
     }
     if candidate.require_final_synthesis != parent.require_final_synthesis {
         changed_genes.push("require_final_synthesis".to_string());
-        layers.insert(PromptLearningLayer::RouteDecision);
         layers.insert(PromptLearningLayer::WorkflowExecution);
+    }
+    if candidate.route_directive != parent.route_directive {
+        changed_genes.push("route_directive".to_string());
+        layers.insert(PromptLearningLayer::RouteDecision);
     }
     if candidate.direct_finalizer_verification != parent.direct_finalizer_verification {
         changed_genes.push("direct_finalizer_verification".to_string());
@@ -298,6 +339,42 @@ pub fn classify_prompt_mutation(
         changed_genes,
         layers,
     }
+}
+
+pub fn assess_prompt_route_intervention(
+    parent: &ConductorPromptGenome,
+    candidate: &ConductorPromptGenome,
+    effort: &str,
+) -> Result<PromptRouteInterventionReceipt, String> {
+    parent.validate()?;
+    candidate.validate()?;
+    let classification = classify_prompt_mutation(parent, candidate);
+    let parent_route_profile_sha256 = parent.route_decision_profile_sha256(effort)?;
+    let candidate_route_profile_sha256 = candidate.route_decision_profile_sha256(effort)?;
+    let parent_workflow_profile_sha256 = parent.workflow_execution_profile_sha256()?;
+    let candidate_workflow_profile_sha256 = candidate.workflow_execution_profile_sha256()?;
+    let eligible = classification.route_campaign_eligible()
+        && parent_route_profile_sha256 != candidate_route_profile_sha256
+        && parent_workflow_profile_sha256 == candidate_workflow_profile_sha256;
+    let reason = if !classification.route_campaign_eligible() {
+        "mutation_is_not_route_only"
+    } else if parent_route_profile_sha256 == candidate_route_profile_sha256 {
+        "mutation_does_not_change_the_route_profile"
+    } else if parent_workflow_profile_sha256 != candidate_workflow_profile_sha256 {
+        "route_mutation_changes_the_workflow_profile"
+    } else {
+        "route_profile_changes_while_workflow_execution_is_fixed"
+    };
+    Ok(PromptRouteInterventionReceipt {
+        schema: PROMPT_ROUTE_INTERVENTION_SCHEMA.to_string(),
+        changed_genes: classification.changed_genes,
+        parent_route_profile_sha256,
+        candidate_route_profile_sha256,
+        parent_workflow_profile_sha256,
+        candidate_workflow_profile_sha256,
+        eligible,
+        reason: reason.to_string(),
+    })
 }
 
 pub fn assess_prompt_execution_intervention(
@@ -336,7 +413,7 @@ pub fn assess_prompt_execution_intervention(
         .count();
     let changed_plans = if classification.workflow_campaign_eligible()
         && parent_execution_profile_sha256 != candidate_execution_profile_sha256
-        && parent_route_profile_sha256 != candidate_route_profile_sha256
+        && parent_route_profile_sha256 == candidate_route_profile_sha256
         && mismatched_profile_plans == 0
         && mismatched_route_profile_plans == 0
     {
@@ -357,10 +434,10 @@ pub fn assess_prompt_execution_intervention(
         "frozen_plans_do_not_exercise_the_parent_route_profile"
     } else if parent_execution_profile_sha256 == candidate_execution_profile_sha256 {
         "mutation_does_not_change_the_executable_workflow_profile"
-    } else if parent_route_profile_sha256 == candidate_route_profile_sha256 {
-        "mutation_does_not_change_the_route_decision_profile"
+    } else if parent_route_profile_sha256 != candidate_route_profile_sha256 {
+        "workflow_mutation_changes_the_route_decision_profile"
     } else {
-        "candidate_changes_at_least_one_frozen_execution_plan_and_route_intervention_is_tracked_separately"
+        "candidate_changes_at_least_one_frozen_workflow_plan_while_route_policy_is_fixed"
     };
     Ok(PromptExecutionInterventionReceipt {
         schema: PROMPT_EXECUTION_INTERVENTION_SCHEMA.to_string(),
@@ -530,10 +607,9 @@ mod direct_finalizer_tests {
     }
 
     #[test]
-    fn route_identity_changes_only_with_workflow_behavior() {
+    fn explicit_route_identity_is_orthogonal_to_workflow_behavior() {
         let seed = ConductorPromptGenome::seed_for_effort("auto");
         let seed_route = seed.route_decision_profile_sha256("auto").unwrap();
-        assert_eq!(seed_route, prompt_genome_sha256(&seed).unwrap());
         assert_eq!(seed.route_decision_directive("auto").unwrap(), None);
 
         let mut finalizer_only = seed.clone();
@@ -553,12 +629,17 @@ mod direct_finalizer_tests {
         let mut workflow = seed;
         workflow.id = "workflow-candidate".to_string();
         workflow.graph_depth = PromptGraphDepth::Deep;
-        let directive = workflow
-            .route_decision_directive("auto")
-            .unwrap()
-            .expect("workflow mutation should affect routing");
-        assert!(directive.contains("independent specialist branches"));
-        assert!(!directive.contains("workflow-candidate"));
+        assert_eq!(workflow.route_decision_directive("auto").unwrap(), None);
+        assert_eq!(
+            workflow.route_decision_profile_sha256("auto").unwrap(),
+            seed_route
+        );
+
+        workflow.route_directive = Some(
+            "Use Workflow only when matched evidence predicts a verified quality gain.".to_string(),
+        );
+        let directive = workflow.route_decision_directive("auto").unwrap().unwrap();
+        assert!(directive.contains("matched evidence"));
         assert_ne!(
             workflow.route_decision_profile_sha256("auto").unwrap(),
             seed_route
@@ -664,13 +745,33 @@ mod intervention_tests {
         assert_eq!(intervention.dormant_plans, 1);
         assert_eq!(intervention.mismatched_profile_plans, 0);
         assert_eq!(intervention.mismatched_route_profile_plans, 0);
-        assert_eq!(intervention.coupled_layers.len(), 2);
-        assert!(intervention
-            .coupled_layers
-            .contains(&PromptLearningLayer::RouteDecision));
+        assert_eq!(intervention.coupled_layers.len(), 1);
         assert!(intervention
             .coupled_layers
             .contains(&PromptLearningLayer::WorkflowExecution));
+    }
+
+    #[test]
+    fn route_intervention_changes_only_route_identity() {
+        let parent = ConductorPromptGenome::seed_for_effort("pro");
+        let mut candidate = parent.clone();
+        candidate.route_directive = Some(
+            "Prefer Direct unless matched evidence shows independent verification improves correctness."
+                .to_string(),
+        );
+
+        let receipt = assess_prompt_route_intervention(&parent, &candidate, "pro").unwrap();
+
+        assert!(receipt.eligible);
+        assert_eq!(receipt.changed_genes, ["route_directive"]);
+        assert_ne!(
+            receipt.parent_route_profile_sha256,
+            receipt.candidate_route_profile_sha256
+        );
+        assert_eq!(
+            receipt.parent_workflow_profile_sha256,
+            receipt.candidate_workflow_profile_sha256
+        );
     }
 
     #[test]

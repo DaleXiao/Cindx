@@ -32,6 +32,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | [Workflow GEPA V7 frozen protocol](evaluations/CINDX_WORKFLOW_GEPA_V7_PROTOCOL_0.2.25_2026-08-09.md) | current source | Same 8 behavior contracts without prescribed routes; observation-driven one-or-two-gene proposals; external action journal; strict product and campaign caps | The frozen protocol is exercised by the separate `0.2.26` provider report; its decision is `NO_GO_TRAINING`, with no quality, promotion, or frontier claim |
 | [Workflow GEPA V7 interrupted campaign](evaluations/CINDX_WORKFLOW_GEPA_V7_INTERRUPTED_0.2.25_2026-08-09.md) | `0.2.25` | One authorized clean-source run; 2 completed train seeds followed by one bounded mutation-search reservation | `INTERRUPTED_CAMPAIGN`: mutation stopped on `no_progress` before a candidate population existed; no matched candidate pair, validation, test, control, snapshot, profile change, or capability conclusion |
 | [Workflow GEPA V7 provider evaluation](evaluations/CINDX_WORKFLOW_GEPA_V7_0.2.26_2026-08-09.md) | `0.2.26` | One authorized clean-source run; 2 train seeds, 3 distinct candidates, and 6 matched train pairs; validation, test, and control remained sealed | `VALID_TARGETED_EVIDENCE`, `NO_GO_TRAINING`: all runs completed with full quality and zero safety violations, but all 6 pairs tied, all candidates remained Direct, and none met the Pareto resource gate; no snapshot or production profile was published |
+| [Workflow GEPA V9 route-causal protocol](evaluations/CINDX_WORKFLOW_GEPA_V9_ROUTE_CAUSAL_PROTOCOL_0.2.28_2026-08-09.md) | current source | Same frozen 8 cases; matched required-Direct versus required-Workflow training treatments; route-only GEPA; unseen validation and untouched test | `PROTOCOL_ONLY`: the campaign must stop before mutation unless Workflow wins an externally verified matched training outcome; no V9 provider result or uplift claim exists yet |
 | Goal Delta control contract | current source | Deterministic obligation, grounding, postcondition, repeated-satisfaction, failure, and bounded-receipt cases | Ordinary tool success no longer earns budget credit; control-plane evidence only, with no provider-backed quality claim |
 | Typed denial and bounded replan contract | current source | Deterministic permission/policy/capability denial, epoch isolation, persistence, evidence visibility, terminal disclosure, and no-credit cases | Denial can converge to an honest blocked result without becoming success; no provider-backed convergence or intelligence-uplift claim |
 | Typed Pro failure curriculum contract | current source | Deterministic canonical timeout/denial/no-progress projection, redaction, scope/epoch binding, successful anchor, diversity, replay, and shared six-packet cap | Failed runs can inform challenger generation without becoming positive evidence or teachers; no provider-backed intelligence-uplift claim |
@@ -41,7 +42,7 @@ claim, and a small GPQA sample is not a real-world Agent benchmark.
 | Authoritative Context Compiler contract | current source | Deterministic effective-objective optional-context ranking, protected-source and current-request invariants, no-text 4 KiB receipt, and operation-count scaling bounds | Request attribution and resource bounds are verified; no provider-backed answer-quality, GEPA, or Auto/Pro uplift claim |
 | Direct-finalizer causal/evolution contracts | current source | One-gene Auto/Pro Direct phenotype, exact assignment/request/delivery attribution, matched prompt-only treatment, strict reviewer and GEPA decision receipts, durable 58-call cap, and frozen 6-train/8-holdout campaign | Mechanism and causal boundaries are verified; quality uplift requires the explicit provider-backed campaign |
 | Prompt profile shipping contract | current source | Deterministic compact deployment, deletion fences and monotonic generations, authoritative recovery, injected serving-write failure with canonical-learning preservation, logical-run stable/canary assignment, exact live-assignment/lease attribution, typed fallback, behavior-only route phenotype, authority ceilings, and operation-count bounds | Proves learned-profile wiring from route through Task Graph, recoverable serving projection, and hard safety/budget boundaries only; provider-backed uplift remains unverified |
-| Workflow GEPA product campaign V7 | current source | 8 tasks split 2 train/2 validation/4 untouched test; dynamic Conductor route choice; observation-driven one-or-two-gene candidates; matched full-product pairs; exact causal receipts; durable external journal and bounded provider work; Grounded Direct control | Deterministic protocol and contract tests pass. The `0.2.26` provider run is valid targeted `NO_GO_TRAINING`: three candidates completed six matched train pairs but produced no quality win, executed no Workflow route, and failed the Pareto resource gate; no snapshot or profile was promoted |
+| Workflow GEPA route-causal campaign V9 | current source | Frozen V7 task splits and product gates; matched required-Direct/required-Workflow training pairs; route-only candidates; exact treatment/profile receipts; durable external journal and 33-run maximum | Deterministic causal boundaries pass. V9 has no provider result yet; V7 remains valid targeted `NO_GO_TRAINING`, and no snapshot or profile has been promoted |
 | Memory-effect V2 contract | current source | V1's 3 cases and 18-cell matched design, adding the observed permissionless read-only `skill.search` tool to the frozen allowlist | Deterministic receipt and analyzer checks fail closed on any other tool; the exact `0.2.19` V2 matrix demonstrates bounded memory benefit under its frozen matched direct harness, while V1 remains `INVALID_EVIDENCE` |
 | Memory lifecycle contract | current source | Matched-regression recall quarantine with expiry, verified-user authority, pin and requirement retention, observed-use preference, and hard capacity bounds | Proves deterministic forgetting and recall eligibility only; it does not establish provider answer-quality uplift |
 | Delivery-frontier runtime contract | current source | Production adaptive scheduling follows only nodes required by the synthesis or verification target and stops with disconnected speculation still pending | Proves bounded graph execution and avoids orphan model work; it does not establish provider collaboration-quality uplift |
@@ -149,19 +150,18 @@ and production promotion remained sealed. This is valid targeted no-go evidence,
 not an intelligence-uplift result.
 
 Current source retains that frozen V7 product suite but emits
-`cindx.workflow-gepa-product-evidence.v8`. This is a receipt-contract change,
-not a new provider result. Seed product receipts are converted to typed
-diagnostic plans that bind the semantic `ExecutionPlan`, exact route-decision
-profile, and exact workflow-execution profile when Workflow actually ran. A
-direct-only seed makes workflow learning dormant and stops before mutation;
-missing or foreign identities invalidate the diagnostic. Candidate generation
-must then pass a zero-provider intervention gate before any matched product run:
-the candidate must change the route and workflow profile identities and cause a
-real semantic plan change on at least one frozen Workflow diagnostic. The
-current genome changes both layers together, so an eventual provider result
-would evaluate a coupled treatment rather than identify a route-only or
-workflow-only effect. These deterministic checks improve causal validity only;
-they do not establish quality, efficiency, promotion, or frontier uplift.
+`cindx.workflow-gepa-product-evidence.v9`. It first executes the two training
+cases as matched required-Direct and required-Workflow Pro treatments with the
+same task, workspace, profile, route identity, models, and budget. Missing,
+duplicated, drifted, or incorrectly executed arms fail closed. If Workflow does
+not win at least one externally verified matched quality outcome, the campaign
+stops before mutation. When a positive treatment exists, GEPA may change only
+the new `route_directive`; executable workflow, safety, tool, and budget genes
+remain fixed. Candidate selection is train-only, and the existing unseen
+validation, Grounded Direct control, untouched test, and resource gates remain
+sealed in order. This is a causal-boundary and preregistration improvement, not
+a provider result: it establishes no quality, efficiency, promotion, or
+frontier uplift by itself.
 
 The Pro-to-Auto path additionally replays the current Pro champion's two gates,
 transfers only the complete bounded structural delta relative to the stable Pro

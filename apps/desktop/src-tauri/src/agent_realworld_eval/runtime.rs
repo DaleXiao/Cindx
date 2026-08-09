@@ -18,7 +18,8 @@ use std::path::Path;
 
 const MAX_DRIVER_ROUNDS: usize = 24;
 
-pub(super) fn run_product_task(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_product_task_with_execution_constraint(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     session_id: &str,
@@ -26,17 +27,20 @@ pub(super) fn run_product_task(
     treatment: Treatment,
     permission_policy: PermissionPolicy,
     run_budget: Option<RunBudget>,
+    execution_constraint_override: Option<AgentExecutionConstraint>,
 ) -> ProductRun {
     let effort = treatment
         .product_effort()
         .expect("product runner cannot execute an oracle reference");
-    let execution_constraint = if treatment.is_memory_evaluation() {
-        AgentExecutionConstraint::MatchedMemoryEffect
-    } else if treatment.is_grounded_direct() {
-        AgentExecutionConstraint::GroundedDirect
-    } else {
-        AgentExecutionConstraint::Native
-    };
+    let execution_constraint = execution_constraint_override.unwrap_or_else(|| {
+        if treatment.is_memory_evaluation() {
+            AgentExecutionConstraint::MatchedMemoryEffect
+        } else if treatment.is_grounded_direct() {
+            AgentExecutionConstraint::GroundedDirect
+        } else {
+            AgentExecutionConstraint::Native
+        }
+    });
     let memory_constraint = match treatment {
         Treatment::MemoryOn => AgentMemoryEvaluationConstraint::MemoryOn,
         Treatment::MemoryOff => AgentMemoryEvaluationConstraint::MemoryOff,
