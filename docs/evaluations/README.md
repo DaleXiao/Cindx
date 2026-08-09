@@ -105,6 +105,19 @@ revision and is no longer the current product decision.
 
 ## Current Targeted Causal Evidence
 
+- [Cindx Conductor ownership targeted evaluation 0.2.27](CINDX_CONDUCTOR_OWNERSHIP_V1_0.2.27_2026-08-09.md)
+  records one frozen old/current train diagnosis and one independent
+  control/candidate holdout for the Conductor-owned execution plan. It is
+  `VALID_TARGETED_EVIDENCE`, `KEEP_HARNESS_FIX`: a complete batch read can now
+  provide closed exact-readback evidence, closing the observed Auto terminal
+  failure while all six candidate product cells preserve quality, completion,
+  and safety. Every classifiable Auto/Pro run remained Direct, so Workflow,
+  learned-profile, GEPA, distillation, and frontier uplift remain unproven.
+- [Sanitized old-train result](CINDX_CONDUCTOR_OWNERSHIP_V1_OLD_TRAIN_0.2.27_2026-08-09.json)
+- [Sanitized current-train result](CINDX_CONDUCTOR_OWNERSHIP_V1_CURRENT_TRAIN_0.2.27_2026-08-09.json)
+- [Sanitized control-holdout result](CINDX_CONDUCTOR_OWNERSHIP_V1_CONTROL_HOLDOUT_0.2.27_2026-08-09.json)
+- [Sanitized candidate-holdout result](CINDX_CONDUCTOR_OWNERSHIP_V1_CANDIDATE_HOLDOUT_0.2.27_2026-08-09.json)
+
 - [Cindx Workflow GEPA V2 invalid attempt 0.2.25](CINDX_WORKFLOW_GEPA_V2_INVALID_0.2.25_2026-08-08.md)
   records the authorized provider attempt on source commit
   `40e07a3103ab98d040b7270404dbd6327a81dabe`. It is

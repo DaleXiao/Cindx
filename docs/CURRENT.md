@@ -253,7 +253,10 @@ loops from unlocking the maximum Auto or Pro budget.
   `include_sha256` can request it for a bounded file up to 8 MiB. `file.read_many`
   still accepts legacy string paths and raw sections, while also supporting
   per-file offsets, status, hashes, and continuations. Any child failure is an
-  explicit partial failure rather than a complete batch success.
+  explicit partial failure rather than a complete batch success. A batch can
+  prove exact workspace readback only when every requested path starts at byte
+  zero and the typed result proves matching order and paths, full untruncated
+  contents, exact counts, no cancellation, and no failed item.
 - `file.list` and `file.search` provide stable, bounded, snapshot-bound pages.
   Listing supports entry-name globs; search supports literal or regular-expression
   matching, case control, path globs, context, coverage, and byte-offset resume.
