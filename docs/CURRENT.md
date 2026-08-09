@@ -745,8 +745,11 @@ Therefore the current claim is:
   evidence independently from direct-finalizer execution evidence. A failed
   task therefore remains a zero-quality product outcome instead of erasing an
   otherwise complete route receipt; malformed finalizer evidence remains
-  visible on its own receipt surface. V12 is frozen but has not yet produced a
-  provider-backed result.
+  visible on its own receipt surface. The one authorized V12 run retained the
+  failed Direct arm with complete route evidence, then the shared-plan Workflow
+  arm stopped before persisting `Agent run decision selected`. The journal has
+  one completed action and one pending reservation, but no matched pair or
+  GO/NO-GO. V12 is therefore `INVALID_EVIDENCE`; production routing is unchanged.
 - Cindx has not demonstrated Fugu Ultra parity or frontier Agent performance.
 
 ## Known Structural Limits

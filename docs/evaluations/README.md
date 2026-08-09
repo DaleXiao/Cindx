@@ -223,8 +223,10 @@ revision and is no longer the current product decision.
 - [Cindx Workflow GEPA V12 route-causal protocol 0.2.29](CINDX_WORKFLOW_GEPA_V12_ROUTE_CAUSAL_PROTOCOL_0.2.29_2026-08-09.md)
   preserves V11's shared-plan treatment and every frozen task, budget, and
   decision gate while separating route/task-graph evidence from orthogonal
-  direct-finalizer execution evidence. It is frozen protocol only until its one
-  authorized provider run produces a valid result.
+  direct-finalizer execution evidence. Its one authorized run is
+  `INVALID_EVIDENCE`: the failed Direct action retained complete route evidence,
+  but the Workflow arm stopped before strategy-event persistence, leaving no
+  matched pair or GO/NO-GO.
 
 - [Cindx Direct-finalizer GEPA calibration 0.2.23](CINDX_DIRECT_FINALIZER_GEPA_0.2.23_2026-08-07.md)
   is the provider-backed four-pair Gate A run on source commit
