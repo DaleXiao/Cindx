@@ -1,7 +1,7 @@
 use super::memory_receipts::memory_evaluation_receipt_from_events;
 use super::receipts::{
     is_receipt_bearing_event, model_receipts_from_metadata, resolved_budget_from_events,
-    strategy_receipt_from_events, successful_response_count,
+    strategy_receipt_from_events_with_constraint, successful_response_count,
 };
 use super::tool_receipts::{project_tool_receipts, ToolReceiptStatus};
 use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment};
@@ -187,6 +187,7 @@ pub(super) fn collect_event_metrics(
     sequence_floor: u64,
     workspace_root: &Path,
     run_budget: Option<RunBudget>,
+    expected_execution_constraint: Option<AgentExecutionConstraint>,
 ) -> Result<EventMetrics, String> {
     let events = {
         let store = state
@@ -288,7 +289,12 @@ pub(super) fn collect_event_metrics(
         Ok(receipt) => metrics.resolved_budget = Some(receipt),
         Err(error) => metrics.evidence_errors.push(error),
     }
-    match strategy_receipt_from_events(&events, treatment, frozen_profile) {
+    match strategy_receipt_from_events_with_constraint(
+        &events,
+        treatment,
+        frozen_profile,
+        expected_execution_constraint,
+    ) {
         Ok(receipt) => metrics.strategy_receipt = receipt,
         Err(error) => metrics.evidence_errors.push(error),
     }

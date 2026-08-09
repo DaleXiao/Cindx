@@ -332,7 +332,7 @@ test, and snapshot publication. Any successor campaign requires a new frozen
 protocol and separate explicit authorization. V6 is that frozen successor
 protocol, but no V6 provider run has occurred.
 
-The current implementation retains the frozen V7 product suite and uses the V9
+The current implementation retains the frozen V7 product suite and uses the V10
 route-causal evidence schema. Before mutation, each training case executes a
 matched required-Direct and required-Workflow Pro pair. The two arms must bind
 the same task, workspace prestate, prompt profile, route profile, provider
@@ -360,12 +360,12 @@ Passing them proves schema, matched-treatment, profile-identity, route-only
 intervention, and fail-closed behavior; it does not prove answer-quality uplift
 and does not authorize a provider run.
 
-The separately authorized V9 one-shot campaign uses a clean exact revision and
+The separately authorized V10 one-shot campaign uses a clean exact revision and
 three fresh outside-Git paths. The resulting journal and report must be retained
 even when the command exits with a preregistered no-go:
 
 ```sh
-run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v9.XXXXXX)"
+run_dir="$(mktemp -d /private/tmp/cindx-workflow-gepa-v10.XXXXXX)"
 CINDX_WORKFLOW_GEPA_REPORT="$run_dir/report.json" \
 CINDX_WORKFLOW_GEPA_SNAPSHOT="$run_dir/snapshot.json" \
 CINDX_WORKFLOW_GEPA_JOURNAL="$run_dir/journal.json" \

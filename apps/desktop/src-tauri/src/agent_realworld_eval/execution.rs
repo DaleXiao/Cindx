@@ -384,6 +384,7 @@ pub(super) fn execute_case(
         sequence_floor,
         root,
         run_budget,
+        execution_constraint,
     ) {
         Ok(metrics) => metrics,
         Err(error) => EventMetrics {

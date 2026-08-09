@@ -1,28 +1,22 @@
-# Cindx Workflow GEPA V9 route-causal protocol 0.2.28
+# Cindx Workflow GEPA V10 route-causal protocol 0.2.28
 
 ## Status
 
-`INVALID_INSTRUMENTATION`
+`PROTOCOL_ONLY`
 
-This protocol freezes one causal question before any provider execution: when
+This protocol freezes one causal question before any V10 provider execution: when
 the same Pro conductor, prompt profile, task, workspace, model set, and budget
 are held fixed, does a required Workflow produce externally verified product
 value over a required Direct execution? GEPA may learn a routing instruction
 only if that contrast contains a positive Workflow treatment.
 
-The one authorized V9 execution at source commit
-`8db5a2731fb3e024fc48519b161c668092684cb7` reserved its first product cell and
-then failed evidence projection. The run deliberately injected
-`matched_direct`, but the legacy receipt validator treated every Pro execution
-constraint as an invalid native treatment. No completed product receipt,
-matched pair, report, candidate, snapshot, promotion, quality result, or
-frontier claim exists. Raw task output was not inspected before freezing the
-instrumentation-only V10 correction.
+There is no V10 provider result, candidate snapshot, profile promotion, quality
+gain, efficiency gain, or frontier claim in this document.
 
 | Field | Frozen value |
 | --- | --- |
 | Application version | `0.2.28` |
-| Evidence schema | `cindx.workflow-gepa-product-evidence.v9` |
+| Evidence schema | `cindx.workflow-gepa-product-evidence.v10` |
 | Suite ID | `cindx-workflow-gepa-v7` |
 | Suite file | `benchmarks/agent/workflow-gepa-v7.json` |
 | Suite SHA-256 | `7f289521669a612f2577888c84c5b364b0cd076179f4776ca20b0bf7c97fcdab` |
@@ -30,8 +24,21 @@ instrumentation-only V10 correction.
 | Learned field | `route_directive` only |
 | Candidate population | 2 distinct route policies from at most 6 proposals |
 | Maximum product runs | 33 planned, below the existing hard cap of 35 |
-| V9 journal SHA-256 | `1eba74a382c2dc8a5a9c84cc0116b215059bd3f5d5c57d147bed12cdc0b4168d` |
-| Completed product runs | `0` |
+| Provider calls in this protocol change | 0 |
+
+## Instrumentation correction from V9
+
+V9 was consumed as `INVALID_INSTRUMENTATION` before one complete product
+receipt existed. Its receipt projector rejected the deliberately injected
+matched execution constraint because only the treatment label reached that
+layer. V10 passes the expected constraint explicitly and requires the expected
+constraint, persisted metadata, and actual Direct or Workflow route to agree.
+Ordinary Pro still requires `native`; the fix does not relax production or
+campaign evidence checks.
+
+No V9 output or partial quality result informed this correction. The frozen
+suite, case order, thresholds, budgets, candidate count, learned field, and
+one-shot rule below are unchanged.
 
 An authorized campaign must use one clean exact Git revision and three new
 outside-repository paths for its report, candidate snapshot, and hash-chained
@@ -41,7 +48,7 @@ receipt, or treatment drift fails closed.
 ## Separated causal boundaries
 
 V8 correctly detected that the old genome coupled route choice and executable
-workflow construction, but it could not learn from Direct-only seed runs. V9
+workflow construction, but it could not learn from Direct-only seed runs. V10
 separates the two interventions instead of adding another routing heuristic:
 
 1. `route_directive` is the only route-policy gene. New profiles can change it
@@ -108,7 +115,7 @@ does not install or promote that snapshot into the shipping profile.
 
 ## Interpretation and one-shot rule
 
-The frozen clean revision was executed once. Every completed, failed,
+The frozen clean revision may be executed once. Every completed, failed,
 timed-out, rejected, or interrupted cell remains in its journal; there is no
 result-driven prompt edit, case replacement, threshold change, or rerun.
 
@@ -118,7 +125,7 @@ result-driven prompt edit, case replacement, threshold change, or rerun.
 - `valid_no_go_training`, `valid_no_go_validation`,
   `valid_no_go_grounded_control`, and `valid_no_go_product_test` identify the
   first pre-registered gate that failed.
-- `valid_candidate_product_uplift` means only that the frozen V9 campaign
+- `valid_candidate_product_uplift` means only that the frozen V10 campaign
   passed. It is not production promotion, broad Agent superiority, or Fugu
   Ultra parity.
 - setup, identity, treatment, journal, or evidence inconsistency is invalid
