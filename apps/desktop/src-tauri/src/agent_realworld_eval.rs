@@ -25,6 +25,7 @@ mod direct_finalizer_tests;
 mod execution;
 mod http_fixture;
 mod memory_receipts;
+mod outcome_shadow;
 mod receipts;
 mod runtime;
 mod setup;
@@ -42,12 +43,13 @@ mod workflow_gepa_campaign_suite;
 mod workflow_gepa_candidate_probe;
 mod workflow_gepa_candidate_search;
 
-use execution::{execute_case, CaseExecutionInput};
 use direct_finalizer_receipts::DirectFinalizerExecutionReceipt;
+use execution::{execute_case, CaseExecutionInput};
 use http_fixture::HttpFixtureReceipt;
 use memory_receipts::{
     validate_memory_effect_suite, MemoryEffectCaseContract, MemoryEvaluationReceipt,
 };
+use outcome_shadow::ShadowOutcomeTraceV1;
 pub(crate) use receipts::{model_receipts_from_metadata, ModelReceipt};
 use receipts::{ResolvedBudgetReceipt, StrategyReceipt};
 use setup::{activate_evaluation_data_root, build_evaluation_app, SetupFailure};
@@ -231,6 +233,10 @@ struct RawRun {
     output: String,
     error: Option<String>,
     evidence_error: Option<String>,
+    #[serde(skip)]
+    outcome_trace: Option<ShadowOutcomeTraceV1>,
+    #[serde(skip)]
+    outcome_trace_error: Option<String>,
     setup_failure: Option<SetupFailure>,
     resolved_budget: ResolvedBudgetReceipt,
     strategy_receipt: Option<StrategyReceipt>,
@@ -292,6 +298,8 @@ struct EventMetrics {
     memory_evaluation_receipt: Option<MemoryEvaluationReceipt>,
     model_receipts: Vec<ModelReceipt>,
     evidence_errors: Vec<String>,
+    outcome_trace: Option<ShadowOutcomeTraceV1>,
+    outcome_trace_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -883,6 +891,8 @@ fn interrupted_run(
         output: String::new(),
         error: Some("evaluation process exited before verification".to_string()),
         evidence_error: Some("run did not reach provider evidence collection".to_string()),
+        outcome_trace: None,
+        outcome_trace_error: Some("run did not reach outcome trace collection".to_string()),
         setup_failure: None,
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
@@ -927,6 +937,8 @@ fn failed_run(
         output: String::new(),
         error: Some(details.error),
         evidence_error: None,
+        outcome_trace: None,
+        outcome_trace_error: Some("run did not reach outcome trace collection".to_string()),
         setup_failure: Some(details.setup_failure),
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,

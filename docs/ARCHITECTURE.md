@@ -52,7 +52,7 @@ remain legacy and are not reclassified from display strings.
 | --- | --- |
 | `agent-core` | Transport-free IDs, messages, events, permissions, tool/model contracts, and shared schemas |
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, model-turn and tool-runtime semantics |
-| `agent-application` | The run/reprepare driver that advances prepared epochs through the kernel |
+| `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
 | `orchestrator` | Conductor execution contracts, run decisions, workflows, task graph, verification, routing evidence, and prompt-evolution policy |
 | `orchestrator-eval` | Non-default evaluation and Fugu comparison contracts |
@@ -193,6 +193,15 @@ Startup recovery uses durable events and checkpoints and restores the matching
 receipt; a run that ended before selection records `not_selected`. Pause and
 permission wait are intentionally nonterminal. Permission recovery and retry
 preserve logical lineage while keeping physical effects auditable.
+
+`agent-application` also owns
+`cindx.agent.externally-verified-outcome.v1`. Evaluation adapters may derive it
+only from validated strategy and terminal identity, actual Actor exposure,
+external postcondition and preservation receipts, and complete resource
+accounting. Missing or tampered provenance is censored; valid unsafe or
+preservation-breaking outcomes remain zero-score evidence. The receipt is
+shadow-only and has no production routing, prompt, memory, permission, or
+serving consumer.
 
 ## Persistence and Background Work
 

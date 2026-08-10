@@ -98,6 +98,10 @@ fn strategy_events() -> Vec<Event> {
     decision.insert("collaboration_policy".to_string(), "single".to_string());
     decision.insert("decision_source".to_string(), "fixture".to_string());
     decision.insert("routing_signature".to_string(), "frozen-route".to_string());
+    decision.insert(
+        "execution_plan_semantic_sha256".to_string(),
+        "a".repeat(64),
+    );
     insert_event_type_v1(
         &EventKind::TaskStatusChanged,
         &mut decision,
@@ -297,7 +301,7 @@ fn missing_terminal_invalidates_strategy_lifecycle_evidence() {
     assert!(metrics
         .evidence_errors
         .iter()
-        .any(|error| error.contains("lifecycle terminal receipt is missing")));
+        .any(|error| error.contains("terminal receipt is missing")));
     assert!(metrics
         .direct_finalizer_evidence_error
         .expect("independent finalizer diagnostic")

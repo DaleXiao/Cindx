@@ -1,14 +1,14 @@
 use super::{metadata_u64, Treatment};
 use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::*;
-use agent_application::{
-    AgentRunEvent, AgentStrategyDecisionReceipt, AgentTerminalCommitIdentity,
-    AgentTerminalCommitState, AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY,
-    AGENT_TERMINAL_COMMIT_SCHEMA, AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY,
-};
-use agent_core::{decode_event_type, DecodedEventType, Event, EventTypeV1};
+use agent_application::{AgentOutcomeExposureV1, AgentOutcomeLifecycleBindingV1};
+#[cfg(test)]
+use agent_application::{AgentStrategyDecisionReceipt, AgentTerminalCommitIdentity};
+#[cfg(test)]
+use agent_core::EventTypeV1;
+use agent_core::{Event, EventKind};
 use orchestrator::{ExecutionPlan, WorkflowPlanIr};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 const PROVIDER_RESPONSE_ID_DOMAIN: &str = "cindx.provider-response-id.v1\0";
 const PROVIDER_FINGERPRINT_DOMAIN: &str = "cindx.provider-system-fingerprint.v1\0";
@@ -69,6 +69,34 @@ pub(super) struct TreatmentExposureReceipt {
     pub(super) non_owner_permission_gated_calls: usize,
     pub(super) workflow_planned: bool,
     pub(super) workflow_completed: bool,
+}
+
+impl TreatmentExposureReceipt {
+    pub(super) fn from_authoritative(exposure: &AgentOutcomeExposureV1) -> Self {
+        Self {
+            logical_model_calls: exposure.logical_model_calls,
+            worker_model_calls: exposure.worker_model_calls,
+            successful_owner_model_calls: exposure.successful_owner_model_calls,
+            successful_specialist_model_calls: exposure.successful_specialist_model_calls,
+            successful_independent_verifier_model_calls: exposure
+                .successful_independent_verifier_model_calls,
+            successful_conductor_model_calls: exposure.successful_conductor_model_calls,
+            successful_workflow_specialist_model_calls: exposure
+                .successful_workflow_specialist_model_calls,
+            successful_workflow_verifier_model_calls: exposure
+                .successful_workflow_verifier_model_calls,
+            successful_workflow_specialist_models: exposure
+                .successful_workflow_specialist_models
+                .clone(),
+            successful_workflow_verifier_models: exposure
+                .successful_workflow_verifier_models
+                .clone(),
+            direct_anchor_competition_calls: exposure.direct_anchor_competition_calls,
+            non_owner_permission_gated_calls: exposure.non_owner_permission_gated_calls,
+            workflow_planned: exposure.workflow_planned,
+            workflow_completed: exposure.workflow_completed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -185,7 +213,22 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     if treatment.is_oracle_reference() {
         return Ok(None);
     }
-    let (decision_index, event) = verified_strategy_decision(events)?;
+    let lifecycle =
+        AgentOutcomeLifecycleBindingV1::from_events(events).map_err(|error| error.to_string())?;
+    let (decision_index, event) = events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| {
+            event.sequence == lifecycle.decision_sequence
+                && event.metadata.get("agent_run_id").map(String::as_str)
+                    == Some(lifecycle.agent_run_id.as_str())
+                && event
+                    .metadata
+                    .get("steer_epoch")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    == Some(lifecycle.steer_epoch)
+        })
+        .ok_or_else(|| "agent strategy receipt decision event is missing".to_string())?;
     let decision_json = required_metadata_any(&event.metadata, &["run_decision", "decision"])?;
     let decision = serde_json::from_str::<AgentRunDecision>(decision_json)
         .map_err(|error| format!("agent strategy decision receipt is invalid: {error}"))?;
@@ -438,7 +481,11 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     }
     let treatment_exposure = expected_execution_constraint
         .filter(|constraint| constraint.is_matched_route())
-        .map(|_| treatment_exposure_from_events(events, decision_index))
+        .map(|_| {
+            AgentOutcomeExposureV1::from_events(events, &lifecycle)
+                .map(|exposure| TreatmentExposureReceipt::from_authoritative(&exposure))
+                .map_err(|error| error.to_string())
+        })
         .transpose()?;
     if treatment_exposure
         .as_ref()
@@ -515,313 +562,13 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     }))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ModelAttributionReceipt {
-    actor: String,
-    service: String,
-    stage: String,
-    effect_authority: String,
-    component: String,
-    model: String,
-    collaboration_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct StartedModelCall {
-    sequence: u64,
-    attribution: ModelAttributionReceipt,
-}
-
-fn treatment_exposure_from_events(
-    events: &[Event],
-    decision_index: usize,
-) -> Result<TreatmentExposureReceipt, String> {
-    let planned_workflow = events
-        .iter()
-        .enumerate()
-        .skip(decision_index.saturating_add(1))
-        .find(|(_, event)| event.summary == "Collaboration workflow planned")
-        .map(|(index, event)| {
-            required_metadata(&event.metadata, "collaboration_id")
-                .map(|collaboration_id| (index, collaboration_id.to_string()))
-        })
-        .transpose()?;
-    let workflow_completed =
-        planned_workflow
-            .as_ref()
-            .is_some_and(|(planned_index, collaboration_id)| {
-                events
-                    .iter()
-                    .skip(planned_index.saturating_add(1))
-                    .any(|event| {
-                        event.summary == "Collaboration workflow completed"
-                            && event.metadata.get("collaboration_id").map(String::as_str)
-                                == Some(collaboration_id.as_str())
-                    })
-            });
-    let workflow_collaboration_id = planned_workflow
-        .as_ref()
-        .map(|(_, collaboration_id)| collaboration_id.as_str());
-
-    let mut starts = BTreeMap::new();
-    for event in events
-        .iter()
-        .filter(|event| event.kind == EventKind::ModelRequestStarted)
-    {
-        let request_id = required_metadata(&event.metadata, "request_id")?.to_string();
-        let call = StartedModelCall {
-            sequence: event.sequence,
-            attribution: model_attribution_receipt(event)?,
-        };
-        if starts.insert(request_id.clone(), call).is_some() {
-            return Err(format!(
-                "matched route treatment exposure has duplicate model start {request_id}"
-            ));
-        }
-    }
-
-    let mut receipt = TreatmentExposureReceipt {
-        workflow_planned: planned_workflow.is_some(),
-        workflow_completed,
-        ..TreatmentExposureReceipt::default()
-    };
-    for call in starts.values() {
-        if matches!(
-            call.attribution.actor.as_str(),
-            "specialist" | "independent_verifier"
-        ) {
-            receipt.worker_model_calls = receipt.worker_model_calls.saturating_add(1);
-        }
-        if call.attribution.component.starts_with("direct_anchor") {
-            receipt.direct_anchor_competition_calls =
-                receipt.direct_anchor_competition_calls.saturating_add(1);
-        }
-        if call.attribution.effect_authority == "permission_gated"
-            && call.attribution.actor != "owner"
-        {
-            receipt.non_owner_permission_gated_calls =
-                receipt.non_owner_permission_gated_calls.saturating_add(1);
-        }
-    }
-
-    let mut finished = BTreeSet::new();
-    let mut successful_responses = 0usize;
-    for event in events
-        .iter()
-        .filter(|event| event.kind == EventKind::ModelRequestFinished)
-    {
-        let request_id = required_metadata(&event.metadata, "request_id")?;
-        let started = starts.get(request_id).ok_or_else(|| {
-            format!("matched route treatment exposure has an orphan model finish {request_id}")
-        })?;
-        if !finished.insert(request_id.to_string()) {
-            return Err(format!(
-                "matched route treatment exposure has duplicate model finish {request_id}"
-            ));
-        }
-        if event.sequence <= started.sequence {
-            return Err(format!(
-                "matched route treatment exposure model finish precedes start {request_id}"
-            ));
-        }
-        let finished_attribution = model_attribution_receipt(event)?;
-        if finished_attribution != started.attribution {
-            return Err(format!(
-                "matched route treatment exposure attribution changed for {request_id}"
-            ));
-        }
-        let response_count = successful_response_count(event);
-        successful_responses = successful_responses.saturating_add(response_count);
-        if response_count == 0 {
-            continue;
-        }
-        let attribution = &started.attribution;
-        match attribution.actor.as_str() {
-            "owner" => {
-                receipt.successful_owner_model_calls =
-                    receipt.successful_owner_model_calls.saturating_add(1)
-            }
-            "specialist" => {
-                receipt.successful_specialist_model_calls =
-                    receipt.successful_specialist_model_calls.saturating_add(1)
-            }
-            "independent_verifier" => {
-                receipt.successful_independent_verifier_model_calls = receipt
-                    .successful_independent_verifier_model_calls
-                    .saturating_add(1)
-            }
-            _ => {}
-        }
-        if attribution.service == "conductor" {
-            receipt.successful_conductor_model_calls =
-                receipt.successful_conductor_model_calls.saturating_add(1);
-        }
-        let is_workflow_step = workflow_collaboration_id.is_some_and(|collaboration_id| {
-            attribution.collaboration_id.as_deref() == Some(collaboration_id)
-                && attribution.effect_authority == "read_only"
-                && !attribution.component.starts_with("direct_anchor")
-        });
-        if is_workflow_step {
-            match attribution.actor.as_str() {
-                "specialist" => {
-                    receipt.successful_workflow_specialist_model_calls = receipt
-                        .successful_workflow_specialist_model_calls
-                        .saturating_add(1);
-                    receipt
-                        .successful_workflow_specialist_models
-                        .insert(attribution.model.clone());
-                }
-                "independent_verifier" => {
-                    receipt.successful_workflow_verifier_model_calls = receipt
-                        .successful_workflow_verifier_model_calls
-                        .saturating_add(1);
-                    receipt
-                        .successful_workflow_verifier_models
-                        .insert(attribution.model.clone());
-                }
-                _ => {}
-            }
-        }
-    }
-    if finished.len() != starts.len() {
-        return Err("matched route treatment exposure has an unfinished model call".to_string());
-    }
-    receipt.logical_model_calls = starts.len().max(successful_responses);
-    Ok(receipt)
-}
-
-fn model_attribution_receipt(event: &Event) -> Result<ModelAttributionReceipt, String> {
-    if event
-        .metadata
-        .get(agent_core::AGENT_MODEL_ATTRIBUTION_SCHEMA_METADATA_KEY)
-        .map(String::as_str)
-        != Some(agent_core::AGENT_MODEL_ATTRIBUTION_SCHEMA)
-    {
-        return Err("matched route model attribution schema is missing".to_string());
-    }
-    let actor = required_metadata(&event.metadata, agent_core::AGENT_ACTOR_METADATA_KEY)?;
-    let service = required_metadata(&event.metadata, agent_core::AGENT_SERVICE_METADATA_KEY)?;
-    let stage = required_metadata(&event.metadata, agent_core::AGENT_STAGE_METADATA_KEY)?;
-    let profile = required_metadata(
-        &event.metadata,
-        agent_core::AGENT_MODEL_PROFILE_METADATA_KEY,
-    )?;
-    let output_trust =
-        required_metadata(&event.metadata, agent_core::AGENT_OUTPUT_TRUST_METADATA_KEY)?;
-    let effect_authority = required_metadata(
-        &event.metadata,
-        agent_core::AGENT_EFFECT_AUTHORITY_METADATA_KEY,
-    )?;
-    let component = required_metadata(
-        &event.metadata,
-        agent_core::AGENT_ATTRIBUTION_COMPONENT_METADATA_KEY,
-    )?;
-    let model = required_metadata(
-        &event.metadata,
-        agent_core::AGENT_ATTRIBUTION_MODEL_METADATA_KEY,
-    )?;
-    required_metadata(
-        &event.metadata,
-        agent_core::AGENT_ATTRIBUTION_LEGACY_ROLE_METADATA_KEY,
-    )?;
-
-    if !matches!(
-        actor,
-        "none" | "owner" | "specialist" | "independent_verifier"
-    ) || !matches!(service, "none" | "conductor" | "learning_utility")
-        || (actor == "none") == (service == "none")
-        || !matches!(stage, "plan" | "evidence" | "act" | "verify" | "finalize")
-        || !matches!(profile, "primary" | "reasoning" | "verifier" | "utility")
-        || output_trust != "untrusted_model_output"
-        || !matches!(effect_authority, "none" | "read_only" | "permission_gated")
-    {
-        return Err("matched route model attribution is invalid".to_string());
-    }
-    Ok(ModelAttributionReceipt {
-        actor: actor.to_string(),
-        service: service.to_string(),
-        stage: stage.to_string(),
-        effect_authority: effect_authority.to_string(),
-        component: component.to_string(),
-        model: model.to_string(),
-        collaboration_id: event.metadata.get("collaboration_id").cloned(),
-    })
-}
-
-fn verified_strategy_decision(events: &[Event]) -> Result<(usize, &Event), String> {
-    let mut terminal_events = Vec::new();
-    for (index, event) in events.iter().enumerate() {
-        let lifecycle = AgentRunEvent::try_from_event(event)
-            .map_err(|error| format!("agent strategy lifecycle event is invalid: {error}"))?;
-        if lifecycle.is_some_and(|event| event.status().is_terminal()) {
-            terminal_events.push((index, event));
-        }
-    }
-    let [(_, terminal)] = terminal_events.as_slice() else {
-        return Err(if terminal_events.is_empty() {
-            "agent strategy lifecycle terminal receipt is missing".to_string()
-        } else {
-            "agent strategy lifecycle has duplicate terminal receipts".to_string()
-        });
-    };
-    if terminal
-        .metadata
-        .get(AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY)
-        .map(String::as_str)
-        != Some(AGENT_TERMINAL_COMMIT_SCHEMA)
-    {
-        return Err("agent strategy lifecycle terminal receipt is missing".to_string());
-    }
-    let steer_epoch = terminal
-        .metadata
-        .get(AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY)
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| "agent strategy lifecycle terminal epoch is invalid".to_string())?;
-    let receipt = AgentStrategyDecisionReceipt::from_metadata(&terminal.metadata)
-        .map_err(|error| format!("agent strategy lifecycle receipt is invalid: {error}"))?;
-    let receipt = receipt.ok_or_else(|| "agent strategy receipt is missing".to_string())?;
-    let identity =
-        AgentTerminalCommitIdentity::new(&terminal.task_id, &terminal.metadata, steer_epoch)
-            .map_err(|error| {
-                format!("agent strategy lifecycle terminal identity is invalid: {error}")
-            })?;
-    match identity.inspect_events(events) {
-        Ok(AgentTerminalCommitState::Committed) => {}
-        Ok(AgentTerminalCommitState::Pending) => {
-            return Err("agent strategy lifecycle terminal receipt is missing".to_string())
-        }
-        Err(error) => Err(format!(
-            "agent strategy lifecycle terminal receipt is invalid: {error}"
-        ))?,
-    }
-    let decisions = events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| {
-            event.metadata.get("agent_run_id").map(String::as_str) == Some(receipt.agent_run_id())
-                && event
-                    .metadata
-                    .get("steer_epoch")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    == Some(receipt.steer_epoch())
-                && matches!(
-                    decode_event_type(event),
-                    DecodedEventType::V1(typed)
-                        if typed.event_type() == EventTypeV1::AgentRunDecisionSelected
-                )
-        })
-        .collect::<Vec<_>>();
-    let [(decision_index, event)] = decisions.as_slice() else {
-        return Err(if decisions.is_empty() {
-            "agent strategy receipt is missing".to_string()
-        } else {
-            "agent strategy lifecycle has duplicate decisions".to_string()
-        });
-    };
-    if !receipt.matches_decision_event(event) {
-        return Err("agent strategy lifecycle receipt does not match its decision".to_string());
-    }
-    Ok((*decision_index, *event))
+#[cfg(test)]
+fn treatment_exposure_from_events(events: &[Event]) -> Result<TreatmentExposureReceipt, String> {
+    let lifecycle =
+        AgentOutcomeLifecycleBindingV1::from_events(events).map_err(|error| error.to_string())?;
+    let exposure = AgentOutcomeExposureV1::from_events(events, &lifecycle)
+        .map_err(|error| error.to_string())?;
+    Ok(TreatmentExposureReceipt::from_authoritative(&exposure))
 }
 
 fn validate_execution_constraint_receipt(
@@ -1062,6 +809,12 @@ mod tests {
             metadata.clone(),
         );
         started.sequence = sequence;
+        insert_event_type_v1(
+            &started.kind,
+            &mut started.metadata,
+            EventTypeV1::AgentModelTurnStarted,
+        )
+        .unwrap();
         metadata.insert("status".to_string(), "completed".to_string());
         let mut finished = event(
             "Model request finished",
@@ -1069,6 +822,12 @@ mod tests {
             metadata,
         );
         finished.sequence = sequence.saturating_add(1);
+        insert_event_type_v1(
+            &finished.kind,
+            &mut finished.metadata,
+            EventTypeV1::AgentModelTurnFinished,
+        )
+        .unwrap();
         [started, finished]
     }
 
@@ -1107,6 +866,10 @@ mod tests {
             .get("execution_plan_semantic_sha256")
             .cloned()
             .unwrap_or_else(|| "a".repeat(64));
+        decision
+            .metadata
+            .entry("execution_plan_semantic_sha256".to_string())
+            .or_insert_with(|| plan_sha256.clone());
         let receipt =
             AgentStrategyDecisionReceipt::new(&decision.task_id, &decision.metadata, &plan_sha256)
                 .unwrap();
@@ -1419,7 +1182,7 @@ mod tests {
         assert!(
             strategy_receipt_from_events(&missing_terminal, Treatment::Pro, None)
                 .expect_err("missing terminal must invalidate strategy evidence")
-                .contains("lifecycle terminal receipt is missing")
+                .contains("terminal receipt is missing")
         );
 
         let mut mismatched_terminal = events.clone();
@@ -1435,10 +1198,12 @@ mod tests {
 
         let mut duplicate_decision = events;
         duplicate_decision.insert(1, duplicate_decision[0].clone());
-        assert!(
+        let duplicate_error =
             strategy_receipt_from_events(&duplicate_decision, Treatment::Pro, None)
-                .expect_err("duplicate decision must invalidate strategy evidence")
-                .contains("multiple strategy decisions")
+                .expect_err("duplicate decision must invalidate strategy evidence");
+        assert!(
+            duplicate_error.contains("multiple strategy decisions"),
+            "{duplicate_error}"
         );
     }
 
@@ -1490,10 +1255,11 @@ mod tests {
         let mut out_of_order = workflow_strategy_events(&metadata);
         let decision_sequence = out_of_order[0].sequence;
         out_of_order.last_mut().unwrap().sequence = decision_sequence;
+        let ordering_error = strategy_receipt_from_events(&out_of_order, Treatment::Pro, None)
+            .expect_err("terminal must follow its strategy decision");
         assert!(
-            strategy_receipt_from_events(&out_of_order, Treatment::Pro, None)
-                .expect_err("terminal must follow its strategy decision")
-                .contains("does not follow")
+            ordering_error.contains("does not follow its durable strategy decision"),
+            "{ordering_error}"
         );
     }
 
@@ -1745,7 +1511,7 @@ mod tests {
         let mut decision = event(
             "Agent run decision selected",
             EventKind::TaskStatusChanged,
-            Metadata::new(),
+            Metadata::from([("execution_plan_semantic_sha256".to_string(), "a".repeat(64))]),
         );
         decision.sequence = 3;
         events.push(decision);
@@ -1802,19 +1568,6 @@ mod tests {
             "verification",
             Some("workflow-exposure"),
         ));
-        events.extend(attributed_model_events(
-            "anchor",
-            11,
-            AgentModelAttribution::actor(
-                AgentActor::Specialist,
-                AgentStage::Act,
-                AgentModelProfile::Reasoning,
-                AgentEffectAuthority::None,
-            ),
-            "anchor-model",
-            "direct_anchor",
-            Some("workflow-exposure"),
-        ));
         let mut completed = event(
             "Collaboration workflow completed",
             EventKind::TaskStatusChanged,
@@ -1825,13 +1578,24 @@ mod tests {
         );
         completed.sequence = 13;
         events.push(completed);
+        events = with_completed_strategy_lifecycle(events);
+        for event in &mut events {
+            event
+                .metadata
+                .entry("agent_run_id".to_string())
+                .or_insert_with(|| "run-receipt".to_string());
+            event
+                .metadata
+                .entry("steer_epoch".to_string())
+                .or_insert_with(|| "0".to_string());
+        }
 
-        let exposure = treatment_exposure_from_events(&events, 2).unwrap();
-        assert_eq!(exposure.logical_model_calls, 7);
-        assert_eq!(exposure.worker_model_calls, 3);
+        let exposure = treatment_exposure_from_events(&events).unwrap();
+        assert_eq!(exposure.logical_model_calls, 6);
+        assert_eq!(exposure.worker_model_calls, 2);
         assert_eq!(exposure.successful_conductor_model_calls, 1);
         assert_eq!(exposure.successful_owner_model_calls, 1);
-        assert_eq!(exposure.successful_specialist_model_calls, 2);
+        assert_eq!(exposure.successful_specialist_model_calls, 1);
         assert_eq!(exposure.successful_independent_verifier_model_calls, 1);
         assert_eq!(exposure.successful_workflow_specialist_model_calls, 1);
         assert_eq!(exposure.successful_workflow_verifier_model_calls, 1);
@@ -1843,7 +1607,7 @@ mod tests {
             exposure.successful_workflow_verifier_models,
             BTreeSet::from(["verifier-model".to_string()])
         );
-        assert_eq!(exposure.direct_anchor_competition_calls, 1);
+        assert_eq!(exposure.direct_anchor_competition_calls, 0);
         assert_eq!(exposure.non_owner_permission_gated_calls, 0);
         assert!(exposure.workflow_planned);
         assert!(exposure.workflow_completed);
@@ -1861,7 +1625,7 @@ mod tests {
                 agent_core::AGENT_ATTRIBUTION_COMPONENT_METADATA_KEY.to_string(),
                 "changed".to_string(),
             );
-        assert!(treatment_exposure_from_events(&changed_attribution, 2).is_err());
+        assert!(treatment_exposure_from_events(&changed_attribution).is_err());
     }
 
     #[test]

@@ -83,6 +83,12 @@ contacting a provider.
 The lifecycle filters include the preparation failure race against cancellation
 and steer, including exactly-once terminal persistence for the winning epoch.
 
+The same profiles include `agent-outcome-evidence-contract`. This provider-free
+gate checks exact lifecycle, treatment-exposure, and resource bindings;
+integer positive, partial, and negative scoring from external postconditions;
+zero-score retention for valid safety or preservation failures; tamper
+censoring; and isolation from production learning consumers.
+
 ```sh
 node scripts/run-quality-gates.mjs \
   --profile control-plane \

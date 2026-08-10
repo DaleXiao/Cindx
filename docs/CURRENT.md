@@ -155,6 +155,14 @@ production Workflow graph with deterministic contracts. It does not
 retroactively validate V12, prove an intelligence or provider-cost gain, or
 authorize another provider run.
 
+The current evaluation projection can also derive one bounded, typed
+externally verified outcome for either Direct or Workflow from validated
+strategy and terminal lineage, actual Actor exposure, external postconditions,
+preservation checks, and complete resource receipts. This is shadow evidence
+only: it is not production `LearningEvidenceV1`, does not enter routing, prompt
+evolution, memory, canary, or serving, and does not establish an intelligence
+gain.
+
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
 ## Known Structural Limits
