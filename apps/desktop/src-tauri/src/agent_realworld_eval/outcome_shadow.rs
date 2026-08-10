@@ -277,6 +277,7 @@ mod tests {
             evidence_error: None,
             outcome_trace: Some(trace),
             outcome_trace_error: None,
+            collaboration_learning_events: Vec::new(),
             setup_failure: None,
             resolved_budget: ResolvedBudgetReceipt::for_treatment(Treatment::Fast),
             strategy_receipt: None,

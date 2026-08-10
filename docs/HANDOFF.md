@@ -139,11 +139,28 @@ The Goal 3B contract foundation is complete in the current source:
 5. The contract has no production routing, prompt, memory, permission, canary,
    snapshot, or serving consumer.
 
-No provider evaluation was run, so these are deterministic learning and
-admission guarantees, not evidence that collaboration improves intelligence or
-performance. There is no runtime/evaluation assignment producer or durable
-evidence journal yet, so real trial collection and discrete admission are not
-operational.
+Goal 3C adds the provider-free runtime and recovery adapter around that
+foundation:
+
+1. A successor-only `realworld-eval` entry commits the matched policy assignment
+   before model work, applies the assigned worker context budget and fail-fast
+   bound, and records only the SHA-256 and size of the exact encoded request
+   before dispatch. The frozen V12 entry continues to pass no learning policy.
+2. The trusted projector aggregates all worker turns and rejects missing,
+   duplicated, reordered, or mismatched run/plan/step/model/context receipts.
+3. Canonical offline genesis and Pair/Censor entries replay through the public
+   constructors into the same sealed evidence contract.
+4. The private external journal uses immutable entries and an atomic manifest;
+   one valid orphan may be adopted, while missing, tampered, forked, or pending
+   state fails closed or becomes `IncompleteInstrumentation`. It has no provider
+   retry callback.
+5. The capture bridge derives the comparison binding from both actual runs and
+   accepts only a pre-frozen source/cohort authority; it remains evaluation-only.
+   The invalid V12 protocol was not changed or rerun.
+
+No provider evaluation was run, so these are deterministic collection and
+recovery guarantees, not evidence that collaboration improves intelligence or
+performance.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -171,14 +188,13 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-The next step is deterministic: add one feature-gated offline adapter that emits
-the trusted assignment/context receipts and durably appends and recovers pair or
-censor observations. Provider-free crash, replay, tamper, and complete-holdout
-tests must pass before any provider protocol is frozen. Only then, after explicit
-user confirmation, may one fixed-budget narrow successor protocol run. It must
-establish a valid matched Direct/Workflow causal pair under a shared Conductor
-plan; incomplete receipts stop immediately. No causal uplift freezes the
-collaboration type; do not alter the protocol to keep it alive.
+After the deterministic adapter gates and formal local App build are green,
+pause for explicit user confirmation. Then freeze exactly one fixed-budget
+successor protocol and its source revision, cases, candidate count, attempt and
+token limits, ordering, and sealed holdout before any provider call. Its first
+step must establish a valid matched Direct/Workflow causal pair under one shared
+Conductor plan; incomplete receipts stop immediately. No causal uplift freezes
+the collaboration type; do not alter the protocol to keep it alive.
 
 ## Structural Risks
 

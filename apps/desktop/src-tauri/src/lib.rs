@@ -44,6 +44,8 @@ mod attachment_commands;
 mod attachment_upload_batches;
 mod background_work_runtime;
 mod collaboration_execution;
+#[cfg(feature = "realworld-eval")]
+mod collaboration_learning_eval_runtime;
 mod collaboration_models;
 mod collaboration_service;
 mod collaboration_stage_runtime;

@@ -163,17 +163,24 @@ only: it is not production `LearningEvidenceV1`, does not enter routing, prompt
 evolution, memory, canary, or serving, and does not establish an intelligence
 gain.
 
-The source also defines the contract foundation for bounded offline
-collaboration learning. The initial matched Direct/Workflow gate decides
-whether one read-only Specialist is useful. A later candidate keeps that
-topology fixed and changes exactly one of two context allocations, independent
-verification, or one same-lane repair; stopping is derived from the
-required-lane result. A candidate counts only when a trusted event projection
-binds the assigned policy to the actual context, lane attempts, repair, stop
-reason, and externally verified outcome. The in-memory contract can accumulate
-and freeze evidence for independent review, but it has no runtime/evaluation
-producer or durable journal yet and cannot publish a prompt profile, enter
-production learning, or authorize serving.
+The source also defines bounded offline collaboration learning. The initial
+matched Direct/Workflow gate decides whether one read-only Specialist is
+useful. A later candidate keeps that topology fixed and changes exactly one of
+two context allocations, independent verification, or one same-lane repair;
+stopping is derived from the required-lane result. Under the opt-in
+`realworld-eval` feature, a successor-only matched runner can persist the
+assigned policy before any Owner or worker call and record a digest and byte
+count for the exact encoded worker request before dispatch. The trusted
+projection joins all turns to the actual lane result and externally verified
+outcome. A separate
+offline feature reconstructs bounded Pair/Censor records into an append-only
+evidence set, while a private immutable-file journal recovers interrupted
+capture as `IncompleteInstrumentation` without replaying a provider call.
+
+These components are dormant outside evaluation and are not connected to the
+invalid frozen V12 run. No successor provider protocol has been frozen or run,
+and the offline record cannot publish a prompt profile, enter production
+learning, or authorize serving.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 

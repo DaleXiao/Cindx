@@ -1,4 +1,4 @@
-use crate::ModelToolCall;
+use crate::{ModelToolCall, PreparedStreamingModelRequest};
 use agent_core::Metadata;
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
@@ -28,6 +28,14 @@ pub(crate) fn request_payload_sha256(bytes: &[u8]) -> String {
     hasher.update(REQUEST_PAYLOAD_DOMAIN);
     hasher.update(bytes);
     digest_hex(hasher.finalize())
+}
+
+impl PreparedStreamingModelRequest {
+    /// Returns the digest and size of the exact encoded payload, without the body.
+    pub fn payload_receipt(&self) -> Option<(&str, usize)> {
+        self.encoded_parts()
+            .map(|(body, _, digest)| (digest, body.len()))
+    }
 }
 
 pub(crate) fn provider_identity_metadata(value: &serde_json::Value) -> Metadata {

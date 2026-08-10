@@ -27,6 +27,7 @@ const CANDIDATE_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-candid
 const HOLDOUT_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-holdout.v1\0";
 const SCOPE_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-scope.v1\0";
 const CENSOR_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-censor.v1\0";
+const PHYSICAL_RUN_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-physical-run.v1\0";
 const CONFIG_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-config.v1\0";
 const EVIDENCE_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-evidence.v1\0";
 const REVIEW_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-review.v1\0";
@@ -58,6 +59,11 @@ pub enum CollaborationLearningArmV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(
+    feature = "collaboration-learning-offline",
+    derive(Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct CollaborationLearningComparisonHashesV1 {
     pub source_commit_sha256: String,
     pub suite_sha256: String,
@@ -77,6 +83,11 @@ pub struct CollaborationLearningComparisonHashesV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(
+    feature = "collaboration-learning-offline",
+    derive(Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct CollaborationLearningComparisonBindingV1 {
     hashes: CollaborationLearningComparisonHashesV1,
     split: CollaborationLearningSplitV1,
@@ -156,10 +167,26 @@ impl CollaborationLearningComparisonBindingV1 {
     }
 
     fn validate(&self) -> ContractResult<()> {
-        if self.binding_sha256 != self.payload_sha256()? {
+        let rebuilt = Self::freeze(
+            self.hashes.clone(),
+            self.split,
+            self.replicate,
+            self.arm_order,
+        )?;
+        if self.binding_sha256 != rebuilt.binding_sha256 {
             return Err(error("comparison binding digest is invalid"));
         }
         Ok(())
+    }
+
+    #[cfg(feature = "collaboration-learning-offline")]
+    pub(crate) fn reconstruct(self) -> ContractResult<Self> {
+        let binding_sha256 = self.binding_sha256;
+        let rebuilt = Self::freeze(self.hashes, self.split, self.replicate, self.arm_order)?;
+        if binding_sha256 != rebuilt.binding_sha256 {
+            return Err(error("comparison binding digest is invalid"));
+        }
+        Ok(rebuilt)
     }
 
     pub fn split(&self) -> CollaborationLearningSplitV1 {
@@ -176,6 +203,11 @@ impl CollaborationLearningComparisonBindingV1 {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(
+    feature = "collaboration-learning-offline",
+    derive(Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct CollaborationLearningTrialV1 {
     binding: CollaborationLearningComparisonBindingV1,
     arm: CollaborationLearningArmV1,
@@ -241,9 +273,24 @@ impl CollaborationLearningTrialV1 {
     fn policy(&self) -> ContractResult<CollaborationLearningPolicyV1> {
         self.exercise.assignment.policy()
     }
+
+    #[cfg(feature = "collaboration-learning-offline")]
+    fn reconstruct(self) -> ContractResult<Self> {
+        Self::new(
+            self.binding.reconstruct()?,
+            self.arm,
+            self.outcome,
+            self.exercise,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(
+    feature = "collaboration-learning-offline",
+    derive(Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct CollaborationLearningPairV1 {
     binding: CollaborationLearningComparisonBindingV1,
     direct: CollaborationLearningTrialV1,
@@ -276,6 +323,11 @@ impl CollaborationLearningPairV1 {
         }
         validate_direct_exposure(&direct.outcome)?;
         validate_workflow_exposure(&workflow.outcome)?;
+        let direct_physical_run_sha256 = physical_run_sha256(&direct.outcome)?;
+        let workflow_physical_run_sha256 = physical_run_sha256(&workflow.outcome)?;
+        if direct_physical_run_sha256 == workflow_physical_run_sha256 {
+            return Err(error("pair arms reused one physical run"));
+        }
         let binding = direct.binding.clone();
         let pair_sha256 = collaboration_learning_sha256(
             PAIR_HASH_DOMAIN,
@@ -312,9 +364,42 @@ impl CollaborationLearningPairV1 {
         self.workflow.reward_bps()
     }
 
-    fn workflow_policy(&self) -> ContractResult<CollaborationLearningPolicyV1> {
+    pub(crate) fn workflow_policy(&self) -> ContractResult<CollaborationLearningPolicyV1> {
         self.workflow.policy()
     }
+
+    pub(crate) fn physical_run_identities(&self) -> ContractResult<[String; 2]> {
+        Ok([
+            physical_run_sha256(&self.direct.outcome)?,
+            physical_run_sha256(&self.workflow.outcome)?,
+        ])
+    }
+
+    #[cfg(feature = "collaboration-learning-offline")]
+    pub(crate) fn reconstruct(self) -> ContractResult<Self> {
+        let binding = self.binding.reconstruct()?;
+        let pair_sha256 = self.pair_sha256;
+        let rebuilt = Self::new(self.direct.reconstruct()?, self.workflow.reconstruct()?)?;
+        if rebuilt.binding != binding || rebuilt.pair_sha256 != pair_sha256 {
+            return Err(error("matched pair digest or binding is invalid"));
+        }
+        Ok(rebuilt)
+    }
+}
+
+pub fn collaboration_learning_physical_run_sha256(agent_run_id: &str) -> ContractResult<String> {
+    if agent_run_id.trim().is_empty() {
+        return Err(error("physical run identity is empty"));
+    }
+    collaboration_learning_sha256(
+        PHYSICAL_RUN_HASH_DOMAIN,
+        &agent_run_id,
+        "physical run identity",
+    )
+}
+
+fn physical_run_sha256(outcome: &ExternallyVerifiedOutcomeV1) -> ContractResult<String> {
+    collaboration_learning_physical_run_sha256(&outcome.lifecycle.agent_run_id)
 }
 
 fn postcondition_contract(
@@ -362,6 +447,11 @@ fn validate_workflow_exposure(outcome: &ExternallyVerifiedOutcomeV1) -> Contract
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(
+    feature = "collaboration-learning-offline",
+    derive(Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct CollaborationLearningCandidateV1 {
     policy: CollaborationLearningPolicyV1,
     changed_axis: Option<CollaborationPolicyAxisV1>,
@@ -436,6 +526,24 @@ impl CollaborationLearningCandidateV1 {
     ) -> ContractResult<String> {
         Ok(freeze_holdout(bindings)?.0)
     }
+
+    #[cfg(feature = "collaboration-learning-offline")]
+    pub(crate) fn reconstruct(self, parent: CollaborationLearningPolicyV1) -> ContractResult<Self> {
+        let changed_axis = self.changed_axis;
+        let candidate_sha256 = self.candidate_sha256;
+        let rebuilt = Self::snapshot(
+            self.policy,
+            Some(parent),
+            self.holdout_manifest_sha256,
+            self.config_sha256,
+            self.proposer_identity_sha256,
+            self.ordinal,
+        )?;
+        if rebuilt.changed_axis != changed_axis || rebuilt.candidate_sha256 != candidate_sha256 {
+            return Err(error("candidate snapshot digest or axis is invalid"));
+        }
+        Ok(rebuilt)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,9 +556,15 @@ pub enum CollaborationLearningCensorReasonV1 {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(
+    feature = "collaboration-learning-offline",
+    derive(Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct CollaborationLearningCensorReceiptV1 {
     binding: CollaborationLearningComparisonBindingV1,
     source_sha256: String,
+    physical_run_sha256: Vec<String>,
     reason: CollaborationLearningCensorReasonV1,
     receipt_sha256: String,
 }
@@ -461,22 +575,98 @@ impl CollaborationLearningCensorReceiptV1 {
         source_sha256: String,
         reason: CollaborationLearningCensorReasonV1,
     ) -> ContractResult<Self> {
+        Self::for_physical_run(binding, source_sha256.clone(), source_sha256, reason)
+    }
+
+    pub fn for_physical_run(
+        binding: CollaborationLearningComparisonBindingV1,
+        source_sha256: String,
+        physical_run_sha256: String,
+        reason: CollaborationLearningCensorReasonV1,
+    ) -> ContractResult<Self> {
+        Self::for_physical_runs(binding, source_sha256, vec![physical_run_sha256], reason)
+    }
+
+    pub fn for_physical_runs(
+        binding: CollaborationLearningComparisonBindingV1,
+        source_sha256: String,
+        mut physical_run_sha256: Vec<String>,
+        reason: CollaborationLearningCensorReasonV1,
+    ) -> ContractResult<Self> {
+        binding.validate()?;
         validate_collaboration_learning_sha256(&source_sha256, "censor source")?;
+        if physical_run_sha256.is_empty() || physical_run_sha256.len() > 2 {
+            return Err(error(
+                "censor physical run identities are outside their fixed bound",
+            ));
+        }
+        physical_run_sha256.sort();
+        for identity in &physical_run_sha256 {
+            validate_collaboration_learning_sha256(identity, "censor physical run identity")?;
+        }
+        if physical_run_sha256
+            .windows(2)
+            .any(|pair| pair[0] == pair[1])
+        {
+            return Err(error("censor physical run identities are duplicated"));
+        }
         let receipt_sha256 = collaboration_learning_sha256(
             CENSOR_HASH_DOMAIN,
-            &(binding.digest(), source_sha256.as_str(), reason),
+            &(
+                binding.digest(),
+                source_sha256.as_str(),
+                &physical_run_sha256,
+                reason,
+            ),
             "censor receipt",
         )?;
         Ok(Self {
             binding,
             source_sha256,
+            physical_run_sha256,
             reason,
             receipt_sha256,
         })
     }
+
+    pub fn binding(&self) -> &CollaborationLearningComparisonBindingV1 {
+        &self.binding
+    }
+
+    pub fn physical_run_sha256(&self) -> &[String] {
+        &self.physical_run_sha256
+    }
+
+    pub fn reason(&self) -> CollaborationLearningCensorReasonV1 {
+        self.reason
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.receipt_sha256
+    }
+
+    #[cfg(feature = "collaboration-learning-offline")]
+    pub(crate) fn reconstruct(self) -> ContractResult<Self> {
+        let receipt_sha256 = self.receipt_sha256;
+        let rebuilt = Self::for_physical_runs(
+            self.binding.reconstruct()?,
+            self.source_sha256,
+            self.physical_run_sha256,
+            self.reason,
+        )?;
+        if rebuilt.receipt_sha256 != receipt_sha256 {
+            return Err(error("censor receipt digest is invalid"));
+        }
+        Ok(rebuilt)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(
+    feature = "collaboration-learning-offline",
+    derive(Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct CollaborationLearningConfigV1 {
     min_train_pairs: u16,
     min_holdout_pairs: u16,
@@ -536,6 +726,23 @@ impl CollaborationLearningConfigV1 {
     pub fn digest(&self) -> &str {
         &self.config_sha256
     }
+
+    #[cfg(feature = "collaboration-learning-offline")]
+    pub(crate) fn reconstruct(self) -> ContractResult<Self> {
+        let config_sha256 = self.config_sha256;
+        let rebuilt = Self::freeze(
+            self.min_train_pairs,
+            self.min_holdout_pairs,
+            self.minimum_uplift_bps,
+            self.max_resource_regression_bps,
+            self.max_position_imbalance,
+            self.candidate_budget,
+        )?;
+        if rebuilt.config_sha256 != config_sha256 {
+            return Err(error("admission config digest is invalid"));
+        }
+        Ok(rebuilt)
+    }
 }
 
 fn freeze_holdout(
@@ -594,7 +801,7 @@ pub struct CollaborationLearningEvidenceSetV1 {
     comparison_scope_sha256: String,
     frozen_holdout: BTreeSet<String>,
     frozen_holdout_cases: BTreeSet<String>,
-    observed_terminal_commit_keys: BTreeSet<String>,
+    observed_physical_run_sha256: BTreeSet<String>,
     observations: BTreeMap<String, CollaborationLearningObservationV1>,
     config: CollaborationLearningConfigV1,
     sealed: bool,
@@ -633,26 +840,14 @@ impl CollaborationLearningEvidenceSetV1 {
                 "candidate or baseline does not match the precommitted holdout",
             ));
         }
+        let baseline_physical_run_sha256 = baseline.physical_run_identities()?;
         Ok(Self {
             candidate,
             baseline_pair_sha256: baseline.digest().to_string(),
             comparison_scope_sha256: scope_sha256,
             frozen_holdout: frozen,
             frozen_holdout_cases: frozen_cases,
-            observed_terminal_commit_keys: BTreeSet::from([
-                baseline
-                    .direct
-                    .outcome
-                    .lifecycle
-                    .terminal_commit_key
-                    .clone(),
-                baseline
-                    .workflow
-                    .outcome
-                    .lifecycle
-                    .terminal_commit_key
-                    .clone(),
-            ]),
+            observed_physical_run_sha256: BTreeSet::from(baseline_physical_run_sha256),
             observations: BTreeMap::new(),
             config,
             sealed: false,
@@ -708,27 +903,28 @@ impl CollaborationLearningEvidenceSetV1 {
         if self.observations.len() >= MAX_COMPARISONS || self.observations.contains_key(&key) {
             return Err(error("observation is duplicated or exceeds its bound"));
         }
-        let terminal_commit_keys = match &observation {
-            CollaborationLearningObservationV1::Pair(pair) => Some([
-                pair.direct.outcome.lifecycle.terminal_commit_key.clone(),
-                pair.workflow.outcome.lifecycle.terminal_commit_key.clone(),
-            ]),
-            CollaborationLearningObservationV1::Censored(_) => None,
+        let physical_run_sha256 = match &observation {
+            CollaborationLearningObservationV1::Pair(pair) => pair
+                .physical_run_identities()?
+                .into_iter()
+                .collect::<Vec<_>>(),
+            CollaborationLearningObservationV1::Censored(censor) => {
+                censor.physical_run_sha256.clone()
+            }
         };
-        if terminal_commit_keys.as_ref().is_some_and(|keys| {
-            keys[0] == keys[1]
-                || keys
-                    .iter()
-                    .any(|receipt| self.observed_terminal_commit_keys.contains(receipt))
-        }) {
+        let unique_physical_runs = physical_run_sha256.iter().collect::<BTreeSet<_>>();
+        if unique_physical_runs.len() != physical_run_sha256.len()
+            || physical_run_sha256
+                .iter()
+                .any(|identity| self.observed_physical_run_sha256.contains(identity))
+        {
             return Err(error(
                 "one physical run was replayed as multiple observations",
             ));
         }
         self.observations.insert(key, observation);
-        if let Some(keys) = terminal_commit_keys {
-            self.observed_terminal_commit_keys.extend(keys);
-        }
+        self.observed_physical_run_sha256
+            .extend(physical_run_sha256);
         Ok(())
     }
 
@@ -765,7 +961,7 @@ impl CollaborationLearningEvidenceSetV1 {
                 self.comparison_scope_sha256.as_str(),
                 &self.frozen_holdout,
                 &self.frozen_holdout_cases,
-                &self.observed_terminal_commit_keys,
+                &self.observed_physical_run_sha256,
                 &self.observations,
                 config.config_sha256.as_str(),
             ),
@@ -1198,5 +1394,11 @@ fn error(message: impl Into<String>) -> CollaborationLearningError {
 }
 
 #[cfg(test)]
-#[path = "collaboration_learning_admission_tests.rs"]
-mod tests;
+mod tests {
+    include!("collaboration_learning_admission_tests.rs");
+
+    #[cfg(feature = "collaboration-learning-offline")]
+    mod offline_replay {
+        include!("collaboration_learning_replay_tests.rs");
+    }
+}

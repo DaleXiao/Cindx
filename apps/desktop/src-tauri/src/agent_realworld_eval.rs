@@ -8,6 +8,9 @@ use std::process::Command;
 use std::time::Instant;
 use tauri::Manager;
 
+mod collaboration_learning_capture;
+#[allow(dead_code)]
+mod collaboration_learning_journal;
 mod conductor_ownership_suite;
 mod direct_finalizer;
 mod direct_finalizer_campaign;
@@ -237,6 +240,8 @@ struct RawRun {
     outcome_trace: Option<ShadowOutcomeTraceV1>,
     #[serde(skip)]
     outcome_trace_error: Option<String>,
+    #[serde(skip)]
+    collaboration_learning_events: Vec<Event>,
     setup_failure: Option<SetupFailure>,
     resolved_budget: ResolvedBudgetReceipt,
     strategy_receipt: Option<StrategyReceipt>,
@@ -300,6 +305,7 @@ struct EventMetrics {
     evidence_errors: Vec<String>,
     outcome_trace: Option<ShadowOutcomeTraceV1>,
     outcome_trace_error: Option<String>,
+    collaboration_learning_events: Vec<Event>,
 }
 
 #[derive(Debug, Clone)]
@@ -499,6 +505,7 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                         run_budget: None,
                         execution_constraint: None,
                         matched_route_plan_anchor: None,
+                        collaboration_learning_policy: None,
                     },
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;
@@ -893,6 +900,7 @@ fn interrupted_run(
         evidence_error: Some("run did not reach provider evidence collection".to_string()),
         outcome_trace: None,
         outcome_trace_error: Some("run did not reach outcome trace collection".to_string()),
+        collaboration_learning_events: Vec::new(),
         setup_failure: None,
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
@@ -939,6 +947,7 @@ fn failed_run(
         evidence_error: None,
         outcome_trace: None,
         outcome_trace_error: Some("run did not reach outcome trace collection".to_string()),
+        collaboration_learning_events: Vec::new(),
         setup_failure: Some(details.setup_failure),
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,

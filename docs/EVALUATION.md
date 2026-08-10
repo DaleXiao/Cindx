@@ -112,21 +112,23 @@ evidence or authorize routing, prompt, memory, canary, or promotion changes.
 This closes a reward-plumbing prerequisite only; no provider run or matched
 uplift result was produced.
 
-The Goal 3B contract foundation adds provider-free structured policy,
-attribution, aggregation, and offline-admission contracts. Policy assignment
-must be joined to actual context allocation, Specialist/Verifier attempts,
-same-lane repair, derived stopping, and the Goal 3A outcome receipt. Candidate
-lineage changes one bounded axis; valid failures remain in the denominator,
-while incomplete attribution freezes the evidence set instead of being silently
-dropped. Train and sealed holdout evidence can reach review readiness, but only
-an independently bound review can authorize an offline narrow-validation
-record. Nothing is served or promoted, and no provider run or uplift result was
-produced. There is not yet a feature-gated event producer or durable,
-replay-safe evidence adapter, so the contract cannot collect real trials.
+The Goal 3B/3C contracts add provider-free structured policy, attribution,
+aggregation, offline admission, canonical replay, and crash-safe journal
+boundaries. Under the successor-only `realworld-eval` path, policy assignment
+is joined to the actual pre-dispatch request payload identity and size, Specialist/Verifier
+attempts, derived stopping, and the Goal 3A outcome receipt. Candidate lineage
+changes one bounded axis; valid failures remain in the denominator, while
+incomplete attribution is retained as a censor instead of being silently
+dropped. The external journal stores private immutable records, rejects
+missing/tampered/forked chains, and recovers pending capture as
+`IncompleteInstrumentation` without rerunning a provider. Train and sealed
+holdout evidence can reach review readiness, but only an independently bound
+review can authorize an offline narrow-validation record. Nothing is served or
+promoted.
 
-The next deterministic step is to connect the contract to a feature-gated
-offline producer and durable append/recovery adapter. After that adapter passes
-provider-free crash, replay, tamper, and complete-holdout tests, freeze one
+All Goal 3C evidence is deterministic and provider-free. V12 remains invalid
+and was not rerun; no collaboration uplift or provider-cost result was
+produced. The next step, only after explicit confirmation, is to freeze one
 successor protocol for the final narrow provider gate. It must:
 
 1. use one shared Conductor plan and vary only the execution treatment;

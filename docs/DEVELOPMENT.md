@@ -94,9 +94,17 @@ gate checks the bounded policy schema, trusted assignment-to-exercise binding,
 actual context and same-lane repair attribution, matched Direct/Workflow
 identity, append-only train/holdout evidence, freeze conditions, and the
 independent-review requirement. Its approved state remains offline-only and is
-not a prompt, routing, memory, canary, or serving admission. This gate does not
-prove a runtime assignment producer or durable evidence recovery path; neither
-is implemented yet.
+not a prompt, routing, memory, canary, or serving admission.
+
+`agent-collaboration-learning-offline-contract` checks bounded canonical import,
+hash-chain replay, physical-run deduplication, and committed-context aggregation
+with the optional agent-application feature. The adjacent
+`agent-collaboration-learning-offline-adapter-contract` enables only
+`realworld-eval` and checks explicit matched policy installation, actual context
+budgeting, materialized assignment, private journal recovery, orphan handling,
+tamper/fork rejection, old-V12 isolation, actual-pair capture identity, and
+censor-without-retry behavior. These gates do not
+contact a provider or prove intelligence uplift.
 
 ```sh
 node scripts/run-quality-gates.mjs \

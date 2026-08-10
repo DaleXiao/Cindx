@@ -100,6 +100,8 @@ pub(crate) fn run_collaboration_candidates(
             let run_context = run_context.clone();
             let collaboration_id = collaboration_id.to_string();
             let stage = spec.stage.clone();
+            #[cfg(feature = "realworld-eval")]
+            let request_id = spec.request_id.clone();
             let model = spec.model.clone();
             let prompt = spec.prompt.clone();
             let cancellation = cancellation.clone();
@@ -120,6 +122,8 @@ pub(crate) fn run_collaboration_candidates(
                     run_context,
                     collaboration_id,
                     stage,
+                    #[cfg(feature = "realworld-eval")]
+                    request_id,
                     ModelRole::Planner,
                     model,
                     prompt,

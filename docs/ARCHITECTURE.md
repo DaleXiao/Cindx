@@ -203,24 +203,39 @@ preservation-breaking outcomes remain zero-score evidence. The receipt is
 shadow-only and has no production routing, prompt, memory, permission, or
 serving consumer.
 
-The same crate owns the portable Goal 3B contract foundation, separate from
-production prompt evolution. A structured policy keeps the Goal 2 graph and
-Owner authority fixed while bounding context, verification, and same-lane
+The same crate owns the portable collaboration-learning contracts, separate
+from production prompt evolution. A structured policy keeps the Goal 2 graph
+and Owner authority fixed while bounding context, verification, and same-lane
 repair choices. Its companion exercise receipt is projected from lifecycle
 events rather than supplied by the candidate: it binds policy assignment,
-semantic plan, exact context receipt, per-lane attempts, derived stop reason,
-and the externally verified outcome digest. The in-memory evidence contract is
-append-only, train/holdout separated, resource-accounted, and either collecting,
-ready for independent review, or frozen. Review may authorize only a narrow
-offline validation record; there is no conversion to production learning
-evidence, prompt genomes, snapshots, routing, canary, or serving. No runtime or
-evaluation producer and no durable evidence journal consume this contract yet.
+semantic plan, exact pre-dispatch request receipts, per-lane attempts, derived
+stop reason, and the externally verified outcome digest. The optional
+`collaboration-learning-offline` feature adds canonical bounded import and
+hash-chain replay into the same train/holdout evidence contract. Review may
+authorize only a narrow offline validation record; there is no conversion to
+production learning evidence, prompt genomes, snapshots, routing, canary, or
+serving.
+
+The desktop `realworld-eval` adapter is the only runtime producer. Its explicit
+successor-only entry installs a matched-arm policy, commits Direct assignment
+with the durable strategy decision or Workflow assignment with the materialized
+plan, applies the assigned context budget and fail-fast attempt bound, and
+commits only the SHA-256 identity and size of the exact encoded request before
+dispatch. Raw request contents are never added to the learning receipt. The
+adapter retains the run event slice outside the frozen report schema and derives
+the comparison binding from the actual pair plus a pre-frozen source/cohort
+authority.
 
 ## Persistence and Background Work
 
 SQLite stores projects, sessions, events, permissions, checkpoints, schedules,
 memory, prompt evolution, and projections. Persistent-state failure aborts
-startup.
+startup. Offline collaboration evidence deliberately does not add a production
+SQLite table: an explicitly selected evaluation harness uses private 0600,
+content-addressed genesis and entry files plus an atomic manifest. Recovery
+adopts only one valid successor; missing, tampered, or forked state fails
+closed, and an unfinished capture becomes a censor rather than a provider
+retry.
 
 Background services are bounded and must not block the healthy foreground path:
 

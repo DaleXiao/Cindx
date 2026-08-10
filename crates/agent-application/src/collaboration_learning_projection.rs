@@ -23,6 +23,8 @@ pub const COLLABORATION_LEARNING_EXERCISE_SCHEMA: &str =
     "cindx.agent-collaboration-learning-exercise.v1";
 pub const COLLABORATION_LEARNING_CONTEXT_RECEIPT_SCHEMA: &str =
     "cindx.agent-collaboration-context-receipt.v1";
+pub const COLLABORATION_LEARNING_CONTEXT_COMMITTED_SUMMARY: &str =
+    "Collaboration learning context committed";
 pub const COLLABORATION_LEARNING_ASSIGNMENT_SCHEMA_METADATA_KEY: &str =
     "collaboration_learning_assignment_schema";
 pub const COLLABORATION_LEARNING_POLICY_JSON_METADATA_KEY: &str =
@@ -55,8 +57,12 @@ pub const COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY: &str =
     "collaboration_learning_context_payload_sha256";
 pub const COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY: &str =
     "collaboration_learning_context_bytes";
+pub const COLLABORATION_LEARNING_WORKER_TURN_ORDINAL_METADATA_KEY: &str =
+    "collaboration_learning_worker_turn_ordinal";
 
 const HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-exercise.v1\0";
+const CONTEXT_AGGREGATE_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-context-aggregate.v1\0";
+const CONTEXT_AGGREGATE_SCHEMA: &str = "cindx.agent-collaboration-context-aggregate.v1";
 const MAX_JSON_BYTES: usize = 128 * 1024;
 const RUN: &str = "agent_run_id";
 const EPOCH: &str = "steer_epoch";
@@ -67,6 +73,7 @@ const STEP: &str = "workflow_step_id";
 const OUTPUT: &str = "output_kind";
 const RECOVERY: &str = "recovery";
 const RECOVERY_ATTEMPT: &str = "recovery_attempt";
+const REQUEST_PAYLOAD: &str = "request_payload_sha256";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -354,6 +361,7 @@ struct Actual {
     profile: String,
     component: String,
     legacy_role: String,
+    runtime_stage: Option<String>,
     recovery: Option<u8>,
     sequence: u64,
     context: Option<CollaborationLearningContextReceiptV1>,
@@ -428,6 +436,8 @@ fn project(
             }
         }
     }
+    let mut committed_contexts =
+        committed_contexts(events, outcome, &assignment, &policy, &starts)?;
     let mut attempts = BTreeMap::<CollaborationLearningLaneActorV1, Vec<_>>::new();
     let mut finished = BTreeSet::new();
     for event in &scoped {
@@ -452,6 +462,7 @@ fn project(
             &actual.profile,
             &actual.component,
             &actual.legacy_role,
+            &actual.runtime_stage,
             actual.recovery,
         ) != (
             start.actor,
@@ -463,6 +474,7 @@ fn project(
             &start.profile,
             &start.component,
             &start.legacy_role,
+            &start.runtime_stage,
             start.recovery,
         ) {
             return Err(err("worker attribution changed between start and finish"));
@@ -474,6 +486,15 @@ fn project(
         {
             return Err(err("worker terminal receipt is invalid"));
         }
+        let context = attempt_context(
+            start,
+            &actual,
+            committed_contexts
+                .remove(&actual.request)
+                .unwrap_or_default(),
+            &assignment,
+            policy.context_budget_bps,
+        )?;
         attempts
             .entry(start.actor)
             .or_default()
@@ -483,13 +504,16 @@ fn project(
                 started_sequence: start.sequence,
                 finished_sequence: actual.sequence,
                 recovery_attempt: start.recovery,
-                context: start.context.clone().expect("start context is required"),
+                context,
                 provider_response_observed: provider_response_observed(event)?,
                 succeeded,
             });
     }
     if finished.len() != starts.len() {
         return Err(err("worker attempt is unfinished"));
+    }
+    if !committed_contexts.is_empty() {
+        return Err(err("committed context is orphaned"));
     }
     let mut lanes = Vec::new();
     for actor in [
@@ -726,7 +750,7 @@ fn parse_actual(
         return Err(err("declared and actual worker assignment disagree"));
     }
     let context = start
-        .then(|| context(event, policy.context_budget_bps))
+        .then(|| legacy_context(event, policy.context_budget_bps))
         .transpose()?;
     Ok(Actual {
         actor,
@@ -739,10 +763,209 @@ fn parse_actual(
         profile: profile.to_string(),
         component: component.to_string(),
         legacy_role: legacy_role.to_string(),
+        runtime_stage: event.metadata.get("stage").cloned(),
         recovery,
         sequence: event.sequence,
-        context,
+        context: context.flatten(),
     })
+}
+
+#[derive(Debug, Clone)]
+struct CommittedContext {
+    sequence: u64,
+    ordinal: u64,
+    payload_sha256: String,
+    bytes: u64,
+}
+
+fn committed_contexts(
+    events: &[Event],
+    outcome: &ExternallyVerifiedOutcomeV1,
+    assignment: &CollaborationLearningAssignmentV1,
+    policy: &CollaborationLearningPolicyV1,
+    starts: &BTreeMap<String, Actual>,
+) -> Result<BTreeMap<String, Vec<CommittedContext>>, CollaborationLearningError> {
+    let mut committed = BTreeMap::<String, Vec<CommittedContext>>::new();
+    for event in events
+        .iter()
+        .filter(|event| context_committed_marker(event))
+    {
+        let request = event.metadata.get(REQUEST).map(String::as_str);
+        if !in_run(event, outcome) {
+            if request.is_some_and(|request| starts.contains_key(request)) {
+                return Err(err("committed context changed run or epoch"));
+            }
+            continue;
+        }
+        if event.sequence <= outcome.lifecycle.decision_sequence
+            || event.sequence >= outcome.lifecycle.terminal_sequence
+        {
+            return Err(err("committed context is outside the bound lifecycle"));
+        }
+        if event.kind != EventKind::TaskStatusChanged
+            || event.summary != COLLABORATION_LEARNING_CONTEXT_COMMITTED_SUMMARY
+            || event
+                .metadata
+                .get(COLLABORATION_LEARNING_CONTEXT_SCHEMA_METADATA_KEY)
+                .map(String::as_str)
+                != Some(COLLABORATION_LEARNING_CONTEXT_RECEIPT_SCHEMA)
+        {
+            return Err(err("committed context event schema is invalid"));
+        }
+        let request = req(&event.metadata, REQUEST, "committed context request")?;
+        let start = starts
+            .get(request)
+            .ok_or_else(|| err("committed context is orphaned"))?;
+        if event.sequence <= start.sequence {
+            return Err(err("committed context was not recorded after worker start"));
+        }
+        let plan = digest(&event.metadata, PLAN, "committed context plan")?;
+        let budget = number(
+            &event.metadata,
+            COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY,
+            "committed context budget",
+        )?;
+        let payload_sha256 = digest(
+            &event.metadata,
+            COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY,
+            "committed context payload",
+        )?;
+        let bytes = number(
+            &event.metadata,
+            COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY,
+            "committed context bytes",
+        )?;
+        let ordinal = number(
+            &event.metadata,
+            COLLABORATION_LEARNING_WORKER_TURN_ORDINAL_METADATA_KEY,
+            "committed context turn ordinal",
+        )?;
+        let runtime_stage = start
+            .runtime_stage
+            .as_deref()
+            .ok_or_else(|| err("worker start is missing its runtime stage"))?;
+        if plan != assignment.execution_plan_semantic_sha256
+            || budget != u64::from(policy.context_budget_bps)
+            || bytes == 0
+            || ordinal == 0
+            || req(&event.metadata, COLLABORATION, "committed collaboration")?
+                != start.collaboration
+            || req(&event.metadata, "stage", "committed runtime stage")? != runtime_stage
+            || req(&event.metadata, "model", "committed model")? != start.model
+            || event.metadata.get(REQUEST_PAYLOAD).map(String::as_str)
+                != Some(payload_sha256.as_str())
+            || req(&event.metadata, STEP, "committed workflow step")? != start.step
+        {
+            return Err(err(
+                "committed context disagrees with its plan, budget, step, or model",
+            ));
+        }
+        committed
+            .entry(request.to_string())
+            .or_default()
+            .push(CommittedContext {
+                sequence: event.sequence,
+                ordinal,
+                payload_sha256,
+                bytes,
+            });
+    }
+    Ok(committed)
+}
+
+fn context_committed_marker(event: &Event) -> bool {
+    event.summary == COLLABORATION_LEARNING_CONTEXT_COMMITTED_SUMMARY
+        || event
+            .metadata
+            .contains_key(COLLABORATION_LEARNING_WORKER_TURN_ORDINAL_METADATA_KEY)
+}
+
+fn attempt_context(
+    start: &Actual,
+    finish: &Actual,
+    mut committed: Vec<CommittedContext>,
+    assignment: &CollaborationLearningAssignmentV1,
+    expected_bps: u16,
+) -> Result<CollaborationLearningContextReceiptV1, CollaborationLearningError> {
+    if committed.is_empty() {
+        return start
+            .context
+            .clone()
+            .ok_or_else(|| err("trusted actual context receipt is missing"));
+    }
+    if start.context.is_some() {
+        return Err(err("actual context receipt is duplicated"));
+    }
+    committed.sort_by_key(|receipt| receipt.ordinal);
+    if committed
+        .iter()
+        .enumerate()
+        .any(|(index, receipt)| receipt.ordinal != u64::try_from(index + 1).unwrap_or(u64::MAX))
+        || committed
+            .windows(2)
+            .any(|pair| pair[0].ordinal == pair[1].ordinal || pair[0].sequence >= pair[1].sequence)
+        || committed
+            .iter()
+            .any(|receipt| receipt.sequence >= finish.sequence)
+    {
+        return Err(err(
+            "committed context turns are duplicated, non-contiguous, or outside the attempt",
+        ));
+    }
+    let bytes = committed.iter().try_fold(0u64, |total, receipt| {
+        total
+            .checked_add(receipt.bytes)
+            .ok_or_else(|| err("committed context byte count overflowed"))
+    })?;
+    let payloads = committed
+        .iter()
+        .map(|receipt| {
+            (
+                receipt.ordinal,
+                receipt.sequence,
+                receipt.payload_sha256.as_str(),
+                receipt.bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+    let payload_sha256 = collaboration_learning_sha256(
+        CONTEXT_AGGREGATE_HASH_DOMAIN,
+        &(
+            CONTEXT_AGGREGATE_SCHEMA,
+            assignment.agent_run_id.as_str(),
+            assignment.steer_epoch,
+            assignment.execution_plan_semantic_sha256.as_str(),
+            start.collaboration.as_str(),
+            start.request.as_str(),
+            start.step.as_str(),
+            start.model.as_str(),
+            start.sequence,
+            finish.sequence,
+            expected_bps,
+            &payloads,
+        ),
+        "aggregate committed context",
+    )?;
+    Ok(CollaborationLearningContextReceiptV1 {
+        budget_bps: expected_bps,
+        payload_sha256,
+        bytes,
+    })
+}
+
+fn legacy_context(
+    event: &Event,
+    expected_bps: u16,
+) -> Result<Option<CollaborationLearningContextReceiptV1>, CollaborationLearningError> {
+    let present = [
+        COLLABORATION_LEARNING_CONTEXT_SCHEMA_METADATA_KEY,
+        COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY,
+        COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY,
+        COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY,
+    ]
+    .into_iter()
+    .any(|key| event.metadata.contains_key(key));
+    present.then(|| context(event, expected_bps)).transpose()
 }
 
 fn context(

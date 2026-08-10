@@ -1,5 +1,6 @@
 use super::execution::{execute_case, CaseExecutionInput};
 use super::outcome_shadow::{project_shadow_outcome_pair, ShadowOutcomePairV1};
+use super::verification::case_input_sha256;
 use super::workflow_gepa_campaign_contract::{
     CampaignSplit, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
 };
@@ -7,6 +8,7 @@ use super::workflow_gepa_campaign_journal::CampaignJournal;
 use super::{materialize_case, ExecutionCell, RawRun, RealworldCase, RealworldSuite, Treatment};
 use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::app_state::AppState;
+use crate::collaboration_learning_eval_runtime::CollaborationLearningEvalPolicyInput;
 use crate::configuration_models::ProviderConfig;
 use crate::prompt_learning_runtime::{
     prompt_evaluation_parent_budget, prompt_workspace_content_sha256,
@@ -31,6 +33,8 @@ pub(super) struct MatchedRoutePairRun {
     pub(super) shadow_outcome_pair: Option<ShadowOutcomePairV1>,
     #[allow(dead_code)]
     pub(super) shadow_outcome_error: Option<String>,
+    pub(super) suite_sha256: String,
+    pub(super) provider_sha256: String,
 }
 
 struct EvaluationProfileEnvironment {
@@ -283,6 +287,7 @@ pub(super) fn execute_journaled_campaign_case(
         action_label,
         None,
         None,
+        None,
         journal,
     )
 }
@@ -306,6 +311,7 @@ fn execute_journaled_campaign_case_with_constraint(
     action_label: &str,
     execution_constraint: Option<AgentExecutionConstraint>,
     matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
+    collaboration_learning_policy: Option<&CollaborationLearningEvalPolicyInput>,
     journal: &mut CampaignJournal,
 ) -> Result<(RawRun, ProductRunReceipt), String> {
     journal.begin_product(action_label)?;
@@ -325,6 +331,7 @@ fn execute_journaled_campaign_case_with_constraint(
         project_scope,
         execution_constraint,
         matched_route_plan_anchor,
+        collaboration_learning_policy,
     );
     let receipt = ProductRunReceipt::from_run(&run, split, replicate)?;
     journal.complete_product(&receipt)?;
@@ -344,6 +351,72 @@ pub(super) fn execute_matched_route_pair(
     pair_index: usize,
     execution_index: &mut usize,
     suite_sha256: &str,
+    journal: &mut CampaignJournal,
+) -> Result<MatchedRoutePairRun, String> {
+    execute_matched_route_pair_with_learning_policy(
+        app,
+        state,
+        provider,
+        evaluation_database,
+        suite_root,
+        case,
+        split,
+        replicate,
+        pair_index,
+        execution_index,
+        suite_sha256,
+        None,
+        journal,
+    )
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(super) fn execute_collaboration_learning_successor_pair(
+    app: &tauri::App<tauri::Wry>,
+    state: &tauri::State<'_, AppState>,
+    provider: &ProviderConfig,
+    evaluation_database: &Path,
+    suite_root: &Path,
+    case: &RealworldCase,
+    split: CampaignSplit,
+    replicate: u32,
+    pair_index: usize,
+    execution_index: &mut usize,
+    suite_sha256: &str,
+    workflow_learning_policy: agent_application::CollaborationLearningPolicyV1,
+    journal: &mut CampaignJournal,
+) -> Result<MatchedRoutePairRun, String> {
+    execute_matched_route_pair_with_learning_policy(
+        app,
+        state,
+        provider,
+        evaluation_database,
+        suite_root,
+        case,
+        split,
+        replicate,
+        pair_index,
+        execution_index,
+        suite_sha256,
+        Some(workflow_learning_policy),
+        journal,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_matched_route_pair_with_learning_policy(
+    app: &tauri::App<tauri::Wry>,
+    state: &tauri::State<'_, AppState>,
+    provider: &ProviderConfig,
+    evaluation_database: &Path,
+    suite_root: &Path,
+    case: &RealworldCase,
+    split: CampaignSplit,
+    replicate: u32,
+    pair_index: usize,
+    execution_index: &mut usize,
+    suite_sha256: &str,
+    workflow_learning_policy: Option<agent_application::CollaborationLearningPolicyV1>,
     journal: &mut CampaignJournal,
 ) -> Result<MatchedRoutePairRun, String> {
     let direct_root = suite_root.join(format!(
@@ -369,12 +442,16 @@ pub(super) fn execute_matched_route_pair(
     let workflow_first = candidate_executes_first(pair_index, replicate);
     let direct_scope = project_scope(split, case, replicate, "forced-direct");
     let workflow_scope = project_scope(split, case, replicate, "forced-workflow");
+    let case_binding_sha256 = case_input_sha256(case);
+    let learning_policies =
+        collaboration_learning_policy_inputs(workflow_learning_policy, case_binding_sha256)?;
     let run_arm = |root: &Path,
                    constraint: AgentExecutionConstraint,
                    scope: &str,
                    index: usize,
                    position: usize,
                    plan_anchor: Option<&MatchedRoutePlanAnchor>,
+                   learning_policy: Option<&CollaborationLearningEvalPolicyInput>,
                    journal: &mut CampaignJournal| {
         execute_journaled_campaign_case_with_constraint(
             app,
@@ -394,6 +471,7 @@ pub(super) fn execute_matched_route_pair(
             scope,
             Some(constraint),
             plan_anchor,
+            learning_policy,
             journal,
         )
     };
@@ -405,6 +483,9 @@ pub(super) fn execute_matched_route_pair(
             *execution_index,
             1,
             None,
+            learning_policies
+                .as_ref()
+                .map(|policies| &policies.workflow),
             journal,
         )?;
         let plan_anchor = matched_route_plan_anchor(&workflow)?;
@@ -416,6 +497,7 @@ pub(super) fn execute_matched_route_pair(
             *execution_index,
             2,
             Some(&plan_anchor),
+            learning_policies.as_ref().map(|policies| &policies.direct),
             journal,
         )?;
         *execution_index = execution_index.saturating_add(1);
@@ -434,6 +516,7 @@ pub(super) fn execute_matched_route_pair(
             *execution_index,
             1,
             None,
+            learning_policies.as_ref().map(|policies| &policies.direct),
             journal,
         )?;
         let plan_anchor = matched_route_plan_anchor(&direct)?;
@@ -445,6 +528,9 @@ pub(super) fn execute_matched_route_pair(
             *execution_index,
             2,
             Some(&plan_anchor),
+            learning_policies
+                .as_ref()
+                .map(|policies| &policies.workflow),
             journal,
         )?;
         *execution_index = execution_index.saturating_add(1);
@@ -486,7 +572,35 @@ pub(super) fn execute_matched_route_pair(
         workflow,
         shadow_outcome_pair,
         shadow_outcome_error,
+        suite_sha256: suite_sha256.to_string(),
+        provider_sha256: sha256_hex(
+            format!("{}\0{}", provider.provider_id, provider.base_url).as_bytes(),
+        ),
     })
+}
+
+struct MatchedRouteLearningPolicies {
+    direct: CollaborationLearningEvalPolicyInput,
+    workflow: CollaborationLearningEvalPolicyInput,
+}
+
+fn collaboration_learning_policy_inputs(
+    workflow_policy: Option<agent_application::CollaborationLearningPolicyV1>,
+    case_binding_sha256: String,
+) -> Result<Option<MatchedRouteLearningPolicies>, String> {
+    workflow_policy
+        .map(|workflow_policy| {
+            Ok(MatchedRouteLearningPolicies {
+                direct: CollaborationLearningEvalPolicyInput::matched_direct(
+                    case_binding_sha256.clone(),
+                )?,
+                workflow: CollaborationLearningEvalPolicyInput::matched_workflow_policy(
+                    workflow_policy,
+                    case_binding_sha256,
+                )?,
+            })
+        })
+        .transpose()
 }
 
 fn validate_matched_route_receipts(
@@ -638,6 +752,7 @@ fn execute_campaign_case_with_constraint(
     project_scope: &str,
     execution_constraint: Option<AgentExecutionConstraint>,
     matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
+    collaboration_learning_policy: Option<&CollaborationLearningEvalPolicyInput>,
 ) -> RawRun {
     let execution = ExecutionCell {
         execution_index,
@@ -660,6 +775,7 @@ fn execute_campaign_case_with_constraint(
             run_budget: Some(workflow_gepa_product_budget()),
             execution_constraint,
             matched_route_plan_anchor,
+            collaboration_learning_policy,
         },
     )
 }
@@ -786,7 +902,11 @@ mod tests {
             profile_sha256: Some("b".repeat(64)),
             route_profile_sha256: Some("c".repeat(64)),
             execution_plan_sha256: Some("d".repeat(64)),
-            execution_plan_semantic_sha256: Some("e".repeat(64)),
+            execution_plan_semantic_sha256: Some(if workflow {
+                "f".repeat(64)
+            } else {
+                "e".repeat(64)
+            }),
             execution_plan_authority: Some("runtime_constraint".to_string()),
             workflow_execution_profile_sha256: workflow.then(|| "f".repeat(64)),
             route_profile_semantics_exercised: true,
@@ -794,6 +914,30 @@ mod tests {
             workflow_verifier_steps: usize::from(workflow),
             treatment_exposure: Some(treatment_exposure),
         }
+    }
+
+    #[test]
+    fn agent_collaboration_learning_offline_adapter_contract_frozen_v12_has_no_policy_and_successor_opts_in(
+    ) {
+        let case_sha256 = "a".repeat(64);
+        assert!(
+            collaboration_learning_policy_inputs(None, case_sha256.clone())
+                .unwrap()
+                .is_none()
+        );
+
+        let workflow_policy = agent_application::CollaborationLearningPolicyV1::seed(
+            agent_application::CollaborationSpecialistInvocationV1::OneReadOnlySpecialist,
+            agent_application::COLLABORATION_CONTEXT_BUDGET_COMPACT_BPS,
+            agent_application::CollaborationVerificationV1::PlanRequiredOnly,
+            agent_application::CollaborationRepairV1::FailFast,
+        )
+        .unwrap();
+        assert!(
+            collaboration_learning_policy_inputs(Some(workflow_policy), case_sha256)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

@@ -93,6 +93,8 @@ pub(crate) fn run_agent_task_blocking(
         AgentExecutionConstraint::Native,
         AgentMemoryEvaluationConstraint::Native,
         None,
+        #[cfg(feature = "realworld-eval")]
+        None,
         &mut start_gate,
     );
     if start_gate.is_some() {
@@ -120,6 +122,9 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     execution_constraint: AgentExecutionConstraint,
     memory_constraint: AgentMemoryEvaluationConstraint,
     matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
+    #[cfg(feature = "realworld-eval")] collaboration_learning_policy: Option<
+        &crate::collaboration_learning_eval_runtime::CollaborationLearningEvalPolicyInput,
+    >,
     start_gate: &mut Option<std::sync::MutexGuard<'_, ()>>,
 ) -> Result<AgentState, String> {
     let effort = AgentPolicy::parse_ingress(&input.effort);
@@ -165,6 +170,12 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     assign_initial_agent_run_identity(&mut run_context)?;
     execution_constraint.write_to_context(&mut run_context);
+    #[cfg(feature = "realworld-eval")]
+    crate::collaboration_learning_eval_runtime::install_policy_input(
+        &mut run_context,
+        collaboration_learning_policy,
+        execution_constraint,
+    )?;
     if let Some(anchor) = matched_route_plan_anchor {
         if !execution_constraint.is_matched_route() {
             return Err(
