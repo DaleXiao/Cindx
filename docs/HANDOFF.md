@@ -122,6 +122,29 @@ Goal 3A is complete in the current source:
 No provider evaluation was run, so this is deterministic reward-plumbing
 evidence, not an intelligence or collaboration-uplift result.
 
+The Goal 3B contract foundation is complete in the current source:
+
+1. Collaboration candidates use a bounded structured policy and retain the
+   Goal 2 Owner, Specialist, Verifier, authority, and serial-graph limits.
+2. Policy assignment is accepted only when a trusted event projection binds
+   the semantic plan, exact context receipt, per-lane attempts and repair,
+   derived stop reason, and Goal 3A externally verified outcome.
+3. Candidate lineage changes one bounded axis. The in-memory evidence contract
+   is content-addressed, deduplicated, train/holdout separated, and retains both
+   valid zero-score outcomes and explicit censor records.
+4. Missing attribution, safety or preservation failure, resource regression,
+   holdout failure, budget exhaustion, or no causal uplift freezes the evidence
+   set. Readiness still requires an independent review receipt before an
+   offline narrow-validation record can be approved.
+5. The contract has no production routing, prompt, memory, permission, canary,
+   snapshot, or serving consumer.
+
+No provider evaluation was run, so these are deterministic learning and
+admission guarantees, not evidence that collaboration improves intelligence or
+performance. There is no runtime/evaluation assignment producer or durable
+evidence journal yet, so real trial collection and discrete admission are not
+operational.
+
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
 1. `ff8c238` separated route/task-graph evidence from direct-finalizer evidence
@@ -148,12 +171,14 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-After explicit user confirmation, Goal 3B may define a bounded policy over
-Specialist invocation, context allocation, verification, repair, and stopping
-from reviewed Goal 3A shadow receipts. It must keep the Goal 2 graph and Owner
-authority fixed, collect continuously, and promote only discrete reviewed
-candidates. Provider validation remains blocked until the remaining Goal 3
-deterministic review passes; no uplift freezes the collaboration type.
+The next step is deterministic: add one feature-gated offline adapter that emits
+the trusted assignment/context receipts and durably appends and recovers pair or
+censor observations. Provider-free crash, replay, tamper, and complete-holdout
+tests must pass before any provider protocol is frozen. Only then, after explicit
+user confirmation, may one fixed-budget narrow successor protocol run. It must
+establish a valid matched Direct/Workflow causal pair under a shared Conductor
+plan; incomplete receipts stop immediately. No causal uplift freezes the
+collaboration type; do not alter the protocol to keep it alive.
 
 ## Structural Risks
 
