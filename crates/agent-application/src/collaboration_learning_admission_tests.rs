@@ -211,6 +211,48 @@ fn config(train: u16) -> CollaborationLearningConfigV1 {
     CollaborationLearningConfigV1::freeze(train, 1, 1, 2_500, 1, 4).unwrap()
 }
 
+#[test]
+fn agent_collaboration_learning_contract_exposes_static_cell_and_observed_policy_identity() {
+    let hashes = CollaborationLearningComparisonHashesV1 {
+        source_commit_sha256: digest('1'),
+        suite_sha256: digest('2'),
+        case_sha256: digest('3'),
+        prestate_sha256: digest('4'),
+        provider_sha256: digest('5'),
+        model_pool_sha256: digest('6'),
+        route_profile_sha256: digest('7'),
+        prompt_profile_sha256: digest('d'),
+        conductor_candidate_sha256: digest('e'),
+        workflow_proposal_sha256: digest('f'),
+        shared_conductor_anchor_sha256: digest('8'),
+        direct_execution_plan_semantic_sha256: digest('0'),
+        workflow_execution_plan_semantic_sha256: digest('9'),
+        budget_sha256: digest('a'),
+        cohort_sha256: digest('c'),
+    };
+    let binding = CollaborationLearningComparisonBindingV1::freeze(
+        hashes.clone(),
+        CollaborationLearningSplitV1::Train,
+        2,
+        CollaborationLearningArmOrderV1::WorkflowFirst,
+    )
+    .unwrap();
+    assert_eq!(binding.hashes(), &hashes);
+    assert_eq!(binding.replicate(), 2);
+
+    let policy = workflow_parent();
+    let observed = pair(
+        binding,
+        &policy,
+        false,
+        AgentOutcomeTerminalStatusV1::Completed,
+        true,
+        true,
+        4,
+    );
+    assert_eq!(observed.workflow_policy_sha256(), policy.policy_sha256);
+}
+
 fn reseal(outcome: ExternallyVerifiedOutcomeV1) -> ExternallyVerifiedOutcomeV1 {
     ExternallyVerifiedOutcomeV1::new(
         outcome.lifecycle,

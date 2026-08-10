@@ -1,3 +1,4 @@
+use super::collaboration_successor_protocol::{provider_binding, ProviderBindingReceipt};
 use super::execution::{execute_case, CaseExecutionInput};
 use super::outcome_shadow::{project_shadow_outcome_pair, ShadowOutcomePairV1};
 use super::verification::case_input_sha256;
@@ -35,6 +36,7 @@ pub(super) struct MatchedRoutePairRun {
     pub(super) shadow_outcome_error: Option<String>,
     pub(super) suite_sha256: String,
     pub(super) provider_sha256: String,
+    pub(super) successor_provider_binding: Option<ProviderBindingReceipt>,
 }
 
 struct EvaluationProfileEnvironment {
@@ -443,6 +445,10 @@ fn execute_matched_route_pair_with_learning_policy(
     let direct_scope = project_scope(split, case, replicate, "forced-direct");
     let workflow_scope = project_scope(split, case, replicate, "forced-workflow");
     let case_binding_sha256 = case_input_sha256(case);
+    let successor_provider_binding = workflow_learning_policy
+        .as_ref()
+        .map(|_| provider_binding(provider))
+        .transpose()?;
     let learning_policies =
         collaboration_learning_policy_inputs(workflow_learning_policy, case_binding_sha256)?;
     let run_arm = |root: &Path,
@@ -576,6 +582,7 @@ fn execute_matched_route_pair_with_learning_policy(
         provider_sha256: sha256_hex(
             format!("{}\0{}", provider.provider_id, provider.base_url).as_bytes(),
         ),
+        successor_provider_binding,
     })
 }
 

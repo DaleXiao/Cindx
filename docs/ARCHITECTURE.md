@@ -226,6 +226,18 @@ adapter retains the run event slice outside the frozen report schema and derives
 the comparison binding from the actual pair plus a pre-frozen source/cohort
 authority.
 
+The successor evaluation control plane has one tracked protocol authority:
+`benchmarks/agent/collaboration-successor-protocol-v1.json`, bound to the
+tracked three-case suite by digest. The manifest fixes three pairs / six runs,
+the 5,000-to-7,500-bps context-only candidate, the existing conservative
+per-run budget, the six-run campaign aggregate, and terminal freeze rules. The
+desktop preflight validates that authority, materializes the exact cases, and
+binds a clean Git HEAD/tree plus redacted provider and complete model-catalog
+digests into a new private receipt outside the repository. It performs zero
+provider calls and cannot authorize execution. A future online authorization
+must bind that receipt without overriding the tracked protocol; no such
+authorization, provider-action reservation, or online executor exists yet.
+
 ## Persistence and Background Work
 
 SQLite stores projects, sessions, events, permissions, checkpoints, schedules,

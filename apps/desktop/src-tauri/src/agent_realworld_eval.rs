@@ -11,6 +11,7 @@ use tauri::Manager;
 mod collaboration_learning_capture;
 #[allow(dead_code)]
 mod collaboration_learning_journal;
+mod collaboration_successor_protocol;
 mod conductor_ownership_suite;
 mod direct_finalizer;
 mod direct_finalizer_campaign;
@@ -530,6 +531,10 @@ pub fn run_workflow_gepa_eval() -> Result<(), String> {
 
 pub fn run_workflow_gepa_candidate_probe() -> Result<(), String> {
     workflow_gepa_candidate_probe::run()
+}
+
+pub fn run_collaboration_successor_preflight() -> Result<(), String> {
+    collaboration_successor_protocol::run_preflight()
 }
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {

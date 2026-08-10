@@ -193,6 +193,14 @@ impl CollaborationLearningComparisonBindingV1 {
         self.split
     }
 
+    pub fn hashes(&self) -> &CollaborationLearningComparisonHashesV1 {
+        &self.hashes
+    }
+
+    pub fn replicate(&self) -> u16 {
+        self.replicate
+    }
+
     pub fn arm_order(&self) -> CollaborationLearningArmOrderV1 {
         self.arm_order
     }
@@ -362,6 +370,10 @@ impl CollaborationLearningPairV1 {
 
     pub fn workflow_reward_bps(&self) -> ContractResult<u16> {
         self.workflow.reward_bps()
+    }
+
+    pub fn workflow_policy_sha256(&self) -> &str {
+        &self.workflow.exercise.assignment.policy_sha256
     }
 
     pub(crate) fn workflow_policy(&self) -> ContractResult<CollaborationLearningPolicyV1> {

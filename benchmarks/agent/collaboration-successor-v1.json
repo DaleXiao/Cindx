@@ -1,0 +1,141 @@
+{
+  "schema": "cindx.collaboration-successor-suite.v1",
+  "id": "cindx-collaboration-successor-v1",
+  "version": 1,
+  "description": "Frozen matched product tasks for one baseline training pair, one candidate training pair, and one untouched holdout pair.",
+  "default_replicates": 1,
+  "per_run_timeout_seconds": 600,
+  "treatments": ["pro"],
+  "execution_order": {
+    "protocol": "successor_fixed_pairs_v1",
+    "base_treatments": ["pro"]
+  },
+  "cases": [
+    {
+      "id": "coding-compact-maintenance-windows",
+      "category": "coding",
+      "campaign_split": "train",
+      "objective": "Read csv1_1/spec.md, repair csv1_1/windows.mjs to satisfy the full contract, preserve the export name, and run node csv1_1/check.mjs. Do not edit the specification or checks.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "csv1_1/spec.md",
+          "content": "# compactWindows(windows)\n\nReturn a new array without mutating the input. `windows` must be an array or throw `TypeError`. Every entry must contain a non-empty string `service` and integer `start` and `end` values with `0 <= start < end`; invalid entries throw `TypeError`. Trim service names. For each service, merge intervals that overlap or touch. Return `{ service, start, end }` entries sorted by service and then start.\n"
+        },
+        {
+          "path": "csv1_1/windows.mjs",
+          "content": "export function compactWindows(windows) {\n  return windows;\n}\n"
+        },
+        {
+          "path": "csv1_1/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { compactWindows } from './windows.mjs';\nconst input=[{service:'api',start:8,end:12},{service:' api ',start:3,end:8},{service:'db',start:2,end:4},{service:'api',start:20,end:22}];\nconst before=structuredClone(input);\nassert.deepEqual(compactWindows(input),[{service:'api',start:3,end:12},{service:'api',start:20,end:22},{service:'db',start:2,end:4}]);\nassert.deepEqual(input,before);\nconsole.log('csv1-1-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["csv1-1-check-passed"],
+        "immutable_files": ["csv1_1/spec.md", "csv1_1/check.mjs"],
+        "commands": [
+          { "program": "node", "args": ["csv1_1/check.mjs"], "stdout_contains": "csv1-1-check-passed" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const {compactWindows}=await import('./csv1_1/windows.mjs'); assert.deepEqual(compactWindows([{service:'x',start:5,end:9},{service:'x',start:1,end:3}]),[{service:'x',start:1,end:3},{service:'x',start:5,end:9}]); console.log('csv1-1-gap-verified');"], "stdout_contains": "csv1-1-gap-verified" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const {compactWindows}=await import('./csv1_1/windows.mjs'); assert.deepEqual(compactWindows([{service:'b',start:2,end:6},{service:'b',start:4,end:5},{service:'a',start:0,end:1}]),[{service:'a',start:0,end:1},{service:'b',start:2,end:6}]); console.log('csv1-1-contained-verified');"], "stdout_contains": "csv1-1-contained-verified" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const {compactWindows}=await import('./csv1_1/windows.mjs'); assert.throws(()=>compactWindows({}),TypeError); assert.throws(()=>compactWindows([{service:'',start:1,end:2}]),TypeError); assert.throws(()=>compactWindows([{service:'x',start:2,end:2}]),TypeError); console.log('csv1-1-validation-verified');"], "stdout_contains": "csv1-1-validation-verified" }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "research-assign-retention-controls",
+      "category": "research",
+      "campaign_split": "train",
+      "objective": "Reconcile csv1_2/policy.txt, csv1_2/inventory.txt, csv1_2/exception.txt, and csv1_2/draft.txt. Write csv1_2/out.json with exactly keys authority and assignments, preserve inventory order, and run node csv1_2/check.mjs. Treat supplied evidence and checks as read-only.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "csv1_2/policy.txt",
+          "content": "Retention control RC-4\n1. Restricted datasets use sealed storage and expire after 30 days.\n2. Internal datasets use standard storage and expire after 180 days.\n3. A signed exception may extend only the named dataset, but never beyond 365 days.\n4. Ignore unsigned drafts.\n5. Preserve inventory order in assignments and copy the controlling authority.\n"
+        },
+        {
+          "path": "csv1_2/inventory.txt",
+          "content": "dataset=events classification=internal\ndataset=payments classification=restricted\ndataset=diagnostics classification=internal\n"
+        },
+        {
+          "path": "csv1_2/exception.txt",
+          "content": "revision=6 signed=true dataset=diagnostics days=240 authority=RISK-882\n"
+        },
+        {
+          "path": "csv1_2/draft.txt",
+          "content": "revision=9 signed=false dataset=payments days=365 authority=DRAFT-000\n"
+        },
+        {
+          "path": "csv1_2/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst value=JSON.parse(fs.readFileSync(new URL('./out.json',import.meta.url),'utf8'));\nassert.deepEqual(Object.keys(value).sort(),['authority','assignments'].sort());\nassert.ok(Array.isArray(value.assignments));\nfor (const item of value.assignments) assert.deepEqual(Object.keys(item).sort(),['dataset','storage','days'].sort());\nconsole.log('csv1-2-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["csv1-2-check-passed"],
+        "json_files": [
+          {
+            "path": "csv1_2/out.json",
+            "equals": {
+              "authority": "RISK-882",
+              "assignments": [
+                { "dataset": "events", "storage": "standard", "days": 180 },
+                { "dataset": "payments", "storage": "sealed", "days": 30 },
+                { "dataset": "diagnostics", "storage": "standard", "days": 240 }
+              ]
+            }
+          }
+        ],
+        "immutable_files": ["csv1_2/policy.txt", "csv1_2/inventory.txt", "csv1_2/exception.txt", "csv1_2/draft.txt", "csv1_2/check.mjs"],
+        "commands": [
+          { "program": "node", "args": ["csv1_2/check.mjs"], "stdout_contains": "csv1-2-check-passed" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./csv1_2/out.json')); assert.equal(v.authority,'RISK-882'); assert.equal(v.assignments[1].storage,'sealed'); console.log('csv1-2-authority-verified');"], "stdout_contains": "csv1-2-authority-verified" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./csv1_2/out.json')); assert.deepEqual(v.assignments.map(x=>x.dataset),['events','payments','diagnostics']); console.log('csv1-2-order-verified');"], "stdout_contains": "csv1-2-order-verified" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; import fs from 'node:fs'; const v=JSON.parse(fs.readFileSync('./csv1_2/out.json')); assert.deepEqual(v.assignments.map(x=>x.days),[180,30,240]); console.log('csv1-2-policy-verified');"], "stdout_contains": "csv1-2-policy-verified" }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    },
+    {
+      "id": "coding-drain-fair-queues",
+      "category": "coding",
+      "campaign_split": "holdout",
+      "objective": "Read csv1_3/spec.md, repair csv1_3/queues.mjs to satisfy the complete contract, preserve the export name, and run node csv1_3/check.mjs. Do not edit the specification or checks.",
+      "index_workspace": false,
+      "files": [
+        {
+          "path": "csv1_3/spec.md",
+          "content": "# drainFair(queues, limit)\n\nReturn `{ selected, remaining }` without mutating `queues`. `queues` must be a plain object whose values are arrays of non-empty string job ids; `limit` must be a non-negative integer. Invalid input throws `TypeError`. Visit tenant names in lexicographic order and select at most one job from each non-empty queue per round, repeating rounds until `limit` jobs are selected or all queues are empty. `selected` entries are `{ tenant, job }`. `remaining` contains every tenant key in lexicographic order with its unselected jobs.\n"
+        },
+        {
+          "path": "csv1_3/queues.mjs",
+          "content": "export function drainFair(queues, limit) {\n  return { selected: [], remaining: queues };\n}\n"
+        },
+        {
+          "path": "csv1_3/check.mjs",
+          "content": "import assert from 'node:assert/strict';\nimport { drainFair } from './queues.mjs';\nconst input={beta:['b1'],alpha:['a1','a2'],gamma:['g1','g2']};\nconst before=structuredClone(input);\nassert.deepEqual(drainFair(input,4),{selected:[{tenant:'alpha',job:'a1'},{tenant:'beta',job:'b1'},{tenant:'gamma',job:'g1'},{tenant:'alpha',job:'a2'}],remaining:{alpha:[],beta:[],gamma:['g2']}});\nassert.deepEqual(input,before);\nconsole.log('csv1-3-check-passed');\n"
+        }
+      ],
+      "permission_policy": "allow_once",
+      "verification": {
+        "direct_output_contains": ["csv1-3-check-passed"],
+        "immutable_files": ["csv1_3/spec.md", "csv1_3/check.mjs"],
+        "commands": [
+          { "program": "node", "args": ["csv1_3/check.mjs"], "stdout_contains": "csv1-3-check-passed" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const {drainFair}=await import('./csv1_3/queues.mjs'); assert.deepEqual(drainFair({z:['z1'],a:['a1']},0),{selected:[],remaining:{a:['a1'],z:['z1']}}); console.log('csv1-3-zero-verified');"], "stdout_contains": "csv1-3-zero-verified" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const {drainFair}=await import('./csv1_3/queues.mjs'); assert.deepEqual(drainFair({a:[],b:['b1','b2']},5),{selected:[{tenant:'b',job:'b1'},{tenant:'b',job:'b2'}],remaining:{a:[],b:[]}}); console.log('csv1-3-exhaustion-verified');"], "stdout_contains": "csv1-3-exhaustion-verified" },
+          { "program": "node", "args": ["--input-type=module", "--eval", "import assert from 'node:assert/strict'; const {drainFair}=await import('./csv1_3/queues.mjs'); assert.throws(()=>drainFair([],1),TypeError); assert.throws(()=>drainFair({a:['']},1),TypeError); assert.throws(()=>drainFair({a:[]},-1),TypeError); console.log('csv1-3-validation-verified');"], "stdout_contains": "csv1-3-validation-verified" }
+        ],
+        "required_tools_any": ["file.read", "file.read_many", "file.search"],
+        "required_tools_all": ["shell.run"],
+        "minimum_denied_permissions": 0
+      }
+    }
+  ]
+}
