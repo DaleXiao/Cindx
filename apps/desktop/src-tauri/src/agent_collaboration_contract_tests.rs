@@ -172,74 +172,9 @@ fn agent_collaboration_contract_gate() {
     );
     assert!(!checkpoint.workflow_verification_satisfied(true));
 
-    let mut controller = AnytimeController::new(AnytimeControllerConfig {
-        max_parallelism: 1,
-        min_successful_candidates: 1,
-        max_candidates: 1,
-        min_usable_quality_bps: 4_500,
-        stop_policy: ConductorStopPolicy::FirstVerified,
-        min_team_uplift_bps: 0,
-        min_distinct_contributions: 0,
-        requires_synthesis: true,
-        verification_required: true,
-    });
-    controller
-        .register(
-            AnytimeCandidate::workflow("final", Vec::new(), 7_000)
-                .with_kind(AnytimeCandidateKind::Synthesis),
-        )
-        .unwrap();
-    controller.mark_running("final").unwrap();
-    controller
-        .observe(
-            "final",
-            AnytimeVerdict {
-                quality_bps: 8_000,
-                confidence_bps: 8_000,
-                constraint_coverage_bps: 8_000,
-                evidence_count: 1,
-                safety_violations: 0,
-                deliverable: true,
-                verified: true,
-                anchor_uplift_bps: None,
-            },
-        )
-        .unwrap();
-    crate::adaptive_uplift_runtime::enforce_candidate_verification_gate(
-        &mut controller,
-        "final",
-        checkpoint.workflow_verification_satisfied(true),
-    )
-    .unwrap();
-    assert!(!controller.verdict("final").unwrap().verified);
-    let rejected_decision = crate::adaptive_uplift_runtime::adaptive_uplift_selection_decision(
-        &controller,
-        "final",
-        None,
+    assert!(
+        !crate::adaptive_collaboration_finalization::owner_handoff_guidance_admitted(true, false)
     );
-    assert!(!matches!(
-        rejected_decision,
-        Some(UpliftGateDecision::AcceptTeam)
-    ));
-    let rejected_selection = crate::adaptive_collaboration_finalization::select_adaptive_guidance(
-        rejected_decision.as_ref(),
-        "final",
-        true,
-        Some("frontier".to_string()),
-    );
-    assert_eq!(
-        rejected_selection.0.as_deref(),
-        Some(DIRECT_ANCHOR_CANDIDATE_ID)
-    );
-    assert!(!rejected_selection.1);
-    let accepted_selection = crate::adaptive_collaboration_finalization::select_adaptive_guidance(
-        Some(&UpliftGateDecision::AcceptTeam),
-        "final",
-        true,
-        Some("frontier".to_string()),
-    );
-    assert_eq!(accepted_selection.0.as_deref(), Some("final"));
-    assert!(accepted_selection.1);
 
     let output = format!(
         "audit complete\nCINDX_VERIFICATION: {{\"schema\":\"{WORKFLOW_VERIFICATION_RECEIPT_SCHEMA}\",\"verdict\":\"passed\",\"reviewed_steps\":[\"root\"],\"evidence_refs\":[],\"unresolved\":[]}}"
@@ -262,6 +197,9 @@ fn agent_collaboration_contract_gate() {
         WorkflowVerificationState::Passed
     );
     assert!(checkpoint.workflow_verification_satisfied(true));
+    assert!(
+        crate::adaptive_collaboration_finalization::owner_handoff_guidance_admitted(true, true)
+    );
 
     let runtime_tools = vec![read];
     let mut wrong_runtime = start_agent_loop(

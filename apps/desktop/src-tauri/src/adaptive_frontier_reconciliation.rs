@@ -16,18 +16,12 @@ pub(super) struct AdaptiveWaveReconciliationContext<'a, 'state> {
     pub(super) prompt: &'a str,
     pub(super) models: &'a [String],
     pub(super) prompt_genome: &'a ConductorPromptGenome,
-    pub(super) execution_contract: &'a ConductorExecutionContract,
-    pub(super) anchor_spec: &'a AdaptiveCollaborationSpec,
     pub(super) final_step_id: &'a str,
     pub(super) workflow_started_at_ms: u64,
     pub(super) wave: &'a AdaptiveWave,
     pub(super) completion: AdaptiveWaveCompletion,
     pub(super) workflow_checkpoint: &'a mut WorkflowExecutionCheckpoint,
     pub(super) anytime_controller: &'a mut AnytimeController,
-    pub(super) anchor_supervisor: &'a mut Option<ParallelJobSupervisor<CollaborationCompletion>>,
-    pub(super) direct_anchor_output: &'a mut Option<String>,
-    pub(super) direct_anchor_verifier: &'a mut Option<DirectAnchorVerifier>,
-    pub(super) direct_anchor_verifier_attempted: &'a mut bool,
     pub(super) outputs: &'a mut BTreeMap<String, String>,
     pub(super) evidence_by_step: &'a mut BTreeMap<String, Vec<CollaborationEvidence>>,
 }
@@ -46,18 +40,12 @@ pub(super) fn reconcile_adaptive_wave(
         prompt,
         models,
         prompt_genome,
-        execution_contract,
-        anchor_spec,
         final_step_id,
         workflow_started_at_ms,
         wave,
         completion,
         workflow_checkpoint,
         anytime_controller,
-        anchor_supervisor,
-        direct_anchor_output,
-        direct_anchor_verifier,
-        direct_anchor_verifier_attempted,
         outputs,
         evidence_by_step,
     } = context;
@@ -74,15 +62,12 @@ pub(super) fn reconcile_adaptive_wave(
                 workspace_root,
                 run_context,
                 collaboration_id,
-                prompt,
                 models,
                 prompt_genome,
                 cancellation: cancellation.clone(),
                 spec,
                 workflow_checkpoint,
                 anytime_controller,
-                anchor_supervisor: anchor_supervisor.as_ref(),
-                direct_anchor_verifier: direct_anchor_verifier.as_ref(),
             },
             completion,
         )?;
@@ -158,58 +143,8 @@ pub(super) fn reconcile_adaptive_wave(
             collaboration_id,
             workflow_checkpoint,
             anytime_controller,
-            anchor_supervisor.as_ref(),
-            direct_anchor_verifier.as_ref(),
         )?;
         return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-    }
-    advance_direct_anchor_background(
-        app,
-        state,
-        config,
-        task_id,
-        workspace_root,
-        run_context,
-        collaboration_id,
-        prompt,
-        prompt_genome.verification,
-        cancellation.as_ref(),
-        anchor_spec,
-        anchor_supervisor,
-        direct_anchor_output,
-        direct_anchor_verifier,
-        direct_anchor_verifier_attempted,
-        anytime_controller,
-        workflow_checkpoint,
-    )?;
-    if collaboration_steer_pending(cancellation.as_ref()) {
-        pause_anytime_for_steer(
-            state,
-            task_id,
-            run_context,
-            collaboration_id,
-            workflow_checkpoint,
-            anytime_controller,
-            anchor_supervisor.as_ref(),
-            direct_anchor_verifier.as_ref(),
-        )?;
-        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-    }
-    if direct_anchor_should_commit(anytime_controller, cancellation.as_ref()) {
-        if let Some(output) = direct_anchor_output.as_ref() {
-            cancel_anytime_background(anchor_supervisor.as_ref(), direct_anchor_verifier.as_ref());
-            append_workflow_checkpoint_event(
-                state,
-                task_id,
-                run_context,
-                collaboration_id,
-                "Anytime terminal reserve committed best-known result",
-                "completed",
-                None,
-                workflow_checkpoint,
-            )?;
-            return Ok(AdaptiveWaveReconciliationOutcome::Commit(output.clone()));
-        }
     }
 
     let successful_steps = wave
@@ -222,66 +157,6 @@ pub(super) fn reconcile_adaptive_wave(
                 .is_some_and(|step| step.status == WorkflowStepStatus::Completed)
         })
         .count();
-    let failed_delivery = wave.specs.iter().any(|spec| {
-        spec.step_id == final_step_id
-            && workflow_checkpoint
-                .steps
-                .get(&spec.step_id)
-                .is_some_and(|step| step.status == WorkflowStepStatus::Failed)
-    });
-    let graph_requires_replan = !layer_failures.is_empty()
-        && (failed_delivery || !wave.independent || successful_steps < wave.required_successes);
-    if graph_requires_replan {
-        if let Some(revision) = attempt_adaptive_graph_replan(AdaptiveGraphReplanContext {
-            state,
-            config,
-            task_id,
-            run_context,
-            collaboration_id,
-            models,
-            wave,
-            layer_failures: &layer_failures,
-            checkpoint: workflow_checkpoint,
-            cancellation: cancellation.as_ref(),
-        })? {
-            let anchor_running = anchor_supervisor
-                .as_ref()
-                .is_some_and(|supervisor| supervisor.pending() > 0);
-            let rebuilt_anytime_controller = rebuild_anytime_controller_after_replan(
-                execution_contract,
-                workflow_checkpoint,
-                &*anytime_controller,
-                direct_anchor_output.as_deref(),
-                anchor_running,
-            )?;
-            *anytime_controller = rebuilt_anytime_controller;
-            *outputs = workflow_checkpoint.completed_outputs();
-            evidence_by_step.retain(|step_id, _| workflow_checkpoint.steps.contains_key(step_id));
-            append_workflow_checkpoint_event(
-                state,
-                task_id,
-                run_context,
-                collaboration_id,
-                "Collaboration task graph revised",
-                "replanned",
-                None,
-                workflow_checkpoint,
-            )?;
-            if let Some(control) = cancellation.as_ref() {
-                control.mark_progress_at(
-                    run_context_steer_epoch(run_context),
-                    "collaboration",
-                    &format!(
-                        "Task graph revision {} replaced {} with {}",
-                        revision.revision,
-                        revision.target_step_id,
-                        revision.replacement_step_ids.join(", ")
-                    ),
-                );
-            }
-            return Ok(AdaptiveWaveReconciliationOutcome::Continue);
-        }
-    }
     if wave.independent && !layer_failures.is_empty() && successful_steps >= wave.required_successes
     {
         degrade_failed_quorum_branches(DegradedQuorumContext {
@@ -322,26 +197,6 @@ pub(super) fn reconcile_adaptive_wave(
                 None,
                 workflow_checkpoint,
             )?;
-        }
-        if direct_anchor_output.is_none() {
-            if let Some(completion) = anchor_supervisor
-                .as_mut()
-                .and_then(|supervisor| supervisor.recv_timeout(Duration::from_millis(500)))
-            {
-                let completion = parallel_completion_or_failure(completion);
-                let _ = settle_direct_anchor_candidate(
-                    state,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    anchor_spec,
-                    &completion,
-                    prompt_genome.verification,
-                    cancellation.as_ref(),
-                    anytime_controller,
-                    workflow_checkpoint,
-                )?;
-            }
         }
         if let Some((candidate_id, output, verdict)) =
             anytime_best_known_output(anytime_controller, workflow_checkpoint)
@@ -524,7 +379,7 @@ fn observe_wave_results(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_failure_commit(
+pub(super) fn record_failure_commit(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
     run_context: &Metadata,

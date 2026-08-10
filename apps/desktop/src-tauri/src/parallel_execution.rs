@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 
 pub(crate) use agent_runtime::{
     AnytimeQuorumExecution, AnytimeQuorumPolicy, CancellableParallelJob,
-    InterruptibleQuorumExecution, InterruptibleQuorumPolicy, ParallelJob, ParallelJobCompletion,
-    ParallelJobSupervisor, ParallelTaskError,
+    InterruptibleQuorumExecution, InterruptibleQuorumPolicy, ParallelJob, ParallelJobSupervisor,
+    ParallelTaskError,
 };
 
 const MAX_GLOBAL_MODEL_WORKERS: usize = 12;

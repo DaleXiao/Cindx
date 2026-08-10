@@ -33,6 +33,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-execution-graph-contract",
       "direct-finalizer-causal-contract",
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
@@ -68,6 +69,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-execution-graph-contract",
       "direct-finalizer-causal-contract",
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
@@ -146,6 +148,7 @@
       "evaluation-foundation",
       "agent-arena-contract",
       "agent-realworld-contract",
+      "agent-execution-graph-contract",
       "direct-finalizer-causal-contract",
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
@@ -343,6 +346,26 @@
         "--test",
         "scripts/agent-realworld-contract.test.mjs",
         "scripts/agent-realworld-claims.test.mjs"
+      ]
+    },
+    {
+      "id": "agent-execution-graph-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--features",
+        "realworld-eval",
+        "agent_execution_graph_contract",
+        "--lib",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 5 passed; 0 failed"
       ]
     },
     {
