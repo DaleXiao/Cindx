@@ -178,8 +178,21 @@ evidence set, while a private immutable-file journal recovers interrupted
 capture as `IncompleteInstrumentation` without replaying a provider call.
 
 These components are dormant outside evaluation and are not connected to the
-invalid frozen V12 run. No successor provider protocol has been frozen or run,
-and the offline record cannot publish a prompt profile, enter production
+invalid frozen V12 run. The tracked
+`benchmarks/agent/collaboration-successor-v1.json` suite and companion protocol
+manifest now freeze three matched pairs / six runs: one 5,000-bps Workflow
+baseline, one sole candidate that changes only the context allocation to
+7,500 bps, and one training-ineligible holdout, all under the existing
+conservative Workflow evaluation run budget. Non-positive baseline evidence,
+any censor, safety or preservation failure, resource regression, or no uplift
+freezes the collaboration type.
+
+The new binary only performs a clean-source, case, provider/model-binding, and
+external-output preflight. The tracked manifest fixes
+`execution_authorized=false`; the private online authorization has not been
+created, and provider-action reservation and execution are not wired. No
+provider evaluation was run. V12 remains unchanged, and neither this protocol
+nor its offline records can publish a prompt profile, enter production
 learning, or authorize serving.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.

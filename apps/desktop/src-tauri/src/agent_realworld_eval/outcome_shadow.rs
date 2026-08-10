@@ -15,6 +15,13 @@ const MODEL_RECEIPTS_DOMAIN: &[u8] = b"cindx.agent-realworld-outcome-models.v1\0
 const TOOL_RECEIPTS_DOMAIN: &[u8] = b"cindx.agent-realworld-outcome-tools.v1\0";
 const VERIFIER_PROTOCOL_DOMAIN: &[u8] = b"cindx.agent-realworld-verifier-protocol.v1\0";
 
+pub(super) fn outcome_budget_sha256(budget: agent_runtime::RunBudget) -> Result<String, String> {
+    receipt_sha256(
+        BUDGET_RECEIPT_DOMAIN,
+        &super::receipts::ResolvedBudgetReceipt::from_budget(budget),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ShadowOutcomeTraceV1 {
     pub(super) lifecycle: AgentOutcomeLifecycleBindingV1,

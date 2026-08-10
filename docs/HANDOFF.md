@@ -163,6 +163,29 @@ No provider evaluation was run, so these are deterministic collection and
 recovery guarantees, not evidence that collaboration improves intelligence or
 performance.
 
+Goal 3D freezes the final narrow successor protocol without authorizing it:
+
+1. The tracked `collaboration-successor-v1.json` suite contains three new,
+   route-blind cases for exactly three matched pairs / six runs: baseline train,
+   candidate train, and sealed holdout.
+2. The tracked `collaboration-successor-protocol-v1.json` manifest binds the
+   suite and complete case contracts, arm ordering, the existing conservative
+   Workflow evaluation run budget, its six-run aggregate, and terminal stop
+   rules.
+3. There is exactly one candidate. It preserves the Owner + one read-only
+   Specialist topology, planned verification, and fail-fast repair, changing
+   only the Specialist context allocation from 5,000 to 7,500 bps.
+4. A preflight-only binary binds a clean source HEAD/tree, redacted provider and
+   full configured-model catalog, materialized prestates, budgets, cohort, and
+   new external output paths into a private receipt. It performs zero provider
+   calls and its tracked authority keeps `execution_authorized=false`.
+5. No private online authorization has been generated, and provider-action
+   reservation/execution is not wired. The invalid V12 attempt and production
+   serving remain unchanged.
+
+No provider evaluation was run for Goal 3D. The frozen protocol is not a causal
+result and establishes no quality, latency, token, or intelligence uplift.
+
 The Goal 3C revision passed the full deterministic profile (`55/55` gates),
 the offline application contract (`5/5`), and the desktop successor adapter
 contract (`12/12`). The formal `0.2.31` arm64 build then passed strict signature,
@@ -194,13 +217,14 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-After the deterministic adapter gates and formal local App build are green,
-pause for explicit user confirmation. Then freeze exactly one fixed-budget
-successor protocol and its source revision, cases, candidate count, attempt and
-token limits, ordering, and sealed holdout before any provider call. Its first
-step must establish a valid matched Direct/Workflow causal pair under one shared
-Conductor plan; incomplete receipts stop immediately. No causal uplift freezes
-the collaboration type; do not alter the protocol to keep it alive.
+Keep the tracked Goal 3D protocol frozen and pause for explicit user
+confirmation. The next implementation may only add private online authorization
+and provider-action reservation/execution wiring that binds the existing
+preflight receipt; it must not change the three cases, six runs, sole candidate,
+budgets, ordering, holdout, evaluator, or stop rules. A provider run remains a
+separate explicit decision. Incomplete receipts stop immediately. No causal
+uplift freezes the collaboration type for this successor protocol; do not
+revise or rescue the protocol to continue.
 
 ## Structural Risks
 

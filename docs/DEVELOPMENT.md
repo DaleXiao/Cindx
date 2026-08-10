@@ -106,6 +106,14 @@ tamper/fork rejection, old-V12 isolation, actual-pair capture identity, and
 censor-without-retry behavior. These gates do not
 contact a provider or prove intelligence uplift.
 
+`agent-collaboration-successor-protocol-contract` also enables only
+`realworld-eval`. Its nine deterministic tests validate the tracked successor
+suite and protocol manifest, three-pair / six-run matrix, exact case and budget
+digests, sole 5,000-to-7,500-bps context candidate, redacted full model-catalog
+binding, external-path isolation, pair projection, and the absence of an online
+executor. The gate is in `ci-contract`, `control-plane`, and `full`, but not
+`quick`; it performs no provider call and proves no uplift.
+
 ```sh
 node scripts/run-quality-gates.mjs \
   --profile control-plane \
@@ -141,6 +149,27 @@ Before execution:
 Do not rerun the frozen Workflow GEPA V12 attempt. Its one-shot evidence is
 invalid; a successor requires a corrected lifecycle instrument and a new frozen
 protocol. See [EVALUATION.md](EVALUATION.md).
+
+The Goal 3D successor is currently preflight-only. After the source is committed
+and clean, a provider-free preflight may be run with two new private paths
+outside the repository:
+
+```sh
+CINDX_COLLABORATION_SUCCESSOR_OUTPUT_ROOT=/private/path/new-output-root \
+CINDX_COLLABORATION_SUCCESSOR_PREFLIGHT_RECEIPT=/private/path/new-preflight.json \
+cargo run --locked \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --no-default-features --features realworld-eval \
+  --bin cindx-collaboration-successor-preflight
+```
+
+The command accepts no execution flag, constructs no provider transport, and
+writes `provider_calls_performed=0` and `execution_authorized=false`. It validates
+that configured credentials exist only to bind the redacted provider and full
+model catalog; secrets and model names are not written. This receipt is not a
+private online authorization. That authorization and the corresponding
+provider-action reservation/execution wiring do not exist yet and require a
+separate user decision before any billable call.
 
 ## Browser and Computer Sidecars
 

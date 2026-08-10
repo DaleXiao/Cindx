@@ -128,24 +128,44 @@ promoted.
 
 All Goal 3C evidence is deterministic and provider-free. V12 remains invalid
 and was not rerun; no collaboration uplift or provider-cost result was
-produced. The next step, only after explicit confirmation, is to freeze one
-successor protocol for the final narrow provider gate. It must:
+produced.
 
-1. use one shared Conductor plan and vary only the execution treatment;
-2. prove both arms persist strategy and terminal receipts;
-3. run a small matched pair before any candidate search;
-4. stop immediately if instrumentation is incomplete;
-5. open candidate generation and holdout only after the causal pair is valid.
+Goal 3D now freezes one successor in
+`benchmarks/agent/collaboration-successor-protocol-v1.json`, bound by SHA-256 to
+the new `collaboration-successor-v1.json` suite. The fixed matrix is three
+matched pairs / six runs in this order:
 
-The protocol, candidate count, repair count, physical attempts, token and time
-budgets, and sealed holdout must be fixed before the first provider call. Any
-instrumentation defect stops the protocol. If the frozen evidence does not show
-causal uplift, the collaboration type is frozen rather than rescued by changing
-the protocol or evaluator.
+1. a Direct-first training pair against the 5,000-bps, fail-fast Workflow
+   baseline;
+2. a Workflow-first training pair for the only candidate, which keeps the same
+   topology, verification, and repair policy and changes only context to
+   7,500 bps;
+3. a Direct-first, training-ineligible holdout pair for that candidate.
 
-This is the shortest path to learning whether Workflow helps. Additional prompt
-genes or evaluator variants before that boundary would add complexity without
-answering the causal question.
+The manifest permits one candidate and requires a valid positive baseline
+before its pair, then a passing candidate training result before holdout. It
+reuses the existing conservative Workflow evaluation run budget: at most ten
+minutes, 20 logical model calls, 48 tool calls, 20 Agent turns, 80 physical
+model attempts, and `83,886,080` accounted tokens per run. The six-run campaign
+aggregate is capped at one hour, 120 model calls, 288 tool calls, 120 turns,
+480 physical attempts, and `503,316,480` accounted tokens. Any censor,
+non-positive baseline, safety or preservation failure, resource regression, or
+missing final uplift terminates and freezes the collaboration type; a started
+physical run cannot be retried by this protocol.
+
+The tracked manifest explicitly sets `execution_authorized=false`. The new
+binary is preflight-only: it validates a clean source tree, tracked protocol and
+case digests, complete redacted provider/model bindings, case prestates, and
+new private output paths, then writes a private receipt with
+`provider_calls_performed=0`. No private online authorization has been created,
+and the online reservation/execution path is not wired. Therefore Goal 3D is a
+frozen deterministic protocol, not provider evidence. It does not change V12,
+production routing, prompt serving, or the current no-uplift decision boundary.
+
+The next step still requires explicit authorization. Before any provider call,
+the missing private authorization and online reservation/execution wiring must
+bind the frozen preflight receipt without adding candidates, cases, retries,
+budgets, or evaluator variants.
 
 ## Running Evaluation
 
