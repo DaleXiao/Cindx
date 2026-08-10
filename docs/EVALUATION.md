@@ -153,19 +153,29 @@ non-positive baseline, safety or preservation failure, resource regression, or
 missing final uplift terminates and freezes the collaboration type; a started
 physical run cannot be retried by this protocol.
 
-The tracked manifest explicitly sets `execution_authorized=false`. The new
-binary is preflight-only: it validates a clean source tree, tracked protocol and
-case digests, complete redacted provider/model bindings, case prestates, and
-new private output paths, then writes a private receipt with
-`provider_calls_performed=0`. No private online authorization has been created,
-and the online reservation/execution path is not wired. Therefore Goal 3D is a
-frozen deterministic protocol, not provider evidence. It does not change V12,
-production routing, prompt serving, or the current no-uplift decision boundary.
+The tracked manifest explicitly sets `execution_authorized=false`. The
+preflight binary validates a clean source tree, tracked protocol and case
+digests, complete redacted provider/model bindings, case prestates, and new
+private output paths, then writes a private receipt with
+`provider_calls_performed=0`. It remains unable to authorize execution.
 
-The next step still requires explicit authorization. Before any provider call,
-the missing private authorization and online reservation/execution wiring must
-bind the frozen preflight receipt without adding candidates, cases, retries,
-budgets, or evaluator variants.
+Goal 3E implements the missing once-authorized control plane without changing
+that authority. A separate provider-free binary can mint one private 15-minute
+authorization bound to the canonical preflight, exact execute binary, current
+clean source and provider/model configuration, frozen cells and budgets, and a
+new one-shot output root. The execute binary must consume that capability and
+durably reserve the campaign, each cell, and each arm before model work. Any
+expiry, drift, tamper, reuse, interruption, censor, non-positive baseline,
+candidate failure, resource failure, or absent holdout uplift stops terminally;
+recovery cannot retry a started physical run.
+
+No Goal 3E authorization was minted and no provider evaluation was run.
+Deterministic tests therefore prove only the binding, ordering, reservation,
+and fail-closed recovery contracts—not quality, cost, latency, or intelligence
+uplift. V12 remains unchanged and invalid. Actual execution requires another
+explicit user confirmation of the exact merged HEAD, canonical preflight and
+execute-runner digests, provider binding, three pairs/six runs, fixed maximum
+campaign budget, and the one-shot/no-retry consequence.
 
 ## Running Evaluation
 

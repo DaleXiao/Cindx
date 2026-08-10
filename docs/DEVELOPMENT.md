@@ -89,8 +89,8 @@ integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
 
-They also include `agent-collaboration-learning-contract`. This provider-free
-gate checks the bounded policy schema, trusted assignment-to-exercise binding,
+They also include `agent-collaboration-learning-contract`. Its 18 provider-free
+tests check the bounded policy schema, trusted assignment-to-exercise binding,
 actual context and same-lane repair attribution, matched Direct/Workflow
 identity, append-only train/holdout evidence, freeze conditions, and the
 independent-review requirement. Its approved state remains offline-only and is
@@ -110,9 +110,16 @@ contact a provider or prove intelligence uplift.
 `realworld-eval`. Its nine deterministic tests validate the tracked successor
 suite and protocol manifest, three-pair / six-run matrix, exact case and budget
 digests, sole 5,000-to-7,500-bps context candidate, redacted full model-catalog
-binding, external-path isolation, pair projection, and the absence of an online
-executor. The gate is in `ci-contract`, `control-plane`, and `full`, but not
-`quick`; it performs no provider call and proves no uplift.
+binding, external-path isolation, pair projection, and the non-authorizing
+preflight boundary.
+
+`agent-collaboration-successor-execution-contract` contains 17 provider-free
+tests for the exact execute-binary authorization binding, fixed 15-minute
+window, private one-shot output root, campaign/cell/arm reservations, strict
+baseline-candidate-holdout ordering, terminal independent-review/freeze/censor
+outcomes, accounting limits, and crash/tamper/concurrency recovery without a
+provider retry. Both successor gates are in `ci-contract`, `control-plane`, and
+`full`, but not `quick`; they perform no provider call and prove no uplift.
 
 ```sh
 node scripts/run-quality-gates.mjs \
@@ -150,9 +157,8 @@ Do not rerun the frozen Workflow GEPA V12 attempt. Its one-shot evidence is
 invalid; a successor requires a corrected lifecycle instrument and a new frozen
 protocol. See [EVALUATION.md](EVALUATION.md).
 
-The Goal 3D successor is currently preflight-only. After the source is committed
-and clean, a provider-free preflight may be run with two new private paths
-outside the repository:
+The Goal 3D preflight remains provider-free. After the source is committed and
+clean, it may be run with two new private paths outside the repository:
 
 ```sh
 CINDX_COLLABORATION_SUCCESSOR_OUTPUT_ROOT=/private/path/new-output-root \
@@ -166,10 +172,23 @@ cargo run --locked \
 The command accepts no execution flag, constructs no provider transport, and
 writes `provider_calls_performed=0` and `execution_authorized=false`. It validates
 that configured credentials exist only to bind the redacted provider and full
-model catalog; secrets and model names are not written. This receipt is not a
-private online authorization. That authorization and the corresponding
-provider-action reservation/execution wiring do not exist yet and require a
-separate user decision before any billable call.
+model catalog; secrets and model names are not written. This receipt is not an
+online authorization.
+
+Goal 3E adds separate feature-gated `cindx-collaboration-successor-authorize`
+and `cindx-collaboration-successor-execute` binaries. Authorization is itself
+provider-free and binds the canonical preflight, current clean source and
+provider/model configuration, exact execute binary, fixed matrix and budgets,
+and new output root for 15 minutes. Execution revalidates and consumes that
+private capability and output root once, reserves the campaign/cell/arm before
+model work, and never retries a started physical run after interruption.
+
+Neither Goal 3E binary has been run: no authorization receipt was minted and no
+provider evaluation occurred. Before either authorization or execution, obtain
+another explicit user confirmation covering the exact merged HEAD, preflight
+and execute-runner digests, provider binding, three pairs/six runs, fixed
+maximum campaign budget, and one-shot/no-retry consequence. Deterministic green
+gates are not that authorization and do not establish uplift.
 
 ## Browser and Computer Sidecars
 

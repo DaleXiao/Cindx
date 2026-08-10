@@ -20,22 +20,23 @@ fn protocol() -> ValidatedProtocol<'static> {
 }
 
 fn provider_config() -> ProviderConfig {
-    let mut config = ProviderConfig::default();
-    config.provider_id = "fixture-provider".into();
-    config.provider_resource = "fixture-resource".into();
-    config.base_url = "https://provider.invalid/v1".into();
-    config.api_key = "fixture-secret-that-must-not-be-hashed".into();
-    config.model = "owner-model".into();
-    config.conductor_model = "reasoning-model".into();
-    config.planner_model = "planner-model".into();
-    config.executor_model = "specialist-model".into();
-    config.reviewer_model = "verifier-model".into();
-    config.summarizer_model = "utility-model".into();
-    config.embedding_model = "embedding-model".into();
-    config.collaboration_policy = "auto_router".into();
-    config.context_window_tokens = 128_000;
-    config.agent_system_prompt = "fixture system prompt".into();
-    config
+    ProviderConfig {
+        provider_id: "fixture-provider".into(),
+        provider_resource: "fixture-resource".into(),
+        base_url: "https://provider.invalid/v1".into(),
+        api_key: "fixture-secret-that-must-not-be-hashed".into(),
+        model: "owner-model".into(),
+        conductor_model: "reasoning-model".into(),
+        planner_model: "planner-model".into(),
+        executor_model: "specialist-model".into(),
+        reviewer_model: "verifier-model".into(),
+        summarizer_model: "utility-model".into(),
+        embedding_model: "embedding-model".into(),
+        collaboration_policy: "auto_router".into(),
+        context_window_tokens: 128_000,
+        agent_system_prompt: "fixture system prompt".into(),
+        ..ProviderConfig::default()
+    }
 }
 
 fn observed_binding_for_cell<'a>(

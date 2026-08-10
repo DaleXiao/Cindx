@@ -1,3 +1,7 @@
+use crate::collaboration_learning_holdout::{
+    freeze_holdout_reservations, CollaborationLearningHoldoutCensorReceiptV1,
+    CollaborationLearningHoldoutReservationV1, COLLABORATION_LEARNING_HOLDOUT_RESERVATION_SCHEMA,
+};
 use crate::collaboration_learning_policy::{
     collaboration_learning_sha256, validate_collaboration_learning_sha256,
     CollaborationLearningError, CollaborationLearningPolicyV1, CollaborationPolicyAxisV1,
@@ -33,7 +37,7 @@ const EVIDENCE_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-evidenc
 const REVIEW_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-review.v1\0";
 const ADMISSION_HASH_DOMAIN: &[u8] = b"cindx.agent-collaboration-learning-offline-admission.v1\0";
 
-const MAX_COMPARISONS: usize = 256;
+pub(crate) const MAX_COMPARISONS: usize = 256;
 const MAX_CANDIDATES: u16 = 8;
 const MAX_RESOURCE_REGRESSION_BPS: u16 = 2_500;
 
@@ -166,7 +170,7 @@ impl CollaborationLearningComparisonBindingV1 {
         )
     }
 
-    fn validate(&self) -> ContractResult<()> {
+    pub(crate) fn validate(&self) -> ContractResult<()> {
         let rebuilt = Self::freeze(
             self.hashes.clone(),
             self.split,
@@ -376,6 +380,45 @@ impl CollaborationLearningPairV1 {
         &self.workflow.exercise.assignment.policy_sha256
     }
 
+    fn assess_complete_safe_pair(
+        &self,
+        config: &CollaborationLearningConfigV1,
+    ) -> Result<(), CollaborationLearningError> {
+        if !complete_usage(self) {
+            return Err(error("positive pair has incomplete resource receipts"));
+        }
+        if has_safety_or_preservation_failure(self) {
+            return Err(error("positive pair has a safety or preservation failure"));
+        }
+        if exceeds_resource_regression(self, config.max_resource_regression_bps) {
+            return Err(error("positive pair exceeds its resource regression bound"));
+        }
+        Ok(())
+    }
+
+    pub fn assess_positive_seed_pair(
+        &self,
+        config: &CollaborationLearningConfigV1,
+    ) -> Result<(), CollaborationLearningError> {
+        self.assess_complete_safe_pair(config)?;
+        if self.workflow_reward_bps()? <= self.direct_reward_bps()? {
+            return Err(error("positive seed pair is not strictly positive"));
+        }
+        Ok(())
+    }
+
+    pub fn assess_positive_pair(
+        &self,
+        config: &CollaborationLearningConfigV1,
+    ) -> Result<(), CollaborationLearningError> {
+        self.assess_complete_safe_pair(config)?;
+        let uplift = i32::from(self.workflow_reward_bps()?) - i32::from(self.direct_reward_bps()?);
+        if uplift < i32::from(config.minimum_uplift_bps) {
+            return Err(error("positive pair is below its minimum uplift"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn workflow_policy(&self) -> ContractResult<CollaborationLearningPolicyV1> {
         self.workflow.policy()
     }
@@ -537,6 +580,37 @@ impl CollaborationLearningCandidateV1 {
         bindings: &[CollaborationLearningComparisonBindingV1],
     ) -> ContractResult<String> {
         Ok(freeze_holdout(bindings)?.0)
+    }
+
+    pub fn snapshot_with_holdout_reservations(
+        policy: CollaborationLearningPolicyV1,
+        parent: Option<CollaborationLearningPolicyV1>,
+        holdout_reservations: &[CollaborationLearningHoldoutReservationV1],
+        config: &CollaborationLearningConfigV1,
+        proposer_identity_sha256: String,
+        ordinal: u16,
+    ) -> ContractResult<Self> {
+        if holdout_reservations.len() < usize::from(config.min_holdout_pairs) {
+            return Err(error("holdout reservation manifest is underreported"));
+        }
+        if holdout_reservations
+            .iter()
+            .any(|reservation| reservation.workflow_policy_sha256() != policy.policy_sha256)
+        {
+            return Err(error(
+                "candidate policy does not match its holdout reservations",
+            ));
+        }
+        let holdout_manifest_sha256 =
+            CollaborationLearningHoldoutReservationV1::freeze_manifest(holdout_reservations)?;
+        Self::snapshot(
+            policy,
+            parent,
+            holdout_manifest_sha256,
+            config.digest().to_string(),
+            proposer_identity_sha256,
+            ordinal,
+        )
     }
 
     #[cfg(feature = "collaboration-learning-offline")]
@@ -804,6 +878,7 @@ fn comparison_scope_sha256(
 enum CollaborationLearningObservationV1 {
     Pair(Box<CollaborationLearningPairV1>),
     Censored(Box<CollaborationLearningCensorReceiptV1>),
+    HoldoutCensored(Box<CollaborationLearningHoldoutCensorReceiptV1>),
 }
 
 #[derive(Debug, Clone)]
@@ -812,7 +887,10 @@ pub struct CollaborationLearningEvidenceSetV1 {
     baseline_pair_sha256: String,
     comparison_scope_sha256: String,
     frozen_holdout: BTreeSet<String>,
+    frozen_holdout_reservations:
+        Option<BTreeMap<String, CollaborationLearningHoldoutReservationV1>>,
     frozen_holdout_cases: BTreeSet<String>,
+    observed_holdout_reservations: BTreeSet<String>,
     observed_physical_run_sha256: BTreeSet<String>,
     observations: BTreeMap<String, CollaborationLearningObservationV1>,
     config: CollaborationLearningConfigV1,
@@ -832,10 +910,7 @@ impl CollaborationLearningEvidenceSetV1 {
             || baseline_policy.parent_policy_sha256.is_some()
             || candidate.policy.parent_policy_sha256.as_deref()
                 != Some(baseline_policy.policy_sha256.as_str())
-            || !complete_usage(&baseline)
-            || has_safety_or_preservation_failure(&baseline)
-            || exceeds_resource_regression(&baseline, config.max_resource_regression_bps)
-            || baseline.workflow_reward_bps()? <= baseline.direct_reward_bps()?
+            || baseline.assess_positive_seed_pair(&config).is_err()
         {
             return Err(error("candidate lacks a valid positive seed baseline"));
         }
@@ -858,7 +933,59 @@ impl CollaborationLearningEvidenceSetV1 {
             baseline_pair_sha256: baseline.digest().to_string(),
             comparison_scope_sha256: scope_sha256,
             frozen_holdout: frozen,
+            frozen_holdout_reservations: None,
             frozen_holdout_cases: frozen_cases,
+            observed_holdout_reservations: BTreeSet::new(),
+            observed_physical_run_sha256: BTreeSet::from(baseline_physical_run_sha256),
+            observations: BTreeMap::new(),
+            config,
+            sealed: false,
+        })
+    }
+
+    pub fn new_with_holdout_reservations(
+        candidate: CollaborationLearningCandidateV1,
+        baseline: CollaborationLearningPairV1,
+        config: CollaborationLearningConfigV1,
+        holdout_reservations: Vec<CollaborationLearningHoldoutReservationV1>,
+    ) -> ContractResult<Self> {
+        let baseline_policy = baseline.workflow_policy()?;
+        if baseline.binding().split() != CollaborationLearningSplitV1::Train
+            || candidate.changed_axis.is_none()
+            || baseline_policy.parent_policy_sha256.is_some()
+            || candidate.policy.parent_policy_sha256.as_deref()
+                != Some(baseline_policy.policy_sha256.as_str())
+            || baseline.assess_positive_seed_pair(&config).is_err()
+        {
+            return Err(error("candidate lacks a valid positive seed baseline"));
+        }
+        if holdout_reservations.len() < usize::from(config.min_holdout_pairs) {
+            return Err(error("holdout reservation manifest is underreported"));
+        }
+        let (holdout_manifest_sha256, frozen, frozen_cases) =
+            freeze_holdout_reservations(&holdout_reservations)?;
+        let scope_sha256 = comparison_scope_sha256(baseline.binding())?;
+        if candidate.holdout_manifest_sha256 != holdout_manifest_sha256
+            || candidate.config_sha256 != config.config_sha256
+            || frozen_cases.contains(&baseline.binding.hashes.case_sha256)
+            || frozen.values().any(|reservation| {
+                reservation.workflow_policy_sha256() != candidate.policy.policy_sha256
+                    || !reservation.shares_static_scope(baseline.binding())
+            })
+        {
+            return Err(error(
+                "candidate or baseline does not match the precommitted holdout reservations",
+            ));
+        }
+        let baseline_physical_run_sha256 = baseline.physical_run_identities()?;
+        Ok(Self {
+            candidate,
+            baseline_pair_sha256: baseline.digest().to_string(),
+            comparison_scope_sha256: scope_sha256,
+            frozen_holdout: BTreeSet::new(),
+            frozen_holdout_reservations: Some(frozen),
+            frozen_holdout_cases: frozen_cases,
+            observed_holdout_reservations: BTreeSet::new(),
             observed_physical_run_sha256: BTreeSet::from(baseline_physical_run_sha256),
             observations: BTreeMap::new(),
             config,
@@ -889,6 +1016,51 @@ impl CollaborationLearningEvidenceSetV1 {
         )
     }
 
+    pub fn append_reserved_censor(
+        &mut self,
+        censor: CollaborationLearningHoldoutCensorReceiptV1,
+    ) -> ContractResult<()> {
+        if self.sealed {
+            return Err(error("evidence set is sealed"));
+        }
+        censor.validate()?;
+        let reservations = self
+            .frozen_holdout_reservations
+            .as_ref()
+            .ok_or_else(|| error("evidence set has no frozen holdout reservations"))?;
+        let reservation_sha256 = censor.reservation_sha256().to_string();
+        let reservation = reservations
+            .get(&reservation_sha256)
+            .ok_or_else(|| error("censor is outside the frozen holdout reservations"))?;
+        reservation.validate()?;
+        if self.observations.len() >= MAX_COMPARISONS
+            || self
+                .observed_holdout_reservations
+                .contains(&reservation_sha256)
+            || self.observations.contains_key(&reservation_sha256)
+        {
+            return Err(error("observation is duplicated or exceeds its bound"));
+        }
+        let physical_run_sha256 = censor.physical_run_sha256().to_vec();
+        if physical_run_sha256
+            .iter()
+            .any(|identity| self.observed_physical_run_sha256.contains(identity))
+        {
+            return Err(error(
+                "one physical run was replayed as multiple observations",
+            ));
+        }
+        self.observations.insert(
+            reservation_sha256.clone(),
+            CollaborationLearningObservationV1::HoldoutCensored(Box::new(censor)),
+        );
+        self.observed_holdout_reservations
+            .insert(reservation_sha256);
+        self.observed_physical_run_sha256
+            .extend(physical_run_sha256);
+        Ok(())
+    }
+
     fn append_observation(
         &mut self,
         binding: CollaborationLearningComparisonBindingV1,
@@ -902,8 +1074,23 @@ impl CollaborationLearningEvidenceSetV1 {
             return Err(error("observation changed the frozen comparison scope"));
         }
         let key = binding.digest().to_string();
+        let mut observed_reservation_sha256 = None;
         if binding.split() == CollaborationLearningSplitV1::Holdout {
-            if !self.frozen_holdout.contains(&key) {
+            if let Some(reservations) = &self.frozen_holdout_reservations {
+                let reservation = reservations
+                    .values()
+                    .find(|reservation| reservation.matches_locator(&binding))
+                    .ok_or_else(|| {
+                        error("observation is outside the frozen holdout reservations")
+                    })?;
+                reservation.validate_binding(&binding)?;
+                if let CollaborationLearningObservationV1::Pair(pair) = &observation {
+                    if reservation.workflow_policy_sha256() != pair.workflow_policy_sha256() {
+                        return Err(error("pair policy does not match its holdout reservation"));
+                    }
+                }
+                observed_reservation_sha256 = Some(reservation.digest().to_string());
+            } else if !self.frozen_holdout.contains(&key) {
                 return Err(error("observation is outside the frozen holdout"));
             }
         } else if self
@@ -923,6 +1110,11 @@ impl CollaborationLearningEvidenceSetV1 {
             CollaborationLearningObservationV1::Censored(censor) => {
                 censor.physical_run_sha256.clone()
             }
+            CollaborationLearningObservationV1::HoldoutCensored(_) => {
+                return Err(error(
+                    "holdout reservation censor requires its dedicated append path",
+                ));
+            }
         };
         let unique_physical_runs = physical_run_sha256.iter().collect::<BTreeSet<_>>();
         if unique_physical_runs.len() != physical_run_sha256.len()
@@ -935,6 +1127,10 @@ impl CollaborationLearningEvidenceSetV1 {
             ));
         }
         self.observations.insert(key, observation);
+        if let Some(reservation_sha256) = observed_reservation_sha256 {
+            self.observed_holdout_reservations
+                .insert(reservation_sha256);
+        }
         self.observed_physical_run_sha256
             .extend(physical_run_sha256);
         Ok(())
@@ -956,7 +1152,13 @@ impl CollaborationLearningEvidenceSetV1 {
     pub fn censored_count(&self) -> usize {
         self.observations
             .values()
-            .filter(|value| matches!(value, CollaborationLearningObservationV1::Censored(_)))
+            .filter(|value| {
+                matches!(
+                    value,
+                    CollaborationLearningObservationV1::Censored(_)
+                        | CollaborationLearningObservationV1::HoldoutCensored(_)
+                )
+            })
             .count()
     }
 
@@ -965,26 +1167,46 @@ impl CollaborationLearningEvidenceSetV1 {
             return Err(error("evidence set is sealed"));
         }
         let config = &self.config;
-        let evidence_sha256 = collaboration_learning_sha256(
-            EVIDENCE_HASH_DOMAIN,
-            &(
-                self.candidate.digest(),
-                self.baseline_pair_sha256.as_str(),
-                self.comparison_scope_sha256.as_str(),
-                &self.frozen_holdout,
-                &self.frozen_holdout_cases,
-                &self.observed_physical_run_sha256,
-                &self.observations,
-                config.config_sha256.as_str(),
-            ),
-            "evidence set",
-        )?;
+        let evidence_sha256 = if let Some(reservations) = &self.frozen_holdout_reservations {
+            collaboration_learning_sha256(
+                EVIDENCE_HASH_DOMAIN,
+                &(
+                    COLLABORATION_LEARNING_HOLDOUT_RESERVATION_SCHEMA,
+                    self.candidate.digest(),
+                    self.baseline_pair_sha256.as_str(),
+                    self.comparison_scope_sha256.as_str(),
+                    reservations,
+                    &self.frozen_holdout_cases,
+                    &self.observed_holdout_reservations,
+                    &self.observed_physical_run_sha256,
+                    &self.observations,
+                    config.config_sha256.as_str(),
+                ),
+                "reservation evidence set",
+            )?
+        } else {
+            collaboration_learning_sha256(
+                EVIDENCE_HASH_DOMAIN,
+                &(
+                    self.candidate.digest(),
+                    self.baseline_pair_sha256.as_str(),
+                    self.comparison_scope_sha256.as_str(),
+                    &self.frozen_holdout,
+                    &self.frozen_holdout_cases,
+                    &self.observed_physical_run_sha256,
+                    &self.observations,
+                    config.config_sha256.as_str(),
+                ),
+                "evidence set",
+            )?
+        };
         let pairs = self
             .observations
             .values()
             .filter_map(|value| match value {
                 CollaborationLearningObservationV1::Pair(pair) => Some(pair.as_ref()),
-                CollaborationLearningObservationV1::Censored(_) => None,
+                CollaborationLearningObservationV1::Censored(_)
+                | CollaborationLearningObservationV1::HoldoutCensored(_) => None,
             })
             .collect::<Vec<_>>();
         let train = pairs
@@ -1021,10 +1243,16 @@ impl CollaborationLearningEvidenceSetV1 {
                 frozen(CollaborationLearningFreezeReasonV1::HoldoutRegression)
             } else if train.len() < usize::from(config.min_train_pairs)
                 || holdout.len() < usize::from(config.min_holdout_pairs)
-                || !self
-                    .frozen_holdout
-                    .iter()
-                    .all(|digest| self.observations.contains_key(digest))
+                || if let Some(reservations) = &self.frozen_holdout_reservations {
+                    !reservations
+                        .keys()
+                        .all(|digest| self.observed_holdout_reservations.contains(digest))
+                } else {
+                    !self
+                        .frozen_holdout
+                        .iter()
+                        .all(|digest| self.observations.contains_key(digest))
+                }
             {
                 (
                     CollaborationLearningAggregateStatusV1::Collecting,

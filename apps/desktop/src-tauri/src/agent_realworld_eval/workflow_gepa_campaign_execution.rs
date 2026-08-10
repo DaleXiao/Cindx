@@ -44,6 +44,38 @@ struct EvaluationProfileEnvironment {
     prior_sha256: Option<OsString>,
 }
 
+pub(super) trait ProductRunLedger {
+    fn begin_product(
+        &mut self,
+        label: &str,
+        constraint: Option<AgentExecutionConstraint>,
+    ) -> Result<(), String>;
+
+    fn complete_product(
+        &mut self,
+        run: &RawRun,
+        receipt: &ProductRunReceipt,
+    ) -> Result<(), String>;
+}
+
+impl ProductRunLedger for CampaignJournal {
+    fn begin_product(
+        &mut self,
+        label: &str,
+        _constraint: Option<AgentExecutionConstraint>,
+    ) -> Result<(), String> {
+        CampaignJournal::begin_product(self, label)
+    }
+
+    fn complete_product(
+        &mut self,
+        _run: &RawRun,
+        receipt: &ProductRunReceipt,
+    ) -> Result<(), String> {
+        CampaignJournal::complete_product(self, receipt)
+    }
+}
+
 impl EvaluationDataEnvironment {
     pub(super) fn install(root: &Path) -> Self {
         let prior_requested_root = std::env::var_os("CINDX_AGENT_REALWORLD_DATA_DIR");
@@ -295,7 +327,7 @@ pub(super) fn execute_journaled_campaign_case(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_journaled_campaign_case_with_constraint(
+fn execute_journaled_campaign_case_with_constraint<L: ProductRunLedger + ?Sized>(
     app: &tauri::App<tauri::Wry>,
     state: &tauri::State<'_, AppState>,
     provider: &ProviderConfig,
@@ -314,9 +346,9 @@ fn execute_journaled_campaign_case_with_constraint(
     execution_constraint: Option<AgentExecutionConstraint>,
     matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
     collaboration_learning_policy: Option<&CollaborationLearningEvalPolicyInput>,
-    journal: &mut CampaignJournal,
+    journal: &mut L,
 ) -> Result<(RawRun, ProductRunReceipt), String> {
-    journal.begin_product(action_label)?;
+    journal.begin_product(action_label, execution_constraint)?;
     let run = execute_campaign_case_with_constraint(
         app,
         state,
@@ -336,7 +368,7 @@ fn execute_journaled_campaign_case_with_constraint(
         collaboration_learning_policy,
     );
     let receipt = ProductRunReceipt::from_run(&run, split, replicate)?;
-    journal.complete_product(&receipt)?;
+    journal.complete_product(&run, &receipt)?;
     Ok((run, receipt))
 }
 
@@ -373,7 +405,7 @@ pub(super) fn execute_matched_route_pair(
 }
 
 #[allow(dead_code, clippy::too_many_arguments)]
-pub(super) fn execute_collaboration_learning_successor_pair(
+pub(super) fn execute_collaboration_learning_successor_pair<L: ProductRunLedger + ?Sized>(
     app: &tauri::App<tauri::Wry>,
     state: &tauri::State<'_, AppState>,
     provider: &ProviderConfig,
@@ -386,7 +418,7 @@ pub(super) fn execute_collaboration_learning_successor_pair(
     execution_index: &mut usize,
     suite_sha256: &str,
     workflow_learning_policy: agent_application::CollaborationLearningPolicyV1,
-    journal: &mut CampaignJournal,
+    journal: &mut L,
 ) -> Result<MatchedRoutePairRun, String> {
     execute_matched_route_pair_with_learning_policy(
         app,
@@ -406,7 +438,7 @@ pub(super) fn execute_collaboration_learning_successor_pair(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_matched_route_pair_with_learning_policy(
+fn execute_matched_route_pair_with_learning_policy<L: ProductRunLedger + ?Sized>(
     app: &tauri::App<tauri::Wry>,
     state: &tauri::State<'_, AppState>,
     provider: &ProviderConfig,
@@ -419,7 +451,7 @@ fn execute_matched_route_pair_with_learning_policy(
     execution_index: &mut usize,
     suite_sha256: &str,
     workflow_learning_policy: Option<agent_application::CollaborationLearningPolicyV1>,
-    journal: &mut CampaignJournal,
+    journal: &mut L,
 ) -> Result<MatchedRoutePairRun, String> {
     let direct_root = suite_root.join(format!(
         "{}-{}-r{replicate}-forced-direct",
@@ -458,7 +490,7 @@ fn execute_matched_route_pair_with_learning_policy(
                    position: usize,
                    plan_anchor: Option<&MatchedRoutePlanAnchor>,
                    learning_policy: Option<&CollaborationLearningEvalPolicyInput>,
-                   journal: &mut CampaignJournal| {
+                   journal: &mut L| {
         execute_journaled_campaign_case_with_constraint(
             app,
             state,

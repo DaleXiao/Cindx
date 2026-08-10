@@ -1,5 +1,6 @@
 mod artifacts;
 mod collaboration_learning_admission;
+mod collaboration_learning_holdout;
 mod collaboration_learning_policy;
 mod collaboration_learning_projection;
 #[cfg(feature = "collaboration-learning-offline")]
@@ -32,6 +33,11 @@ pub use collaboration_learning_admission::{
     COLLABORATION_LEARNING_CANDIDATE_SCHEMA, COLLABORATION_LEARNING_COMPARISON_SCHEMA,
     COLLABORATION_LEARNING_CONFIG_SCHEMA, COLLABORATION_LEARNING_OFFLINE_ADMISSION_SCHEMA,
     COLLABORATION_LEARNING_REVIEW_SCHEMA,
+};
+pub use collaboration_learning_holdout::{
+    CollaborationLearningHoldoutCensorReceiptV1, CollaborationLearningHoldoutReservationV1,
+    COLLABORATION_LEARNING_HOLDOUT_CENSOR_SCHEMA,
+    COLLABORATION_LEARNING_HOLDOUT_RESERVATION_SCHEMA,
 };
 pub use collaboration_learning_policy::{
     CollaborationGoal2LimitsV1, CollaborationLearningError, CollaborationLearningPolicyV1,

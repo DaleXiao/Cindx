@@ -46,6 +46,7 @@
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
       "agent-collaboration-successor-protocol-contract",
+      "agent-collaboration-successor-execution-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -87,6 +88,7 @@
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
       "agent-collaboration-successor-protocol-contract",
+      "agent-collaboration-successor-execution-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -171,6 +173,7 @@
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
       "agent-collaboration-successor-protocol-contract",
+      "agent-collaboration-successor-execution-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -555,7 +558,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 11 passed; 0 failed",
+        "test result: ok. 18 passed; 0 failed",
         "cindx.agent-collaboration-learning-policy.v1"
       ]
     },
@@ -620,6 +623,27 @@
       "required_output": [
         "test result: ok. 9 passed; 0 failed",
         "cindx.collaboration-successor-protocol.v1"
+      ]
+    },
+    {
+      "id": "agent-collaboration-successor-execution-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--features",
+        "realworld-eval",
+        "agent_collaboration_successor_execution_contract_",
+        "--lib",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 17 passed; 0 failed"
       ]
     },
     {

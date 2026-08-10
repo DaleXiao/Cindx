@@ -537,6 +537,14 @@ pub fn run_collaboration_successor_preflight() -> Result<(), String> {
     collaboration_successor_protocol::run_preflight()
 }
 
+pub fn run_collaboration_successor_authorize() -> Result<(), String> {
+    collaboration_successor_protocol::run_authorize()
+}
+
+pub fn run_collaboration_successor_execute() -> Result<(), String> {
+    collaboration_successor_protocol::run_execute()
+}
+
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
     let expected = expected_treatments(&suite.schema)
         .ok_or_else(|| format!("unsupported suite schema {}", suite.schema))?;

@@ -179,12 +179,33 @@ Goal 3D freezes the final narrow successor protocol without authorizing it:
    full configured-model catalog, materialized prestates, budgets, cohort, and
    new external output paths into a private receipt. It performs zero provider
    calls and its tracked authority keeps `execution_authorized=false`.
-5. No private online authorization has been generated, and provider-action
-   reservation/execution is not wired. The invalid V12 attempt and production
-   serving remain unchanged.
+5. At the Goal 3D checkpoint no private online authorization had been generated
+   and provider-action reservation/execution was not wired. The invalid V12
+   attempt and production serving remained unchanged.
 
 No provider evaluation was run for Goal 3D. The frozen protocol is not a causal
 result and establishes no quality, latency, token, or intelligence uplift.
+
+Goal 3E implements the bounded execution control plane around that frozen
+authority:
+
+1. A provider-free authorization binary accepts only the explicit frozen
+   protocol command and can mint one private 15-minute receipt bound to the
+   canonical preflight, current clean source and provider/model configuration,
+   exact execute binary, fixed matrix and budgets, and new output root.
+2. The execute binary revalidates and consumes those bindings once, persists
+   the campaign before provider-capable setup, and durably reserves each cell
+   and arm before its model action.
+3. Baseline admission precedes the sole candidate, candidate admission precedes
+   holdout, and the controller ends only ready for independent review, frozen,
+   or censored. Recovery never resumes or retries a started physical run.
+4. The provider-free execution contract contains 17 deterministic tests. The
+   collaboration-learning gate now contains 18 tests. These counts prove
+   contracts, not uplift.
+
+No Goal 3E authorization receipt was minted and no provider call was made.
+V12, the tracked successor manifest/suite, and production serving remain
+unchanged.
 
 The Goal 3C revision passed the full deterministic profile (`55/55` gates),
 the offline application contract (`5/5`), and the desktop successor adapter
@@ -217,14 +238,14 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-Keep the tracked Goal 3D protocol frozen and pause for explicit user
-confirmation. The next implementation may only add private online authorization
-and provider-action reservation/execution wiring that binds the existing
-preflight receipt; it must not change the three cases, six runs, sole candidate,
-budgets, ordering, holdout, evaluator, or stop rules. A provider run remains a
-separate explicit decision. Incomplete receipts stop immediately. No causal
-uplift freezes the collaboration type for this successor protocol; do not
-revise or rescue the protocol to continue.
+Pause before minting authorization or running the provider path. Actual online
+execution is a separate decision and requires explicit user confirmation of
+the exact merged HEAD, canonical preflight and execute-runner digests, provider
+binding, three-pair/six-run matrix, fixed maximum campaign budget, and
+one-shot/no-retry consequence. The successor cases, candidate, budgets,
+ordering, holdout, evaluator, and stop rules remain frozen. Incomplete evidence
+or no causal uplift freezes this collaboration type; do not revise or rescue
+the protocol to continue.
 
 ## Structural Risks
 

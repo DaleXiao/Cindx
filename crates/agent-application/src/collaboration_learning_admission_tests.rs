@@ -211,6 +211,421 @@ fn config(train: u16) -> CollaborationLearningConfigV1 {
     CollaborationLearningConfigV1::freeze(train, 1, 1, 2_500, 1, 4).unwrap()
 }
 
+fn reservation(
+    binding: &CollaborationLearningComparisonBindingV1,
+) -> CollaborationLearningHoldoutReservationV1 {
+    CollaborationLearningHoldoutReservationV1::from_binding(
+        binding,
+        candidate_policy().policy_sha256,
+    )
+    .unwrap()
+}
+
+fn reservation_candidate(
+    reservations: &[CollaborationLearningHoldoutReservationV1],
+    config: &CollaborationLearningConfigV1,
+) -> CollaborationLearningCandidateV1 {
+    CollaborationLearningCandidateV1::snapshot_with_holdout_reservations(
+        candidate_policy(),
+        Some(workflow_parent()),
+        reservations,
+        config,
+        digest('9'),
+        1,
+    )
+    .unwrap()
+}
+
+fn reservation_evidence(
+    holdout: &CollaborationLearningComparisonBindingV1,
+    config: CollaborationLearningConfigV1,
+) -> CollaborationLearningEvidenceSetV1 {
+    let reservations = vec![reservation(holdout)];
+    let candidate = reservation_candidate(&reservations, &config);
+    CollaborationLearningEvidenceSetV1::new_with_holdout_reservations(
+        candidate,
+        baseline(),
+        config,
+        reservations,
+    )
+    .unwrap()
+}
+
+#[test]
+fn agent_collaboration_learning_contract_goal3e_precommits_bounded_reservation_manifest() {
+    let holdout = comparison(
+        CollaborationLearningSplitV1::Holdout,
+        2,
+        CollaborationLearningArmOrderV1::WorkflowFirst,
+    );
+    let reservation = reservation(&holdout);
+    assert_eq!(reservation.split(), CollaborationLearningSplitV1::Holdout);
+    assert_eq!(reservation.replicate(), 2);
+    assert_eq!(
+        reservation.arm_order(),
+        CollaborationLearningArmOrderV1::WorkflowFirst
+    );
+    assert_eq!(
+        reservation.workflow_policy_sha256(),
+        candidate_policy().policy_sha256
+    );
+    assert_eq!(
+        CollaborationLearningHoldoutReservationV1::freeze_manifest(std::slice::from_ref(
+            &reservation
+        ))
+        .unwrap(),
+        CollaborationLearningHoldoutReservationV1::freeze_manifest(std::slice::from_ref(
+            &reservation
+        ))
+        .unwrap()
+    );
+
+    let two_holdouts = CollaborationLearningConfigV1::freeze(1, 2, 1, 2_500, 1, 4).unwrap();
+    assert!(
+        CollaborationLearningCandidateV1::snapshot_with_holdout_reservations(
+            candidate_policy(),
+            Some(workflow_parent()),
+            std::slice::from_ref(&reservation),
+            &two_holdouts,
+            digest('9'),
+            1,
+        )
+        .is_err()
+    );
+
+    let config = config(1);
+    let wrong_policy_reservation = CollaborationLearningHoldoutReservationV1::from_binding(
+        &holdout,
+        workflow_parent().policy_sha256,
+    )
+    .unwrap();
+    assert!(
+        CollaborationLearningCandidateV1::snapshot_with_holdout_reservations(
+            candidate_policy(),
+            Some(workflow_parent()),
+            std::slice::from_ref(&wrong_policy_reservation),
+            &config,
+            digest('9'),
+            1,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn agent_collaboration_learning_contract_goal3e_uses_one_positive_pair_authority() {
+    let frozen_config = config(1);
+    assert!(baseline().assess_positive_seed_pair(&frozen_config).is_ok());
+    assert!(baseline().assess_positive_pair(&frozen_config).is_ok());
+
+    let no_uplift = candidate_pair(
+        comparison(
+            CollaborationLearningSplitV1::Train,
+            2,
+            CollaborationLearningArmOrderV1::DirectFirst,
+        ),
+        true,
+        AgentOutcomeTerminalStatusV1::Completed,
+        true,
+        true,
+    );
+    assert!(no_uplift.assess_positive_pair(&frozen_config).is_err());
+
+    let regression = candidate_pair(
+        comparison(
+            CollaborationLearningSplitV1::Train,
+            3,
+            CollaborationLearningArmOrderV1::WorkflowFirst,
+        ),
+        true,
+        AgentOutcomeTerminalStatusV1::Completed,
+        false,
+        true,
+    );
+    assert!(regression.assess_positive_pair(&frozen_config).is_err());
+}
+
+#[test]
+fn agent_collaboration_learning_contract_goal3e_preserves_positive_seed_threshold_semantics() {
+    let frozen_config = CollaborationLearningConfigV1::freeze(1, 1, 7_500, 2_500, 1, 4).unwrap();
+    let seed = low_positive_baseline();
+    assert_eq!(seed.direct_reward_bps().unwrap(), 5_000);
+    assert_eq!(seed.workflow_reward_bps().unwrap(), 10_000);
+    assert!(seed.assess_positive_seed_pair(&frozen_config).is_ok());
+    assert!(seed.assess_positive_pair(&frozen_config).is_err());
+
+    let holdout = comparison(
+        CollaborationLearningSplitV1::Holdout,
+        2,
+        CollaborationLearningArmOrderV1::WorkflowFirst,
+    );
+    assert!(CollaborationLearningEvidenceSetV1::new(
+        candidate(std::slice::from_ref(&holdout), &frozen_config),
+        seed.clone(),
+        frozen_config.clone(),
+        vec![holdout.clone()],
+    )
+    .is_ok());
+
+    let reservations = vec![reservation(&holdout)];
+    assert!(
+        CollaborationLearningEvidenceSetV1::new_with_holdout_reservations(
+            reservation_candidate(&reservations, &frozen_config),
+            seed,
+            frozen_config,
+            reservations,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn agent_collaboration_learning_contract_goal3e_rejects_reservation_refinement_mismatches() {
+    let holdout = comparison(
+        CollaborationLearningSplitV1::Holdout,
+        2,
+        CollaborationLearningArmOrderV1::WorkflowFirst,
+    );
+    let mut mismatches = Vec::new();
+
+    let mut wrong_case = holdout.hashes().clone();
+    wrong_case.case_sha256 = digest('d');
+    mismatches.push(
+        CollaborationLearningComparisonBindingV1::freeze(
+            wrong_case,
+            holdout.split(),
+            holdout.replicate(),
+            holdout.arm_order(),
+        )
+        .unwrap(),
+    );
+
+    let mut wrong_prestate = holdout.hashes().clone();
+    wrong_prestate.prestate_sha256 = digest('e');
+    mismatches.push(
+        CollaborationLearningComparisonBindingV1::freeze(
+            wrong_prestate,
+            holdout.split(),
+            holdout.replicate(),
+            holdout.arm_order(),
+        )
+        .unwrap(),
+    );
+
+    let mut wrong_provider = holdout.hashes().clone();
+    wrong_provider.provider_sha256 = digest('f');
+    mismatches.push(
+        CollaborationLearningComparisonBindingV1::freeze(
+            wrong_provider,
+            holdout.split(),
+            holdout.replicate(),
+            holdout.arm_order(),
+        )
+        .unwrap(),
+    );
+
+    mismatches.push(
+        CollaborationLearningComparisonBindingV1::freeze(
+            holdout.hashes().clone(),
+            holdout.split(),
+            holdout.replicate(),
+            CollaborationLearningArmOrderV1::DirectFirst,
+        )
+        .unwrap(),
+    );
+
+    for mismatch in mismatches {
+        let mut evidence = reservation_evidence(&holdout, config(1));
+        let censor = CollaborationLearningCensorReceiptV1::new(
+            mismatch,
+            digest('b'),
+            CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+        )
+        .unwrap();
+        assert!(evidence.append_censor(censor).is_err());
+    }
+
+    let mut matching = reservation_evidence(&holdout, config(1));
+    matching
+        .append_pair(candidate_pair(
+            holdout,
+            false,
+            AgentOutcomeTerminalStatusV1::Completed,
+            true,
+            true,
+        ))
+        .unwrap();
+}
+
+#[test]
+fn agent_collaboration_learning_contract_goal3e_collects_then_censor_freezes_and_seals() {
+    let holdout = comparison(
+        CollaborationLearningSplitV1::Holdout,
+        2,
+        CollaborationLearningArmOrderV1::WorkflowFirst,
+    );
+    let mut evidence = reservation_evidence(&holdout, config(1));
+    evidence
+        .append_pair(candidate_pair(
+            comparison(
+                CollaborationLearningSplitV1::Train,
+                2,
+                CollaborationLearningArmOrderV1::DirectFirst,
+            ),
+            false,
+            AgentOutcomeTerminalStatusV1::Completed,
+            true,
+            true,
+        ))
+        .unwrap();
+    assert_eq!(
+        evidence.aggregate().unwrap().status(),
+        CollaborationLearningAggregateStatusV1::Collecting
+    );
+
+    evidence
+        .append_censor(
+            CollaborationLearningCensorReceiptV1::new(
+                holdout.clone(),
+                digest('b'),
+                CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let aggregate = evidence.aggregate().unwrap();
+    assert_eq!(
+        aggregate.status(),
+        CollaborationLearningAggregateStatusV1::Frozen
+    );
+    assert_eq!(
+        aggregate.freeze_reason(),
+        Some(CollaborationLearningFreezeReasonV1::InvalidInstrumentation)
+    );
+    assert!(evidence
+        .append_pair(candidate_pair(
+            holdout,
+            false,
+            AgentOutcomeTerminalStatusV1::Completed,
+            true,
+            true,
+        ))
+        .is_err());
+}
+
+#[test]
+fn agent_collaboration_learning_contract_goal3e_reserved_censor_fails_closed() {
+    let holdout = comparison(
+        CollaborationLearningSplitV1::Holdout,
+        2,
+        CollaborationLearningArmOrderV1::WorkflowFirst,
+    );
+    let frozen = reservation(&holdout);
+    assert!(
+        CollaborationLearningHoldoutCensorReceiptV1::for_physical_runs(
+            &frozen,
+            digest('a'),
+            Vec::new(),
+            CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+        )
+        .is_err()
+    );
+    assert!(
+        CollaborationLearningHoldoutCensorReceiptV1::for_physical_runs(
+            &frozen,
+            digest('a'),
+            vec![digest('b'), digest('b')],
+            CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+        )
+        .is_err()
+    );
+
+    let mut tampered = CollaborationLearningHoldoutCensorReceiptV1::for_physical_run(
+        &frozen,
+        digest('a'),
+        digest('b'),
+        CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+    )
+    .unwrap();
+    tampered.corrupt_digest_for_test(digest('0'));
+    assert!(reservation_evidence(&holdout, config(1))
+        .append_reserved_censor(tampered)
+        .is_err());
+
+    let other = reservation(&comparison(
+        CollaborationLearningSplitV1::Holdout,
+        3,
+        CollaborationLearningArmOrderV1::DirectFirst,
+    ));
+    let wrong_reservation = CollaborationLearningHoldoutCensorReceiptV1::for_physical_run(
+        &other,
+        digest('a'),
+        digest('b'),
+        CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+    )
+    .unwrap();
+    assert!(reservation_evidence(&holdout, config(1))
+        .append_reserved_censor(wrong_reservation)
+        .is_err());
+
+    let baseline_physical_run = baseline().physical_run_identities().unwrap()[0].clone();
+    let replayed_physical_run = CollaborationLearningHoldoutCensorReceiptV1::for_physical_run(
+        &frozen,
+        digest('a'),
+        baseline_physical_run,
+        CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+    )
+    .unwrap();
+    assert!(reservation_evidence(&holdout, config(1))
+        .append_reserved_censor(replayed_physical_run)
+        .is_err());
+}
+
+#[test]
+fn agent_collaboration_learning_contract_goal3e_reserved_censor_is_terminal() {
+    let holdout = comparison(
+        CollaborationLearningSplitV1::Holdout,
+        2,
+        CollaborationLearningArmOrderV1::WorkflowFirst,
+    );
+    let frozen = reservation(&holdout);
+    let censor = CollaborationLearningHoldoutCensorReceiptV1::for_physical_run(
+        &frozen,
+        digest('a'),
+        digest('b'),
+        CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+    )
+    .unwrap();
+    assert_eq!(censor.reservation_sha256(), frozen.digest());
+    assert_eq!(censor.physical_run_sha256(), &[digest('b')]);
+    assert_eq!(
+        censor.reason(),
+        CollaborationLearningCensorReasonV1::IncompleteInstrumentation
+    );
+    assert_eq!(censor.digest().len(), 64);
+
+    let mut evidence = reservation_evidence(&holdout, config(1));
+    evidence.append_reserved_censor(censor).unwrap();
+    assert_eq!(evidence.censored_count(), 1);
+    let aggregate = evidence.aggregate().unwrap();
+    assert_eq!(
+        aggregate.status(),
+        CollaborationLearningAggregateStatusV1::Frozen
+    );
+    assert_eq!(
+        aggregate.freeze_reason(),
+        Some(CollaborationLearningFreezeReasonV1::InvalidInstrumentation)
+    );
+    let after_terminal = CollaborationLearningHoldoutCensorReceiptV1::for_physical_run(
+        &frozen,
+        digest('a'),
+        digest('c'),
+        CollaborationLearningCensorReasonV1::IncompleteInstrumentation,
+    )
+    .unwrap();
+    assert!(evidence.append_reserved_censor(after_terminal).is_err());
+}
+
 #[test]
 fn agent_collaboration_learning_contract_exposes_static_cell_and_observed_policy_identity() {
     let hashes = CollaborationLearningComparisonHashesV1 {
@@ -262,6 +677,49 @@ fn reseal(outcome: ExternallyVerifiedOutcomeV1) -> ExternallyVerifiedOutcomeV1 {
         outcome.resources,
     )
     .unwrap()
+}
+
+fn low_positive_baseline() -> CollaborationLearningPairV1 {
+    let baseline = baseline();
+    let binding = baseline.binding().clone();
+    let direct_policy = direct_policy();
+    let workflow_policy = workflow_parent();
+    let direct = with_two_behavior_results(baseline.direct.outcome, true, false);
+    let workflow = with_two_behavior_results(baseline.workflow.outcome, true, true);
+    let direct_exercise = exercise_for_outcome(&direct_policy, &direct, true);
+    let workflow_exercise = exercise_for_outcome(&workflow_policy, &workflow, true);
+    CollaborationLearningPairV1::new(
+        CollaborationLearningTrialV1::new(
+            binding.clone(),
+            CollaborationLearningArmV1::Direct,
+            direct,
+            direct_exercise,
+        )
+        .unwrap(),
+        CollaborationLearningTrialV1::new(
+            binding,
+            CollaborationLearningArmV1::Workflow,
+            workflow,
+            workflow_exercise,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn with_two_behavior_results(
+    mut outcome: ExternallyVerifiedOutcomeV1,
+    first_passed: bool,
+    second_passed: bool,
+) -> ExternallyVerifiedOutcomeV1 {
+    outcome.postconditions[0].passed = first_passed;
+    let mut second = outcome.postconditions[0].clone();
+    second.kind = "secondary behavior".into();
+    second.expected_sha256 = digest('b');
+    second.observed_sha256 = Some(digest(if second_passed { 'b' } else { 'c' }));
+    second.passed = second_passed;
+    outcome.postconditions.push(second);
+    reseal(outcome)
 }
 
 fn with_run_identity(

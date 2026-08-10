@@ -767,6 +767,25 @@ pub(super) use preflight::run_preflight;
 pub(super) use preflight::validate_observed_pair;
 pub(super) use preflight::{provider_binding, ProviderBindingReceipt};
 
+#[path = "collaboration_successor_execution.rs"]
+pub(super) mod execution;
+
+#[path = "collaboration_successor_authorization.rs"]
+#[allow(dead_code)]
+mod authorization;
+
+#[path = "collaboration_successor_execution_journal.rs"]
+#[allow(dead_code)]
+mod execution_journal;
+
+#[path = "collaboration_successor_runner.rs"]
+mod runner;
+pub(super) use runner::{run_authorize, run_execute};
+
 #[cfg(test)]
 #[path = "collaboration_successor_protocol_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "collaboration_successor_execution_tests.rs"]
+mod execution_tests;
