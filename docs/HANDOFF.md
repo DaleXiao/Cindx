@@ -5,22 +5,22 @@ in place; do not create versioned handoff files.
 
 ## Release Identity
 
-Current release version: `0.2.30`
+Current release version: `0.2.31`
 
 | Item | Verified value |
 | --- | --- |
-| Release source commit | `f2ce3b7a08585472eb678d9e783d4c50caa4378c` |
-| Tag | `v0.2.30` |
-| GitHub release | <https://github.com/DaleXiao/Cindx/releases/tag/v0.2.30> |
-| Asset | `Cindx-0.2.30-macOS-arm64.zip` |
-| Asset size | `53,023,332` bytes |
-| Asset SHA-256 | `02826e60135d24eff06b3b727ed17a219525623ad0441651ab7ded53c318b254` |
-| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.30` |
+| Local build source commit | `ef2cac38f5b4455e13f3e57ac3d48a8e5b8275e6` |
+| Tag | Not tagged; latest published tag remains `v0.2.30` |
+| GitHub release | Not published; latest published release remains <https://github.com/DaleXiao/Cindx/releases/tag/v0.2.30> |
+| Local asset | `dist/Cindx-0.2.31-macOS-arm64.zip` |
+| Local asset size | `53,780,372` bytes |
+| Local asset SHA-256 | `26fc553805615221c87483ddca67b13ac0c71d6e661e6b095fa53e501fffa337` |
+| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.31` |
 | Installed signature | `codesign --verify --deep --strict` passed |
 
-The release is the packaged application requested for GitHub. Documentation
-cleanup after the tag does not change the binary; do not rebuild merely to
-include Markdown changes.
+This is an ad-hoc-signed local validation build, not a tagged, notarized, or
+GitHub-published release. Its embedded source revision remains the clean commit
+above; the subsequent version/evidence commit does not change the binary.
 
 ## Repository State
 
@@ -28,8 +28,9 @@ include Markdown changes.
 - Integration branch: `origin/main`
 - The local continuation branch may have a different name. Compare it to
   `origin/main`; do not infer divergence from the branch name.
-- Product source at the release is `f2ce3b7`. Subsequent current-main changes
-  should be read from Git rather than copied into this file as a second log.
+- The installed `0.2.31` local build embeds `ef2cac3`; the latest published
+  `v0.2.30` release embeds `f2ce3b7`. Read later source state from Git rather
+  than copying it into this file as a second log.
 - The current document set is intentionally limited to `README.md`, `AGENTS.md`,
   and the five files under `docs/`.
 
@@ -161,6 +162,11 @@ foundation:
 No provider evaluation was run, so these are deterministic collection and
 recovery guarantees, not evidence that collaboration improves intelligence or
 performance.
+
+The Goal 3C revision passed the full deterministic profile (`55/55` gates),
+the offline application contract (`5/5`), and the desktop successor adapter
+contract (`12/12`). The formal `0.2.31` arm64 build then passed strict signature,
+clean-start, and fail-closed persistent-state probes before installation.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
