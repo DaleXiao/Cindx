@@ -1,4 +1,7 @@
 mod artifacts;
+mod collaboration_learning_admission;
+mod collaboration_learning_policy;
+mod collaboration_learning_projection;
 mod loss_aware_work_queue;
 mod outcome_evidence;
 mod outcome_projection;
@@ -13,6 +16,50 @@ mod terminal_commit;
 pub use artifacts::{
     artifact_kind_from_path, artifact_manifest_message, project_agent_artifacts,
     AgentOutputArtifact,
+};
+pub use collaboration_learning_admission::{
+    CollaborationLearningAggregateStatusV1, CollaborationLearningAggregateV1,
+    CollaborationLearningArmOrderV1, CollaborationLearningArmV1, CollaborationLearningCandidateV1,
+    CollaborationLearningCensorReasonV1, CollaborationLearningCensorReceiptV1,
+    CollaborationLearningComparisonBindingV1, CollaborationLearningComparisonHashesV1,
+    CollaborationLearningConfigV1, CollaborationLearningEvidenceSetV1,
+    CollaborationLearningFreezeReasonV1, CollaborationLearningOfflineAdmissionStatusV1,
+    CollaborationLearningOfflineAdmissionV1, CollaborationLearningPairV1,
+    CollaborationLearningReviewReceiptV1, CollaborationLearningSplitV1,
+    CollaborationLearningTrialV1, COLLABORATION_LEARNING_CANDIDATE_SCHEMA,
+    COLLABORATION_LEARNING_COMPARISON_SCHEMA, COLLABORATION_LEARNING_CONFIG_SCHEMA,
+    COLLABORATION_LEARNING_OFFLINE_ADMISSION_SCHEMA, COLLABORATION_LEARNING_REVIEW_SCHEMA,
+};
+pub use collaboration_learning_policy::{
+    CollaborationGoal2LimitsV1, CollaborationLearningError, CollaborationLearningPolicyV1,
+    CollaborationPolicyAxisV1, CollaborationRepairV1, CollaborationSpecialistInvocationV1,
+    CollaborationStopV1, CollaborationVerificationV1, COLLABORATION_CONTEXT_BUDGET_COMPACT_BPS,
+    COLLABORATION_CONTEXT_BUDGET_EXPANDED_BPS, COLLABORATION_LEARNING_POLICY_SCHEMA,
+};
+pub use collaboration_learning_projection::{
+    CollaborationDerivedStopReasonV1, CollaborationLearningAssignmentV1,
+    CollaborationLearningContextReceiptV1, CollaborationLearningExerciseV1,
+    CollaborationLearningLaneActorV1, CollaborationLearningLaneAssignmentV1,
+    CollaborationLearningLaneExerciseV1, CollaborationLearningOutputKindV1,
+    CollaborationLearningWorkerAttemptV1, COLLABORATION_LEARNING_ASSIGNMENT_SCHEMA,
+    COLLABORATION_LEARNING_ASSIGNMENT_SCHEMA_METADATA_KEY,
+    COLLABORATION_LEARNING_ASSIGNMENT_SUMMARY,
+    COLLABORATION_LEARNING_CASE_BINDING_SHA256_METADATA_KEY,
+    COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY,
+    COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY,
+    COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY,
+    COLLABORATION_LEARNING_CONTEXT_RECEIPT_SCHEMA,
+    COLLABORATION_LEARNING_CONTEXT_SCHEMA_METADATA_KEY, COLLABORATION_LEARNING_EXERCISE_SCHEMA,
+    COLLABORATION_LEARNING_PLAN_REQUIRED_INDEPENDENT_VERIFIER_METADATA_KEY,
+    COLLABORATION_LEARNING_POLICY_JSON_METADATA_KEY,
+    COLLABORATION_LEARNING_POLICY_SHA256_METADATA_KEY,
+    COLLABORATION_LEARNING_SPECIALIST_MODEL_METADATA_KEY,
+    COLLABORATION_LEARNING_SPECIALIST_OUTPUT_KIND_METADATA_KEY,
+    COLLABORATION_LEARNING_SPECIALIST_REPAIR_MODEL_METADATA_KEY,
+    COLLABORATION_LEARNING_SPECIALIST_STEP_ID_METADATA_KEY,
+    COLLABORATION_LEARNING_VERIFIER_MODEL_METADATA_KEY,
+    COLLABORATION_LEARNING_VERIFIER_REPAIR_MODEL_METADATA_KEY,
+    COLLABORATION_LEARNING_VERIFIER_STEP_ID_METADATA_KEY,
 };
 pub use loss_aware_work_queue::{
     ClaimedWork, LossAwareWorkQueue, WorkEnqueueOutcome, WorkEnqueueResult, WorkQueueMetrics,
