@@ -236,6 +236,8 @@ pub(crate) fn recover_adaptive_worker(
         run_context.clone(),
         collaboration_id.to_string(),
         recovery_stage.clone(),
+        #[cfg(feature = "realworld-eval")]
+        recovery_request_id.clone(),
         adaptive_model_role(&spec.role, &spec.output_kind),
         replacement_model.to_string(),
         spec.prompt.clone(),

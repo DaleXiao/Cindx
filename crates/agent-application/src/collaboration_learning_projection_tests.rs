@@ -372,6 +372,68 @@ mod contract_tests {
         }
         event
     }
+    fn real_worker_event(
+        sequence: u64,
+        start: bool,
+        request: &str,
+        model: &str,
+        success: bool,
+    ) -> Event {
+        let mut event = worker_event(sequence, start, request, model, false, success);
+        for key in [
+            COLLABORATION_LEARNING_CONTEXT_SCHEMA_METADATA_KEY,
+            COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY,
+            COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY,
+            COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY,
+        ] {
+            event.metadata.remove(key);
+        }
+        event
+            .metadata
+            .insert("stage".into(), "specialist-runtime".into());
+        event
+    }
+    fn committed_context_event(
+        sequence: u64,
+        request: &str,
+        model: &str,
+        ordinal: u64,
+        payload: char,
+        bytes: u64,
+    ) -> Event {
+        let mut event = event(sequence, EventKind::TaskStatusChanged);
+        event.summary = COLLABORATION_LEARNING_CONTEXT_COMMITTED_SUMMARY.into();
+        event.metadata.extend([
+            (PLAN.into(), d('a')),
+            (COLLABORATION.into(), "fixture-collaboration".into()),
+            (REQUEST.into(), request.into()),
+            (STEP.into(), "specialist".into()),
+            ("stage".into(), "specialist-runtime".into()),
+            ("model".into(), model.into()),
+            (
+                COLLABORATION_LEARNING_WORKER_TURN_ORDINAL_METADATA_KEY.into(),
+                ordinal.to_string(),
+            ),
+            (
+                COLLABORATION_LEARNING_CONTEXT_SCHEMA_METADATA_KEY.into(),
+                COLLABORATION_LEARNING_CONTEXT_RECEIPT_SCHEMA.into(),
+            ),
+            (
+                COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY.into(),
+                "5000".into(),
+            ),
+            (
+                COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY.into(),
+                d(payload),
+            ),
+            (
+                COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY.into(),
+                bytes.to_string(),
+            ),
+            (REQUEST_PAYLOAD.into(), d(payload)),
+        ]);
+        event
+    }
     fn outcome(
         policy: &CollaborationLearningPolicyV1,
         repair: bool,
@@ -551,5 +613,104 @@ mod contract_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("censored") && error.contains("declared and actual"));
+    }
+
+    #[test]
+    fn agent_collaboration_learning_offline_adapter_contract_projects_pre_dispatch_committed_context(
+    ) {
+        let policy = policy(CollaborationRepairV1::FailFast);
+        let outcome = outcome(&policy, false);
+        let events = vec![
+            assignment(&policy, "specialist-model", None),
+            real_worker_event(3, true, "one", "specialist-model", true),
+            committed_context_event(4, "one", "specialist-model", 1, '8', 64),
+            committed_context_event(5, "one", "specialist-model", 2, '9', 96),
+            real_worker_event(6, false, "one", "specialist-model", true),
+        ];
+
+        let projected = CollaborationLearningExerciseV1::from_events(&events, &outcome).unwrap();
+        let context = &projected.lanes[0].attempts[0].context;
+        assert_eq!(context.budget_bps, 5_000);
+        assert_eq!(context.bytes, 160);
+        assert_ne!(context.payload_sha256, d('8'));
+        assert_ne!(context.payload_sha256, d('9'));
+        assert_eq!(
+            CollaborationLearningExerciseV1::from_events(&events, &outcome).unwrap(),
+            projected
+        );
+    }
+
+    #[test]
+    fn agent_collaboration_learning_offline_adapter_contract_censors_invalid_committed_context() {
+        let policy = policy(CollaborationRepairV1::FailFast);
+        let outcome = outcome(&policy, false);
+        let valid = vec![
+            assignment(&policy, "specialist-model", None),
+            real_worker_event(3, true, "one", "specialist-model", true),
+            committed_context_event(4, "one", "specialist-model", 1, '8', 64),
+            committed_context_event(5, "one", "specialist-model", 2, '9', 96),
+            real_worker_event(6, false, "one", "specialist-model", true),
+        ];
+        let censored = |events: &[Event]| {
+            CollaborationLearningExerciseV1::from_events(events, &outcome)
+                .unwrap_err()
+                .to_string()
+                .contains("censored")
+        };
+
+        let mut missing = valid.clone();
+        missing.drain(2..4);
+        assert!(censored(&missing));
+
+        let mut duplicate = valid.clone();
+        duplicate[3].metadata.insert(
+            COLLABORATION_LEARNING_WORKER_TURN_ORDINAL_METADATA_KEY.into(),
+            "1".into(),
+        );
+        assert!(censored(&duplicate));
+
+        for (key, value) in [
+            (PLAN, d('f')),
+            (STEP, "other-step".into()),
+            ("model", "other-model".into()),
+            (
+                COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY,
+                "4999".into(),
+            ),
+            (REQUEST_PAYLOAD, d('f')),
+            (EPOCH, "1".into()),
+        ] {
+            let mut tampered = valid.clone();
+            tampered[2].metadata.insert(key.into(), value);
+            assert!(censored(&tampered), "tamper for {key} was accepted");
+        }
+
+        let mut after_finish = valid.clone();
+        after_finish[2].sequence = 7;
+        after_finish[2].id = EventId("7".into());
+        after_finish.remove(3);
+        after_finish.swap(2, 3);
+        assert!(censored(&after_finish));
+
+        let mut duplicated_source = valid;
+        duplicated_source[1].metadata.extend([
+            (
+                COLLABORATION_LEARNING_CONTEXT_SCHEMA_METADATA_KEY.into(),
+                COLLABORATION_LEARNING_CONTEXT_RECEIPT_SCHEMA.into(),
+            ),
+            (
+                COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY.into(),
+                "5000".into(),
+            ),
+            (
+                COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY.into(),
+                d('8'),
+            ),
+            (
+                COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY.into(),
+                "64".into(),
+            ),
+        ]);
+        assert!(censored(&duplicated_source));
     }
 }

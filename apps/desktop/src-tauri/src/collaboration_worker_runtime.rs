@@ -20,6 +20,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     run_context: Metadata,
     collaboration_id: String,
     stage: String,
+    #[cfg(feature = "realworld-eval")] request_id: String,
     role: ModelRole,
     model: String,
     prompt: String,
@@ -33,6 +34,25 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     let started_at_ms = current_time_millis();
     let objective_epoch = run_context_steer_epoch(&run_context);
     let state = app.state::<AppState>();
+    #[cfg(feature = "realworld-eval")]
+    let collaboration_learning_enabled =
+        match crate::collaboration_learning_eval_runtime::policy_input_is_enabled(&run_context) {
+            Ok(value) => value,
+            Err(error) => return CollaborationCompletion::failed(error),
+        };
+    #[cfg(feature = "realworld-eval")]
+    let context_window_tokens =
+        match crate::collaboration_learning_eval_runtime::effective_worker_context_window_tokens(
+            &run_context,
+            config.context_window_tokens,
+        ) {
+            Ok(value) => value,
+            Err(error) => return CollaborationCompletion::failed(error),
+        };
+    #[cfg(not(feature = "realworld-eval"))]
+    let context_window_tokens = config.context_window_tokens;
+    #[cfg(feature = "realworld-eval")]
+    let context_receipt_task_id = task_id.clone();
     let allow_tools = access.tool_policy != WorkflowToolPolicy::None;
     let registry = if allow_tools {
         match tool_registry_for_state(&state, &workspace_root) {
@@ -44,7 +64,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     };
     let tools = if let Some(registry) = registry.as_ref() {
         let exposed = registry
-            .exposure_plan(&prompt, config.context_window_tokens)
+            .exposure_plan(&prompt, context_window_tokens)
             .inline;
         match &access.tool_policy {
             WorkflowToolPolicy::None => Vec::new(),
@@ -94,6 +114,7 @@ pub(crate) fn complete_collaboration_worker_with_tools(
     let mut evidence = Vec::new();
     let mut first_delta_at_ms = None;
     let stage_class = collaboration_worker_stage_class(&stage, &role);
+    let mut worker_turn_ordinal = 0usize;
 
     loop {
         if branch_cancellation
@@ -147,13 +168,14 @@ pub(crate) fn complete_collaboration_worker_with_tools(
         });
 
         let max_output_tokens = bounded_max_output_tokens(
-            config.context_window_tokens,
+            context_window_tokens,
             max_output_tokens.clamp(256, COLLABORATION_MAX_OUTPUT_TOKENS),
         );
+        worker_turn_ordinal = worker_turn_ordinal.saturating_add(1);
         let prepared_turn = match worker.prepare_model_turn(
             Some(&config.agent_system_prompt),
             Some(&trusted_context),
-            config.context_window_tokens,
+            context_window_tokens,
             max_output_tokens,
         ) {
             Ok(prepared_turn) => prepared_turn,
@@ -274,34 +296,104 @@ pub(crate) fn complete_collaboration_worker_with_tools(
                 );
             }
         }
-        let mut partial_output = String::new();
-        let mut stream_progress = ModelStreamProgress::new();
-        let response = provider.complete_streaming_cancellable(
-            request,
-            |delta| {
-                if !delta.is_empty() {
-                    first_delta_at_ms.get_or_insert_with(current_time_millis);
-                    partial_output.push_str(delta);
+        #[cfg(feature = "realworld-eval")]
+        let prepared_evaluation_request = collaboration_learning_enabled
+            .then(|| StreamingModelProvider::prepare_streaming_request(&provider, &request));
+        #[cfg(feature = "realworld-eval")]
+        if let Some(Ok(prepared)) = prepared_evaluation_request.as_ref() {
+            let Some((request_payload_sha256, request_body_bytes)) = prepared.payload_receipt()
+            else {
+                if let Some(attempt) = model_attempt {
+                    let _ = attempt.settle_unknown();
                 }
                 if let Some(control) = cancellation.as_ref() {
-                    stream_progress.observe(
-                        control,
-                        objective_epoch,
-                        "model_stream",
-                        &stage,
-                        &partial_output,
-                    );
+                    control.finish_model_call_at(objective_epoch);
                 }
-            },
-            || {
-                cancellation.as_ref().is_some_and(|control| {
-                    collaboration_stage_should_interrupt(control, stage_class)
-                        || !control.preparation_epoch_is_current(objective_epoch)
-                }) || branch_cancellation
-                    .as_ref()
-                    .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
-            },
-        );
+                return CollaborationCompletion::failed_worker(
+                    AgentFailure::internal(
+                        "prepared_request_receipt_missing",
+                        "worker prepared request has no safe encoded payload receipt",
+                    ),
+                    None,
+                    current_time_millis().saturating_sub(started_at_ms),
+                    worker.completion_usage("isolated_evidence_v2"),
+                    evidence,
+                );
+            };
+            if let Err(error) =
+                crate::collaboration_learning_eval_runtime::record_context_committed_if_enabled(
+                    &state,
+                    &context_receipt_task_id,
+                    &run_context,
+                    &collaboration_id,
+                    &evidence_source,
+                    &request_id,
+                    &stage,
+                    &model,
+                    worker_turn_ordinal,
+                    request_payload_sha256,
+                    request_body_bytes,
+                )
+            {
+                if let Some(attempt) = model_attempt {
+                    let _ = attempt.settle_unknown();
+                }
+                if let Some(control) = cancellation.as_ref() {
+                    control.finish_model_call_at(objective_epoch);
+                }
+                return CollaborationCompletion::failed_worker(
+                    AgentFailure::internal(
+                        "context_receipt_persistence_failed",
+                        format!("worker context receipt failed before provider dispatch: {error}"),
+                    ),
+                    None,
+                    current_time_millis().saturating_sub(started_at_ms),
+                    worker.completion_usage("isolated_evidence_v2"),
+                    evidence,
+                );
+            }
+        }
+        let mut partial_output = String::new();
+        let mut stream_progress = ModelStreamProgress::new();
+        let mut on_delta = |delta: &str| {
+            if !delta.is_empty() {
+                first_delta_at_ms.get_or_insert_with(current_time_millis);
+                partial_output.push_str(delta);
+            }
+            if let Some(control) = cancellation.as_ref() {
+                stream_progress.observe(
+                    control,
+                    objective_epoch,
+                    "model_stream",
+                    &stage,
+                    &partial_output,
+                );
+            }
+        };
+        let mut should_cancel = || {
+            cancellation.as_ref().is_some_and(|control| {
+                collaboration_stage_should_interrupt(control, stage_class)
+                    || !control.preparation_epoch_is_current(objective_epoch)
+            }) || branch_cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::SeqCst))
+        };
+        #[cfg(feature = "realworld-eval")]
+        let response = match prepared_evaluation_request {
+            Some(Ok(prepared)) => StreamingModelProvider::complete_prepared_streaming_cancellable(
+                &provider,
+                &prepared,
+                &mut on_delta,
+                &mut should_cancel,
+            ),
+            Some(Err(error)) => Err(error),
+            None => {
+                provider.complete_streaming_cancellable(request, &mut on_delta, &mut should_cancel)
+            }
+        };
+        #[cfg(not(feature = "realworld-eval"))]
+        let response =
+            provider.complete_streaming_cancellable(request, &mut on_delta, &mut should_cancel);
         if let Some(attempt) = model_attempt {
             match &response {
                 Ok(response) => {

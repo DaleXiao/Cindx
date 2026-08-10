@@ -66,3 +66,38 @@ impl fmt::Debug for PreparedStreamingModelRequest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{Metadata, ModelRole};
+
+    fn request() -> ModelRequest {
+        ModelRequest {
+            role: ModelRole::Executor,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            mode: crate::ModelCallMode::Streaming,
+            metadata: Metadata::new(),
+        }
+    }
+
+    #[test]
+    fn agent_collaboration_learning_offline_adapter_contract_encoded_payload_receipt_exposes_only_digest_and_size(
+    ) {
+        let prepared = PreparedStreamingModelRequest::encoded("{\"safe\":true}".to_string(), 3);
+
+        let (digest, bytes) = prepared.payload_receipt().expect("encoded receipt");
+
+        assert_eq!(bytes, 13);
+        assert_eq!(digest, request_payload_sha256(b"{\"safe\":true}"));
+    }
+
+    #[test]
+    fn agent_collaboration_learning_offline_adapter_contract_deferred_payload_has_no_encoded_receipt(
+    ) {
+        let prepared = PreparedStreamingModelRequest::deferred(request());
+
+        assert_eq!(prepared.payload_receipt(), None);
+    }
+}

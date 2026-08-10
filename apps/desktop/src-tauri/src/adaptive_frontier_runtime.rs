@@ -81,6 +81,12 @@ pub(super) fn run_adaptive_frontier(
     } = context;
     let max_step_attempts =
         effective_workflow_step_attempt_budget(prompt_genome, &workflow_checkpoint);
+    #[cfg(feature = "realworld-eval")]
+    let max_step_attempts =
+        crate::collaboration_learning_eval_runtime::effective_workflow_step_attempts(
+            run_context,
+            max_step_attempts,
+        )?;
     let mut outputs = workflow_checkpoint.completed_outputs();
     let mut evidence_by_step = checkpoint_evidence_by_step(&workflow_checkpoint);
 

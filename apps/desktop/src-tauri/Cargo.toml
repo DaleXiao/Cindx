@@ -11,7 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["lancedb-store"]
 lancedb-store = ["agent-rag/lancedb-store"]
-realworld-eval = []
+realworld-eval = ["agent-application/collaboration-learning-offline"]
 
 [[bin]]
 name = "cindx-agent-realworld-eval"

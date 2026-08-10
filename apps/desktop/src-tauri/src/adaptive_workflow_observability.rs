@@ -188,6 +188,16 @@ pub(super) fn record_adaptive_workflow_planned(
             ),
         )
         .map_err(|error| error.to_string())?;
+        #[cfg(feature = "realworld-eval")]
+        crate::collaboration_learning_eval_runtime::append_workflow_assignment_if_enabled(
+            &mut store,
+            task_id,
+            run_context,
+            collaboration_id,
+            workflow_plan,
+            execution_contract.verification_required,
+        )
+        .map_err(|error| error.to_string())?;
     }
     append_workflow_checkpoint_event(
         state,

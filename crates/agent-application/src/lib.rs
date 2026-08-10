@@ -2,6 +2,8 @@ mod artifacts;
 mod collaboration_learning_admission;
 mod collaboration_learning_policy;
 mod collaboration_learning_projection;
+#[cfg(feature = "collaboration-learning-offline")]
+mod collaboration_learning_replay;
 mod loss_aware_work_queue;
 mod outcome_evidence;
 mod outcome_projection;
@@ -18,17 +20,18 @@ pub use artifacts::{
     AgentOutputArtifact,
 };
 pub use collaboration_learning_admission::{
-    CollaborationLearningAggregateStatusV1, CollaborationLearningAggregateV1,
-    CollaborationLearningArmOrderV1, CollaborationLearningArmV1, CollaborationLearningCandidateV1,
-    CollaborationLearningCensorReasonV1, CollaborationLearningCensorReceiptV1,
-    CollaborationLearningComparisonBindingV1, CollaborationLearningComparisonHashesV1,
-    CollaborationLearningConfigV1, CollaborationLearningEvidenceSetV1,
-    CollaborationLearningFreezeReasonV1, CollaborationLearningOfflineAdmissionStatusV1,
-    CollaborationLearningOfflineAdmissionV1, CollaborationLearningPairV1,
-    CollaborationLearningReviewReceiptV1, CollaborationLearningSplitV1,
-    CollaborationLearningTrialV1, COLLABORATION_LEARNING_CANDIDATE_SCHEMA,
-    COLLABORATION_LEARNING_COMPARISON_SCHEMA, COLLABORATION_LEARNING_CONFIG_SCHEMA,
-    COLLABORATION_LEARNING_OFFLINE_ADMISSION_SCHEMA, COLLABORATION_LEARNING_REVIEW_SCHEMA,
+    collaboration_learning_physical_run_sha256, CollaborationLearningAggregateStatusV1,
+    CollaborationLearningAggregateV1, CollaborationLearningArmOrderV1, CollaborationLearningArmV1,
+    CollaborationLearningCandidateV1, CollaborationLearningCensorReasonV1,
+    CollaborationLearningCensorReceiptV1, CollaborationLearningComparisonBindingV1,
+    CollaborationLearningComparisonHashesV1, CollaborationLearningConfigV1,
+    CollaborationLearningEvidenceSetV1, CollaborationLearningFreezeReasonV1,
+    CollaborationLearningOfflineAdmissionStatusV1, CollaborationLearningOfflineAdmissionV1,
+    CollaborationLearningPairV1, CollaborationLearningReviewReceiptV1,
+    CollaborationLearningSplitV1, CollaborationLearningTrialV1,
+    COLLABORATION_LEARNING_CANDIDATE_SCHEMA, COLLABORATION_LEARNING_COMPARISON_SCHEMA,
+    COLLABORATION_LEARNING_CONFIG_SCHEMA, COLLABORATION_LEARNING_OFFLINE_ADMISSION_SCHEMA,
+    COLLABORATION_LEARNING_REVIEW_SCHEMA,
 };
 pub use collaboration_learning_policy::{
     CollaborationGoal2LimitsV1, CollaborationLearningError, CollaborationLearningPolicyV1,
@@ -47,6 +50,7 @@ pub use collaboration_learning_projection::{
     COLLABORATION_LEARNING_CASE_BINDING_SHA256_METADATA_KEY,
     COLLABORATION_LEARNING_CONTEXT_BUDGET_BPS_METADATA_KEY,
     COLLABORATION_LEARNING_CONTEXT_BYTES_METADATA_KEY,
+    COLLABORATION_LEARNING_CONTEXT_COMMITTED_SUMMARY,
     COLLABORATION_LEARNING_CONTEXT_PAYLOAD_SHA256_METADATA_KEY,
     COLLABORATION_LEARNING_CONTEXT_RECEIPT_SCHEMA,
     COLLABORATION_LEARNING_CONTEXT_SCHEMA_METADATA_KEY, COLLABORATION_LEARNING_EXERCISE_SCHEMA,
@@ -60,6 +64,13 @@ pub use collaboration_learning_projection::{
     COLLABORATION_LEARNING_VERIFIER_MODEL_METADATA_KEY,
     COLLABORATION_LEARNING_VERIFIER_REPAIR_MODEL_METADATA_KEY,
     COLLABORATION_LEARNING_VERIFIER_STEP_ID_METADATA_KEY,
+    COLLABORATION_LEARNING_WORKER_TURN_ORDINAL_METADATA_KEY,
+};
+#[cfg(feature = "collaboration-learning-offline")]
+pub use collaboration_learning_replay::{
+    CollaborationLearningOfflineEntryV1, CollaborationLearningOfflineGenesisV1,
+    CollaborationLearningOfflineReplayV1, COLLABORATION_LEARNING_OFFLINE_ENTRY_SCHEMA,
+    COLLABORATION_LEARNING_OFFLINE_GENESIS_SCHEMA,
 };
 pub use loss_aware_work_queue::{
     ClaimedWork, LossAwareWorkQueue, WorkEnqueueOutcome, WorkEnqueueResult, WorkQueueMetrics,

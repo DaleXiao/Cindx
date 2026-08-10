@@ -254,6 +254,8 @@ pub(super) fn execute_adaptive_wave(
             let run_context = run_context.clone();
             let collaboration_id = collaboration_id.to_string();
             let stage = spec.stage.clone();
+            #[cfg(feature = "realworld-eval")]
+            let request_id = spec.request_id.clone();
             let model = spec.model.clone();
             let role = adaptive_model_role(&spec.role, &spec.output_kind);
             let prompt = spec.prompt.clone();
@@ -272,6 +274,8 @@ pub(super) fn execute_adaptive_wave(
                     run_context,
                     collaboration_id,
                     stage,
+                    #[cfg(feature = "realworld-eval")]
+                    request_id,
                     role,
                     model,
                     prompt,
