@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.2.30`
+Current application version: `0.2.31`
 
 Last code-fact review: `2026-08-10`
 
@@ -197,6 +197,6 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   the provider campaign surface is not fully isolated from desktop code.
 - Current evidence does not establish general Auto/Pro superiority, successful
   GEPA self-improvement, or Fugu Ultra parity.
-- The published `v0.2.30` archive is Apple Silicon (`arm64`) and locally
-  ad-hoc-signed. A normal-user distribution still needs the appropriate Apple
-  signing and notarization path.
+- The installed `0.2.31` validation build and published `v0.2.30` archive are
+  Apple Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution
+  still needs the appropriate Apple signing and notarization path.
