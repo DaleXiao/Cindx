@@ -187,13 +187,23 @@ conservative Workflow evaluation run budget. Non-positive baseline evidence,
 any censor, safety or preservation failure, resource regression, or no uplift
 freezes the collaboration type.
 
-The new binary only performs a clean-source, case, provider/model-binding, and
-external-output preflight. The tracked manifest fixes
-`execution_authorized=false`; the private online authorization has not been
-created, and provider-action reservation and execution are not wired. No
-provider evaluation was run. V12 remains unchanged, and neither this protocol
-nor its offline records can publish a prompt profile, enter production
-learning, or authorize serving.
+Goal 3E adds a feature-gated, once-authorized successor path without changing
+the tracked protocol. The authorization binary is provider-free and binds the
+canonical preflight receipt, current clean source authority, redacted
+provider/model configuration, fixed matrix and budgets, new external output
+root, and exact execute-binary digest into a private 15-minute receipt. The
+execute binary revalidates those bindings, consumes that receipt and output
+root once, durably reserves the campaign, cell, and arm before model work, and
+can finish only as ready for independent review, frozen, or censored. Recovery
+never resumes or retries a started physical run.
+
+This is implementation and deterministic contract evidence only. No private
+authorization was minted and no provider evaluation was run, so there is no
+uplift claim. Actual execution still requires another explicit user
+confirmation of the exact merged HEAD, preflight and execute-runner digests,
+provider binding, three-pair/six-run matrix, fixed maximum campaign budget, and
+one-shot/no-retry consequence. V12 and production routing, prompt serving,
+permissions, safety, recovery, and history remain unchanged.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 

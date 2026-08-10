@@ -38,6 +38,16 @@ name = "cindx-collaboration-successor-preflight"
 path = "src/bin/collaboration_successor_preflight.rs"
 required-features = ["realworld-eval"]
 
+[[bin]]
+name = "cindx-collaboration-successor-authorize"
+path = "src/bin/collaboration_successor_authorize.rs"
+required-features = ["realworld-eval"]
+
+[[bin]]
+name = "cindx-collaboration-successor-execute"
+path = "src/bin/collaboration_successor_execute.rs"
+required-features = ["realworld-eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

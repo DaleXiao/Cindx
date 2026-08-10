@@ -234,9 +234,24 @@ per-run budget, the six-run campaign aggregate, and terminal freeze rules. The
 desktop preflight validates that authority, materializes the exact cases, and
 binds a clean Git HEAD/tree plus redacted provider and complete model-catalog
 digests into a new private receipt outside the repository. It performs zero
-provider calls and cannot authorize execution. A future online authorization
-must bind that receipt without overriding the tracked protocol; no such
-authorization, provider-action reservation, or online executor exists yet.
+provider calls and cannot authorize execution. Goal 3E adds two separate,
+feature-gated control-plane binaries around that receipt. Authorization is a
+provider-free, 15-minute, private one-shot capability bound to the current
+preflight, clean source, provider/model configuration, exact execute binary,
+fixed cells and budgets, and a new external output root. Execution revalidates
+and atomically consumes it, then persists campaign, cell, and arm reservations
+before the corresponding provider action. The private lifecycle journal is the
+recovery authority; any ambiguous, interrupted, tampered, expired, or reused
+state terminates frozen/censored and cannot resume a started physical run.
+
+The fixed controller admits the baseline before the candidate and the
+candidate before holdout, then exposes only ready-for-independent-review,
+frozen, or censored terminal state. It has no production serving or promotion
+consumer. No authorization receipt has been minted and the provider path has
+not been run; actual execution remains separately user-authorized against the
+exact merged HEAD, preflight and execute-runner digests, provider binding,
+three-pair/six-run matrix, fixed maximum campaign budget, and
+one-shot/no-retry consequence.
 
 ## Persistence and Background Work
 

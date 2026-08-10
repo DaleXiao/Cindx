@@ -266,6 +266,42 @@ pub(super) fn materialize_cells(
         .collect()
 }
 
+pub(super) fn validate_current_preflight_authority(
+    protocol: &ValidatedProtocol<'_>,
+    receipt: &SuccessorPreflightReceipt,
+    repo_root: &Path,
+    config: &ProviderConfig,
+    output_root: &Path,
+) -> Result<(), String> {
+    validate_preflight_snapshot(
+        protocol,
+        receipt,
+        &clean_source_binding(repo_root)?,
+        &provider_binding(config)?,
+        &materialize_cells(protocol)?,
+        output_root,
+    )
+}
+
+pub(super) fn validate_preflight_snapshot(
+    protocol: &ValidatedProtocol<'_>,
+    receipt: &SuccessorPreflightReceipt,
+    source: &SourceBindingReceipt,
+    provider: &ProviderBindingReceipt,
+    cells: &[MaterializedCellReceipt],
+    output_root: &Path,
+) -> Result<(), String> {
+    validate_preflight_authority(protocol, receipt)?;
+    if source != &receipt.source
+        || provider != &receipt.provider
+        || cells != receipt.cells
+        || receipt.output_root_sha256 != sha256_hex(output_root.as_os_str().as_encoded_bytes())
+    {
+        return Err("successor preflight no longer matches the current execution authority".into());
+    }
+    Ok(())
+}
+
 pub(super) fn build_receipt(
     protocol: &ValidatedProtocol<'_>,
     source: SourceBindingReceipt,
@@ -517,7 +553,7 @@ pub(super) fn validate_observed_pair_binding(
     Ok(())
 }
 
-fn validate_preflight_authority(
+pub(super) fn validate_preflight_authority(
     protocol: &ValidatedProtocol<'_>,
     receipt: &SuccessorPreflightReceipt,
 ) -> Result<(), String> {
@@ -606,7 +642,7 @@ fn sha256_json(value: &impl Serialize) -> Result<String, String> {
         .map_err(|error| format!("failed to hash frozen JSON: {error}"))
 }
 
-fn clean_source_binding(repo_root: &Path) -> Result<SourceBindingReceipt, String> {
+pub(super) fn clean_source_binding(repo_root: &Path) -> Result<SourceBindingReceipt, String> {
     let status = git_output(
         repo_root,
         &["status", "--porcelain", "--untracked-files=all"],
@@ -728,7 +764,7 @@ pub(super) fn validate_new_external_path(
     Ok(parent.join(name))
 }
 
-fn now_millis() -> Result<u64, String> {
+pub(super) fn now_millis() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
