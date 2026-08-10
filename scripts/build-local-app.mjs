@@ -44,7 +44,8 @@ const versionPaths = [
   path.join(tauriRoot, "tauri.conf.json"),
   path.join(tauriRoot, "Cargo.toml"),
   path.join(tauriRoot, "Cargo.lock"),
-  path.join(repoRoot, "docs", "CURRENT.md")
+  path.join(repoRoot, "docs", "CURRENT.md"),
+  path.join(repoRoot, "docs", "HANDOFF.md")
 ];
 const originals = new Map(
   versionPaths.map((filePath) => [filePath, fs.readFileSync(filePath, "utf8")])

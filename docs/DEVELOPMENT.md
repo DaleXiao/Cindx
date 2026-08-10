@@ -174,8 +174,9 @@ in-memory substitute.
 ## Local Production Build
 
 The local build script requires a clean Git tree, advances the patch version,
-stamps all version sources including `docs/CURRENT.md`, builds an Apple Silicon
-bundle, ad-hoc signs it, probes clean startup and fail-closed persistence,
+stamps all version sources including `docs/CURRENT.md` and `docs/HANDOFF.md`,
+builds an Apple Silicon bundle, ad-hoc signs it, probes clean startup and
+fail-closed persistence,
 creates a zip, and installs `/Applications/Cindx.app` unless `--no-install` is
 used.
 
@@ -197,7 +198,8 @@ must preserve source, user data, configuration, and the installed app.
 
 Release consistency requires:
 
-- identical version in package, lockfile, Tauri, Cargo, and `CURRENT.md`;
+- identical version in package, lockfile, Tauri, Cargo, `CURRENT.md`, and
+  `HANDOFF.md`;
 - clean source revision and annotated version tag;
 - passing release and shipping gates;
 - a verified bundle signature;

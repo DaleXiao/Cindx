@@ -11,7 +11,8 @@ const paths = {
   tauriConfig: path.join(root, "apps/desktop/src-tauri/tauri.conf.json"),
   cargoToml: path.join(root, "apps/desktop/src-tauri/Cargo.toml"),
   cargoLock: path.join(root, "apps/desktop/src-tauri/Cargo.lock"),
-  currentDoc: path.join(root, "docs/CURRENT.md")
+  currentDoc: path.join(root, "docs/CURRENT.md"),
+  handoffDoc: path.join(root, "docs/HANDOFF.md")
 };
 
 const packageJson = JSON.parse(fs.readFileSync(paths.packageJson, "utf8"));
@@ -20,6 +21,7 @@ const tauriConfig = JSON.parse(fs.readFileSync(paths.tauriConfig, "utf8"));
 const cargoToml = fs.readFileSync(paths.cargoToml, "utf8");
 const cargoLock = fs.readFileSync(paths.cargoLock, "utf8");
 const currentDoc = fs.readFileSync(paths.currentDoc, "utf8");
+const handoffDoc = fs.readFileSync(paths.handoffDoc, "utf8");
 const current = tauriConfig.version;
 const cargoVersion = cargoToml.match(/^\[package\][\s\S]*?^version = "([^"]+)"$/m)?.[1];
 const lockedVersion = cargoLock.match(
@@ -28,13 +30,17 @@ const lockedVersion = cargoLock.match(
 const documentedVersion = currentDoc.match(
   /^Current application version: `([^`]+)`$/m
 )?.[1];
+const handoffVersion = handoffDoc.match(
+  /^Current release version: `([^`]+)`$/m
+)?.[1];
 const versions = [
   packageJson.version,
   packageLock.version,
   packageLock.packages?.[""]?.version,
   cargoVersion,
   lockedVersion,
-  documentedVersion
+  documentedVersion,
+  handoffVersion
 ];
 if (versions.some((version) => version !== current)) {
   throw new Error(`Cindx version files are out of sync: ${[current, ...versions].join(", ")}`);
@@ -82,6 +88,13 @@ fs.writeFileSync(
   currentDoc.replace(
     /^Current application version: `[^`]+`$/m,
     `Current application version: \`${next}\``
+  )
+);
+fs.writeFileSync(
+  paths.handoffDoc,
+  handoffDoc.replace(
+    /^Current release version: `[^`]+`$/m,
+    `Current release version: \`${next}\``
   )
 );
 
