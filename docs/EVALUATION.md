@@ -103,8 +103,18 @@ evaluation projection rejects a Direct arm with workflow-worker exposure, a
 Workflow arm without its planned treatment, or any reintroduced anchor/reviewer
 competition. This is structure and observability evidence, not quality uplift.
 
-Complete the separately reviewed learning-policy goal before requesting the
-final narrow provider gate. Only then freeze a successor protocol that:
+Goal 3A adds a provider-free shadow outcome contract shared by Direct and
+Workflow. It derives bounded reward only from externally verified behavior
+after lifecycle, actual treatment exposure, preservation, safety, and resource
+receipts validate. Valid failures remain zero-score evidence; missing or
+tampered provenance is censored. The receipt does not write production learning
+evidence or authorize routing, prompt, memory, canary, or promotion changes.
+This closes a reward-plumbing prerequisite only; no provider run or matched
+uplift result was produced.
+
+Complete the remaining structured learning-policy and offline admission work
+before requesting the final narrow provider gate. Only then freeze a successor
+protocol that:
 
 1. uses one shared Conductor plan and varies only the execution treatment;
 2. proves both arms persist strategy and terminal receipts;

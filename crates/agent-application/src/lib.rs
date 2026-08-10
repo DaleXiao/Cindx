@@ -1,5 +1,7 @@
 mod artifacts;
 mod loss_aware_work_queue;
+mod outcome_evidence;
+mod outcome_projection;
 mod recovery;
 mod run_execution;
 mod run_lifecycle;
@@ -15,6 +17,13 @@ pub use artifacts::{
 pub use loss_aware_work_queue::{
     ClaimedWork, LossAwareWorkQueue, WorkEnqueueOutcome, WorkEnqueueResult, WorkQueueMetrics,
     WorkQueuePolicy, WorkRetryOutcome, WorkRetryResult,
+};
+pub use outcome_evidence::{
+    AgentExternalPostconditionV1, AgentExternalVerifierV1, AgentOutcomeDispositionV1,
+    AgentOutcomeEvidenceError, AgentOutcomeExposureV1, AgentOutcomeLifecycleBindingV1,
+    AgentOutcomeResourcesV1, AgentOutcomeTerminalResourcesV1, AgentOutcomeTerminalStatusV1,
+    AgentOutcomeUsageCompletenessV1, AgentOutcomeUsageV1, ExternallyVerifiedOutcomeV1,
+    EXTERNALLY_VERIFIED_OUTCOME_SCHEMA,
 };
 pub use recovery::{
     AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState, ResolvedAgentRecovery,

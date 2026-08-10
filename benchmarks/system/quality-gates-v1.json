@@ -41,6 +41,7 @@
       "agent-strategy-lifecycle-contract",
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
+      "agent-outcome-evidence-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -77,6 +78,7 @@
       "agent-strategy-lifecycle-contract",
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
+      "agent-outcome-evidence-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -156,6 +158,7 @@
       "agent-strategy-lifecycle-contract",
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
+      "agent-outcome-evidence-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -365,7 +368,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 5 passed; 0 failed"
+        "test result: ok. 6 passed; 0 failed"
       ]
     },
     {
@@ -506,6 +509,24 @@
       ],
       "required_output": [
         "test result: ok. 3 passed; 0 failed"
+      ]
+    },
+    {
+      "id": "agent-outcome-evidence-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-application",
+        "agent_outcome_evidence_contract_",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 8 passed; 0 failed",
+        "cindx.agent.externally-verified-outcome.v1"
       ]
     },
     {

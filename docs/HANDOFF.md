@@ -105,6 +105,23 @@ These are deterministic graph, safety, and attribution guarantees. No provider
 evaluation was run, so they do not establish quality, latency, token, or
 intelligence improvement.
 
+Goal 3A is complete in the current source:
+
+1. `agent-application` owns one bounded externally verified outcome receipt
+   shared by Direct and Workflow.
+2. The receipt binds strategy and terminal lifecycle, semantic execution plan,
+   actual Actor exposure, external postconditions, preservation, and resource
+   accounting before deriving reward.
+3. The same integer rule records positive, partial, and negative outcomes;
+   valid safety or preservation failures remain zero-score evidence, while
+   missing or tampered provenance is censored.
+4. Evaluation reuses this portable contract without writing
+   `LearningEvidenceV1` or changing production routing, prompts, memory,
+   permissions, provider calls, or serving.
+
+No provider evaluation was run, so this is deterministic reward-plumbing
+evidence, not an intelligence or collaboration-uplift result.
+
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
 1. `ff8c238` separated route/task-graph evidence from direct-finalizer evidence
@@ -131,13 +148,12 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-After explicit user confirmation, Goal 3 may teach structured expert invocation,
-context allocation, verification, repair, and stopping from externally
-verifiable outcomes. It must keep the Goal 2 graph and Owner authority fixed,
-collect continuously, and promote only discrete, reviewed candidates. A single
-fixed-budget narrow provider gate is allowed only after Goal 3 passes its
-deterministic review. No uplift freezes that collaboration type instead of
-changing the protocol repeatedly.
+After explicit user confirmation, Goal 3B may define a bounded policy over
+Specialist invocation, context allocation, verification, repair, and stopping
+from reviewed Goal 3A shadow receipts. It must keep the Goal 2 graph and Owner
+authority fixed, collect continuously, and promote only discrete reviewed
+candidates. Provider validation remains blocked until the remaining Goal 3
+deterministic review passes; no uplift freezes the collaboration type.
 
 ## Structural Risks
 

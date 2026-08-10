@@ -1,4 +1,5 @@
 use super::execution::{execute_case, CaseExecutionInput};
+use super::outcome_shadow::{project_shadow_outcome_pair, ShadowOutcomePairV1};
 use super::workflow_gepa_campaign_contract::{
     CampaignSplit, ProductPairReceipt, ProductRunReceipt, CAMPAIGN_PROJECT_ID,
 };
@@ -26,6 +27,10 @@ pub(super) struct MatchedRoutePairRun {
     pub(super) pair: ProductPairReceipt,
     pub(super) direct: RawRun,
     pub(super) workflow: RawRun,
+    #[allow(dead_code)]
+    pub(super) shadow_outcome_pair: Option<ShadowOutcomePairV1>,
+    #[allow(dead_code)]
+    pub(super) shadow_outcome_error: Option<String>,
 }
 
 struct EvaluationProfileEnvironment {
@@ -452,6 +457,8 @@ pub(super) fn execute_matched_route_pair(
         )
     };
     validate_matched_route_receipts(case, &direct_receipt, &workflow_receipt)?;
+    let (shadow_outcome_pair, shadow_outcome_error) =
+        project_shadow_outcome_pair(&direct, &workflow);
     let evaluation_id = format!(
         "route-treatment-pair-{}",
         &sha256_hex(
@@ -477,6 +484,8 @@ pub(super) fn execute_matched_route_pair(
         pair,
         direct,
         workflow,
+        shadow_outcome_pair,
+        shadow_outcome_error,
     })
 }
 
@@ -719,8 +728,8 @@ pub(super) fn project_scope(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::receipts::TreatmentExposureReceipt;
+    use super::*;
     use std::{collections::BTreeSet, fs};
 
     fn route_receipt(execution_mode: &str) -> ProductRunReceipt {
