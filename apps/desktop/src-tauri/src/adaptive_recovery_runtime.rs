@@ -151,6 +151,11 @@ pub(crate) fn recover_adaptive_worker(
             failure,
             prior_evidence,
         ),
+        AgentModelAttribution::service(
+            AgentService::Conductor,
+            AgentStage::Plan,
+            AgentModelProfile::Reasoning,
+        ),
     ) {
         Ok(instruction) => instruction,
         Err(error)
@@ -182,6 +187,10 @@ pub(crate) fn recover_adaptive_worker(
         &adaptive_model_role(&spec.role, &spec.output_kind),
         replacement_model,
         &recovery_request_id,
+        adaptive_step_attribution(
+            &spec.output_kind,
+            &adaptive_model_role(&spec.role, &spec.output_kind),
+        ),
         &recovery_metadata,
     )?;
     let recovered = complete_collaboration_worker_with_tools(
@@ -221,6 +230,10 @@ pub(crate) fn recover_adaptive_worker(
         replacement_model,
         &recovery_request_id,
         &recovered,
+        adaptive_step_attribution(
+            &spec.output_kind,
+            &adaptive_model_role(&spec.role, &spec.output_kind),
+        ),
         &recovery_metadata,
     )?;
     Ok(recovered)

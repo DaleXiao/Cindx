@@ -326,6 +326,12 @@ pub(super) fn repair_adaptive_uplift(
             truncate_for_collaboration(team_output, 14_000),
             anchor_section,
         ),
+        AgentModelAttribution::actor(
+            AgentActor::Specialist,
+            AgentStage::Plan,
+            AgentModelProfile::Utility,
+            AgentEffectAuthority::None,
+        ),
     ) {
         Ok(output) if !output.trim().is_empty() => output,
         Ok(_) => {

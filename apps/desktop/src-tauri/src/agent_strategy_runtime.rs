@@ -22,6 +22,7 @@ use self::finalization::{finalize_planned_run, PlannedRunFinalizeInput};
 use self::matched_route::{
     plan_from_shared_anchor, shared_anchor_from_context, MatchedRoutePlanningInput,
 };
+use self::recording::record_planned_agent_run as record_plan;
 #[cfg(test)]
 pub(crate) use self::preparation::should_evaluate_strategy_profile;
 pub(crate) use self::preparation::{
@@ -186,8 +187,7 @@ pub(crate) fn plan_agent_run(
             .apply_to_context(run_context)
             .map_err(CollaborationStageError::Failed)?;
         run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
-        recording::record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
-            .map_err(CollaborationStageError::Failed)?;
+        record_plan(state, task_id, run_context, &planned, &profile_source, cancellation)?;
         return Ok(planned);
     }
 
@@ -230,8 +230,7 @@ pub(crate) fn plan_agent_run(
             .apply_to_context(run_context)
             .map_err(CollaborationStageError::Failed)?;
         run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
-        recording::record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
-            .map_err(CollaborationStageError::Failed)?;
+        record_plan(state, task_id, run_context, &planned, &profile_source, cancellation)?;
         return Ok(planned);
     }
     let fallback_model = requirements::compatible_route_fallback_model(
@@ -409,8 +408,7 @@ pub(crate) fn plan_agent_run(
         .apply_to_context(run_context)
         .map_err(CollaborationStageError::Failed)?;
     run_context.insert("prompt_profile_source".to_string(), profile_source.clone());
-    recording::record_planned_agent_run(state, task_id, run_context, &planned, &profile_source)
-        .map_err(CollaborationStageError::Failed)?;
+    record_plan(state, task_id, run_context, &planned, &profile_source, cancellation)?;
     Ok(planned)
 }
 

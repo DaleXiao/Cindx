@@ -67,6 +67,22 @@ node scripts/run-quality-gates.mjs \
   --report target/quality-gate-report.json
 ```
 
+The `ci-contract`, `control-plane`, and `full` profiles include the
+`agent-strategy-lifecycle-contract`, `agent-strategy-control-contract`, and
+`agent-terminal-lifecycle-contract` gates. Together they check preparation and
+start linearization, selected-decision recovery, success/failure/cancellation
+terminal linkage, exactly-once replay, and evaluation fail-closed behavior
+without contacting a provider:
+
+The lifecycle filters include the preparation failure race against cancellation
+and steer, including exactly-once terminal persistence for the winning epoch.
+
+```sh
+node scripts/run-quality-gates.mjs \
+  --profile control-plane \
+  --report target/quality-gate-report.json
+```
+
 For a performance change, use two clean checkouts on the same machine:
 
 ```sh

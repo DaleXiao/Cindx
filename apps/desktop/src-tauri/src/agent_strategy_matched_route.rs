@@ -88,7 +88,7 @@ pub(super) fn plan_from_shared_anchor(
         run_context,
         &planned,
         input.profile_source,
-    )
-    .map_err(CollaborationStageError::Failed)?;
+        input.cancellation,
+    )?;
     Ok(planned)
 }

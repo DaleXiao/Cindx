@@ -5,6 +5,7 @@ mod run_execution;
 mod run_lifecycle;
 mod run_persistence;
 mod sessions;
+mod strategy_decision;
 mod terminal_commit;
 
 pub use artifacts::{
@@ -29,6 +30,14 @@ pub use run_persistence::{
 };
 pub use sessions::{
     project_session_lifecycle, SessionLifecycleInput, SessionLifecycleProjection, SessionTitleState,
+};
+pub use strategy_decision::{
+    insert_strategy_not_selected, strategy_receipt_is_explicitly_not_selected,
+    AgentStrategyDecisionReceipt, AgentStrategyReceiptError,
+    AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY, AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_NOT_SELECTED, AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_SCHEMA, AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_SELECTED, AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY,
 };
 pub use terminal_commit::{
     AgentTerminalCommitError, AgentTerminalCommitIdentity, AgentTerminalCommitState,

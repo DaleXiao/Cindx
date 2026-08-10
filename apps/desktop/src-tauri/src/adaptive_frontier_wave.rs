@@ -181,6 +181,7 @@ pub(super) fn prepare_adaptive_wave(
             &role,
             &spec.model,
             &spec.request_id,
+            adaptive_step_attribution(&spec.output_kind, &role),
             &metadata,
         )?;
     }

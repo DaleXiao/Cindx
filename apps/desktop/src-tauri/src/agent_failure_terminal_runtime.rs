@@ -2,11 +2,13 @@ use crate::{
     agent_loop_runtime::pause_agent_loop_for_control_stop,
     agent_query_commands::emit_agent_stream_delta,
     agent_read_model::{
-        agent_state_for_session, persist_agent_error_terminalization_in_transaction,
+        agent_state_for_session, agent_state_with_error_in_context,
+        persist_agent_error_terminalization_in_transaction,
     },
     agent_terminal_commit_runtime::persist_agent_terminal_once,
     app_state::AppState,
     collaboration_service::AgentCollaboration,
+    runtime_values::run_context_steer_epoch,
     suspended_run_runtime::clear_suspended_agent_run_for_context,
     view_models::AgentState,
 };
@@ -27,6 +29,55 @@ pub(crate) enum AgentFailureTerminalOutcome {
 pub(crate) enum AgentFailureLoopOutcome {
     Finished(AgentState),
     RestartAfterSteer,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum AgentPreparationFailureTerminalOutcome {
+    Finished(Result<AgentState, String>),
+    RestartAfterSteer,
+    Stopped,
+}
+
+pub(crate) fn commit_agent_preparation_failure_terminal(
+    state: &tauri::State<'_, AppState>,
+    run_context: &Metadata,
+    cancellation: &AgentRunControl,
+    display_message: String,
+) -> AgentPreparationFailureTerminalOutcome {
+    let session_id = run_context.get("session_id").map(String::as_str);
+    match commit_preparation_failure_with(
+        cancellation,
+        run_context_steer_epoch(run_context),
+        || agent_state_with_error_in_context(state, run_context, display_message),
+    ) {
+        Ok(RunTerminalCommit::Committed(state)) => {
+            AgentPreparationFailureTerminalOutcome::Finished(Ok(state))
+        }
+        Ok(RunTerminalCommit::RestartAfterSteer) => {
+            AgentPreparationFailureTerminalOutcome::RestartAfterSteer
+        }
+        Ok(RunTerminalCommit::Stopped(_)) => AgentPreparationFailureTerminalOutcome::Stopped,
+        Ok(RunTerminalCommit::AlreadyCommitted) => {
+            let state = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))
+                .and_then(|store| {
+                    agent_state_for_session(&store, None, session_id)
+                        .map_err(|error| error.to_string())
+                });
+            AgentPreparationFailureTerminalOutcome::Finished(state)
+        }
+        Err(error) => AgentPreparationFailureTerminalOutcome::Finished(Err(error)),
+    }
+}
+
+fn commit_preparation_failure_with<T, E>(
+    cancellation: &AgentRunControl,
+    expected_epoch: u64,
+    writer: impl FnOnce() -> Result<T, E>,
+) -> Result<RunTerminalCommit<T>, E> {
+    cancellation.commit_preparation_terminal_with(expected_epoch, writer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -149,6 +200,59 @@ pub(crate) fn commit_agent_failure_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_strategy_lifecycle_contract_preparation_failure_persists_only_for_the_winning_epoch() {
+        let failure = AgentRunControl::new("auto");
+        assert!(failure.begin_preparation());
+        let mut writes = 0usize;
+        assert_eq!(
+            commit_preparation_failure_with(&failure, 0, || {
+                writes += 1;
+                Ok::<_, ()>("failed")
+            })
+            .unwrap(),
+            RunTerminalCommit::Committed("failed")
+        );
+        assert_eq!(writes, 1);
+        assert_eq!(
+            commit_preparation_failure_with(&failure, 0, || {
+                writes += 1;
+                Ok::<_, ()>("duplicate")
+            })
+            .unwrap(),
+            RunTerminalCommit::AlreadyCommitted
+        );
+        assert_eq!(writes, 1);
+
+        let steered = AgentRunControl::new("auto");
+        assert!(steered.begin_preparation());
+        assert_eq!(steered.request_steer("new-objective"), Ok(true));
+        let mut steer_writer_ran = false;
+        assert_eq!(
+            commit_preparation_failure_with(&steered, 0, || {
+                steer_writer_ran = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+            RunTerminalCommit::RestartAfterSteer
+        );
+        assert!(!steer_writer_ran);
+
+        let cancelled = AgentRunControl::new("auto");
+        assert!(cancelled.begin_preparation());
+        assert!(cancelled.request_cancel());
+        let mut cancel_writer_ran = false;
+        assert!(matches!(
+            commit_preparation_failure_with(&cancelled, 0, || {
+                cancel_writer_ran = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+            RunTerminalCommit::Stopped(agent_runtime::RunStopReason::UserCancelled)
+        ));
+        assert!(!cancel_writer_ran);
+    }
 
     #[test]
     fn stale_failure_epoch_never_runs_the_terminal_writer() {

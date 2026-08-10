@@ -75,6 +75,11 @@ pub(super) fn attempt_adaptive_graph_replan(
         ModelRole::Planner,
         &conductor_model,
         planning_prompt,
+        AgentModelAttribution::service(
+            AgentService::Conductor,
+            AgentStage::Plan,
+            AgentModelProfile::Reasoning,
+        ),
     ) {
         Ok(response) => response,
         Err(error)
@@ -116,6 +121,11 @@ pub(super) fn attempt_adaptive_graph_replan(
         ModelRole::Planner,
         &conductor_model,
         repair_prompt,
+        AgentModelAttribution::service(
+            AgentService::Conductor,
+            AgentStage::Plan,
+            AgentModelProfile::Reasoning,
+        ),
     ) {
         Ok(response) => response,
         Err(error)

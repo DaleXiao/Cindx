@@ -49,6 +49,7 @@ fn infer_status_type(summary: &str, metadata: &Metadata) -> Option<EventTypeV1> 
         "Agent task paused" => Some(EventTypeV1::AgentRunPaused),
         "Agent task completed" => Some(EventTypeV1::AgentRunCompleted),
         "Agent task cancelled" => Some(EventTypeV1::AgentRunCancelled),
+        "Agent run decision selected" => Some(EventTypeV1::AgentRunDecisionSelected),
         _ => None,
     }
 }

@@ -21,6 +21,30 @@ Cloud providers reason and stream model output. The local app owns run identity,
 context assembly, tool exposure, permission decisions, effects, persistence,
 recovery, retrieval, memory, and the delivered result.
 
+## Runtime Ontology and Trace Attribution
+
+Current Agent execution uses separate dimensions instead of treating legacy
+role names as one ontology:
+
+- **Actor:** Owner, Specialist, or Independent Verifier.
+- **Stage:** plan, evidence, act, verify, or finalize.
+- **Model profile:** Primary, Reasoning, Verifier, or Utility.
+- **Service:** Conductor planning and background learning utilities are
+  services and are never recorded as Actors.
+
+The Owner alone owns permission-gated effects and final user delivery.
+Specialists contribute bounded internal plans or evidence. Independent
+Verifiers evaluate an artifact without effect authority. Utility-profile model
+calls can prepare internal synthesis but do not own final delivery.
+Background prompt mutation is recorded as a learning utility service, not a
+production Specialist.
+
+These fields are an event-local sidecar on current Agent model request events.
+Started and finished events reuse the same explicit attribution selected at the
+call site. Existing `role`, `stage`, model configuration slots, summaries, and
+event counts are preserved for compatibility; legacy events without the schema
+remain legacy and are not reclassified from display strings.
+
 ## Crate Ownership
 
 | Crate | Current owner responsibility |
@@ -91,6 +115,12 @@ constraints, context and profile fingerprints, and optional workflow identity.
 A compatibility router may produce shadow evidence, but it does not override a
 valid Conductor action.
 
+The selected plan also produces a strategy receipt bound to task, session,
+physical run, steer epoch, and semantic plan digest. Run control serializes a
+preparation checkpoint without entering execution, while one immediate SQLite
+transaction writes both the router event and selected decision. A cancellation
+or steer that wins first prevents that stale decision from being committed.
+
 ### 3. Retrieval and memory
 
 Workspace retrieval and durable memory are independent inputs:
@@ -142,8 +172,18 @@ candidate rather than restarting the actor.
 
 The completion transaction persists terminal event, result, artifacts,
 lifecycle, learning evidence, and cleanup under one attempt/epoch identity.
-Startup recovery uses durable events and checkpoints. Permission recovery and
-retry preserve logical lineage while keeping physical effects auditable.
+Its terminal identity keeps the existing exactly-once key and additionally
+validates the matching strategy receipt before a new terminal write. Post-start
+preparation failures arbitrate terminal persistence with cancellation and steer
+under the same run-control lock; a winning steer replays preparation.
+Each new physical attempt keeps session admission and run control registered
+until its durable start transaction commits. Initial start/message writes and
+continuation recovery-claim/start/replay writes are atomic; pending steers stay
+queued for the resumed attempt instead of invalidating its start.
+Startup recovery uses durable events and checkpoints and restores the matching
+receipt; a run that ended before selection records `not_selected`. Pause and
+permission wait are intentionally nonterminal. Permission recovery and retry
+preserve logical lineage while keeping physical effects auditable.
 
 ## Persistence and Background Work
 

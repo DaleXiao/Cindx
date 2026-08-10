@@ -1,8 +1,9 @@
 use crate::control_steer::{restore_stage_usage, snapshot_stage_usage, RunPhase, RunStageUsage};
 pub use crate::control_steer::{
     RunControlSnapshot, RunEpochLease, RunEpochLeaseOutcome, RunExecutionStepCommit,
-    RunPreparationCommit, RunProgressSnapshot, RunStageUsageSnapshot, RunSteer,
-    RunSteerBatchCommit, RunSteerRequestCommit, RunTerminalCommit, RunToolCallStart,
+    RunPreparationCheckpoint, RunPreparationCommit, RunProgressSnapshot, RunStageUsageSnapshot,
+    RunStartCheckpoint, RunSteer, RunSteerBatchCommit, RunSteerRequestCommit, RunTerminalCommit,
+    RunToolCallStart,
 };
 use crate::resource_ledger::{
     ModelAttemptUsage, PhysicalModelAttempt, ResourceAdmissionError, RunResourceLedger,
@@ -29,7 +30,6 @@ mod steer_commit;
 mod tool_batch;
 #[path = "control_tool_continuation.rs"]
 mod tool_continuation;
-
 const PARTIAL_OUTPUT_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,6 +836,31 @@ impl AgentRunControl {
             self.commit_preparation_with(expected_epoch, || Ok::<(), std::convert::Infallible>(())),
             Ok(RunPreparationCommit::Committed { .. })
         )
+    }
+
+    /// Commits a preparation-side durable checkpoint while steering and
+    /// stopping are serialized behind the same state lock. Unlike the final
+    /// preparation handoff, this keeps the run in `Preparing`.
+    pub fn commit_preparation_checkpoint_with<T, E, F>(
+        &self,
+        expected_epoch: u64,
+        commit: F,
+    ) -> Result<RunPreparationCheckpoint<T>, E>
+    where
+        F: FnOnce() -> Result<T, E>,
+    {
+        let mut state = self.state.lock().expect("run control state poisoned");
+        if let Some(reason) = self.refresh_stop_reason_locked(&mut state, Instant::now()) {
+            return Ok(RunPreparationCheckpoint::Stopped(reason));
+        }
+        if state.phase != RunPhase::Preparing
+            || !state.pending_steers.is_empty()
+            || state.applied_steer_epoch != expected_epoch
+            || self.steer_epoch.load(Ordering::SeqCst) != expected_epoch
+        {
+            return Ok(RunPreparationCheckpoint::RestartAfterSteer);
+        }
+        commit().map(RunPreparationCheckpoint::Committed)
     }
 
     /// Commits all preparation-side persistence while steering and stopping are

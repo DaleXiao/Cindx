@@ -76,6 +76,12 @@ pub(crate) fn run_collaboration_candidates(
             &ModelRole::Planner,
             &spec.model,
             &spec.request_id,
+            AgentModelAttribution::actor(
+                AgentActor::Specialist,
+                AgentStage::Plan,
+                AgentModelProfile::Reasoning,
+                AgentEffectAuthority::ReadOnly,
+            ),
             &Metadata::new(),
         )?;
     }
@@ -236,6 +242,12 @@ pub(crate) fn run_collaboration_candidates(
             &spec.model,
             &spec.request_id,
             completion,
+            AgentModelAttribution::actor(
+                AgentActor::Specialist,
+                AgentStage::Plan,
+                AgentModelProfile::Reasoning,
+                AgentEffectAuthority::ReadOnly,
+            ),
             &Metadata::new(),
         )?;
         if let Some(content) = completion
@@ -266,6 +278,12 @@ pub(crate) fn run_collaboration_candidates(
         ModelRole::Reviewer,
         &config.model_for_role(&ModelRole::Reviewer),
         build_collaboration_arbiter_prompt(prompt, &candidates, conductor_directive.as_deref()),
+        AgentModelAttribution::actor(
+            AgentActor::IndependentVerifier,
+            AgentStage::Verify,
+            AgentModelProfile::Verifier,
+            AgentEffectAuthority::None,
+        ),
     );
     match arbiter_result {
         Ok(guidance) => Ok(guidance),

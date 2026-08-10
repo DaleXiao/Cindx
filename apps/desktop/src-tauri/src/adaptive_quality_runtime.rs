@@ -364,6 +364,12 @@ pub(crate) fn quality_gate_adaptive_output(
                 review_index,
                 evaluated_artifact
             ),
+            AgentModelAttribution::actor(
+                AgentActor::IndependentVerifier,
+                AgentStage::Verify,
+                AgentModelProfile::Verifier,
+                AgentEffectAuthority::None,
+            ),
         ) {
             Ok(raw_gate) => raw_gate,
             Err(error) => {
@@ -495,6 +501,12 @@ pub(crate) fn quality_gate_adaptive_output(
                 truncate_for_collaboration(&candidate, 14_000),
                 issues
             ),
+            AgentModelAttribution::actor(
+                AgentActor::Specialist,
+                AgentStage::Plan,
+                AgentModelProfile::Utility,
+                AgentEffectAuthority::None,
+            ),
         ) {
             Ok(repaired) if !repaired.trim().is_empty() => repaired,
             Err(error) if error == COLLABORATION_STEER_INTERRUPTED => break,
@@ -554,6 +566,12 @@ pub(crate) fn compare_team_guidance_with_anchor(
                 ModelRole::Reviewer,
                 &reviewer_model,
                 forward_prompt,
+                AgentModelAttribution::actor(
+                    AgentActor::IndependentVerifier,
+                    AgentStage::Verify,
+                    AgentModelProfile::Verifier,
+                    AgentEffectAuthority::None,
+                ),
             )
         });
         let reverse = scope.spawn(|| {
@@ -567,6 +585,12 @@ pub(crate) fn compare_team_guidance_with_anchor(
                 ModelRole::Reviewer,
                 &reviewer_model,
                 reverse_prompt,
+                AgentModelAttribution::actor(
+                    AgentActor::IndependentVerifier,
+                    AgentStage::Verify,
+                    AgentModelProfile::Verifier,
+                    AgentEffectAuthority::None,
+                ),
             )
         });
         (

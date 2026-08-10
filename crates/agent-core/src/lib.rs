@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod event_contract;
+mod model_attribution;
 mod model_contract;
 mod permission_policy;
 mod run_identity;
@@ -8,6 +9,15 @@ mod run_identity;
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
+};
+pub use model_attribution::{
+    AgentActor, AgentEffectAuthority, AgentModelAttribution, AgentModelAttributionError,
+    AgentModelProfile, AgentOutputTrust, AgentService, AgentStage, AGENT_ACTOR_METADATA_KEY,
+    AGENT_ATTRIBUTION_COMPONENT_METADATA_KEY, AGENT_ATTRIBUTION_LEGACY_ROLE_METADATA_KEY,
+    AGENT_ATTRIBUTION_MODEL_METADATA_KEY, AGENT_EFFECT_AUTHORITY_METADATA_KEY,
+    AGENT_MODEL_ATTRIBUTION_SCHEMA, AGENT_MODEL_ATTRIBUTION_SCHEMA_METADATA_KEY,
+    AGENT_MODEL_PROFILE_METADATA_KEY, AGENT_OUTPUT_TRUST_METADATA_KEY, AGENT_SERVICE_METADATA_KEY,
+    AGENT_STAGE_METADATA_KEY,
 };
 pub use model_contract::{
     classify_provider_failure, tool_function_name, ModelCallMode, ModelError, ModelRequest,

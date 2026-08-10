@@ -1,10 +1,23 @@
 use agent_core::{Metadata, EVENT_TYPE_METADATA_KEY};
 
-const EVENT_LOCAL_RUN_CONTEXT_KEYS: &[&str] = &[
+const OBJECTIVE_RUN_CONTEXT_KEYS: &[&str] = &[
     "initial_prompt_objective",
     "effective_prompt_objective",
     "prompt_objective",
     "matched_route_plan_anchor",
+];
+
+const MODEL_ATTRIBUTION_RUN_CONTEXT_KEYS: &[&str] = &[
+    "agent_model_attribution_schema",
+    "agent_actor",
+    "agent_service",
+    "agent_stage",
+    "agent_model_profile",
+    "agent_output_trust",
+    "agent_effect_authority",
+    "agent_attribution_component",
+    "agent_attribution_model",
+    "agent_attribution_legacy_role",
 ];
 
 /// Merge durable run identity and policy context into an event without copying
@@ -12,7 +25,10 @@ const EVENT_LOCAL_RUN_CONTEXT_KEYS: &[&str] = &[
 /// snapshot must insert it explicitly before calling this function.
 pub fn merge_persistable_run_context(mut metadata: Metadata, context: &Metadata) -> Metadata {
     for (key, value) in context {
-        if key == EVENT_TYPE_METADATA_KEY || EVENT_LOCAL_RUN_CONTEXT_KEYS.contains(&key.as_str()) {
+        if key == EVENT_TYPE_METADATA_KEY
+            || OBJECTIVE_RUN_CONTEXT_KEYS.contains(&key.as_str())
+            || MODEL_ATTRIBUTION_RUN_CONTEXT_KEYS.contains(&key.as_str())
+        {
             continue;
         }
         metadata.entry(key.clone()).or_insert_with(|| value.clone());
@@ -68,7 +84,7 @@ pub fn insert_runtime_message_display_prompt(
 /// Copy the objective snapshot only onto events that own that contract, such
 /// as run starts, route decisions, permission checkpoints, and recovery data.
 pub fn insert_run_objectives(metadata: &mut Metadata, context: &Metadata) {
-    for key in EVENT_LOCAL_RUN_CONTEXT_KEYS {
+    for key in OBJECTIVE_RUN_CONTEXT_KEYS {
         if let Some(value) = context.get(*key) {
             metadata.insert((*key).to_string(), value.clone());
         }
@@ -135,6 +151,32 @@ mod tests {
             merged.get("effective_prompt_objective").map(String::as_str),
             Some("new objective")
         );
+    }
+
+    #[test]
+    fn model_attribution_stays_event_local() {
+        let context = [
+            ("agent_run_id".to_string(), "run-1".to_string()),
+            (
+                "effective_prompt_objective".to_string(),
+                "inspect the repository".to_string(),
+            ),
+            ("agent_actor".to_string(), "specialist".to_string()),
+            ("agent_stage".to_string(), "evidence".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let mut metadata = Metadata::new();
+        insert_run_objectives(&mut metadata, &context);
+
+        let merged = merge_persistable_run_context(metadata, &context);
+
+        assert_eq!(
+            merged.get("effective_prompt_objective").map(String::as_str),
+            Some("inspect the repository")
+        );
+        assert!(!merged.contains_key("agent_actor"));
+        assert!(!merged.contains_key("agent_stage"));
     }
 
     #[test]

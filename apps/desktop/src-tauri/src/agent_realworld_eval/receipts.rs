@@ -1,7 +1,13 @@
 use super::{metadata_u64, Treatment};
 use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::*;
-use agent_core::Event;
+use agent_application::{
+    AgentRunEvent, AgentStrategyDecisionReceipt, AgentTerminalCommitIdentity,
+    AgentTerminalCommitState,
+    AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY, AGENT_TERMINAL_COMMIT_SCHEMA,
+    AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY,
+};
+use agent_core::{decode_event_type, DecodedEventType, Event, EventTypeV1};
 use orchestrator::{ExecutionPlan, WorkflowPlanIr};
 
 const PROVIDER_RESPONSE_ID_DOMAIN: &str = "cindx.provider-response-id.v1\0";
@@ -159,12 +165,7 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     if treatment.is_oracle_reference() {
         return Ok(None);
     }
-    let (decision_index, event) = events
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, event)| event.summary == "Agent run decision selected")
-        .ok_or_else(|| "agent strategy receipt is missing".to_string())?;
+    let (decision_index, event) = verified_strategy_decision(events)?;
     let decision_json = required_metadata_any(&event.metadata, &["run_decision", "decision"])?;
     let decision = serde_json::from_str::<AgentRunDecision>(decision_json)
         .map_err(|error| format!("agent strategy decision receipt is invalid: {error}"))?;
@@ -480,6 +481,82 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     }))
 }
 
+fn verified_strategy_decision(events: &[Event]) -> Result<(usize, &Event), String> {
+    let mut terminal_events = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let lifecycle = AgentRunEvent::try_from_event(event)
+            .map_err(|error| format!("agent strategy lifecycle event is invalid: {error}"))?;
+        if lifecycle.is_some_and(|event| event.status().is_terminal()) {
+            terminal_events.push((index, event));
+        }
+    }
+    let [(_, terminal)] = terminal_events.as_slice() else {
+        return Err(if terminal_events.is_empty() {
+            "agent strategy lifecycle terminal receipt is missing".to_string()
+        } else {
+            "agent strategy lifecycle has duplicate terminal receipts".to_string()
+        });
+    };
+    if terminal
+        .metadata
+        .get(AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY)
+        .map(String::as_str)
+        != Some(AGENT_TERMINAL_COMMIT_SCHEMA)
+    {
+        return Err("agent strategy lifecycle terminal receipt is missing".to_string());
+    }
+    let steer_epoch = terminal
+        .metadata
+        .get(AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY)
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "agent strategy lifecycle terminal epoch is invalid".to_string())?;
+    let receipt = AgentStrategyDecisionReceipt::from_metadata(&terminal.metadata)
+        .map_err(|error| format!("agent strategy lifecycle receipt is invalid: {error}"))?;
+    let receipt = receipt.ok_or_else(|| "agent strategy receipt is missing".to_string())?;
+    let identity = AgentTerminalCommitIdentity::new(&terminal.task_id, &terminal.metadata, steer_epoch)
+        .map_err(|error| {
+            format!("agent strategy lifecycle terminal identity is invalid: {error}")
+        })?;
+    match identity.inspect_events(events) {
+        Ok(AgentTerminalCommitState::Committed) => {}
+        Ok(AgentTerminalCommitState::Pending) => {
+            return Err("agent strategy lifecycle terminal receipt is missing".to_string())
+        }
+        Err(error) => Err(format!(
+            "agent strategy lifecycle terminal receipt is invalid: {error}"
+        ))?,
+    }
+    let decisions = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event.metadata.get("agent_run_id").map(String::as_str)
+                == Some(receipt.agent_run_id())
+                && event
+                    .metadata
+                    .get("steer_epoch")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    == Some(receipt.steer_epoch())
+                && matches!(
+                    decode_event_type(event),
+                    DecodedEventType::V1(typed)
+                        if typed.event_type() == EventTypeV1::AgentRunDecisionSelected
+                )
+        })
+        .collect::<Vec<_>>();
+    let [(decision_index, event)] = decisions.as_slice() else {
+        return Err(if decisions.is_empty() {
+            "agent strategy receipt is missing".to_string()
+        } else {
+            "agent strategy lifecycle has duplicate decisions".to_string()
+        });
+    };
+    if !receipt.matches_decision_event(event) {
+        return Err("agent strategy lifecycle receipt does not match its decision".to_string());
+    }
+    Ok((*decision_index, *event))
+}
+
 fn validate_execution_constraint_receipt(
     treatment: Treatment,
     expected_override: Option<AgentExecutionConstraint>,
@@ -675,7 +752,7 @@ fn duration_ms(value: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{EventId, TaskId};
+    use agent_core::{insert_event_type_v1, EventId, TaskId};
     use orchestrator::{
         AgentExecutionMode, AgentVerificationPolicy, WorkflowBudget, WorkflowCompletionCriteria,
         WorkflowOutputKind, WorkflowPlanIr, WorkflowPlanProposal, WorkflowPlanProposalStep,
@@ -692,6 +769,75 @@ mod tests {
             summary: summary.to_string(),
             metadata,
         }
+    }
+
+    fn with_completed_strategy_lifecycle(events: Vec<Event>) -> Vec<Event> {
+        with_completed_strategy_lifecycle_for_epoch(events, 0)
+    }
+
+    fn with_completed_strategy_lifecycle_for_epoch(
+        mut events: Vec<Event>,
+        steer_epoch: u64,
+    ) -> Vec<Event> {
+        let decision_index = events
+            .iter()
+            .position(|event| event.summary == "Agent run decision selected")
+            .expect("strategy fixture must contain a decision");
+        let decision = &mut events[decision_index];
+        decision
+            .metadata
+            .entry("session_id".to_string())
+            .or_insert_with(|| "session-receipt".to_string());
+        decision
+            .metadata
+            .entry("agent_run_id".to_string())
+            .or_insert_with(|| "run-receipt".to_string());
+        decision
+            .metadata
+            .insert("steer_epoch".to_string(), steer_epoch.to_string());
+        insert_event_type_v1(
+            &decision.kind,
+            &mut decision.metadata,
+            EventTypeV1::AgentRunDecisionSelected,
+        )
+        .unwrap();
+        let plan_sha256 = decision
+            .metadata
+            .get("execution_plan_semantic_sha256")
+            .cloned()
+            .unwrap_or_else(|| "a".repeat(64));
+        let receipt =
+            AgentStrategyDecisionReceipt::new(&decision.task_id, &decision.metadata, &plan_sha256)
+                .unwrap();
+        receipt.insert_into(&mut decision.metadata).unwrap();
+        let identity = AgentTerminalCommitIdentity::new(
+            &decision.task_id,
+            &decision.metadata,
+            receipt.steer_epoch(),
+        )
+        .unwrap();
+        let mut terminal_metadata = decision.metadata.clone();
+        terminal_metadata.extend(identity.metadata());
+        terminal_metadata.remove(agent_core::EVENT_TYPE_METADATA_KEY);
+        insert_event_type_v1(
+            &EventKind::TaskStatusChanged,
+            &mut terminal_metadata,
+            EventTypeV1::AgentRunCompleted,
+        )
+        .unwrap();
+        let mut terminal = event(
+            "Agent task completed",
+            EventKind::TaskStatusChanged,
+            terminal_metadata,
+        );
+        terminal.sequence = events
+            .iter()
+            .map(|event| event.sequence)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1);
+        events.push(terminal);
+        events
     }
 
     fn budget_metadata(budget: &ResolvedBudgetReceipt) -> Metadata {
@@ -828,6 +974,10 @@ mod tests {
     }
 
     fn workflow_strategy_events(metadata: &Metadata) -> Vec<Event> {
+        workflow_strategy_events_for_epoch(metadata, 0)
+    }
+
+    fn workflow_strategy_events_for_epoch(metadata: &Metadata, steer_epoch: u64) -> Vec<Event> {
         let proposal = serde_json::from_str::<WorkflowPlanProposal>(
             metadata.get("conductor_workflow_proposal").unwrap(),
         )
@@ -868,7 +1018,7 @@ mod tests {
                 max_output_tokens_per_step: 1_024,
             },
         };
-        vec![
+        with_completed_strategy_lifecycle_for_epoch(vec![
             event(
                 "Agent run decision selected",
                 EventKind::TaskStatusChanged,
@@ -898,7 +1048,7 @@ mod tests {
                     "workflow-receipt-test".to_string(),
                 )]),
             ),
-        ]
+        ], steer_epoch)
     }
 
     #[test]
@@ -944,17 +1094,103 @@ mod tests {
             "conductor_workflow_proposal_sha256".to_string(),
             "0".repeat(64),
         );
-        assert!(strategy_receipt_from_events(
-            &[event(
-                "Agent run decision selected",
-                EventKind::TaskStatusChanged,
-                tampered,
-            )],
-            Treatment::Pro,
-            None,
-        )
-        .expect_err("tampered proposal receipt must fail closed")
-        .contains("proposal receipt is inconsistent"));
+        let tampered_events = with_completed_strategy_lifecycle(vec![event(
+            "Agent run decision selected",
+            EventKind::TaskStatusChanged,
+            tampered,
+        )]);
+        assert!(
+            strategy_receipt_from_events(&tampered_events, Treatment::Pro, None,)
+                .expect_err("tampered proposal receipt must fail closed")
+                .contains("proposal receipt is inconsistent")
+        );
+    }
+
+    #[test]
+    fn agent_strategy_lifecycle_contract_evidence_fails_closed() {
+        let events = workflow_strategy_events(&workflow_strategy_metadata());
+
+        let mut missing_terminal = events.clone();
+        missing_terminal.pop();
+        assert!(
+            strategy_receipt_from_events(&missing_terminal, Treatment::Pro, None)
+                .expect_err("missing terminal must invalidate strategy evidence")
+                .contains("lifecycle terminal receipt is missing")
+        );
+
+        let mut mismatched_terminal = events.clone();
+        mismatched_terminal.last_mut().unwrap().metadata.insert(
+            agent_application::AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY.to_string(),
+            "f".repeat(64),
+        );
+        assert!(
+            strategy_receipt_from_events(&mismatched_terminal, Treatment::Pro, None)
+                .expect_err("mismatched terminal must invalidate strategy evidence")
+                .contains("strategy receipt does not match")
+        );
+
+        let mut duplicate_decision = events;
+        duplicate_decision.insert(1, duplicate_decision[0].clone());
+        assert!(
+            strategy_receipt_from_events(&duplicate_decision, Treatment::Pro, None)
+                .expect_err("duplicate decision must invalidate strategy evidence")
+                .contains("multiple strategy decisions")
+        );
+    }
+
+    #[test]
+    fn agent_strategy_lifecycle_contract_scopes_decisions_to_the_terminal_epoch() {
+        let metadata = workflow_strategy_metadata();
+        let mut events = workflow_strategy_events_for_epoch(&metadata, 1);
+        let previous_decision = workflow_strategy_events_for_epoch(&metadata, 0).remove(0);
+        events.insert(0, previous_decision);
+        strategy_receipt_from_events(&events, Treatment::Pro, None)
+            .expect("a prior steer epoch must not invalidate the terminal epoch")
+            .expect("product strategy");
+
+        let mut duplicate_terminal = workflow_strategy_events(&metadata);
+        let mut unlinked = duplicate_terminal.last().unwrap().clone();
+        unlinked
+            .metadata
+            .remove(agent_application::AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY);
+        unlinked
+            .metadata
+            .remove(agent_application::AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY);
+        unlinked.sequence = unlinked.sequence.saturating_add(1);
+        duplicate_terminal.push(unlinked);
+        assert!(
+            strategy_receipt_from_events(&duplicate_terminal, Treatment::Pro, None)
+                .expect_err("an unlinked second terminal must invalidate evidence")
+                .contains("duplicate terminal receipts")
+        );
+
+        let mut cross_run_terminal = workflow_strategy_events(&metadata);
+        let mut other_run = cross_run_terminal.last().unwrap().clone();
+        other_run
+            .metadata
+            .insert("agent_run_id".to_string(), "other-run".to_string());
+        other_run
+            .metadata
+            .remove(agent_application::AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY);
+        other_run
+            .metadata
+            .remove(agent_application::AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY);
+        other_run.sequence = other_run.sequence.saturating_add(1);
+        cross_run_terminal.push(other_run);
+        assert!(
+            strategy_receipt_from_events(&cross_run_terminal, Treatment::Pro, None)
+                .expect_err("a second physical run terminal must invalidate case evidence")
+                .contains("duplicate terminal receipts")
+        );
+
+        let mut out_of_order = workflow_strategy_events(&metadata);
+        let decision_sequence = out_of_order[0].sequence;
+        out_of_order.last_mut().unwrap().sequence = decision_sequence;
+        assert!(
+            strategy_receipt_from_events(&out_of_order, Treatment::Pro, None)
+                .expect_err("terminal must follow its strategy decision")
+                .contains("does not follow")
+        );
     }
 
     #[test]
@@ -1123,17 +1359,14 @@ mod tests {
             ("decision_source".to_string(), "fast_direct".to_string()),
             ("routing_signature".to_string(), "frozen-route".to_string()),
         ]);
-        let receipt = strategy_receipt_from_events(
-            &[event(
-                "Agent run decision selected",
-                EventKind::TaskStatusChanged,
-                metadata,
-            )],
-            Treatment::Fast,
-            None,
-        )
-        .expect("strategy receipt")
-        .expect("product strategy");
+        let events = with_completed_strategy_lifecycle(vec![event(
+            "Agent run decision selected",
+            EventKind::TaskStatusChanged,
+            metadata,
+        )]);
+        let receipt = strategy_receipt_from_events(&events, Treatment::Fast, None)
+            .expect("strategy receipt")
+            .expect("product strategy");
 
         assert_eq!(receipt.profile_id, genome.id);
         assert_eq!(
@@ -1206,17 +1439,14 @@ mod tests {
                 "grounded_direct".to_string(),
             ),
         ]);
-        let receipt = strategy_receipt_from_events(
-            &[event(
-                "Agent run decision selected",
-                EventKind::TaskStatusChanged,
-                metadata,
-            )],
-            Treatment::GroundedDirect,
-            None,
-        )
-        .expect("strategy receipt")
-        .expect("grounded strategy");
+        let events = with_completed_strategy_lifecycle(vec![event(
+            "Agent run decision selected",
+            EventKind::TaskStatusChanged,
+            metadata,
+        )]);
+        let receipt = strategy_receipt_from_events(&events, Treatment::GroundedDirect, None)
+            .expect("strategy receipt")
+            .expect("grounded strategy");
 
         assert_eq!(receipt.execution_constraint, "grounded_direct");
         assert_eq!(receipt.execution_mode, "direct");
@@ -1257,17 +1487,14 @@ mod tests {
             ),
         ]);
 
-        let receipt = strategy_receipt_from_events(
-            &[event(
-                "Agent run decision selected",
-                EventKind::TaskStatusChanged,
-                metadata,
-            )],
-            Treatment::MemoryOn,
-            None,
-        )
-        .expect("strategy receipt")
-        .expect("memory-effect strategy");
+        let events = with_completed_strategy_lifecycle(vec![event(
+            "Agent run decision selected",
+            EventKind::TaskStatusChanged,
+            metadata,
+        )]);
+        let receipt = strategy_receipt_from_events(&events, Treatment::MemoryOn, None)
+            .expect("strategy receipt")
+            .expect("memory-effect strategy");
 
         assert_eq!(receipt.decision_source, "matched_memory_evaluation");
         assert_eq!(receipt.execution_constraint, "matched_memory_effect");

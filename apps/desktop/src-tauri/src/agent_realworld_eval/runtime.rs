@@ -9,14 +9,14 @@ use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment}
 use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::{
-    begin_agent_run_control_for_effort, begin_agent_run_control_with_budget, phase16_task_id,
+    cancel_background_prompt_evaluations, phase16_task_id, project_session_metadata_for_session,
     resolve_agent_permission_blocking, retry_agent_task_blocking,
-    run_agent_task_blocking_inner_with_evaluation_constraints, AgentState, AgentTaskInput,
-    AppState, EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
+    run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate, AgentState,
+    AgentTaskInput, AppState, EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
 };
-use agent_runtime::RunBudget;
 use agent_core::Event;
-use std::path::Path;
+use agent_runtime::{AgentRunControl, RunBudget};
+use std::{path::Path, sync::Arc};
 
 const MAX_DRIVER_ROUNDS: usize = 24;
 
@@ -50,13 +50,25 @@ pub(super) fn run_product_task_with_execution_constraint(
         _ => AgentMemoryEvaluationConstraint::Native,
     };
     let initial = (|| -> Result<AgentState, String> {
-        let lease = if let Some(budget) = run_budget {
-            begin_agent_run_control_with_budget(state, session_id, budget)?
+        let lifecycle = state
+            .session_lifecycle_gate
+            .lock()
+            .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
+        cancel_background_prompt_evaluations(state)?;
+        project_session_metadata_for_session(state, Some(session_id))?;
+        let control = if let Some(budget) = run_budget {
+            AgentRunControl::with_budget(budget)
         } else {
-            begin_agent_run_control_for_effort(state, session_id, effort, None)?
+            AgentRunControl::new(effort)
         };
+        let lease = state
+            .agent_run_controls
+            .register(session_id, Arc::new(control))
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "agent run is already active for this session".to_string())?;
         let control = lease.control();
-        let result = run_agent_task_blocking_inner_with_evaluation_constraints(
+        let mut start_gate = Some(lifecycle);
+        let result = run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate(
             app,
             state.clone(),
             AgentTaskInput {
@@ -71,8 +83,12 @@ pub(super) fn run_product_task_with_execution_constraint(
             execution_constraint,
             memory_constraint,
             matched_route_plan_anchor,
+            &mut start_gate,
         );
-        drop(lease);
+        if start_gate.is_some() {
+            drop(lease);
+            drop(start_gate.take());
+        }
         result
     })();
     let mut current = match initial {
