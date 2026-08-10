@@ -203,6 +203,19 @@ preservation-breaking outcomes remain zero-score evidence. The receipt is
 shadow-only and has no production routing, prompt, memory, permission, or
 serving consumer.
 
+The same crate owns the portable Goal 3B contract foundation, separate from
+production prompt evolution. A structured policy keeps the Goal 2 graph and
+Owner authority fixed while bounding context, verification, and same-lane
+repair choices. Its companion exercise receipt is projected from lifecycle
+events rather than supplied by the candidate: it binds policy assignment,
+semantic plan, exact context receipt, per-lane attempts, derived stop reason,
+and the externally verified outcome digest. The in-memory evidence contract is
+append-only, train/holdout separated, resource-accounted, and either collecting,
+ready for independent review, or frozen. Review may authorize only a narrow
+offline validation record; there is no conversion to production learning
+evidence, prompt genomes, snapshots, routing, canary, or serving. No runtime or
+evaluation producer and no durable evidence journal consume this contract yet.
+
 ## Persistence and Background Work
 
 SQLite stores projects, sessions, events, permissions, checkpoints, schedules,
@@ -224,6 +237,11 @@ be rebuilt; a cache publication failure cannot rewrite the scientific outcome.
 Prompt evolution observes completed, redacted evidence. `orchestrator` owns
 candidate schemas, comparison, promotion gates, and rollout policy; desktop
 workers own provider calls, durable campaign state, and publication.
+
+Goal 3B collaboration candidates are not prompt-evolution candidates. They are
+shadow/offline admission records owned by `agent-application`; keeping that
+dependency direction prevents the production prompt selector from consuming
+them implicitly.
 
 A deployed profile is selected once per logical run, is stable across retries,
 and cannot alter permissions, tools, or budgets. Fast is seed-only. Missing or

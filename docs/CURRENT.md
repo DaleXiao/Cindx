@@ -163,6 +163,18 @@ only: it is not production `LearningEvidenceV1`, does not enter routing, prompt
 evolution, memory, canary, or serving, and does not establish an intelligence
 gain.
 
+The source also defines the contract foundation for bounded offline
+collaboration learning. The initial matched Direct/Workflow gate decides
+whether one read-only Specialist is useful. A later candidate keeps that
+topology fixed and changes exactly one of two context allocations, independent
+verification, or one same-lane repair; stopping is derived from the
+required-lane result. A candidate counts only when a trusted event projection
+binds the assigned policy to the actual context, lane attempts, repair, stop
+reason, and externally verified outcome. The in-memory contract can accumulate
+and freeze evidence for independent review, but it has no runtime/evaluation
+producer or durable journal yet and cannot publish a prompt profile, enter
+production learning, or authorize serving.
+
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
 ## Known Structural Limits
