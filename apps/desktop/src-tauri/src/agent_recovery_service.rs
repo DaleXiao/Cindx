@@ -24,7 +24,7 @@ use agent_core::{
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
     AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
-pub(super) use recovery_status::agent_task_is_cancelled;
+pub(super) use recovery_status::{agent_task_is_cancelled, latest_applied_agent_steer_epoch};
 use recovery_status::{latest_agent_run_event, recovery_run_context};
 
 pub(super) fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRecoveryEnvelope> {
@@ -43,27 +43,6 @@ pub(super) fn latest_agent_recovery_envelope(events: &[Event]) -> Option<AgentRe
                     .is_none_or(|snapshot| snapshot.validate_checkpoint().is_ok()))
             .then_some(envelope)
         })
-}
-
-pub(super) fn latest_applied_agent_steer_epoch(events: &[Event]) -> u64 {
-    events
-        .iter()
-        .filter(|event| {
-            is_agent_run_start_event(event)
-                || (event.kind == EventKind::MessageAdded
-                    && event.metadata.get("role").map(String::as_str) == Some("user")
-                    && event.metadata.get("internal").map(String::as_str) != Some("true")
-                    && (event.metadata.get("queue_mode").map(String::as_str) == Some("steer")
-                        || event
-                            .metadata
-                            .get("continuation_replay")
-                            .map(String::as_str)
-                            != Some("true")))
-        })
-        .filter_map(|event| event.metadata.get("steer_epoch"))
-        .filter_map(|value| value.parse::<u64>().ok())
-        .max()
-        .unwrap_or_default()
 }
 
 pub(super) fn initial_agent_objective_from_events(events: &[Event]) -> Option<String> {
@@ -238,6 +217,11 @@ pub(super) fn agent_recovery_metadata_with_task_state(
         serde_json::to_string(&envelope)
             .map_err(|error| format!("failed to encode agent recovery checkpoint: {error}"))?,
     );
+    crate::agent_strategy_receipt_runtime::bind_strategy_receipt_from_events(
+        events,
+        run_context,
+        &mut metadata,
+    )?;
     insert_run_objectives(&mut metadata, run_context);
     Ok(metadata_with_context(metadata, run_context))
 }
@@ -291,6 +275,7 @@ pub(super) fn peek_agent_recovery_envelope(
     Ok(Some(envelope))
 }
 
+#[cfg(test)]
 pub(super) fn claim_agent_recovery_envelope(
     store: &mut SqliteStore,
     run_context: &Metadata,

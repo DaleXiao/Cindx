@@ -1,5 +1,10 @@
-use crate::AgentRunEvent;
-use agent_core::{agent_run_id, Event, Metadata, TaskId};
+use crate::{
+    strategy_receipt_is_explicitly_not_selected, AgentRunEvent, AgentStrategyDecisionReceipt,
+    AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY,
+};
+use agent_core::{
+    agent_run_id, decode_event_type, DecodedEventType, Event, EventTypeV1, Metadata, TaskId,
+};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -23,6 +28,10 @@ pub enum AgentTerminalCommitError {
     MalformedIdentity,
     NonterminalEvent,
     DuplicateTerminalEvents,
+    MissingStrategyDecision,
+    DuplicateStrategyDecisions,
+    StrategyDecisionMismatch,
+    TerminalPrecedesStrategyDecision,
     InvalidLifecycleEvent(String),
 }
 
@@ -54,6 +63,24 @@ impl fmt::Display for AgentTerminalCommitError {
                 formatter,
                 "terminal commit identity resolves to multiple terminal events"
             ),
+            Self::MissingStrategyDecision => {
+                write!(
+                    formatter,
+                    "terminal commit has no matching durable strategy decision"
+                )
+            }
+            Self::DuplicateStrategyDecisions => write!(
+                formatter,
+                "terminal commit resolves to multiple strategy decisions for one epoch"
+            ),
+            Self::StrategyDecisionMismatch => write!(
+                formatter,
+                "terminal commit strategy receipt does not match its durable decision"
+            ),
+            Self::TerminalPrecedesStrategyDecision => write!(
+                formatter,
+                "terminal commit does not follow its durable strategy decision"
+            ),
             Self::InvalidLifecycleEvent(error) => write!(formatter, "{error}"),
         }
     }
@@ -66,6 +93,8 @@ pub struct AgentTerminalCommitIdentity {
     key: String,
     agent_run_id: String,
     steer_epoch: u64,
+    strategy_receipt: Option<AgentStrategyDecisionReceipt>,
+    strategy_not_selected: bool,
 }
 
 impl AgentTerminalCommitIdentity {
@@ -81,6 +110,24 @@ impl AgentTerminalCommitIdentity {
             .get("session_id")
             .map(String::as_str)
             .unwrap_or_default();
+        let strategy_not_selected = strategy_receipt_is_explicitly_not_selected(run_context);
+        let strategy_receipt = if strategy_not_selected {
+            let receipt_epoch = run_context
+                .get(AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY)
+                .and_then(|value| value.parse::<u64>().ok());
+            if receipt_epoch != Some(steer_epoch) {
+                return Err(AgentTerminalCommitError::MalformedIdentity);
+            }
+            None
+        } else {
+            AgentStrategyDecisionReceipt::from_metadata(run_context)
+                .map_err(|_| AgentTerminalCommitError::MalformedIdentity)?
+        };
+        if strategy_receipt.as_ref().is_some_and(|receipt| {
+            receipt.agent_run_id() != agent_run_id || receipt.steer_epoch() != steer_epoch
+        }) {
+            return Err(AgentTerminalCommitError::MalformedIdentity);
+        }
         let canonical = serde_json::to_vec(&(
             AGENT_TERMINAL_COMMIT_HASH_DOMAIN,
             task_id.0.as_str(),
@@ -93,6 +140,8 @@ impl AgentTerminalCommitIdentity {
             key: hex_sha256(&canonical),
             agent_run_id: agent_run_id.to_string(),
             steer_epoch,
+            strategy_receipt,
+            strategy_not_selected,
         })
     }
 
@@ -101,7 +150,7 @@ impl AgentTerminalCommitIdentity {
     }
 
     pub fn metadata(&self) -> Metadata {
-        [
+        let mut metadata = [
             (
                 AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY.to_string(),
                 AGENT_TERMINAL_COMMIT_SCHEMA.to_string(),
@@ -116,33 +165,61 @@ impl AgentTerminalCommitIdentity {
             ),
         ]
         .into_iter()
-        .collect()
+        .collect();
+        if let Some(receipt) = &self.strategy_receipt {
+            receipt
+                .insert_into(&mut metadata)
+                .expect("validated strategy receipt must fit terminal metadata");
+        } else if self.strategy_not_selected {
+            crate::insert_strategy_not_selected(&mut metadata, self.steer_epoch)
+                .expect("validated not-selected state must fit terminal metadata");
+        }
+        metadata
     }
 
     pub fn inspect_events(
         &self,
         events: &[Event],
     ) -> Result<AgentTerminalCommitState, AgentTerminalCommitError> {
-        let mut matching = events.iter().filter(|event| {
+        let mut terminal_event = None;
+        for event in events.iter().filter(|event| {
             event.metadata.get("agent_run_id").map(String::as_str)
                 == Some(self.agent_run_id.as_str())
-                && event
-                    .metadata
-                    .get(AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY)
-                    .map(String::as_str)
-                    == Some(self.key.as_str())
-        });
-        let Some(event) = matching.next() else {
+        }) {
+            let terminal = AgentRunEvent::try_from_event(event)
+                .map_err(|error| {
+                    AgentTerminalCommitError::InvalidLifecycleEvent(error.to_string())
+                })?
+                .is_some_and(|event| event.status().is_terminal());
+            if terminal && terminal_event.replace(event).is_some() {
+                return Err(AgentTerminalCommitError::DuplicateTerminalEvents);
+            }
+        }
+        let Some(event) = terminal_event else {
+            if events.iter().any(|event| {
+                event.metadata.get("agent_run_id").map(String::as_str)
+                    == Some(self.agent_run_id.as_str())
+                    && event
+                        .metadata
+                        .get(AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY)
+                        .map(String::as_str)
+                        == Some(self.key.as_str())
+            }) {
+                return Err(AgentTerminalCommitError::NonterminalEvent);
+            }
+            self.validate_strategy_decision(events)?;
             return Ok(AgentTerminalCommitState::Pending);
         };
-        if matching.next().is_some() {
-            return Err(AgentTerminalCommitError::DuplicateTerminalEvents);
-        }
         if event
             .metadata
             .get(AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY)
             .map(String::as_str)
             != Some(AGENT_TERMINAL_COMMIT_SCHEMA)
+            || event
+                .metadata
+                .get(AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY)
+                .map(String::as_str)
+                != Some(self.key.as_str())
             || event
                 .metadata
                 .get(AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY)
@@ -151,13 +228,76 @@ impl AgentTerminalCommitIdentity {
         {
             return Err(AgentTerminalCommitError::MalformedIdentity);
         }
-        let terminal = AgentRunEvent::try_from_event(event)
-            .map_err(|error| AgentTerminalCommitError::InvalidLifecycleEvent(error.to_string()))?
-            .is_some_and(|event| event.status().is_terminal());
-        if !terminal {
-            return Err(AgentTerminalCommitError::NonterminalEvent);
+        match &self.strategy_receipt {
+            Some(receipt)
+                if AgentStrategyDecisionReceipt::from_metadata(&event.metadata)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    != Some(receipt) =>
+            {
+                return Err(AgentTerminalCommitError::StrategyDecisionMismatch)
+            }
+            None if self.strategy_not_selected
+                && !strategy_receipt_is_explicitly_not_selected(&event.metadata) =>
+            {
+                return Err(AgentTerminalCommitError::StrategyDecisionMismatch)
+            }
+            None if !self.strategy_not_selected
+                && event
+                    .metadata
+                    .contains_key(crate::AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY) =>
+            {
+                return Err(AgentTerminalCommitError::StrategyDecisionMismatch)
+            }
+            _ => {}
+        }
+        if self
+            .validate_strategy_decision(events)?
+            .is_some_and(|decision| event.sequence <= decision.sequence)
+        {
+            return Err(AgentTerminalCommitError::TerminalPrecedesStrategyDecision);
         }
         Ok(AgentTerminalCommitState::Committed)
+    }
+
+    fn validate_strategy_decision<'a>(
+        &self,
+        events: &'a [Event],
+    ) -> Result<Option<&'a Event>, AgentTerminalCommitError> {
+        let decisions = events
+            .iter()
+            .filter(|event| {
+                event.metadata.get("agent_run_id").map(String::as_str)
+                    == Some(self.agent_run_id.as_str())
+                    && event
+                        .metadata
+                        .get("steer_epoch")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        == Some(self.steer_epoch)
+                    && matches!(
+                        decode_event_type(event),
+                        DecodedEventType::V1(typed)
+                            if typed.event_type() == EventTypeV1::AgentRunDecisionSelected
+                    )
+            })
+            .collect::<Vec<_>>();
+        match &self.strategy_receipt {
+            Some(_) if decisions.is_empty() => {
+                Err(AgentTerminalCommitError::MissingStrategyDecision)
+            }
+            Some(_) if decisions.len() > 1 => {
+                Err(AgentTerminalCommitError::DuplicateStrategyDecisions)
+            }
+            Some(receipt) if !receipt.matches_decision_event(decisions[0]) => {
+                Err(AgentTerminalCommitError::StrategyDecisionMismatch)
+            }
+            Some(_) => Ok(Some(decisions[0])),
+            None if !decisions.is_empty() => {
+                Err(AgentTerminalCommitError::StrategyDecisionMismatch)
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -196,10 +336,44 @@ mod tests {
         Event {
             id: EventId("terminal-a".to_string()),
             task_id: TaskId("agent".to_string()),
+            sequence: 2,
+            timestamp_ms: 2,
+            kind: EventKind::TaskStatusChanged,
+            summary: "localized completion".to_string(),
+            metadata,
+        }
+    }
+
+    fn selected_context() -> (Metadata, AgentStrategyDecisionReceipt) {
+        let mut context = context();
+        context.insert("steer_epoch".to_string(), "0".to_string());
+        let receipt = AgentStrategyDecisionReceipt::new(
+            &TaskId("agent".to_string()),
+            &context,
+            &"a".repeat(64),
+        )
+        .unwrap();
+        receipt.insert_into(&mut context).unwrap();
+        (context, receipt)
+    }
+
+    fn decision_event(receipt: &AgentStrategyDecisionReceipt) -> Event {
+        let mut metadata = context();
+        metadata.insert("steer_epoch".to_string(), "0".to_string());
+        receipt.insert_into(&mut metadata).unwrap();
+        insert_event_type_v1(
+            &EventKind::TaskStatusChanged,
+            &mut metadata,
+            EventTypeV1::AgentRunDecisionSelected,
+        )
+        .unwrap();
+        Event {
+            id: EventId("decision-a".to_string()),
+            task_id: TaskId("agent".to_string()),
             sequence: 1,
             timestamp_ms: 1,
             kind: EventKind::TaskStatusChanged,
-            summary: "localized completion".to_string(),
+            summary: "localized decision".to_string(),
             metadata,
         }
     }
@@ -217,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_contract_distinguishes_pending_and_committed() {
+    fn agent_strategy_lifecycle_contract_distinguishes_pending_and_committed() {
         let identity =
             AgentTerminalCommitIdentity::new(&TaskId("agent".to_string()), &context(), 0).unwrap();
         assert_eq!(
@@ -233,12 +407,20 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_malformed_and_nonterminal_commits_fail_closed() {
+    fn agent_strategy_lifecycle_contract_duplicate_malformed_and_nonterminal_commits_fail_closed() {
         let identity =
             AgentTerminalCommitIdentity::new(&TaskId("agent".to_string()), &context(), 0).unwrap();
         let terminal = terminal_event(&identity);
         assert_eq!(
             identity.inspect_events(&[terminal.clone(), terminal.clone()]),
+            Err(AgentTerminalCommitError::DuplicateTerminalEvents)
+        );
+        let mut unlinked = terminal.clone();
+        unlinked
+            .metadata
+            .remove(AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY);
+        assert_eq!(
+            identity.inspect_events(&[terminal.clone(), unlinked]),
             Err(AgentTerminalCommitError::DuplicateTerminalEvents)
         );
 
@@ -268,6 +450,36 @@ mod tests {
         assert_eq!(
             AgentTerminalCommitIdentity::new(&TaskId("agent".to_string()), &Metadata::new(), 0,),
             Err(AgentTerminalCommitError::MissingRunId)
+        );
+    }
+
+    #[test]
+    fn agent_strategy_lifecycle_contract_selected_strategy_must_match_before_terminal_commit() {
+        let (context, receipt) = selected_context();
+        let identity =
+            AgentTerminalCommitIdentity::new(&TaskId("agent".to_string()), &context, 0).unwrap();
+        assert_eq!(
+            identity.inspect_events(&[]),
+            Err(AgentTerminalCommitError::MissingStrategyDecision)
+        );
+
+        let decision = decision_event(&receipt);
+        let terminal = terminal_event(&identity);
+        assert_eq!(
+            identity
+                .inspect_events(&[decision.clone(), terminal])
+                .unwrap(),
+            AgentTerminalCommitState::Committed
+        );
+        let mut early_terminal = terminal_event(&identity);
+        early_terminal.sequence = decision.sequence;
+        assert_eq!(
+            identity.inspect_events(&[decision.clone(), early_terminal]),
+            Err(AgentTerminalCommitError::TerminalPrecedesStrategyDecision)
+        );
+        assert_eq!(
+            identity.inspect_events(&[decision.clone(), decision]),
+            Err(AgentTerminalCommitError::DuplicateStrategyDecisions)
         );
     }
 }

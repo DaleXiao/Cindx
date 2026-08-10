@@ -9,19 +9,20 @@ use crate::agent_finalizer_runtime::direct_finalizer_policy::{
     selected_direct_finalizer_policy,
 };
 use crate::prompt_profile_serving::{seed_prompt_profile_selection, PromptProfileFallback};
+use agent_application::{AgentStrategyDecisionReceipt, AgentTerminalCommitIdentity};
 use agent_core::{
-    Event, EventId, EventKind, Metadata, TaskId, AGENT_RUN_ID_METADATA_KEY,
-    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+    insert_event_type_v1, Event, EventId, EventKind, EventTypeV1, Metadata, TaskId,
+    AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
 use orchestrator::{
     prompt_genome_sha256, AgentExecutionMode, AgentPolicy, AgentRunDecision, PromptVerification,
 };
 
-fn event(summary: &str, kind: EventKind, metadata: Metadata) -> Event {
+fn event(sequence: u64, summary: &str, kind: EventKind, metadata: Metadata) -> Event {
     Event {
         id: EventId("direct-finalizer-receipt-event".to_string()),
         task_id: TaskId("direct-finalizer-receipt-task".to_string()),
-        sequence: 7,
+        sequence,
         timestamp_ms: 1,
         kind,
         summary: summary.to_string(),
@@ -32,6 +33,7 @@ fn event(summary: &str, kind: EventKind, metadata: Metadata) -> Event {
 fn strategy_events() -> Vec<Event> {
     let mut context = Metadata::from([
         ("project_id".to_string(), "receipt-project".to_string()),
+        ("session_id".to_string(), "receipt-session".to_string()),
         ("agent_effort".to_string(), "auto".to_string()),
         ("collaboration_profile".to_string(), "direct".to_string()),
         ("steer_epoch".to_string(), "2".to_string()),
@@ -96,6 +98,23 @@ fn strategy_events() -> Vec<Event> {
     decision.insert("collaboration_policy".to_string(), "single".to_string());
     decision.insert("decision_source".to_string(), "fixture".to_string());
     decision.insert("routing_signature".to_string(), "frozen-route".to_string());
+    decision.insert(
+        "execution_plan_semantic_sha256".to_string(),
+        "a".repeat(64),
+    );
+    insert_event_type_v1(
+        &EventKind::TaskStatusChanged,
+        &mut decision,
+        EventTypeV1::AgentRunDecisionSelected,
+    )
+    .unwrap();
+    let task_id = TaskId("direct-finalizer-receipt-task".to_string());
+    let strategy_receipt =
+        AgentStrategyDecisionReceipt::new(&task_id, &decision, &"a".repeat(64)).unwrap();
+    strategy_receipt.insert_into(&mut decision).unwrap();
+    let terminal_identity =
+        AgentTerminalCommitIdentity::new(&task_id, &decision, strategy_receipt.steer_epoch())
+            .unwrap();
 
     let request_id = "private-direct-finalizer-request";
     let mut started = context.clone();
@@ -120,24 +139,35 @@ fn strategy_events() -> Vec<Event> {
         request_id.to_string(),
     );
     terminal.insert("finalizer_fallback".to_string(), "false".to_string());
+    terminal.extend(terminal_identity.metadata());
+    insert_event_type_v1(
+        &EventKind::TaskStatusChanged,
+        &mut terminal,
+        EventTypeV1::AgentRunCompleted,
+    )
+    .unwrap();
 
     vec![
         event(
+            7,
             "Agent run decision selected",
             EventKind::TaskStatusChanged,
             decision,
         ),
         event(
+            8,
             "Agent model turn started",
             EventKind::ModelRequestStarted,
             started,
         ),
         event(
+            9,
             "Agent model turn finished",
             EventKind::ModelRequestFinished,
             finished,
         ),
         event(
+            10,
             "Agent task completed",
             EventKind::TaskStatusChanged,
             terminal,
@@ -183,9 +213,11 @@ fn rejects_a_mismatched_finished_request() {
         "different-finalizer-request".to_string(),
     );
 
-    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
-        .unwrap_err()
-        .contains("matching direct-finalizer finished event is missing"));
+    assert!(
+        direct_finalizer_receipt_from_events(&events, Treatment::Auto)
+            .unwrap_err()
+            .contains("matching direct-finalizer finished event is missing")
+    );
 }
 
 #[test]
@@ -196,9 +228,11 @@ fn rejects_a_tampered_assignment_receipt() {
         "0".repeat(64),
     );
 
-    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
-        .unwrap_err()
-        .contains("assignment receipt digest mismatch"));
+    assert!(
+        direct_finalizer_receipt_from_events(&events, Treatment::Auto)
+            .unwrap_err()
+            .contains("assignment receipt digest mismatch")
+    );
 }
 
 #[test]
@@ -214,9 +248,11 @@ fn fallback_terminal_keeps_the_route_receipt_without_claiming_finalizer_executio
     strategy_receipt_from_events(&events, Treatment::Auto, None)
         .expect("strategy receipt")
         .expect("product strategy");
-    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
-        .expect("direct-finalizer receipt projection")
-        .is_none());
+    assert!(
+        direct_finalizer_receipt_from_events(&events, Treatment::Auto)
+            .expect("direct-finalizer receipt projection")
+            .is_none()
+    );
 }
 
 #[test]
@@ -229,9 +265,11 @@ fn assigned_but_unexercised_finalizer_keeps_the_route_receipt() {
     strategy_receipt_from_events(&events, Treatment::Auto, None)
         .expect("strategy receipt")
         .expect("product strategy");
-    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
-        .expect("direct-finalizer receipt projection")
-        .is_none());
+    assert!(
+        direct_finalizer_receipt_from_events(&events, Treatment::Auto)
+            .expect("direct-finalizer receipt projection")
+            .is_none()
+    );
 }
 
 #[test]
@@ -244,24 +282,26 @@ fn exercised_finalizer_cannot_claim_a_fallback_terminal() {
     strategy_receipt_from_events(&events, Treatment::Auto, None)
         .expect("strategy receipt")
         .expect("product strategy");
-    assert!(direct_finalizer_receipt_from_events(&events, Treatment::Auto)
-        .unwrap_err()
-        .contains("execution claim is attached to a fallback terminal"));
+    assert!(
+        direct_finalizer_receipt_from_events(&events, Treatment::Auto)
+            .unwrap_err()
+            .contains("execution claim is attached to a fallback terminal")
+    );
 }
 
 #[test]
-fn missing_finalizer_terminal_does_not_invalidate_route_evidence() {
+fn missing_terminal_invalidates_strategy_lifecycle_evidence() {
     let mut events = strategy_events();
     events.pop();
 
     let mut metrics = EventMetrics::default();
     project_route_and_finalizer_evidence(&mut metrics, &events, Treatment::Auto, None, None);
 
-    let route = metrics
-        .strategy_receipt
-        .expect("route evidence must remain projectable");
-    assert_eq!(route.execution_mode, "direct");
-    assert!(metrics.evidence_errors.is_empty());
+    assert!(metrics.strategy_receipt.is_none());
+    assert!(metrics
+        .evidence_errors
+        .iter()
+        .any(|error| error.contains("terminal receipt is missing")));
     assert!(metrics
         .direct_finalizer_evidence_error
         .expect("independent finalizer diagnostic")

@@ -49,7 +49,11 @@ Never use `reset --hard` or force-push to synchronize this checkout.
 
 - Fast is a direct single-model route.
 - Auto and Pro use one Conductor-owned typed execution plan. Pro has larger
-  bounded collaboration capacity; it does not blindly activate all models.
+  bounded planning capacity; it does not blindly activate all models.
+- A production Workflow runs exactly one read-only Specialist, optionally one
+  model-distinct Independent Verifier, then a deterministic checkpoint handoff
+  to the Owner. It has no competing anchor, reviewer tournament, or model
+  synthesis layer.
 - One shared kernel owns model/tool turns, permission suspension, steer,
   recovery, and terminal commit.
 - Workspace retrieval, durable memory, task graph, and prompt evolution are
@@ -64,7 +68,61 @@ reconstruct them from old commit messages or historical reports.
 
 ## Last Completed Work
 
-The `0.2.30` release contains two scoped code changes after `0.2.29`:
+Goal 1 of the post-`0.2.30` Agent architecture work is complete in the current
+source:
+
+1. Current Agent model events have explicit Actor, Stage, model-profile,
+   service, trust, and effect-authority attribution while retaining every
+   legacy role/configuration field.
+2. Router and selected-decision events commit atomically behind a preparation
+   epoch checkpoint, before treatment execution can advance.
+3. Success, failure, cancellation, pause/recovery, and startup reconciliation
+   bind the same strategy receipt or an explicit pre-decision `not_selected`
+   explanation.
+4. Evaluation projection rejects missing, duplicate, tampered, or unlinked
+   strategy/terminal receipts.
+
+This work did not change production route selection, model configuration,
+budgets, permissions, tool authority, UI behavior, or provider call counts. No
+provider evaluation was run, and no intelligence improvement is claimed.
+
+Goal 2 is also complete in the current source:
+
+1. Direct remains the foreground Owner path; Workflow is constrained to one
+   Specialist, an optional planned Independent Verifier, and the same Owner.
+2. The compatibility synthesis node is completed deterministically from the
+   durable checkpoint and consumes no model attempt.
+3. Direct-anchor competition, post-team quality/reviewer competition, model
+   synthesis, uplift repair, and secondary Conductor replanning were removed
+   from the production Workflow path. Bounded retry remains within the same
+   logical Specialist or Verifier lane.
+4. Permission-gated effects and final delivery remain Owner-only. Missing or
+   failed required verification falls through to the direct Owner path.
+5. Matched evaluation now validates actual Actor exposure instead of trusting
+   Direct/Workflow labels alone, while retaining total call and token accounting.
+
+These are deterministic graph, safety, and attribution guarantees. No provider
+evaluation was run, so they do not establish quality, latency, token, or
+intelligence improvement.
+
+Goal 3A is complete in the current source:
+
+1. `agent-application` owns one bounded externally verified outcome receipt
+   shared by Direct and Workflow.
+2. The receipt binds strategy and terminal lifecycle, semantic execution plan,
+   actual Actor exposure, external postconditions, preservation, and resource
+   accounting before deriving reward.
+3. The same integer rule records positive, partial, and negative outcomes;
+   valid safety or preservation failures remain zero-score evidence, while
+   missing or tampered provenance is censored.
+4. Evaluation reuses this portable contract without writing
+   `LearningEvidenceV1` or changing production routing, prompts, memory,
+   permissions, provider calls, or serving.
+
+No provider evaluation was run, so this is deterministic reward-plumbing
+evidence, not an intelligence or collaboration-uplift result.
+
+The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
 1. `ff8c238` separated route/task-graph evidence from direct-finalizer evidence
    in the V12 causal evaluation path.
@@ -90,25 +148,12 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-Make strategy-event persistence and terminal lifecycle state one atomic,
-observable boundary shared by Direct and Workflow evaluation arms, without
-changing production route selection or UX.
-
-Success criteria are deliberately narrow:
-
-1. Both treatments persist the selected decision before execution can advance.
-2. Terminal success, failure, cancellation, and interruption each bind to that
-   decision receipt.
-3. Recovery cannot leave a reserved provider action without a durable strategy
-   or terminal explanation.
-4. Existing Fast/Auto/Pro behavior, permissions, budgets, and serving profiles
-   remain unchanged.
-5. Deterministic lifecycle and replay tests pass before a new provider protocol
-   is proposed.
-
-Only after that goal should a new, small, frozen matched Direct-vs-Workflow
-protocol be designed. Do not add prompt genes, roles, evaluators, or broader
-benchmarks first.
+After explicit user confirmation, Goal 3B may define a bounded policy over
+Specialist invocation, context allocation, verification, repair, and stopping
+from reviewed Goal 3A shadow receipts. It must keep the Goal 2 graph and Owner
+authority fixed, collect continuously, and promote only discrete reviewed
+candidates. Provider validation remains blocked until the remaining Goal 3
+deterministic review passes; no uplift freezes the collaboration type.
 
 ## Structural Risks
 

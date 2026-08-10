@@ -97,6 +97,23 @@ impl AgentModelTurnRole {
     fn is_finalizer(self) -> bool {
         self == Self::Finalizer
     }
+
+    fn attribution(self) -> AgentModelAttribution {
+        match self {
+            Self::Actor => AgentModelAttribution::actor(
+                AgentActor::Owner,
+                AgentStage::Act,
+                AgentModelProfile::Primary,
+                AgentEffectAuthority::PermissionGated,
+            ),
+            Self::Finalizer => AgentModelAttribution::actor(
+                AgentActor::Owner,
+                AgentStage::Finalize,
+                AgentModelProfile::Primary,
+                AgentEffectAuthority::None,
+            ),
+        }
+    }
 }
 
 pub(crate) struct AgentModelTurnUnavailable {
@@ -288,6 +305,15 @@ pub(crate) fn execute_agent_model_turn(
             metadata.insert("role".to_string(), turn_role.label().to_string());
             metadata.insert("policy".to_string(), collaboration.policy.clone());
         }
+        turn_role
+            .attribution()
+            .insert_into(
+                &mut metadata,
+                agent_model,
+                turn_role.label(),
+                "foreground_agent",
+            )
+            .map_err(|error| error.to_string())?;
         insert_context_compiler_event_metadata(&mut metadata, context_governor);
         insert_direct_finalizer_event_metadata(&mut metadata, &request.metadata);
         append_event(
@@ -756,6 +782,15 @@ pub(crate) fn execute_agent_model_turn(
             metadata.insert("role".to_string(), turn_role.label().to_string());
             metadata.insert("policy".to_string(), collaboration.policy.clone());
         }
+        turn_role
+            .attribution()
+            .insert_into(
+                &mut metadata,
+                agent_model,
+                turn_role.label(),
+                "foreground_agent",
+            )
+            .map_err(|error| error.to_string())?;
         insert_direct_finalizer_event_metadata(&mut metadata, &request.metadata);
         append_event(
             &mut store,
@@ -832,6 +867,28 @@ mod tests {
             repeated.get("context_compiler_receipt_digest"),
             Some(digest)
         );
+    }
+
+    #[test]
+    fn foreground_owner_keeps_effects_and_final_delivery_separate() {
+        for (role, stage, authority) in [
+            (AgentModelTurnRole::Actor, "act", "permission_gated"),
+            (AgentModelTurnRole::Finalizer, "finalize", "none"),
+        ] {
+            let mut metadata = Metadata::new();
+            role.attribution()
+                .insert_into(&mut metadata, "shared-model", role.label(), "foreground")
+                .unwrap();
+            assert_eq!(
+                metadata.get("agent_actor").map(String::as_str),
+                Some("owner")
+            );
+            assert_eq!(metadata.get("agent_stage").map(String::as_str), Some(stage));
+            assert_eq!(
+                metadata.get("agent_effect_authority").map(String::as_str),
+                Some(authority)
+            );
+        }
     }
 
     struct CountingPreparedProvider {

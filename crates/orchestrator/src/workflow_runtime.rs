@@ -355,6 +355,13 @@ impl WorkflowPlanIr {
         validate_adaptive_workflow(&self.adaptive_workflow(), allowed_models)
     }
 
+    pub fn validate_owner_execution_graph(
+        &self,
+        required_verification: bool,
+    ) -> Result<(), String> {
+        crate::owner_execution_graph::validate(self, required_verification)
+    }
+
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string(self)
             .map_err(|error| format!("workflow serialization failed: {error}"))
@@ -830,7 +837,15 @@ impl WorkflowExecutionCheckpoint {
         evidence_json: String,
         now_ms: u64,
     ) -> Result<(), String> {
-        self.complete_step_inner(step_id, model, output, evidence_json, None, None, now_ms)
+        self.complete_step_inner(
+            step_id,
+            Some(model),
+            output,
+            evidence_json,
+            None,
+            None,
+            now_ms,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -846,7 +861,7 @@ impl WorkflowExecutionCheckpoint {
     ) -> Result<(), String> {
         self.complete_step_inner(
             step_id,
-            model,
+            Some(model),
             output,
             evidence_json,
             Some(evidence),
@@ -855,11 +870,52 @@ impl WorkflowExecutionCheckpoint {
         )
     }
 
+    pub fn complete_owner_handoff(
+        &mut self,
+        step_id: &str,
+        output: String,
+        evidence_json: String,
+        evidence: WorkflowEvidenceSummary,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let required_verification = self
+            .plan
+            .steps
+            .iter()
+            .any(|step| step.contract.output_kind == WorkflowOutputKind::Verification);
+        self.plan
+            .validate_owner_execution_graph(required_verification)?;
+        let plan_step = self
+            .plan
+            .steps
+            .last()
+            .filter(|step| {
+                step.id == step_id && step.contract.output_kind == WorkflowOutputKind::Synthesis
+            })
+            .ok_or_else(|| "owner handoff must complete the final synthesis sink".to_string())?;
+        let checkpoint = self
+            .steps
+            .get(&plan_step.id)
+            .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
+        if checkpoint.attempts != 0 {
+            return Err("owner handoff cannot consume a model attempt".to_string());
+        }
+        self.complete_step_inner(
+            step_id,
+            None,
+            output,
+            evidence_json,
+            Some(evidence),
+            None,
+            now_ms,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn complete_step_inner(
         &mut self,
         step_id: &str,
-        model: &str,
+        model: Option<&str>,
         output: String,
         evidence_json: String,
         evidence_summary: Option<WorkflowEvidenceSummary>,
@@ -973,8 +1029,10 @@ impl WorkflowExecutionCheckpoint {
             .get_mut(step_id)
             .ok_or_else(|| format!("unknown workflow checkpoint step: {step_id}"))?;
         step.status = WorkflowStepStatus::Completed;
-        step.attempts = step.attempts.max(1);
-        step.model = model.to_string();
+        if let Some(model) = model {
+            step.attempts = step.attempts.max(1);
+            step.model = model.to_string();
+        }
         step.output = Some(output);
         step.evidence_count = semantic.evidence_count;
         step.evidence_json = evidence_json;
@@ -1208,6 +1266,27 @@ impl WorkflowExecutionCheckpoint {
         checkpoint.plan.reconcile_step_contracts();
         checkpoint.reconcile_semantic_state()?;
         checkpoint.validate(allowed_models)?;
+        Ok(checkpoint)
+    }
+
+    pub fn from_json_for_untrusted_handoff(value: &str) -> Result<Self, String> {
+        let mut checkpoint = serde_json::from_str::<Self>(value)
+            .map_err(|error| format!("workflow checkpoint JSON is invalid: {error}"))?;
+        checkpoint.plan.reconcile_step_contracts();
+        checkpoint.reconcile_semantic_state()?;
+        let embedded_models = checkpoint
+            .plan
+            .steps
+            .iter()
+            .map(|step| step.model.clone())
+            .chain(checkpoint.steps.values().map(|step| step.model.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if embedded_models.iter().any(|model| model.trim().is_empty()) {
+            return Err("workflow checkpoint contains an empty model identity".to_string());
+        }
+        checkpoint.validate(&embedded_models)?;
         Ok(checkpoint)
     }
 

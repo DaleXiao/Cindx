@@ -1,10 +1,13 @@
 mod artifacts;
 mod loss_aware_work_queue;
+mod outcome_evidence;
+mod outcome_projection;
 mod recovery;
 mod run_execution;
 mod run_lifecycle;
 mod run_persistence;
 mod sessions;
+mod strategy_decision;
 mod terminal_commit;
 
 pub use artifacts::{
@@ -14,6 +17,13 @@ pub use artifacts::{
 pub use loss_aware_work_queue::{
     ClaimedWork, LossAwareWorkQueue, WorkEnqueueOutcome, WorkEnqueueResult, WorkQueueMetrics,
     WorkQueuePolicy, WorkRetryOutcome, WorkRetryResult,
+};
+pub use outcome_evidence::{
+    AgentExternalPostconditionV1, AgentExternalVerifierV1, AgentOutcomeDispositionV1,
+    AgentOutcomeEvidenceError, AgentOutcomeExposureV1, AgentOutcomeLifecycleBindingV1,
+    AgentOutcomeResourcesV1, AgentOutcomeTerminalResourcesV1, AgentOutcomeTerminalStatusV1,
+    AgentOutcomeUsageCompletenessV1, AgentOutcomeUsageV1, ExternallyVerifiedOutcomeV1,
+    EXTERNALLY_VERIFIED_OUTCOME_SCHEMA,
 };
 pub use recovery::{
     AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState, ResolvedAgentRecovery,
@@ -29,6 +39,14 @@ pub use run_persistence::{
 };
 pub use sessions::{
     project_session_lifecycle, SessionLifecycleInput, SessionLifecycleProjection, SessionTitleState,
+};
+pub use strategy_decision::{
+    insert_strategy_not_selected, strategy_receipt_is_explicitly_not_selected,
+    AgentStrategyDecisionReceipt, AgentStrategyReceiptError,
+    AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY, AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_NOT_SELECTED, AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_SCHEMA, AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_SELECTED, AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY,
 };
 pub use terminal_commit::{
     AgentTerminalCommitError, AgentTerminalCommitIdentity, AgentTerminalCommitState,

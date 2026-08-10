@@ -46,7 +46,7 @@ impl MatchedRoutePlanAnchor {
             .into_iter()
             .collect::<Vec<_>>();
         self.workflow_plan
-            .validate(&self.conductor_candidate, &allowed_models)
+            .validate_owner_execution_graph(&self.conductor_candidate, &allowed_models)
     }
 
     pub(crate) fn write_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {

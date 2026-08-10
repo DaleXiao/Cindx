@@ -9,6 +9,7 @@ use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
 use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
+use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
 use crate::prompt_profile_serving::prompt_profile_assignment_from_events;
 use crate::suspended_run_runtime::{
     clear_suspended_agent_run, suspended_agent_run_control_snapshot, suspended_agent_run_policy,
@@ -19,7 +20,10 @@ use agent_application::{
     insert_run_objectives, insert_run_start_prompts, insert_user_message_model_prompt,
     merge_persistable_run_context,
 };
-use agent_core::AgentRunIdentity;
+use agent_core::{
+    AgentRunIdentity, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_ID_METADATA_KEY,
+    LOGICAL_AGENT_RUN_ID_METADATA_KEY, SOURCE_AGENT_RUN_ID_METADATA_KEY,
+};
 
 pub(crate) fn persisted_agent_policy_from_active_events(
     active_events: &[Event],
@@ -30,6 +34,22 @@ pub(crate) fn persisted_agent_policy_from_active_events(
         .and_then(|event| event.metadata.get("agent_effort"))
         .map(String::as_str);
     persisted_agent_policy(persisted)
+}
+
+fn commit_agent_run_start_with<T>(
+    control: &Arc<AgentRunControl>,
+    commit: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match control.commit_start_checkpoint_with(commit)? {
+        agent_runtime::RunStartCheckpoint::Committed(value) => Ok(value),
+        agent_runtime::RunStartCheckpoint::Stopped(reason) => Err(format!(
+            "agent run stopped before durable start ({})",
+            reason.code()
+        )),
+        agent_runtime::RunStartCheckpoint::TerminalCommitted => {
+            Err("agent run terminated before durable start".to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -52,10 +72,33 @@ pub(crate) fn run_agent_task_blocking(
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
     let effort = AgentPolicy::parse_ingress(&input.effort);
-    let run_control_lease =
-        begin_agent_run_control_for_effort(&state, &session_id, effort.label(), None)?;
+    let lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
+    cancel_background_prompt_evaluations(&state)?;
+    project_session_metadata_for_session(&state, Some(&session_id))?;
+    let run_control_lease = state
+        .agent_run_controls
+        .register(&session_id, Arc::new(AgentRunControl::new(effort.label())))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "agent run is already active for this session".to_string())?;
     let cancellation = run_control_lease.control();
-    let result = run_agent_task_blocking_inner(app, state.clone(), input, &cancellation);
+    let mut start_gate = Some(lifecycle);
+    let result = run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate(
+        app,
+        state.clone(),
+        input,
+        &cancellation,
+        AgentExecutionConstraint::Native,
+        AgentMemoryEvaluationConstraint::Native,
+        None,
+        &mut start_gate,
+    );
+    if start_gate.is_some() {
+        drop(run_control_lease);
+        drop(start_gate.take());
+    }
     if let Ok(agent) = result.as_ref() {
         if agent.status == "completed" {
             if let Ok(Some(refinement)) =
@@ -68,40 +111,8 @@ pub(crate) fn run_agent_task_blocking(
     result
 }
 
-pub(crate) fn run_agent_task_blocking_inner(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    input: AgentTaskInput,
-    cancellation: &Arc<AgentRunControl>,
-) -> Result<AgentState, String> {
-    run_agent_task_blocking_inner_with_execution_constraint(
-        app,
-        state,
-        input,
-        cancellation,
-        AgentExecutionConstraint::Native,
-    )
-}
-
-pub(crate) fn run_agent_task_blocking_inner_with_execution_constraint(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    input: AgentTaskInput,
-    cancellation: &Arc<AgentRunControl>,
-    execution_constraint: AgentExecutionConstraint,
-) -> Result<AgentState, String> {
-    run_agent_task_blocking_inner_with_evaluation_constraints(
-        app,
-        state,
-        input,
-        cancellation,
-        execution_constraint,
-        AgentMemoryEvaluationConstraint::Native,
-        None,
-    )
-}
-
-pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate(
     app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     input: AgentTaskInput,
@@ -109,6 +120,7 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
     execution_constraint: AgentExecutionConstraint,
     memory_constraint: AgentMemoryEvaluationConstraint,
     matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
+    start_gate: &mut Option<std::sync::MutexGuard<'_, ()>>,
 ) -> Result<AgentState, String> {
     let effort = AgentPolicy::parse_ingress(&input.effort);
     let user_prompt = input.prompt.trim().to_string();
@@ -192,11 +204,10 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
     let session_id = run_context.get("session_id").map(String::as_str);
     let task_id = phase16_task_id();
     let (history, artifact_manifest) = {
-        let mut store = state
+        let store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        delete_persisted_agent_runtime_snapshot(&mut store, session_id)?;
         let events = agent_events_for_session(&store, &task_id, session_id)
             .map_err(|error| error.to_string())?;
         let session_events = session_id
@@ -207,17 +218,26 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
             .filter_map(model_message_from_event)
             .collect::<Vec<_>>();
         let artifact_manifest = artifact_manifest_message(&session_events);
-        let mut start_metadata = run_context.clone();
-        insert_run_start_prompts(&mut start_metadata, &display_prompt, &prompt, &prompt);
-        start_metadata.insert(
-            "context_window_tokens".to_string(),
-            config.context_window_tokens.to_string(),
-        );
-        let mut message_metadata = merge_persistable_run_context(Metadata::new(), &run_context);
-        insert_user_message_model_prompt(&mut message_metadata, &display_prompt, &prompt);
-        add_attachment_metadata(&mut message_metadata, &attachments);
+        (history, artifact_manifest)
+    };
+    let mut start_metadata = run_context.clone();
+    insert_run_start_prompts(&mut start_metadata, &display_prompt, &prompt, &prompt);
+    start_metadata.insert(
+        "context_window_tokens".to_string(),
+        config.context_window_tokens.to_string(),
+    );
+    let mut message_metadata = merge_persistable_run_context(Metadata::new(), &run_context);
+    insert_user_message_model_prompt(&mut message_metadata, &display_prompt, &prompt);
+    add_attachment_metadata(&mut message_metadata, &attachments);
+    commit_agent_run_start_with(cancellation, || {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
         store
             .with_immediate_transaction(|store| {
+                delete_persisted_agent_runtime_snapshot(store, session_id)
+                    .map_err(StorageError::new)?;
                 append_event(
                     store,
                     &task_id,
@@ -233,9 +253,9 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
                     message_metadata,
                 )
             })
-            .map_err(|error| error.to_string())?;
-        (history, artifact_manifest)
-    };
+            .map_err(|error| error.to_string())
+    })?;
+    drop(start_gate.take());
 
     let runtime_config = cancellation.runtime_config();
     let mut runtime = if history.is_empty() {
@@ -266,6 +286,7 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints(
         cancellation,
     ) {
         Ok(prepared) => prepared,
+        Err(AgentRunPreparationError::Finished(result)) => return *result,
         Err(AgentRunPreparationError::ControlStop(run_context)) => {
             return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
         }
@@ -295,32 +316,100 @@ pub(crate) fn cancel_agent_task(
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
     let active_run_cancelled = request_agent_run_cancel(&state, &input.session_id)?;
     clear_suspended_agent_run(&state, &input.session_id)?;
-    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
-    let session_id = run_context.get("session_id").map(String::as_str);
+    let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let session_id = run_context.get("session_id").cloned();
     let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let current =
-        agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())?;
+    let current = agent_state_for_session(&store, None, session_id.as_deref())
+        .map_err(|error| error.to_string())?;
     if !current.can_cancel && !active_run_cancelled {
         return Ok(current);
     }
-
-    append_event(
-        &mut store,
-        &phase16_task_id(),
-        EventKind::TaskStatusChanged,
-        "Agent task cancelled",
-        metadata_with_context(
-            [("reason".to_string(), "user_cancelled".to_string())]
-                .into_iter()
-                .collect(),
+    let events = agent_events_for_session(&store, &phase16_task_id(), session_id.as_deref())
+        .map_err(|error| error.to_string())?;
+    let active_events = active_agent_events_for_session(&events, session_id.as_deref());
+    let start = active_events
+        .iter()
+        .find(|event| is_agent_run_start_event(event));
+    if let Some(start) = start {
+        if let Some(identity) = AgentRunIdentity::from_metadata(&start.metadata)
+            .map_err(|error| format!("invalid active agent run identity: {error}"))?
+        {
+            identity
+                .insert_into(&mut run_context)
+                .map_err(|error| format!("invalid active agent run identity: {error}"))?;
+        } else {
+            for key in [
+                AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,
+                LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+                AGENT_RUN_ID_METADATA_KEY,
+                SOURCE_AGENT_RUN_ID_METADATA_KEY,
+            ] {
+                if let Some(value) = start.metadata.get(key) {
+                    run_context.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+    let steer_epoch = latest_applied_agent_steer_epoch(&active_events);
+    run_context.insert("steer_epoch".to_string(), steer_epoch.to_string());
+    let mut receipt_context = Metadata::new();
+    crate::agent_strategy_receipt_runtime::bind_strategy_receipt_from_events(
+        &active_events,
+        &run_context,
+        &mut receipt_context,
+    )?;
+    run_context.extend(receipt_context);
+    let cancelled = if run_context.contains_key(AGENT_RUN_ID_METADATA_KEY) {
+        persist_agent_terminal_once(
+            &mut store,
+            &phase16_task_id(),
             &run_context,
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    delete_persisted_agent_runtime_snapshot(&mut store, session_id)?;
+            steer_epoch,
+            |store, identity| {
+                append_event(
+                    store,
+                    &phase16_task_id(),
+                    EventKind::TaskStatusChanged,
+                    "Agent task cancelled",
+                    metadata_with_context(
+                        [("reason".to_string(), "user_cancelled".to_string())]
+                            .into_iter()
+                            .chain(identity.metadata())
+                            .collect(),
+                        &run_context,
+                    ),
+                )?;
+                delete_persisted_agent_runtime_snapshot(store, session_id.as_deref())
+                    .map_err(StorageError::new)?;
+                agent_state_for_session(store, None, session_id.as_deref())
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .state
+    } else {
+        store
+            .with_immediate_transaction(|store| {
+                append_event(
+                    store,
+                    &phase16_task_id(),
+                    EventKind::TaskStatusChanged,
+                    "Agent task cancelled",
+                    metadata_with_context(
+                        [("reason".to_string(), "user_cancelled".to_string())]
+                            .into_iter()
+                            .collect(),
+                        &run_context,
+                    ),
+                )?;
+                delete_persisted_agent_runtime_snapshot(store, session_id.as_deref())
+                    .map_err(StorageError::new)?;
+                agent_state_for_session(store, None, session_id.as_deref())
+            })
+            .map_err(|error| error.to_string())?
+    };
     if let Err(error) = refresh_project_memory_after_run(&mut store, &run_context) {
         eprintln!("project memory checkpoint unavailable: {error}");
     }
@@ -335,7 +424,7 @@ pub(crate) fn cancel_agent_task(
         None,
     );
 
-    agent_state_for_session(&store, None, session_id).map_err(|error| error.to_string())
+    Ok(cancelled)
 }
 
 #[tauri::command]
@@ -357,6 +446,11 @@ pub(crate) fn retry_agent_task_blocking(
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
+    let lifecycle = state
+        .session_lifecycle_gate
+        .lock()
+        .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
+    cancel_background_prompt_evaluations(&state)?;
     let recovery_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     let (persisted_effort, applied_steer_epoch, durable_recovery) = {
         let store = state
@@ -381,38 +475,51 @@ pub(crate) fn retry_agent_task_blocking(
     }
     let effort = suspended_effort.unwrap_or(persisted_effort);
     let suspended_snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
-    let run_control_lease = if let Some(snapshot) = suspended_snapshot {
-        begin_agent_run_control_for_continuation(&state, &session_id, snapshot)?
+    let control = if let Some(snapshot) = suspended_snapshot {
+        AgentRunControl::from_snapshot_for_continuation(snapshot)
+            .map_err(|reason| format!("agent run cannot continue after {}", reason.code()))?
     } else if let Some(recovery) = durable_recovery
         .as_ref()
         .filter(|recovery| recovery.resource_snapshot.is_some())
     {
-        begin_agent_run_control_from_persisted_resources(
-            &state,
-            &session_id,
-            effort.label(),
-            applied_steer_epoch,
-            recovery
-                .resource_snapshot
-                .clone()
-                .expect("filtered durable resource snapshot"),
-            recovery.reason != AgentRecoveryReason::AppRestarted,
-        )?
+        let resources = recovery
+            .resource_snapshot
+            .clone()
+            .expect("filtered durable resource snapshot");
+        if recovery.reason != AgentRecoveryReason::AppRestarted {
+            AgentRunControl::new_for_continuation_at_steer_epoch_with_resource_snapshot(
+                effort.label(),
+                applied_steer_epoch,
+                resources,
+            )
+        } else {
+            AgentRunControl::new_at_steer_epoch_with_resource_snapshot(
+                effort.label(),
+                applied_steer_epoch,
+                resources,
+            )
+        }
     } else {
-        begin_agent_run_control_at_steer_epoch(
-            &state,
-            &session_id,
-            effort.label(),
-            applied_steer_epoch,
-        )?
+        AgentRunControl::new_at_steer_epoch(effort.label(), applied_steer_epoch)
     };
+    let run_control_lease = state
+        .agent_run_controls
+        .register(&session_id, Arc::new(control))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "agent run is already active for this session".to_string())?;
     let cancellation = run_control_lease.control();
     let suspended = take_suspended_agent_run(&state, &session_id)?;
-    if let Some(suspended) = suspended {
-        resume_suspended_agent_run(app, &state, suspended, &cancellation)
+    let mut start_gate = Some(lifecycle);
+    let result = if let Some(suspended) = suspended {
+        resume_suspended_agent_run(app, &state, suspended, &cancellation, &mut start_gate)
     } else {
-        retry_agent_task_blocking_inner(app, state.clone(), input, &cancellation)
+        retry_agent_task_blocking_inner(app, state.clone(), input, &cancellation, &mut start_gate)
+    };
+    if start_gate.is_some() {
+        drop(run_control_lease);
+        drop(start_gate.take());
     }
+    result
 }
 
 pub(crate) fn resume_suspended_agent_run(
@@ -420,6 +527,7 @@ pub(crate) fn resume_suspended_agent_run(
     state: &tauri::State<'_, AppState>,
     suspended: SuspendedAgentRun,
     cancellation: &Arc<AgentRunControl>,
+    start_gate: &mut Option<std::sync::MutexGuard<'_, ()>>,
 ) -> Result<AgentState, String> {
     let SuspendedAgentRun {
         mut runtime,
@@ -440,19 +548,14 @@ pub(crate) fn resume_suspended_agent_run(
         );
     }
     let recovery = {
-        let mut store = state
+        let store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        claim_agent_recovery_envelope(
-            &mut store,
-            &run_context,
-            &[AgentRecoveryState::Paused],
-            AgentRecoveryReason::UserContinued,
-        )?
+        peek_agent_recovery_envelope(&store, &run_context, &[AgentRecoveryState::Paused])?
     };
     let mut inherited_identity = inherited_agent_run_identity(&run_context)?;
-    if let Some(recovery) = recovery {
+    if let Some(recovery) = recovery.as_ref() {
         inherited_identity = Some((
             recovery.identity.logical_run_id().to_string(),
             recovery.identity.source_run_id.clone(),
@@ -463,11 +566,11 @@ pub(crate) fn resume_suspended_agent_run(
         );
         run_context.insert(
             "recovery_attempts".to_string(),
-            recovery.attempts.to_string(),
+            recovery.attempts.saturating_add(1).to_string(),
         );
         run_context.insert("continuation".to_string(), "true".to_string());
-        if let Some(queue_id) = recovery.queue_id {
-            run_context.insert("queue_id".to_string(), queue_id);
+        if let Some(queue_id) = recovery.queue_id.as_ref() {
+            run_context.insert("queue_id".to_string(), queue_id.clone());
         }
     }
     if let Some((logical_run_id, source_attempt_run_id)) = inherited_identity {
@@ -499,36 +602,60 @@ pub(crate) fn resume_suspended_agent_run(
         .find_map(|message| message.metadata.get("display_content"))
         .cloned()
         .unwrap_or_else(|| prompt.clone());
-    {
+    let mut retry_metadata = [
+        ("continuation".to_string(), "true".to_string()),
+        (
+            "context_window_tokens".to_string(),
+            config.context_window_tokens.to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    insert_run_start_prompts(
+        &mut retry_metadata,
+        &display_prompt,
+        &prompt,
+        &recovery_prompt,
+    );
+    insert_run_objectives(&mut retry_metadata, &run_context);
+    commit_agent_run_start_with(cancellation, || {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let mut retry_metadata = [
-            ("continuation".to_string(), "true".to_string()),
-            (
-                "context_window_tokens".to_string(),
-                config.context_window_tokens.to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        insert_run_start_prompts(
-            &mut retry_metadata,
-            &display_prompt,
-            &prompt,
-            &recovery_prompt,
-        );
-        insert_run_objectives(&mut retry_metadata, &run_context);
-        append_event(
-            &mut store,
-            &phase16_task_id(),
-            EventKind::TaskStatusChanged,
-            "Agent task retry started",
-            metadata_with_context(retry_metadata, &run_context),
-        )
-        .map_err(|error| error.to_string())?;
-    }
+        store
+            .with_immediate_transaction(|store| {
+                let claimed = claim_agent_recovery_envelope_in_transaction(
+                    store,
+                    &run_context,
+                    &[AgentRecoveryState::Paused],
+                    AgentRecoveryReason::UserContinued,
+                )
+                .map_err(StorageError::new)?;
+                let claim_matches = match (recovery.as_ref(), claimed.as_ref()) {
+                    (None, None) => true,
+                    (Some(expected), Some(claimed)) => {
+                        claimed.identity.resume_key == expected.identity.resume_key
+                            && claimed.attempts == expected.attempts.saturating_add(1)
+                    }
+                    _ => false,
+                };
+                if !claim_matches {
+                    return Err(StorageError::new(
+                        "agent recovery claim changed before durable retry start",
+                    ));
+                }
+                append_event(
+                    store,
+                    &phase16_task_id(),
+                    EventKind::TaskStatusChanged,
+                    "Agent task retry started",
+                    metadata_with_context(retry_metadata, &run_context),
+                )
+            })
+            .map_err(|error| error.to_string())
+    })?;
+    drop(start_gate.take());
     let prepared = PreparedAgentExecution {
         base_run_context: run_context.clone(),
         run_context,
@@ -552,6 +679,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
     state: tauri::State<'_, AppState>,
     input: SessionActionInput,
     cancellation: &Arc<AgentRunControl>,
+    start_gate: &mut Option<std::sync::MutexGuard<'_, ()>>,
 ) -> Result<AgentState, String> {
     clear_suspended_agent_run(&state, &input.session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
@@ -585,8 +713,10 @@ pub(crate) fn retry_agent_task_blocking_inner(
         prompt_contract_epoch,
         inherited_identity,
         prompt_profile_assignment,
+        history,
+        artifact_manifest,
     ) = {
-        let mut store = state
+        let store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
@@ -620,12 +750,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
             }
             None => None,
         };
-        let recovery = claim_agent_recovery_envelope(
-            &mut store,
-            &run_context,
-            &[AgentRecoveryState::Paused],
-            AgentRecoveryReason::UserContinued,
-        )?;
+        let recovery =
+            peek_agent_recovery_envelope(&store, &run_context, &[AgentRecoveryState::Paused])?;
         let applied_steer_epoch = latest_applied_agent_steer_epoch(&active_events);
         let initial_objective = initial_agent_objective_from_events(&active_events)
             .unwrap_or_else(|| display_prompt.clone());
@@ -655,6 +781,12 @@ pub(crate) fn retry_agent_task_blocking_inner(
             })
             .transpose()?
             .unwrap_or_default();
+        let session_events = session_id
+            .as_deref()
+            .map(|session_id| agent_session_events(&events, session_id))
+            .unwrap_or_default();
+        let history = recovery_safe_transcript(&session_events);
+        let artifact_manifest = artifact_manifest_message(&session_events);
         (
             prompt,
             display_prompt,
@@ -667,6 +799,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
             prompt_contract_epoch,
             inherited_identity,
             prompt_profile_assignment,
+            history,
+            artifact_manifest,
         )
     };
     run_context.insert("steer_epoch".to_string(), applied_steer_epoch.to_string());
@@ -686,7 +820,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
         );
         run_context.insert(
             "recovery_attempts".to_string(),
-            recovery.attempts.to_string(),
+            recovery.attempts.saturating_add(1).to_string(),
         );
         run_context.insert("continuation".to_string(), "true".to_string());
         if let Some(queue_id) = recovery.queue_id.as_ref() {
@@ -721,104 +855,105 @@ pub(crate) fn retry_agent_task_blocking_inner(
         &recovered_prepared_task_state,
         &mut run_context,
     );
+    let (restored_task_state, checkpoint_fallback) = if let Some(snapshot) = recovery
+        .as_ref()
+        .and_then(|recovery| recovery.task_state.as_ref())
     {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let mut start_metadata = run_context.clone();
-        insert_run_start_prompts(
-            &mut start_metadata,
-            &display_prompt,
-            &prompt,
-            &recovery_prompt,
-        );
-        start_metadata.insert(
-            "context_window_tokens".to_string(),
-            config.context_window_tokens.to_string(),
-        );
-        append_event(
-            &mut store,
-            &task_id,
-            EventKind::TaskStatusChanged,
-            "Agent task retry started",
-            start_metadata,
-        )
-        .map_err(|error| error.to_string())?;
-        let mut continuation_metadata =
-            merge_persistable_run_context(Metadata::new(), &run_context);
-        continuation_metadata.insert("continuation_replay".to_string(), "true".to_string());
-        continuation_metadata.insert("display_content".to_string(), display_prompt.clone());
-        insert_user_message_model_prompt(&mut continuation_metadata, &display_prompt, &prompt);
-        append_message_event_with_metadata(
-            &mut store,
-            &task_id,
-            MessageRole::User,
-            &display_prompt,
-            continuation_metadata,
-        )
-        .map_err(|error| error.to_string())?;
-    }
-
-    let (history, artifact_manifest, restored_task_state) = {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let events = store
-            .list_by_task(&task_id)
-            .map_err(|error| error.to_string())?;
-        let session_events = session_id
-            .as_deref()
-            .map(|session_id| agent_session_events(&events, session_id))
-            .unwrap_or_default();
-        let mut messages = recovery_safe_transcript(&session_events);
-        if messages
-            .last()
-            .map(|message| matches!(message.role, MessageRole::User) && message.content == prompt)
-            .unwrap_or(false)
-        {
-            messages.pop();
+        match snapshot.restore_with_effective_objective(
+            recovery_prompt.clone(),
+            history.clone(),
+            recovered_prepared_task_state.effective_objective(),
+        ) {
+            Ok(runtime) => (Some(runtime), None),
+            Err(error) => (
+                None,
+                Some(metadata_with_context(
+                    [
+                        (
+                            "recovery_code".to_string(),
+                            "task_state_lineage_mismatch".to_string(),
+                        ),
+                        ("recovery_detail".to_string(), error.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    &run_context,
+                )),
+            ),
         }
-        let restored_task_state = recovery
-            .as_ref()
-            .and_then(|recovery| recovery.task_state.as_ref())
-            .and_then(|snapshot| {
-                match snapshot.restore_with_effective_objective(
-                    recovery_prompt.clone(),
-                    messages.clone(),
-                    recovered_prepared_task_state.effective_objective(),
-                ) {
-                    Ok(runtime) => Some(runtime),
-                    Err(error) => {
-                        let _ = append_event(
-                            &mut store,
-                            &task_id,
-                            EventKind::TaskStatusChanged,
-                            "Agent task checkpoint fallback",
-                            metadata_with_context(
-                                [
-                                    (
-                                        "recovery_code".to_string(),
-                                        "task_state_lineage_mismatch".to_string(),
-                                    ),
-                                    ("recovery_detail".to_string(), error.to_string()),
-                                ]
-                                .into_iter()
-                                .collect(),
-                                &run_context,
-                            ),
-                        );
-                        None
-                    }
-                }
-            });
-        (
-            messages,
-            artifact_manifest_message(&session_events),
-            restored_task_state,
-        )
+    } else {
+        (None, None)
     };
+    let mut start_metadata = run_context.clone();
+    insert_run_start_prompts(
+        &mut start_metadata,
+        &display_prompt,
+        &prompt,
+        &recovery_prompt,
+    );
+    start_metadata.insert(
+        "context_window_tokens".to_string(),
+        config.context_window_tokens.to_string(),
+    );
+    let mut continuation_metadata = merge_persistable_run_context(Metadata::new(), &run_context);
+    continuation_metadata.insert("continuation_replay".to_string(), "true".to_string());
+    continuation_metadata.insert("display_content".to_string(), display_prompt.clone());
+    insert_user_message_model_prompt(&mut continuation_metadata, &display_prompt, &prompt);
+    commit_agent_run_start_with(cancellation, || {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .with_immediate_transaction(|store| {
+                let claimed = claim_agent_recovery_envelope_in_transaction(
+                    store,
+                    &run_context,
+                    &[AgentRecoveryState::Paused],
+                    AgentRecoveryReason::UserContinued,
+                )
+                .map_err(StorageError::new)?;
+                let claim_matches = match (recovery.as_ref(), claimed.as_ref()) {
+                    (None, None) => true,
+                    (Some(expected), Some(claimed)) => {
+                        claimed.identity.resume_key == expected.identity.resume_key
+                            && claimed.attempts == expected.attempts.saturating_add(1)
+                    }
+                    _ => false,
+                };
+                if !claim_matches {
+                    return Err(StorageError::new(
+                        "agent recovery claim changed before durable retry start",
+                    ));
+                }
+                append_event(
+                    store,
+                    &task_id,
+                    EventKind::TaskStatusChanged,
+                    "Agent task retry started",
+                    start_metadata,
+                )?;
+                append_message_event_with_metadata(
+                    store,
+                    &task_id,
+                    MessageRole::User,
+                    &display_prompt,
+                    continuation_metadata,
+                )?;
+                if let Some(metadata) = checkpoint_fallback {
+                    append_event(
+                        store,
+                        &task_id,
+                        EventKind::TaskStatusChanged,
+                        "Agent task checkpoint fallback",
+                        metadata,
+                    )?;
+                }
+                Ok(())
+            })
+            .map_err(|error| error.to_string())
+    })?;
+    drop(start_gate.take());
     let runtime_config = cancellation.runtime_config();
     let mut runtime = if let Some(mut runtime) = restored_task_state {
         runtime.messages = history;
@@ -860,6 +995,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
         cancellation,
     ) {
         Ok(prepared) => prepared,
+        Err(AgentRunPreparationError::Finished(result)) => return *result,
         Err(AgentRunPreparationError::ControlStop(run_context)) => {
             return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
         }

@@ -24,6 +24,7 @@ pub(crate) fn run_adaptive_collaboration(
         execution_contract,
         resume_key,
         mut workflow_checkpoint,
+        checkpoint_resumable,
         resumed_from_workflow_id,
         resumed_from_checkpoint,
         prior,
@@ -32,7 +33,6 @@ pub(crate) fn run_adaptive_collaboration(
         prompt_genome,
         prompt_genome_json,
         shared_memory,
-        anchor_spec,
         cancellation,
     } = prepare_adaptive_collaboration(
         state,
@@ -45,32 +45,6 @@ pub(crate) fn run_adaptive_collaboration(
         models,
         agent_budget,
     )?;
-    let anchor_outcome = start_adaptive_anchor(AdaptiveAnchorContext {
-        app,
-        state,
-        config,
-        task_id,
-        workspace_root,
-        run_context,
-        collaboration_id,
-        effort: &effort,
-        resumed_from_checkpoint,
-        execution_contract: &execution_contract,
-        prompt_genome: &prompt_genome,
-        anchor_spec: &anchor_spec,
-        checkpoint: workflow_checkpoint.as_ref(),
-        cancellation: cancellation.clone(),
-    })?;
-    let AdaptiveAnchorState {
-        output: mut direct_anchor_output,
-        supervisor: mut anchor_supervisor,
-        attempted: direct_anchor_attempted,
-    } = match anchor_outcome {
-        AdaptiveAnchorOutcome::Continue(state) => state,
-        AdaptiveAnchorOutcome::Commit => {
-            return Ok(AdaptiveCollaborationOutcome::foreground_direct());
-        }
-    };
     let conductor_outcome = plan_adaptive_workflow(AdaptiveConductorContext {
         state,
         config,
@@ -79,7 +53,6 @@ pub(crate) fn run_adaptive_collaboration(
         collaboration_id,
         prompt,
         models,
-        agent_budget,
         shared_memory: &shared_memory,
         effort: &effort,
         policy: &policy,
@@ -90,12 +63,10 @@ pub(crate) fn run_adaptive_collaboration(
         route_workflow_proposal: route_workflow_proposal.as_ref(),
         prompt_genome: &prompt_genome,
         checkpoint: workflow_checkpoint.as_ref(),
+        checkpoint_resumable,
         resume_key: &resume_key,
         resumed_from_workflow_id: resumed_from_workflow_id.as_deref(),
         cancellation: cancellation.as_ref(),
-        anchor_spec: &anchor_spec,
-        anchor_supervisor: &mut anchor_supervisor,
-        direct_anchor_output: &mut direct_anchor_output,
     })?;
     let (workflow_plan, conductor_attempts, workflow_plan_source) = match conductor_outcome {
         AdaptiveConductorOutcome::Plan {
@@ -104,7 +75,7 @@ pub(crate) fn run_adaptive_collaboration(
             source,
         } => (*workflow_plan, attempts, source),
         AdaptiveConductorOutcome::DirectCommit => {
-            return Ok(AdaptiveCollaborationOutcome::foreground_direct());
+            return adaptive_direct_commit_outcome(prompt, workflow_checkpoint.as_ref());
         }
     };
     let workflow = workflow_plan.adaptive_workflow();
@@ -121,38 +92,8 @@ pub(crate) fn run_adaptive_collaboration(
     workflow_checkpoint.plan = workflow_plan.clone();
     workflow_checkpoint.prompt_genome_json = prompt_genome_json.clone();
     workflow_checkpoint.validate(models)?;
-    let mut anytime_controller =
-        initialize_anytime_controller(&execution_contract, &workflow, &workflow_checkpoint)?;
-    let mut direct_anchor_verifier = None;
-    let mut direct_anchor_verifier_attempted = false;
-    if let Some(output) = direct_anchor_output.as_ref() {
-        if anytime_controller
-            .candidate(DIRECT_ANCHOR_CANDIDATE_ID)
-            .is_some_and(|candidate| {
-                matches!(
-                    candidate.state,
-                    AnytimeCandidateState::Pending | AnytimeCandidateState::Running
-                )
-            })
-        {
-            controller_mark_running_if_pending(
-                &mut anytime_controller,
-                DIRECT_ANCHOR_CANDIDATE_ID,
-            )?;
-            anytime_controller.observe(
-                DIRECT_ANCHOR_CANDIDATE_ID,
-                direct_anchor_verdict(prompt_genome.verification, Some(output)),
-            )?;
-        }
-        workflow_checkpoint
-            .anytime_outputs
-            .insert(DIRECT_ANCHOR_CANDIDATE_ID.to_string(), output.clone());
-    } else if anchor_supervisor.is_some() {
-        controller_mark_running_if_pending(&mut anytime_controller, DIRECT_ANCHOR_CANDIDATE_ID)?;
-    } else if direct_anchor_attempted {
-        controller_mark_running_if_pending(&mut anytime_controller, DIRECT_ANCHOR_CANDIDATE_ID)?;
-        anytime_controller.fail(DIRECT_ANCHOR_CANDIDATE_ID)?;
-    }
+    let anytime_controller =
+        initialize_anytime_controller(&execution_contract, &workflow, &mut workflow_checkpoint)?;
     persist_anytime_controller(&mut workflow_checkpoint, &anytime_controller)?;
     record_adaptive_workflow_planned(AdaptiveWorkflowObservabilityContext {
         state,
@@ -185,30 +126,9 @@ pub(crate) fn run_adaptive_collaboration(
             collaboration_id,
             &mut workflow_checkpoint,
             &anytime_controller,
-            anchor_supervisor.as_ref(),
-            direct_anchor_verifier.as_ref(),
         )?;
         return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
     }
-    advance_direct_anchor_background(
-        app,
-        state,
-        config,
-        task_id,
-        workspace_root,
-        run_context,
-        collaboration_id,
-        prompt,
-        prompt_genome.verification,
-        cancellation.as_ref(),
-        &anchor_spec,
-        &mut anchor_supervisor,
-        &mut direct_anchor_output,
-        &mut direct_anchor_verifier,
-        &mut direct_anchor_verifier_attempted,
-        &mut anytime_controller,
-        &mut workflow_checkpoint,
-    )?;
     let frontier_outcome = run_adaptive_frontier(AdaptiveFrontierContext {
         app,
         state,
@@ -224,13 +144,8 @@ pub(crate) fn run_adaptive_collaboration(
         execution_contract: &execution_contract,
         workflow_started_at_ms,
         cancellation: cancellation.clone(),
-        anchor_spec: &anchor_spec,
         workflow_checkpoint,
         anytime_controller,
-        anchor_supervisor,
-        direct_anchor_output,
-        direct_anchor_verifier,
-        direct_anchor_verifier_attempted,
     })?;
     let frontier_state = match frontier_outcome {
         AdaptiveFrontierOutcome::Continue(state) => *state,
@@ -239,33 +154,10 @@ pub(crate) fn run_adaptive_collaboration(
     let AdaptiveFrontierState {
         mut workflow_checkpoint,
         mut anytime_controller,
-        mut anchor_supervisor,
-        mut direct_anchor_output,
-        direct_anchor_verifier,
         mut outputs,
         evidence_by_step,
+        ..
     } = frontier_state;
-
-    if direct_anchor_output.is_none() {
-        if let Some(completion) = anchor_supervisor
-            .as_mut()
-            .and_then(ParallelJobSupervisor::try_recv)
-        {
-            let completion = parallel_completion_or_failure(completion);
-            direct_anchor_output = settle_direct_anchor_candidate(
-                state,
-                task_id,
-                run_context,
-                collaboration_id,
-                &anchor_spec,
-                &completion,
-                prompt_genome.verification,
-                cancellation.as_ref(),
-                &mut anytime_controller,
-                &mut workflow_checkpoint,
-            )?;
-        }
-    }
     let final_plan = workflow_checkpoint.plan.clone();
     let final_workflow = final_plan.adaptive_workflow();
     let final_step_id = adaptive_delivery_schedule(
@@ -273,166 +165,49 @@ pub(crate) fn run_adaptive_collaboration(
         effective_workflow_step_attempt_budget(&prompt_genome, &workflow_checkpoint),
     )?
     .target_step_id;
-    let final_layer_count = adaptive_workflow_layers(&final_workflow)?.len();
-    let final_role_coverage = workflow_contract_coverage(&final_plan, &role_hints);
-    let final_output = if let Some(output) = outputs.remove(&final_step_id) {
-        output
-    } else {
-        if direct_anchor_output.is_none() {
-            if let Some(completion) = anchor_supervisor
-                .as_mut()
-                .and_then(|supervisor| supervisor.recv_timeout(Duration::from_millis(500)))
-            {
-                let completion = parallel_completion_or_failure(completion);
-                let _ = settle_direct_anchor_candidate(
-                    state,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    &anchor_spec,
-                    &completion,
-                    prompt_genome.verification,
-                    cancellation.as_ref(),
-                    &mut anytime_controller,
-                    &mut workflow_checkpoint,
-                )?;
-            }
-        }
-        if let Some((_candidate_id, _output, _verdict)) =
-            anytime_best_known_output(&anytime_controller, &workflow_checkpoint)
-        {
-            return Ok(AdaptiveCollaborationOutcome::foreground_direct());
-        }
-        return Err("adaptive workflow final output is missing".to_string());
-    };
+    let final_output = outputs
+        .remove(&final_step_id)
+        .ok_or_else(|| "adaptive workflow owner handoff is missing".to_string())?;
     let evidence_count = evidence_by_step
         .values()
         .flatten()
         .map(|evidence| evidence.tool_call_id.as_str())
         .collect::<BTreeSet<_>>()
         .len();
-    let quality_gate = quality_gate_adaptive_output(
-        state,
-        config,
-        task_id,
-        run_context,
-        collaboration_id,
-        prompt,
-        &final_output,
-        prompt_genome.verification,
-        evidence_count,
-    );
-    if collaboration_steer_pending(cancellation.as_ref()) {
-        pause_anytime_for_steer(
-            state,
-            task_id,
-            run_context,
-            collaboration_id,
-            &mut workflow_checkpoint,
-            &anytime_controller,
-            anchor_supervisor.as_ref(),
-            direct_anchor_verifier.as_ref(),
-        )?;
-        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-    }
-    let final_output = match adaptive_quality_handoff(&quality_gate) {
-        Ok(output) => output,
-        Err(error) => {
-            controller_mark_running_if_pending(&mut anytime_controller, &final_step_id)?;
-            if anytime_controller
-                .candidate(&final_step_id)
-                .is_some_and(|candidate| candidate.state == AnytimeCandidateState::Running)
-            {
-                anytime_controller.observe(
-                    &final_step_id,
-                    AnytimeVerdict {
-                        quality_bps: 0,
-                        confidence_bps: 0,
-                        constraint_coverage_bps: 0,
-                        evidence_count,
-                        safety_violations: quality_gate.safety_violations,
-                        deliverable: false,
-                        verified: false,
-                        anchor_uplift_bps: None,
-                    },
-                )?;
-            }
-            persist_anytime_controller(&mut workflow_checkpoint, &anytime_controller)?;
-            append_workflow_checkpoint_event(
-                state,
-                task_id,
-                run_context,
-                collaboration_id,
-                "Collaboration workflow blocked by quality gate",
-                "paused",
-                Some(&final_step_id),
-                &workflow_checkpoint,
-            )?;
-            if let Some((candidate_id, output, verdict)) =
-                anytime_best_known_output(&anytime_controller, &workflow_checkpoint)
-            {
-                if let Some(control) = cancellation.as_ref() {
-                    control.record_best_known_result_at(
-                        run_context_steer_epoch(run_context),
-                        &format!("anytime_quality_rejection:{candidate_id}"),
-                        &output,
-                        if verdict.verified {
-                            ResultQuality::Verified
-                        } else {
-                            ResultQuality::Grounded
-                        },
-                        verdict.evidence_count,
-                        verdict.verified,
-                        false,
-                    );
-                }
-                return Ok(AdaptiveCollaborationOutcome::foreground_direct());
-            }
-            return Err(error);
-        }
-    };
-    if direct_anchor_output.is_none() {
-        if let Some(completion) = anchor_supervisor
-            .as_mut()
-            .and_then(|supervisor| supervisor.recv_timeout(Duration::from_millis(750)))
-        {
-            let completion = parallel_completion_or_failure(completion);
-            direct_anchor_output = settle_direct_anchor_candidate(
-                state,
-                task_id,
-                run_context,
-                collaboration_id,
-                &anchor_spec,
-                &completion,
-                prompt_genome.verification,
-                cancellation.as_ref(),
-                &mut anytime_controller,
-                &mut workflow_checkpoint,
-            )?;
-        }
-    }
     finalize_adaptive_collaboration(AdaptiveCollaborationFinalization {
         state,
-        config,
         task_id,
         run_context,
         collaboration_id,
-        prompt,
         effort,
-        prompt_genome,
         workflow_started_at_ms,
         final_step_id,
         workflow_steps: final_plan.steps.len(),
-        layer_count: final_layer_count,
-        role_coverage: final_role_coverage,
+        layer_count: adaptive_workflow_layers(&final_workflow)?.len(),
+        role_coverage: workflow_contract_coverage(&final_plan, &role_hints),
         evidence_count,
-        quality_gate,
+        verification_required: execution_contract.verification_required,
         final_output,
-        direct_anchor_output: direct_anchor_output.as_deref(),
         cancellation: cancellation.as_ref(),
-        anchor_supervisor: anchor_supervisor.as_ref(),
-        direct_anchor_verifier: direct_anchor_verifier.as_ref(),
         anytime_controller: &mut anytime_controller,
         workflow_checkpoint: &mut workflow_checkpoint,
     })
+}
+
+fn adaptive_direct_commit_outcome(
+    prompt: &str,
+    checkpoint: Option<&WorkflowExecutionCheckpoint>,
+) -> Result<AdaptiveCollaborationOutcome, String> {
+    let Some(checkpoint) = checkpoint else {
+        return Ok(AdaptiveCollaborationOutcome::foreground_direct());
+    };
+    let outputs = checkpoint.completed_outputs();
+    let failures = [
+        "The saved workflow checkpoint is not executable under the current Owner graph and model catalog; do not schedule its legacy steps."
+            .to_string(),
+    ];
+    let Some(handoff) = adaptive_partial_work_handoff(prompt, &outputs, &failures) else {
+        return Ok(AdaptiveCollaborationOutcome::foreground_direct());
+    };
+    adaptive_untrusted_partial_outcome(handoff, checkpoint)
 }

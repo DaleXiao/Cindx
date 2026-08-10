@@ -21,13 +21,38 @@ Cloud providers reason and stream model output. The local app owns run identity,
 context assembly, tool exposure, permission decisions, effects, persistence,
 recovery, retrieval, memory, and the delivered result.
 
+## Runtime Ontology and Trace Attribution
+
+Current Agent execution uses separate dimensions instead of treating legacy
+role names as one ontology:
+
+- **Actor:** Owner, Specialist, or Independent Verifier.
+- **Stage:** plan, evidence, act, verify, or finalize.
+- **Model profile:** Primary, Reasoning, Verifier, or Utility.
+- **Service:** Conductor planning and background learning utilities are
+  services and are never recorded as Actors.
+
+The Owner alone owns permission-gated effects and final user delivery.
+Specialists contribute bounded internal plans or evidence. Independent
+Verifiers evaluate an artifact without effect authority. Utility-profile model
+calls support bounded background preparation but do not participate in the
+production Workflow decision or own final delivery.
+Background prompt mutation is recorded as a learning utility service, not a
+production Specialist.
+
+These fields are an event-local sidecar on current Agent model request events.
+Started and finished events reuse the same explicit attribution selected at the
+call site. Existing `role`, `stage`, model configuration slots, summaries, and
+event counts are preserved for compatibility; legacy events without the schema
+remain legacy and are not reclassified from display strings.
+
 ## Crate Ownership
 
 | Crate | Current owner responsibility |
 | --- | --- |
 | `agent-core` | Transport-free IDs, messages, events, permissions, tool/model contracts, and shared schemas |
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, model-turn and tool-runtime semantics |
-| `agent-application` | The run/reprepare driver that advances prepared epochs through the kernel |
+| `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
 | `orchestrator` | Conductor execution contracts, run decisions, workflows, task graph, verification, routing evidence, and prompt-evolution policy |
 | `orchestrator-eval` | Non-default evaluation and Fugu comparison contracts |
@@ -91,6 +116,12 @@ constraints, context and profile fingerprints, and optional workflow identity.
 A compatibility router may produce shadow evidence, but it does not override a
 valid Conductor action.
 
+The selected plan also produces a strategy receipt bound to task, session,
+physical run, steer epoch, and semantic plan digest. Run control serializes a
+preparation checkpoint without entering execution, while one immediate SQLite
+transaction writes both the router event and selected decision. A cancellation
+or steer that wins first prevents that stale decision from being committed.
+
 ### 3. Retrieval and memory
 
 Workspace retrieval and durable memory are independent inputs:
@@ -106,16 +137,24 @@ canonical chat history.
 
 ### 4. Optional workflow and task graph
 
-`orchestrator` materializes a bounded dependency graph only for a validated
-Workflow decision. Analysis and verification nodes receive admitted read-only
-catalogs; synthesis is tool-free. Side effects remain with the foreground
-executor.
+`orchestrator` materializes a fixed owner-execution graph only for a validated
+Workflow decision: one dependency-free Analysis or Evidence Specialist,
+optionally one tool-free and model-distinct Independent Verifier, and one final
+compatibility sink. The Specialist receives only its admitted read-only catalog.
+Side effects remain with the foreground Owner.
 
-The scheduler follows dependencies required by the delivery target. A typed
-verification receipt must cite the evidence it reviewed. Team guidance reaches
-the foreground actor only after the independent uplift decision accepts it;
-unproven, unavailable, failed, or regressed collaboration falls through to the
-direct control path.
+The final sink is not a model Actor. The runtime completes it deterministically
+from the checkpoint after its dependency succeeds, preserving step identity,
+input and output digests, evidence lineage, resume identity, and typed
+verification receipts. The resulting packet is untrusted internal guidance;
+the Owner independently reconciles it and owns final delivery. Missing,
+malformed, failed, or required-but-unsatisfied verification rejects the handoff
+and falls through to the direct Owner path. Checkpoint loading separates an
+executable resume from an untrusted Owner-only handoff: retired models and a
+legacy final sink that already consumed a model attempt are never scheduled,
+while completed outputs remain available as partial context. The production
+graph has no direct anchor competition, reviewer tournament, model synthesis,
+uplift repair, or second Conductor planner.
 
 ### 5. Kernel and effects
 
@@ -142,8 +181,27 @@ candidate rather than restarting the actor.
 
 The completion transaction persists terminal event, result, artifacts,
 lifecycle, learning evidence, and cleanup under one attempt/epoch identity.
-Startup recovery uses durable events and checkpoints. Permission recovery and
-retry preserve logical lineage while keeping physical effects auditable.
+Its terminal identity keeps the existing exactly-once key and additionally
+validates the matching strategy receipt before a new terminal write. Post-start
+preparation failures arbitrate terminal persistence with cancellation and steer
+under the same run-control lock; a winning steer replays preparation.
+Each new physical attempt keeps session admission and run control registered
+until its durable start transaction commits. Initial start/message writes and
+continuation recovery-claim/start/replay writes are atomic; pending steers stay
+queued for the resumed attempt instead of invalidating its start.
+Startup recovery uses durable events and checkpoints and restores the matching
+receipt; a run that ended before selection records `not_selected`. Pause and
+permission wait are intentionally nonterminal. Permission recovery and retry
+preserve logical lineage while keeping physical effects auditable.
+
+`agent-application` also owns
+`cindx.agent.externally-verified-outcome.v1`. Evaluation adapters may derive it
+only from validated strategy and terminal identity, actual Actor exposure,
+external postcondition and preservation receipts, and complete resource
+accounting. Missing or tampered provenance is censored; valid unsafe or
+preservation-breaking outcomes remain zero-score evidence. The receipt is
+shadow-only and has no production routing, prompt, memory, permission, or
+serving consumer.
 
 ## Persistence and Background Work
 

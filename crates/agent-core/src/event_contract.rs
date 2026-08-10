@@ -13,6 +13,7 @@ pub enum EventTypeV1 {
     AgentRunCompleted,
     AgentRunFailed,
     AgentRunCancelled,
+    AgentRunDecisionSelected,
     AgentModelTurnStarted,
     AgentModelTurnFinished,
     AgentQueueEnqueued,
@@ -37,6 +38,7 @@ impl EventTypeV1 {
             Self::AgentRunCompleted => "cindx.event.v1/agent.run.completed",
             Self::AgentRunFailed => "cindx.event.v1/agent.run.failed",
             Self::AgentRunCancelled => "cindx.event.v1/agent.run.cancelled",
+            Self::AgentRunDecisionSelected => "cindx.event.v1/agent.run.decision_selected",
             Self::AgentModelTurnStarted => "cindx.event.v1/agent.model_turn.started",
             Self::AgentModelTurnFinished => "cindx.event.v1/agent.model_turn.finished",
             Self::AgentQueueEnqueued => "cindx.event.v1/agent.queue.enqueued",
@@ -63,6 +65,7 @@ impl EventTypeV1 {
             "cindx.event.v1/agent.run.completed" => Some(Self::AgentRunCompleted),
             "cindx.event.v1/agent.run.failed" => Some(Self::AgentRunFailed),
             "cindx.event.v1/agent.run.cancelled" => Some(Self::AgentRunCancelled),
+            "cindx.event.v1/agent.run.decision_selected" => Some(Self::AgentRunDecisionSelected),
             "cindx.event.v1/agent.model_turn.started" => Some(Self::AgentModelTurnStarted),
             "cindx.event.v1/agent.model_turn.finished" => Some(Self::AgentModelTurnFinished),
             "cindx.event.v1/agent.queue.enqueued" => Some(Self::AgentQueueEnqueued),
@@ -85,6 +88,7 @@ impl EventTypeV1 {
             | Self::AgentRunPaused
             | Self::AgentRunCompleted
             | Self::AgentRunCancelled
+            | Self::AgentRunDecisionSelected
             | Self::AgentQueueEnqueued
             | Self::AgentQueueEdited
             | Self::AgentQueueSteerRequested

@@ -1,4 +1,4 @@
-use super::{RawRun, RealworldCase};
+use super::{receipts::TreatmentExposureReceipt, RawRun, RealworldCase};
 use orchestrator::{
     prompt_genome_sha256, AgentExecutionMode, AgentPolicy, ConductorPromptGenome,
     PromptExecutionDiagnosticPlan,
@@ -51,6 +51,8 @@ pub(super) struct ProductRunReceipt {
     pub(super) replicate: u32,
     pub(super) treatment: String,
     pub(super) execution_mode: String,
+    #[serde(skip)]
+    pub(super) execution_constraint: Option<String>,
     pub(super) completed: bool,
     pub(super) terminal_status: String,
     pub(super) behavior_checks_passed: usize,
@@ -73,6 +75,10 @@ pub(super) struct ProductRunReceipt {
     pub(super) workflow_execution_profile_sha256: Option<String>,
     pub(super) route_profile_semantics_exercised: bool,
     pub(super) workflow_profile_exercised: bool,
+    #[serde(skip)]
+    pub(super) workflow_verifier_steps: usize,
+    #[serde(skip)]
+    pub(super) treatment_exposure: Option<TreatmentExposureReceipt>,
 }
 
 impl ProductRunReceipt {
@@ -112,6 +118,7 @@ impl ProductRunReceipt {
             execution_mode: strategy
                 .map(|receipt| receipt.execution_mode.clone())
                 .unwrap_or_else(|| "unknown".to_string()),
+            execution_constraint: strategy.map(|receipt| receipt.execution_constraint.clone()),
             completed: run.completed,
             terminal_status: run.terminal_status.clone(),
             behavior_checks_passed,
@@ -142,6 +149,8 @@ impl ProductRunReceipt {
                 .is_some_and(|receipt| receipt.route_profile_semantics_exercised),
             workflow_profile_exercised: strategy
                 .is_some_and(|receipt| receipt.workflow_profile_exercised),
+            workflow_verifier_steps: strategy.map_or(0, |receipt| receipt.workflow_verifier_steps),
+            treatment_exposure: strategy.and_then(|receipt| receipt.treatment_exposure.clone()),
         })
     }
 
@@ -488,6 +497,25 @@ fn validate_run_evidence(run: &RawRun) -> Result<(), String> {
             run.model_receipts.len(),
         ));
     }
+    if let Some(strategy) = run.strategy_receipt.as_ref().filter(|receipt| {
+        matches!(
+            receipt.execution_constraint.as_str(),
+            "matched_direct" | "matched_workflow"
+        )
+    }) {
+        let exposure = strategy.treatment_exposure.as_ref().ok_or_else(|| {
+            format!(
+                "real product task {} is missing matched-route treatment exposure",
+                run.case_id
+            )
+        })?;
+        if exposure.logical_model_calls != run.metrics.model_calls {
+            return Err(format!(
+                "real product task {} changed the matched-route model-call counting boundary",
+                run.case_id
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -539,6 +567,7 @@ mod tests {
             } else {
                 "direct".to_string()
             },
+            execution_constraint: None,
             completed: true,
             terminal_status: "completed".to_string(),
             behavior_checks_passed: usize::from(score > 0.0),
@@ -565,6 +594,8 @@ mod tests {
             workflow_execution_profile_sha256: None,
             route_profile_semantics_exercised: true,
             workflow_profile_exercised: workflow,
+            workflow_verifier_steps: usize::from(workflow),
+            treatment_exposure: None,
         }
     }
 

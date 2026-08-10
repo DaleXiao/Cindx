@@ -42,12 +42,17 @@ pub(crate) fn workflow_resume_key_from_events(
     ))
 }
 
+pub(crate) struct LoadedWorkflowCheckpoint {
+    pub(crate) checkpoint: WorkflowExecutionCheckpoint,
+    pub(crate) resumable: bool,
+}
+
 pub(crate) fn resumable_workflow_checkpoint_from_events(
     events: &[Event],
     resume_key: &str,
     prompt: &str,
     allowed_models: &[String],
-) -> Option<WorkflowExecutionCheckpoint> {
+) -> Option<LoadedWorkflowCheckpoint> {
     let event = events.iter().rev().find(|event| {
         event
             .metadata
@@ -57,8 +62,36 @@ pub(crate) fn resumable_workflow_checkpoint_from_events(
             && event.metadata.contains_key("workflow_checkpoint")
     })?;
     let encoded = event.metadata.get("workflow_checkpoint")?;
-    let checkpoint = WorkflowExecutionCheckpoint::from_json(encoded, allowed_models).ok()?;
-    (!checkpoint.is_complete() && checkpoint.plan.objective == prompt).then_some(checkpoint)
+    let (checkpoint, models_available) =
+        match WorkflowExecutionCheckpoint::from_json(encoded, allowed_models) {
+            Ok(checkpoint) => (checkpoint, true),
+            Err(_) => (
+                WorkflowExecutionCheckpoint::from_json_for_untrusted_handoff(encoded).ok()?,
+                false,
+            ),
+        };
+    if checkpoint.is_complete() || checkpoint.plan.objective != prompt {
+        return None;
+    }
+    let required_verification = checkpoint
+        .plan
+        .steps
+        .iter()
+        .any(|step| step.contract.output_kind == WorkflowOutputKind::Verification);
+    let owner_execution_shape = checkpoint
+        .plan
+        .validate_owner_execution_graph(required_verification)
+        .is_ok();
+    let pristine_owner_handoff = checkpoint
+        .plan
+        .steps
+        .last()
+        .and_then(|step| checkpoint.steps.get(&step.id))
+        .is_some_and(|step| step.attempts == 0);
+    Some(LoadedWorkflowCheckpoint {
+        checkpoint,
+        resumable: models_available && owner_execution_shape && pristine_owner_handoff,
+    })
 }
 
 pub(crate) fn load_workflow_checkpoint_for_run(
@@ -69,7 +102,7 @@ pub(crate) fn load_workflow_checkpoint_for_run(
     effort: &str,
     policy: &str,
     allowed_models: &[String],
-) -> Result<(String, Option<WorkflowExecutionCheckpoint>), String> {
+) -> Result<(String, Option<LoadedWorkflowCheckpoint>), String> {
     let session_id = run_context.get("session_id").map(String::as_str);
     let store = state
         .store

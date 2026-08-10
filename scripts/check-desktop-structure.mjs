@@ -1757,7 +1757,8 @@ assert(
     agentRuntimeSource.includes(
       "continuation_starts_a_fresh_bounded_segment_after_budget_exhaustion"
     ) &&
-    rustLib.includes("begin_agent_run_control_for_continuation") &&
+    rustLib.includes("AgentRunControl::from_snapshot_for_continuation") &&
+    rustLib.includes("commit_agent_run_start_with") &&
     rustLib.includes("suspended_agent_run_control_snapshot"),
   "Paused long-running work must continue in a fresh bounded segment without weakening permission or cancellation semantics"
 );
@@ -1941,12 +1942,15 @@ assert(
     rustLib.includes("Collaboration workflow step checkpointed") &&
     rustLib.includes("WORKFLOW_RESUMABLE_ERROR_PREFIX") &&
     rustLib.includes("workflow_checkpoint.completed_outputs()") &&
-    rustLib.includes("workflow_checkpoint.assign_step_credits") &&
+    orchestratorSource.includes("pub fn validate_owner_execution_graph") &&
+    orchestratorSource.includes("pub fn complete_owner_handoff") &&
+    rustLib.includes("checkpoint.complete_owner_handoff") &&
+    !rustLib.includes("workflow_checkpoint.assign_step_credits") &&
     rustLib.includes("timeline_workflow_progress") &&
     tauriBridge.includes("workflowProgress?:") &&
     sessionThreadSource.includes("latestWorkflow.totalSteps") &&
     sessionThreadSource.includes("Checkpoint saved"),
-  "Adaptive workflows must persist node checkpoints and resume only incomplete branches with fresh budget"
+  "Adaptive workflows must preserve resumable checkpoints and complete the Owner handoff without model-derived learning credit"
 );
 assert(
   appSource.includes("sessionLoadingId") &&
@@ -2658,7 +2662,9 @@ assert(
     rustLib.includes("queued_steer_commit_revalidates_the_current_queue_item") &&
     rustLib
       .slice(
-        rustLib.indexOf("fn run_agent_task_blocking_inner("),
+        rustLib.indexOf(
+          "fn run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate("
+        ),
         rustLib.indexOf("fn cancel_agent_task(")
       )
       .includes("with_immediate_transaction(|store|") &&
@@ -3767,7 +3773,8 @@ assert(
     promptEvolutionSource.includes("average_step_credit") &&
     promptEvolutionSource.includes("pareto_selection_does_not_treat_token_cost_as_intelligence") &&
     promptEvolutionSource.includes("format_valid_rate < 1.0") &&
-    rustLib.includes("pareto_search_teacher_v2") &&
+    rustLib.includes("run_decision_proposal") &&
+    !rustLib.includes("pareto_search_teacher_v2") &&
     rustLib.includes("prompt_evolution_enabled") &&
     promptEvolutionRuntimeSource.includes("reconcile_prompt_evolution_for_background") &&
     promptEvolutionRuntimeSource.includes("publish_canonical_prompt_profile_deployment") &&
@@ -4295,13 +4302,17 @@ assert(
     parallelExecutionSource.includes("MAX_GLOBAL_MODEL_WORKERS: usize = 12") &&
     parallelExecutionSource.includes("BoundedParallelExecutor") &&
     parallelExecutionSource.includes("run_model_jobs_until_anytime_quorum_interruptible") &&
-    rustLib.includes('"conductor_plan"') &&
+    rustLib.includes('"conductor_workflow_plan_source"') &&
+    rustLib.includes('"run_decision_proposal"') &&
     rustLib.includes('format!("worker_{}", step_index + 1)') &&
     collaborationServiceSource.includes(
       '("access_list".to_string(), spec.access.join(","))'
     ) &&
     rustLib.includes("recover_adaptive_worker(") &&
-    rustLib.includes("quality_gate_adaptive_output(") &&
+    orchestratorSource.includes("pub fn validate_owner_execution_graph") &&
+    orchestratorSource.includes("pub fn complete_owner_handoff") &&
+    rustLib.includes("adaptive_worker_model_distinctness_error") &&
+    !rustLib.includes("quality_gate_adaptive_output(") &&
     rustLib.includes("append_single_model_policy_guidance(") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3") &&
@@ -4310,16 +4321,12 @@ assert(
     orchestratorSource.includes("must only access earlier steps") &&
     rustLib.includes('"workflow_ir".to_string()') &&
     orchestratorSource.includes('WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1"') &&
-    orchestratorSource.includes(
-      'WORKFLOW_REVISION_SCHEMA: &str = "cindx.workflow.revision.v1"'
-    ) &&
-    orchestratorSource.includes("MAX_WORKFLOW_PLAN_REVISIONS") &&
-    rustLib.includes("validate_and_apply_revision(") &&
+    !rustLib.includes("validate_and_apply_revision(") &&
     rustLib.includes("Collaboration workflow planned") &&
     rustLib.includes("Tool evidence ledger") &&
     rustLib.includes("collaboration_step_result(") &&
     rustLib.includes('"evidence_count"'),
-  "Primary agent must use a bounded, tool-capable, conductor-planned and revisable workflow"
+  "Primary agent must use the bounded, tool-capable Owner graph from the recorded Conductor decision"
 );
 assert(
   orchestratorSource.includes("evaluate_routing_cases") &&

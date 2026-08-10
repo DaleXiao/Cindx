@@ -203,18 +203,57 @@ fn collaboration_failure_completion(
     }
 }
 
+pub(crate) const fn model_profile_for_role(role: &ModelRole) -> AgentModelProfile {
+    match role {
+        ModelRole::Executor => AgentModelProfile::Primary,
+        ModelRole::Planner => AgentModelProfile::Reasoning,
+        ModelRole::Reviewer => AgentModelProfile::Verifier,
+        ModelRole::Summarizer | ModelRole::Embedder => AgentModelProfile::Utility,
+    }
+}
+
+pub(crate) const fn adaptive_step_attribution(
+    output_kind: &WorkflowOutputKind,
+    role: &ModelRole,
+) -> AgentModelAttribution {
+    match output_kind {
+        WorkflowOutputKind::Verification => AgentModelAttribution::actor(
+            AgentActor::IndependentVerifier,
+            AgentStage::Verify,
+            AgentModelProfile::Verifier,
+            AgentEffectAuthority::ReadOnly,
+        ),
+        WorkflowOutputKind::Synthesis => AgentModelAttribution::actor(
+            AgentActor::Specialist,
+            AgentStage::Plan,
+            model_profile_for_role(role),
+            AgentEffectAuthority::ReadOnly,
+        ),
+        WorkflowOutputKind::Analysis => AgentModelAttribution::actor(
+            AgentActor::Specialist,
+            AgentStage::Plan,
+            model_profile_for_role(role),
+            AgentEffectAuthority::ReadOnly,
+        ),
+        WorkflowOutputKind::Evidence => AgentModelAttribution::actor(
+            AgentActor::Specialist,
+            AgentStage::Evidence,
+            model_profile_for_role(role),
+            AgentEffectAuthority::ReadOnly,
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn record_collaboration_stage_started(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
-    run_context: &Metadata,
+pub(crate) fn collaboration_stage_started_metadata(
     collaboration_id: &str,
     stage: &str,
     role: &ModelRole,
     model: &str,
     request_id: &str,
+    attribution: AgentModelAttribution,
     stage_metadata: &Metadata,
-) -> Result<(), String> {
+) -> Result<Metadata, String> {
     let mut metadata = [
         ("collaboration_id".to_string(), collaboration_id.to_string()),
         ("request_id".to_string(), request_id.to_string()),
@@ -227,6 +266,34 @@ pub(crate) fn record_collaboration_stage_started(
     for (key, value) in stage_metadata {
         metadata.insert(key.clone(), value.clone());
     }
+    attribution
+        .insert_into(&mut metadata, model, role_label(role), stage)
+        .map_err(|error| error.to_string())?;
+    Ok(metadata)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_collaboration_stage_started(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: &ModelRole,
+    model: &str,
+    request_id: &str,
+    attribution: AgentModelAttribution,
+    stage_metadata: &Metadata,
+) -> Result<(), String> {
+    let metadata = collaboration_stage_started_metadata(
+        collaboration_id,
+        stage,
+        role,
+        model,
+        request_id,
+        attribution,
+        stage_metadata,
+    )?;
     let mut store = state
         .store
         .lock()
@@ -743,6 +810,51 @@ mod protocol_tests {
         assert_eq!(usage["provider_response_id"], "response-1");
         assert_eq!(usage["request_payload_sha256"], "a".repeat(64));
         assert_eq!(usage["response_semantic_sha256"], "b".repeat(64));
+    }
+
+    #[test]
+    fn adaptive_step_attribution_uses_structure_not_role_labels() {
+        for (kind, role, actor, stage, profile) in [
+            (
+                WorkflowOutputKind::Analysis,
+                ModelRole::Planner,
+                "specialist",
+                "plan",
+                "reasoning",
+            ),
+            (
+                WorkflowOutputKind::Evidence,
+                ModelRole::Executor,
+                "specialist",
+                "evidence",
+                "primary",
+            ),
+            (
+                WorkflowOutputKind::Synthesis,
+                ModelRole::Summarizer,
+                "specialist",
+                "plan",
+                "utility",
+            ),
+            (
+                WorkflowOutputKind::Verification,
+                ModelRole::Executor,
+                "independent_verifier",
+                "verify",
+                "verifier",
+            ),
+        ] {
+            let mut metadata = Metadata::new();
+            adaptive_step_attribution(&kind, &role)
+                .insert_into(&mut metadata, "shared-model", "legacy-label", "worker")
+                .unwrap();
+            assert_eq!(metadata.get("agent_actor").map(String::as_str), Some(actor));
+            assert_eq!(metadata.get("agent_stage").map(String::as_str), Some(stage));
+            assert_eq!(
+                metadata.get("agent_model_profile").map(String::as_str),
+                Some(profile)
+            );
+        }
     }
 
     fn response_with_tool_call() -> model_provider::ModelResponse {

@@ -405,7 +405,6 @@ impl AgentRunDecision {
         if !(1..=5).contains(&self.estimated_steps) {
             return Err("run decision estimated_steps must be between 1 and 5".to_string());
         }
-        let max_parallelism = max_parallelism.clamp(1, 3);
         match self.execution {
             AgentExecutionMode::Direct => {
                 if self.max_parallelism != 1
@@ -418,42 +417,28 @@ impl AgentRunDecision {
                 }
             }
             AgentExecutionMode::Workflow => {
-                if !(1..=max_parallelism).contains(&self.max_parallelism) {
-                    return Err(format!(
-                        "workflow parallelism must be between 1 and {max_parallelism}"
-                    ));
-                }
-                if !(1..=self.max_parallelism).contains(&self.min_successful_branches) {
-                    return Err("workflow quorum exceeds its parallel branch budget".to_string());
-                }
-                if !(1..=self.max_parallelism).contains(&self.distinct_contributions) {
-                    return Err(
-                        "workflow distinct contribution count is outside its branch budget"
-                            .to_string(),
-                    );
-                }
-                if self.stop_policy == ConductorStopPolicy::FirstVerified
-                    && self.min_successful_branches != 1
+                if max_parallelism == 0
+                    || self.max_parallelism != 1
+                    || self.min_successful_branches != 1
+                    || self.distinct_contributions != 1
+                    || !(2..=3).contains(&self.estimated_steps)
                 {
-                    return Err(
-                        "first_verified workflow must require exactly one successful branch"
-                            .to_string(),
-                    );
+                    return Err("workflow execution must use one specialist contribution and a two- or three-step owner handoff graph".to_string());
                 }
-                if self.stop_policy == ConductorStopPolicy::FirstVerified
-                    && self.verification == AgentVerificationPolicy::None
-                {
-                    return Err(
-                        "first_verified workflow requires self-check or independent verification"
-                            .to_string(),
-                    );
-                }
-                if self.verification == AgentVerificationPolicy::Independent
-                    && self.estimated_steps < 2
-                {
-                    return Err(
-                        "independent verification requires at least two workflow steps".to_string(),
-                    );
+                match self.verification {
+                    AgentVerificationPolicy::None
+                        if self.estimated_steps == 2
+                            && self.stop_policy != ConductorStopPolicy::FirstVerified => {}
+                    AgentVerificationPolicy::Independent if self.estimated_steps == 3 => {}
+                    AgentVerificationPolicy::None => {
+                        return Err("workflow without an independent verifier must use two steps and cannot use first_verified".to_string());
+                    }
+                    AgentVerificationPolicy::Independent => {
+                        return Err("independent workflow verification requires exactly one verifier in a three-step graph".to_string());
+                    }
+                    AgentVerificationPolicy::SelfCheck => {
+                        return Err("workflow execution supports only no verifier or one independent verifier".to_string());
+                    }
                 }
             }
         }
@@ -660,7 +645,8 @@ pub struct WorkflowPlanProposalStep {
 }
 
 impl WorkflowPlanProposal {
-    pub fn validate(
+    /// Validate the stable proposal shape retained by persisted v1 receipts.
+    pub fn validate_v1(
         &self,
         decision: &AgentRunDecision,
         allowed_models: &[String],
@@ -783,6 +769,82 @@ impl WorkflowPlanProposal {
         }
         Ok(())
     }
+
+    /// Validate the current production Owner execution topology.
+    pub fn validate_owner_execution_graph(
+        &self,
+        decision: &AgentRunDecision,
+        allowed_models: &[String],
+    ) -> Result<(), String> {
+        self.validate_v1(decision, allowed_models)?;
+        let specialist_steps = self
+            .steps
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step.output_kind,
+                    WorkflowOutputKind::Analysis | WorkflowOutputKind::Evidence
+                )
+            })
+            .collect::<Vec<_>>();
+        let verification_steps = self
+            .steps
+            .iter()
+            .filter(|step| step.output_kind == WorkflowOutputKind::Verification)
+            .collect::<Vec<_>>();
+        if specialist_steps.len() != 1
+            || !specialist_steps[0].access.is_empty()
+            || verification_steps.len()
+                != usize::from(decision.verification == AgentVerificationPolicy::Independent)
+        {
+            return Err(
+                "workflow proposal must contain one specialist and at most one required independent verifier"
+                    .to_string(),
+            );
+        }
+        let specialist_id = specialist_steps[0].id.trim();
+        if verification_steps.first().is_some_and(|verification| {
+            verification.tool_policy != WorkflowToolPolicy::None
+                || verification.access.len() != 1
+                || verification.access[0].trim() != specialist_id
+                || verification.model == specialist_steps[0].model
+        }) {
+            return Err(
+                "independent verifier must use a different configured model and audit only the specialist output without tools"
+                    .to_string(),
+            );
+        }
+        let final_step = self
+            .steps
+            .last()
+            .expect("v1 validation requires a final synthesis step");
+        let required_final_inputs = verification_steps.first().map_or_else(
+            || vec![specialist_id],
+            |verification| vec![verification.id.trim()],
+        );
+        if final_step.access.len() != required_final_inputs.len()
+            || !required_final_inputs.iter().all(|required| {
+                final_step
+                    .access
+                    .iter()
+                    .any(|dependency| dependency.trim() == *required)
+            })
+        {
+            return Err(
+                "workflow owner handoff must depend on the final specialist or verifier output"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn validate(
+        &self,
+        decision: &AgentRunDecision,
+        allowed_models: &[String],
+    ) -> Result<(), String> {
+        self.validate_owner_execution_graph(decision, allowed_models)
+    }
 }
 
 fn proposal_step_reaches(
@@ -880,8 +942,8 @@ impl AgentRunDecisionHarness {
                 "Treat the strongest configured single-model direct answer as the baseline. Choose workflow only when independent work, verification, or decomposition is likely to improve correctness enough to justify coordination latency and correlated-error risk. Pro prioritizes correctness but is not automatically multi-model. Auto balances correctness and latency.\n",
                 "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Memory and workspace retrieval are blocking foreground work: select them only when missing evidence can materially change answer quality. Greetings, capability questions, and self-contained requests should use neither. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
-                "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. For workflow use 1..={max_parallelism} branches. Independent contributions must perform genuinely different work. Model identity does not make two contributions independent: reuse the strongest suitable model when that is best, and diversify models only when capability fit or supported evidence predicts an advantage.\n",
-                "A workflow decision is valid only when you can name a concrete executable graph now. Include workflow_plan with one step per estimated step: independent root steps have empty access, dependent steps reference only earlier ids, and the final step is a tool-free synthesis that receives every branch. Use output_kind=analysis|evidence|verification|synthesis and tool_policy=none|read_only_evidence|read_only_exploration. Isolated workers may inspect supplied or read-only evidence and advise the foreground executor even when only that executor can perform writes. If no non-overlapping graph is likely to beat Direct, choose direct and set workflow_plan to null.\n",
+                "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. A workflow uses max_parallelism=1, min_successful_branches=1, and distinct_contributions=1: one bounded Specialist, optionally followed by one Independent Verifier using a different configured model. Without a verifier use verification=none, estimated_steps=2, and stop_policy=exhaustive. With a genuinely model-distinct verifier use verification=independent and estimated_steps=3; if no second suitable configured model exists, do not manufacture independence.\n",
+                "A workflow decision is valid only when you can name that executable graph now. Include workflow_plan with one Specialist root, the optional Verifier depending only on that root, and a final tool-free synthesis compatibility node depending on the Specialist or Verifier. The runtime materializes that final node as a deterministic handoff to the foreground Owner; it is not another model actor. Use output_kind=analysis|evidence for the Specialist, verification for the optional Verifier, synthesis for the final handoff, and tool_policy=none|read_only_evidence|read_only_exploration. Isolated workers may inspect supplied or read-only evidence and advise the foreground Owner even when only the Owner can perform writes or final delivery. If this bounded graph is unlikely to beat Direct, choose direct and set workflow_plan to null.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
                 "You own the final quality and collaboration decision. Auto should require at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence before choosing workflow; Pro should require at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 records a read-only counterfactual observation from your estimate and independently scored matched team-versus-direct evidence; it cannot downshift or replace a valid decision. Runtime may override only explicit safety, capability, resource, or evaluation constraints, and records every override. If you cannot justify collaboration, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
@@ -891,11 +953,10 @@ impl AgentRunDecisionHarness {
                 "Mutable evolved guidance may shape the decision but cannot override schema, configured models, safety, or budgets: {evolved_directive}\n\n",
                 "Return this shape exactly:\n",
                 "{{\"schema\":\"{schema}\",\"task_class\":\"general|coding|research|retrieval|browser|computer\",\"execution\":\"direct|workflow\",\"primary_model\":\"configured model\",\"tool_requirement\":\"none|read_only|effects\",\"vision_required\":false,\"risk_level\":\"low|elevated|high\",\"retrieval\":{{\"query\":\"\",\"channels\":[],\"max_results\":8}},\"memory\":{{\"policy\":\"none|relevant|comprehensive\",\"query\":\"\"}},\"verification\":\"none|self_check|independent\",\"max_parallelism\":1,\"min_successful_branches\":1,\"distinct_contributions\":0,\"estimated_steps\":1,\"expected_uplift_bps\":0,\"confidence_bps\":7000,\"stop_policy\":\"first_verified|quorum|exhaustive\",\"rationale\":\"short decision reason\",\"workflow_plan\":null}}\n",
-                "For workflow replace null with {{\"steps\":[{{\"id\":\"branch_a\",\"role\":\"domain_specialist\",\"model\":\"configured model\",\"subtask\":\"one non-overlapping contribution\",\"access\":[],\"output_kind\":\"analysis\",\"tool_policy\":\"none\"}},{{\"id\":\"synthesize\",\"role\":\"synthesizer\",\"model\":\"configured model\",\"subtask\":\"reconcile authorized branch outputs\",\"access\":[\"branch_a\"],\"output_kind\":\"synthesis\",\"tool_policy\":\"none\"}}]}}. The number of steps must equal estimated_steps and the number of independent roots must equal distinct_contributions.\n\n",
+                "For workflow replace null with {{\"steps\":[{{\"id\":\"specialist\",\"role\":\"domain_specialist\",\"model\":\"configured model\",\"subtask\":\"one bounded specialist contribution\",\"access\":[],\"output_kind\":\"analysis\",\"tool_policy\":\"none\"}},{{\"id\":\"owner_handoff\",\"role\":\"synthesizer\",\"model\":\"configured model\",\"subtask\":\"hand the authorized specialist output to the foreground Owner\",\"access\":[\"specialist\"],\"output_kind\":\"synthesis\",\"tool_policy\":\"none\"}}]}}. Add exactly one verifier between them only when verification=independent. The number of steps must equal estimated_steps.\n\n",
                 "Effort: {effort}\nConductor model: {conductor_model}\nConfigured execution models:\n{models}\n\nUser request:\n{objective}\n\nRecent session context:\n{context}"
             ),
             query_limit = MAX_RUN_DECISION_QUERY_CHARS,
-            max_parallelism = request.max_parallelism.clamp(1, 3),
             auto_uplift_floor = AUTO_COLLABORATION_MIN_UPLIFT_BPS,
             auto_confidence_floor = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
             pro_uplift_floor = minimum_team_uplift_bps("pro"),
@@ -970,7 +1031,7 @@ impl AgentRunDecisionHarness {
             AgentExecutionMode::Workflow => workflow_plan
                 .as_ref()
                 .ok_or_else(|| "workflow execution requires workflow_plan".to_string())?
-                .validate(&decision, &self.request.allowed_models)?,
+                .validate_owner_execution_graph(&decision, &self.request.allowed_models)?,
             AgentExecutionMode::Direct => {}
         }
         let snapshot = RouteFeatureSnapshotV2::from_decision_request(
@@ -1089,34 +1150,85 @@ mod tests {
                     "retrieval":{"query":"implementation evidence","channels":["semantic","file_search"],"max_results":6},
                     "memory":{"policy":"relevant","query":"prior architecture constraints"},
                     "verification":"independent",
-                    "max_parallelism":2,
-                    "min_successful_branches":2,
-                    "distinct_contributions":2,
-                    "estimated_steps":4,
+                    "max_parallelism":1,
+                    "min_successful_branches":1,
+                    "distinct_contributions":1,
+                    "estimated_steps":3,
                     "expected_uplift_bps":6000,
                     "confidence_bps":8000,
-                    "stop_policy":"quorum",
-                    "rationale":"independent architecture and implementation analysis",
+                    "stop_policy":"exhaustive",
+                    "rationale":"specialist architecture analysis with independent verification",
                     "workflow_plan":{"steps":[
-                        {"id":"architecture","role":"architect","model":"executor","subtask":"analyze the architecture tradeoffs","access":[],"output_kind":"analysis","tool_policy":"none"},
-                        {"id":"implementation","role":"implementer","model":"executor","subtask":"derive an independent implementation strategy","access":[],"output_kind":"evidence","tool_policy":"read_only_evidence"},
-                        {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both contributions","access":["architecture","implementation"],"output_kind":"verification","tool_policy":"none"},
-                        {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the verified result","access":["architecture","implementation","verify"],"output_kind":"synthesis","tool_policy":"none"}
+                        {"id":"specialist","role":"architecture_specialist","model":"executor","subtask":"analyze the architecture and implementation tradeoffs","access":[],"output_kind":"analysis","tool_policy":"read_only_evidence"},
+                        {"id":"verify","role":"independent_verifier","model":"reviewer","subtask":"audit the specialist contribution","access":["specialist"],"output_kind":"verification","tool_policy":"none"},
+                        {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the verified result to the foreground Owner","access":["verify"],"output_kind":"synthesis","tool_policy":"none"}
                     ]}
                 }"#,
             )
             .unwrap();
         assert_eq!(
             decision.policy(),
-            OrchestrationPolicy::BestOfN { candidates: 2 }
+            OrchestrationPolicy::BestOfN { candidates: 1 }
         );
         assert_eq!(decision.retrieval.max_results, 6);
         assert_eq!(
             decision
                 .execution_contract("auto")
                 .min_distinct_contributions,
-            2
+            1
         );
+    }
+
+    #[test]
+    fn workflow_proposal_v1_receipts_remain_distinct_from_the_current_owner_graph() {
+        let mut legacy = AgentRunDecision::direct("executor");
+        legacy.execution = AgentExecutionMode::Workflow;
+        legacy.verification = AgentVerificationPolicy::SelfCheck;
+        legacy.max_parallelism = 2;
+        legacy.min_successful_branches = 2;
+        legacy.distinct_contributions = 2;
+        legacy.estimated_steps = 3;
+        legacy.stop_policy = ConductorStopPolicy::Quorum;
+        let proposal = WorkflowPlanProposal {
+            steps: vec![
+                WorkflowPlanProposalStep {
+                    id: "analysis".to_string(),
+                    role: "analyst".to_string(),
+                    model: "executor".to_string(),
+                    subtask: "derive the primary solution".to_string(),
+                    access: Vec::new(),
+                    output_kind: WorkflowOutputKind::Analysis,
+                    tool_policy: WorkflowToolPolicy::None,
+                },
+                WorkflowPlanProposalStep {
+                    id: "counterexample".to_string(),
+                    role: "critic".to_string(),
+                    model: "executor".to_string(),
+                    subtask: "search for an independent counterexample".to_string(),
+                    access: Vec::new(),
+                    output_kind: WorkflowOutputKind::Verification,
+                    tool_policy: WorkflowToolPolicy::None,
+                },
+                WorkflowPlanProposalStep {
+                    id: "synthesis".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "executor".to_string(),
+                    subtask: "reconcile both contributions".to_string(),
+                    access: vec!["analysis".to_string(), "counterexample".to_string()],
+                    output_kind: WorkflowOutputKind::Synthesis,
+                    tool_policy: WorkflowToolPolicy::None,
+                },
+            ],
+        };
+        let models = ["executor".to_string()];
+
+        proposal
+            .validate_v1(&legacy, &models)
+            .expect("persisted v1 proposal topology must remain readable");
+        assert!(proposal
+            .validate_owner_execution_graph(&legacy, &models)
+            .expect_err("legacy competition must not re-enter the current production graph")
+            .contains("one specialist"));
     }
 
     #[test]
@@ -1142,22 +1254,21 @@ mod tests {
         let mut candidate = AgentRunDecision::direct("executor");
         candidate.execution = AgentExecutionMode::Workflow;
         candidate.verification = AgentVerificationPolicy::Independent;
-        candidate.max_parallelism = 2;
-        candidate.min_successful_branches = 2;
-        candidate.distinct_contributions = 2;
-        candidate.estimated_steps = 4;
+        candidate.max_parallelism = 1;
+        candidate.min_successful_branches = 1;
+        candidate.distinct_contributions = 1;
+        candidate.estimated_steps = 3;
         candidate.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS - 1;
         candidate.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
-        candidate.stop_policy = ConductorStopPolicy::Quorum;
-        candidate.rationale = "independent comparison".to_string();
+        candidate.stop_policy = ConductorStopPolicy::Exhaustive;
+        candidate.rationale = "specialist contribution with independent verification".to_string();
 
         let payload = workflow_payload(
             &candidate,
             serde_json::json!([
-                {"id":"approach_a","role":"architect","model":"executor","subtask":"derive the architecture path","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"approach_b","role":"implementer","model":"executor","subtask":"derive the implementation path","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both paths","access":["approach_a","approach_b"],"output_kind":"verification","tool_policy":"none"},
-                {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the audited paths","access":["approach_a","approach_b","verify"],"output_kind":"synthesis","tool_policy":"none"}
+                {"id":"specialist","role":"implementation_specialist","model":"executor","subtask":"derive the architecture and implementation path","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"verify","role":"independent_verifier","model":"reviewer","subtask":"audit the specialist path","access":["specialist"],"output_kind":"verification","tool_policy":"none"},
+                {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the audited path to the foreground Owner","access":["verify"],"output_kind":"synthesis","tool_policy":"none"}
             ]),
         );
         let draft = AgentRunDecisionHarness::new(request())
@@ -1178,41 +1289,41 @@ mod tests {
         );
         assert_eq!(
             draft.workflow_plan.as_ref().map(|plan| plan.steps.len()),
-            Some(4)
+            Some(3)
         );
         assert!(draft.conductor_candidate.causal_route.is_none());
     }
 
     #[test]
-    fn one_capable_model_can_supply_multiple_independent_contributions() {
+    fn one_capable_model_runs_one_specialist_without_a_pseudo_verifier() {
         let mut request = request();
         request.allowed_models = vec!["executor".to_string()];
         let harness = AgentRunDecisionHarness::new(request);
         let mut candidate = AgentRunDecision::direct("executor");
         candidate.task_class = TaskClass::Research;
         candidate.execution = AgentExecutionMode::Workflow;
-        candidate.verification = AgentVerificationPolicy::SelfCheck;
-        candidate.max_parallelism = 2;
-        candidate.min_successful_branches = 2;
-        candidate.distinct_contributions = 2;
-        candidate.estimated_steps = 3;
+        candidate.verification = AgentVerificationPolicy::None;
+        candidate.max_parallelism = 1;
+        candidate.min_successful_branches = 1;
+        candidate.distinct_contributions = 1;
+        candidate.estimated_steps = 2;
         candidate.expected_uplift_bps = 5_000;
         candidate.confidence_bps = 8_000;
-        candidate.stop_policy = ConductorStopPolicy::Quorum;
-        candidate.rationale = "two different solution paths from the strongest model".to_string();
+        candidate.stop_policy = ConductorStopPolicy::Exhaustive;
+        candidate.rationale = "one bounded specialist contribution".to_string();
         let payload = workflow_payload(
             &candidate,
             serde_json::json!([
-                {"id":"approach_a","role":"analyst","model":"executor","subtask":"derive the first solution path","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"approach_b","role":"critic","model":"executor","subtask":"derive a distinct second solution path","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile both paths","access":["approach_a","approach_b"],"output_kind":"synthesis","tool_policy":"none"}
+                {"id":"specialist","role":"domain_specialist","model":"executor","subtask":"derive the primary solution path","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the specialist path to the foreground Owner","access":["specialist"],"output_kind":"synthesis","tool_policy":"none"}
             ]),
         );
         let decision = harness
             .parse(&payload)
-            .expect("contribution count must not be capped by model count");
+            .expect("one model should still support one bounded specialist");
 
-        assert_eq!(decision.distinct_contributions, 2);
+        assert_eq!(decision.distinct_contributions, 1);
+        assert_eq!(decision.verification, AgentVerificationPolicy::None);
     }
 
     #[test]
@@ -1397,11 +1508,11 @@ mod tests {
         let mut decision = AgentRunDecision::direct("executor");
         decision.execution = AgentExecutionMode::Workflow;
         decision.verification = AgentVerificationPolicy::Independent;
-        decision.max_parallelism = 2;
-        decision.min_successful_branches = 2;
-        decision.distinct_contributions = 2;
+        decision.max_parallelism = 1;
+        decision.min_successful_branches = 1;
+        decision.distinct_contributions = 1;
         decision.estimated_steps = 3;
-        decision.stop_policy = ConductorStopPolicy::Quorum;
+        decision.stop_policy = ConductorStopPolicy::Exhaustive;
 
         assert_eq!(
             decision.execution_contract("pro").min_team_uplift_bps,
@@ -1441,20 +1552,19 @@ mod tests {
         let mut auto = AgentRunDecision::direct("executor");
         auto.execution = AgentExecutionMode::Workflow;
         auto.verification = AgentVerificationPolicy::Independent;
-        auto.max_parallelism = 2;
-        auto.min_successful_branches = 2;
-        auto.distinct_contributions = 2;
-        auto.estimated_steps = 4;
+        auto.max_parallelism = 1;
+        auto.min_successful_branches = 1;
+        auto.distinct_contributions = 1;
+        auto.estimated_steps = 3;
         auto.expected_uplift_bps = 8_000;
         auto.confidence_bps = 9_000;
-        auto.stop_policy = ConductorStopPolicy::Quorum;
+        auto.stop_policy = ConductorStopPolicy::Exhaustive;
         let payload = workflow_payload(
             &auto,
             serde_json::json!([
-                {"id":"approach_a","role":"analyst","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"approach_b","role":"critic","model":"executor","subtask":"derive an independent alternative","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both alternatives","access":["approach_a","approach_b"],"output_kind":"verification","tool_policy":"none"},
-                {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the audit","access":["approach_a","approach_b","verify"],"output_kind":"synthesis","tool_policy":"none"}
+                {"id":"specialist","role":"domain_specialist","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"verify","role":"independent_verifier","model":"reviewer","subtask":"audit the specialist solution","access":["specialist"],"output_kind":"verification","tool_policy":"none"},
+                {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the verified result to the foreground Owner","access":["verify"],"output_kind":"synthesis","tool_policy":"none"}
             ]),
         );
         let evidence = MatchedCollaborationEvidence {
@@ -1543,19 +1653,18 @@ mod tests {
                     "retrieval":{"query":"workspace implementation evidence","channels":["semantic","file_search"],"max_results":6},
                     "memory":{"policy":"relevant","query":"prior project constraints"},
                     "verification":"independent",
-                    "max_parallelism":2,
-                    "min_successful_branches":2,
-                    "distinct_contributions":2,
-                    "estimated_steps":4,
+                    "max_parallelism":1,
+                    "min_successful_branches":1,
+                    "distinct_contributions":1,
+                    "estimated_steps":3,
                     "expected_uplift_bps":2999,
                     "confidence_bps":8000,
-                    "stop_policy":"quorum",
+                    "stop_policy":"exhaustive",
                     "rationale":"inspect and independently verify",
                     "workflow_plan":{"steps":[
-                        {"id":"inspect","role":"evidence_researcher","model":"executor","subtask":"inspect workspace implementation evidence","access":[],"output_kind":"evidence","tool_policy":"read_only_evidence"},
-                        {"id":"analyze_image","role":"visual_analyst","model":"executor","subtask":"analyze the supplied image independently","access":[],"output_kind":"analysis","tool_policy":"none"},
-                        {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both evidence streams","access":["inspect","analyze_image"],"output_kind":"verification","tool_policy":"none"},
-                        {"id":"synthesize","role":"synthesizer","model":"executor","subtask":"reconcile the verified execution brief","access":["inspect","analyze_image","verify"],"output_kind":"synthesis","tool_policy":"none"}
+                        {"id":"specialist","role":"evidence_specialist","model":"executor","subtask":"inspect workspace evidence and analyze the supplied image","access":[],"output_kind":"evidence","tool_policy":"read_only_evidence"},
+                        {"id":"verify","role":"independent_verifier","model":"reviewer","subtask":"audit the specialist evidence","access":["specialist"],"output_kind":"verification","tool_policy":"none"},
+                        {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the verified execution brief to the foreground Owner","access":["verify"],"output_kind":"synthesis","tool_policy":"none"}
                     ]}
                 }"#,
             )
@@ -1581,24 +1690,23 @@ mod tests {
     }
 
     #[test]
-    fn independent_verification_must_feed_the_final_synthesis() {
+    fn independent_verification_must_be_the_owner_handoff_input() {
         let mut decision = AgentRunDecision::direct("executor");
         decision.execution = AgentExecutionMode::Workflow;
         decision.verification = AgentVerificationPolicy::Independent;
-        decision.max_parallelism = 2;
-        decision.min_successful_branches = 2;
-        decision.distinct_contributions = 2;
-        decision.estimated_steps = 4;
+        decision.max_parallelism = 1;
+        decision.min_successful_branches = 1;
+        decision.distinct_contributions = 1;
+        decision.estimated_steps = 3;
         decision.expected_uplift_bps = 6_000;
         decision.confidence_bps = 8_000;
-        decision.stop_policy = ConductorStopPolicy::Quorum;
+        decision.stop_policy = ConductorStopPolicy::Exhaustive;
         let payload = workflow_payload(
             &decision,
             serde_json::json!([
-                {"id":"analysis","role":"analyst","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"counterexample","role":"critic","model":"executor","subtask":"derive an independent counterexample","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"verify","role":"verifier","model":"reviewer","subtask":"audit both branches","access":["analysis","counterexample"],"output_kind":"verification","tool_policy":"none"},
-                {"id":"synthesis","role":"synthesizer","model":"executor","subtask":"reconcile the branches without the audit","access":["analysis","counterexample"],"output_kind":"synthesis","tool_policy":"none"}
+                {"id":"specialist","role":"domain_specialist","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"verify","role":"independent_verifier","model":"reviewer","subtask":"audit the specialist solution","access":["specialist"],"output_kind":"verification","tool_policy":"none"},
+                {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand both results to the foreground Owner","access":["specialist","verify"],"output_kind":"synthesis","tool_policy":"none"}
             ]),
         );
 
@@ -1606,23 +1714,38 @@ mod tests {
             .parse_draft(&payload)
             .expect_err("a disconnected verifier must fail closed");
 
-        assert!(error.contains("and reach synthesis"));
+        assert!(error
+            .contains("workflow owner handoff must depend on the final specialist or verifier"));
+
+        let same_model_payload = workflow_payload(
+            &decision,
+            serde_json::json!([
+                {"id":"specialist","role":"domain_specialist","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
+                {"id":"verify","role":"independent_verifier","model":"executor","subtask":"audit the specialist solution","access":["specialist"],"output_kind":"verification","tool_policy":"none"},
+                {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the verified result to the foreground Owner","access":["verify"],"output_kind":"synthesis","tool_policy":"none"}
+            ]),
+        );
+        let error = AgentRunDecisionHarness::new(request())
+            .parse_draft(&same_model_payload)
+            .expect_err("the same model must not masquerade as an independent verifier");
+        assert!(error.contains("different configured model"));
     }
 
     #[test]
     fn workflow_proposal_rejects_a_self_dependency() {
         let mut decision = AgentRunDecision::direct("executor");
         decision.execution = AgentExecutionMode::Workflow;
-        decision.verification = AgentVerificationPolicy::SelfCheck;
+        decision.verification = AgentVerificationPolicy::None;
         decision.distinct_contributions = 1;
         decision.estimated_steps = 2;
         decision.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS;
         decision.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
+        decision.stop_policy = ConductorStopPolicy::Exhaustive;
         let payload = workflow_payload(
             &decision,
             serde_json::json!([
                 {"id":"analysis","role":"analyst","model":"executor","subtask":"derive the primary solution","access":[],"output_kind":"analysis","tool_policy":"none"},
-                {"id":"synthesis","role":"synthesizer","model":"executor","subtask":"integrate the result","access":["synthesis"],"output_kind":"synthesis","tool_policy":"none"}
+                {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the result to the foreground Owner","access":["owner_handoff"],"output_kind":"synthesis","tool_policy":"none"}
             ]),
         );
 
@@ -1634,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn first_verified_workflow_requires_a_real_verification_policy() {
+    fn workflow_without_a_verifier_rejects_first_verified() {
         let mut decision = AgentRunDecision::direct("executor");
         decision.execution = AgentExecutionMode::Workflow;
         decision.verification = AgentVerificationPolicy::None;
@@ -1647,6 +1770,6 @@ mod tests {
 
         let error = decision.validate(&["executor".to_string()], 2).unwrap_err();
 
-        assert!(error.contains("requires self-check or independent verification"));
+        assert!(error.contains("cannot use first_verified"));
     }
 }
