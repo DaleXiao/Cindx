@@ -89,6 +89,15 @@ integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
 
+They also include `agent-collaboration-learning-contract`. This provider-free
+gate checks the bounded policy schema, trusted assignment-to-exercise binding,
+actual context and same-lane repair attribution, matched Direct/Workflow
+identity, append-only train/holdout evidence, freeze conditions, and the
+independent-review requirement. Its approved state remains offline-only and is
+not a prompt, routing, memory, canary, or serving admission. This gate does not
+prove a runtime assignment producer or durable evidence recovery path; neither
+is implemented yet.
+
 ```sh
 node scripts/run-quality-gates.mjs \
   --profile control-plane \

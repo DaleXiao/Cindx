@@ -112,15 +112,34 @@ evidence or authorize routing, prompt, memory, canary, or promotion changes.
 This closes a reward-plumbing prerequisite only; no provider run or matched
 uplift result was produced.
 
-Complete the remaining structured learning-policy and offline admission work
-before requesting the final narrow provider gate. Only then freeze a successor
-protocol that:
+The Goal 3B contract foundation adds provider-free structured policy,
+attribution, aggregation, and offline-admission contracts. Policy assignment
+must be joined to actual context allocation, Specialist/Verifier attempts,
+same-lane repair, derived stopping, and the Goal 3A outcome receipt. Candidate
+lineage changes one bounded axis; valid failures remain in the denominator,
+while incomplete attribution freezes the evidence set instead of being silently
+dropped. Train and sealed holdout evidence can reach review readiness, but only
+an independently bound review can authorize an offline narrow-validation
+record. Nothing is served or promoted, and no provider run or uplift result was
+produced. There is not yet a feature-gated event producer or durable,
+replay-safe evidence adapter, so the contract cannot collect real trials.
 
-1. uses one shared Conductor plan and varies only the execution treatment;
-2. proves both arms persist strategy and terminal receipts;
-3. runs a small matched pair before any candidate search;
-4. stops immediately if instrumentation is incomplete;
-5. opens candidate generation and holdout only after the causal pair is valid.
+The next deterministic step is to connect the contract to a feature-gated
+offline producer and durable append/recovery adapter. After that adapter passes
+provider-free crash, replay, tamper, and complete-holdout tests, freeze one
+successor protocol for the final narrow provider gate. It must:
+
+1. use one shared Conductor plan and vary only the execution treatment;
+2. prove both arms persist strategy and terminal receipts;
+3. run a small matched pair before any candidate search;
+4. stop immediately if instrumentation is incomplete;
+5. open candidate generation and holdout only after the causal pair is valid.
+
+The protocol, candidate count, repair count, physical attempts, token and time
+budgets, and sealed holdout must be fixed before the first provider call. Any
+instrumentation defect stops the protocol. If the frozen evidence does not show
+causal uplift, the collaboration type is frozen rather than rescued by changing
+the protocol or evaluator.
 
 This is the shortest path to learning whether Workflow helps. Additional prompt
 genes or evaluator variants before that boundary would add complexity without
