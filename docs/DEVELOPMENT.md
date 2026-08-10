@@ -69,10 +69,16 @@ node scripts/run-quality-gates.mjs \
 
 The `ci-contract`, `control-plane`, and `full` profiles include the
 `agent-strategy-lifecycle-contract`, `agent-strategy-control-contract`, and
-`agent-terminal-lifecycle-contract` gates. Together they check preparation and
-start linearization, selected-decision recovery, success/failure/cancellation
-terminal linkage, exactly-once replay, and evaluation fail-closed behavior
-without contacting a provider:
+`agent-terminal-lifecycle-contract` gates. They also include the
+`agent-execution-graph-contract`, which projects typed model attribution to
+prove that matched Direct exposes no workflow worker while matched Workflow
+completes exactly one read-only Specialist and its optional planned Independent
+Verifier. When present, the actual Verifier attribution must use a different
+configured model from the Specialist. The gate retains the existing total
+model-call boundary. Together these checks cover preparation and start
+linearization, selected-decision recovery, success/failure/cancellation terminal
+linkage, exactly-once replay, and evaluation fail-closed behavior without
+contacting a provider.
 
 The lifecycle filters include the preparation failure race against cancellation
 and steer, including exactly-once terminal persistence for the winning epoch.

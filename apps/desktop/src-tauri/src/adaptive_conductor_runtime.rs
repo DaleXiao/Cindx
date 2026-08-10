@@ -1,4 +1,5 @@
 use super::*;
+use orchestrator::MAX_ADAPTIVE_WORKFLOW_STEPS;
 
 pub(super) enum AdaptiveConductorOutcome {
     Plan {
@@ -13,8 +14,6 @@ pub(super) enum AdaptiveConductorOutcome {
 pub(super) enum AdaptiveWorkflowPlanSource {
     CheckpointResume,
     RunDecisionProposal,
-    ParetoSearchTeacher,
-    ModelColdStart,
 }
 
 impl AdaptiveWorkflowPlanSource {
@@ -22,8 +21,6 @@ impl AdaptiveWorkflowPlanSource {
         match self {
             Self::CheckpointResume => "checkpoint_resume",
             Self::RunDecisionProposal => "run_decision_proposal",
-            Self::ParetoSearchTeacher => "pareto_search_teacher_v2",
-            Self::ModelColdStart => "model_cold_start",
         }
     }
 }
@@ -36,7 +33,6 @@ pub(super) struct AdaptiveConductorContext<'a, 'state> {
     pub(super) collaboration_id: &'a str,
     pub(super) prompt: &'a str,
     pub(super) models: &'a [String],
-    pub(super) agent_budget: usize,
     pub(super) shared_memory: &'a str,
     pub(super) effort: &'a str,
     pub(super) policy: &'a str,
@@ -47,12 +43,10 @@ pub(super) struct AdaptiveConductorContext<'a, 'state> {
     pub(super) route_workflow_proposal: Option<&'a WorkflowPlanProposal>,
     pub(super) prompt_genome: &'a ConductorPromptGenome,
     pub(super) checkpoint: Option<&'a WorkflowExecutionCheckpoint>,
+    pub(super) checkpoint_resumable: bool,
     pub(super) resume_key: &'a str,
     pub(super) resumed_from_workflow_id: Option<&'a str>,
     pub(super) cancellation: Option<&'a Arc<AgentRunControl>>,
-    pub(super) anchor_spec: &'a AdaptiveCollaborationSpec,
-    pub(super) anchor_supervisor: &'a mut Option<ParallelJobSupervisor<CollaborationCompletion>>,
-    pub(super) direct_anchor_output: &'a mut Option<String>,
 }
 
 pub(super) fn plan_adaptive_workflow(
@@ -66,7 +60,6 @@ pub(super) fn plan_adaptive_workflow(
         collaboration_id,
         prompt,
         models,
-        agent_budget,
         shared_memory,
         effort,
         policy,
@@ -77,15 +70,42 @@ pub(super) fn plan_adaptive_workflow(
         route_workflow_proposal,
         prompt_genome,
         checkpoint,
+        checkpoint_resumable,
         resume_key,
         resumed_from_workflow_id,
         cancellation,
-        anchor_spec,
-        anchor_supervisor,
-        direct_anchor_output,
     } = context;
 
+    if collaboration_steer_pending(cancellation) {
+        return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
+    }
+
     if let Some(checkpoint) = checkpoint {
+        if !checkpoint_resumable {
+            record_conductor_rejection(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                0,
+                "checkpoint is quarantined for Owner untrusted partial handoff",
+            );
+            return Ok(AdaptiveConductorOutcome::DirectCommit);
+        }
+        if let Err(error) = checkpoint
+            .plan
+            .validate_owner_execution_graph(execution_contract.verification_required)
+        {
+            record_conductor_rejection(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                0,
+                &format!("checkpoint workflow graph rejected: {error}"),
+            );
+            return Ok(AdaptiveConductorOutcome::DirectCommit);
+        }
         let mut store = state
             .store
             .lock()
@@ -125,6 +145,19 @@ pub(super) fn plan_adaptive_workflow(
         });
     }
 
+    let Some(proposal) = route_workflow_proposal else {
+        record_conductor_rejection(
+            state,
+            task_id,
+            run_context,
+            collaboration_id,
+            0,
+            "run-decision workflow proposal is missing",
+        );
+        return Ok(AdaptiveConductorOutcome::DirectCommit);
+    };
+    let (proposal_steps, proposal_models) = route_workflow_capacity(proposal);
+
     let harness = ConductorHarness::new(ConductorRequest {
         workflow_id: collaboration_id.to_string(),
         objective: prompt.to_string(),
@@ -140,8 +173,8 @@ pub(super) fn plan_adaptive_workflow(
         worker_models: models.to_vec(),
         role_hints: role_hints.clone(),
         budget: WorkflowBudget {
-            max_steps: adaptive_workflow_step_budget(agent_budget),
-            max_models: agent_budget.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
+            max_steps: proposal_steps,
+            max_models: proposal_models,
             max_model_turns_per_step: DEFAULT_COLLABORATION_WORKER_TURNS,
             max_tool_calls_per_step: MAX_COLLABORATION_WORKER_TOOL_CALLS,
             max_output_tokens_per_step: COLLABORATION_MAX_OUTPUT_TOKENS as usize,
@@ -151,197 +184,44 @@ pub(super) fn plan_adaptive_workflow(
         prompt_evolution_enabled: config.prompt_evolution_enabled,
         prompt_genome: prompt_genome.clone(),
     });
-    if let Some(proposal) = route_workflow_proposal {
-        match harness.plan_from_proposal(proposal) {
-            Ok(workflow_plan) => {
-                return Ok(AdaptiveConductorOutcome::Plan {
-                    workflow_plan: Box::new(workflow_plan),
-                    attempts: 0,
-                    source: AdaptiveWorkflowPlanSource::RunDecisionProposal,
-                });
-            }
-            Err(error) => record_conductor_rejection(
+    match harness
+        .plan_from_proposal(proposal)
+        .and_then(|workflow_plan| {
+            workflow_plan
+                .validate_owner_execution_graph(execution_contract.verification_required)
+                .map(|()| workflow_plan)
+        }) {
+        Ok(workflow_plan) => Ok(AdaptiveConductorOutcome::Plan {
+            workflow_plan: Box::new(workflow_plan),
+            attempts: 0,
+            source: AdaptiveWorkflowPlanSource::RunDecisionProposal,
+        }),
+        Err(error) => {
+            record_conductor_rejection(
                 state,
                 task_id,
                 run_context,
                 collaboration_id,
                 0,
                 &format!("run-decision workflow proposal rejected: {error}"),
-            ),
+            );
+            Ok(AdaptiveConductorOutcome::DirectCommit)
         }
     }
-    let conductor_response = run_collaboration_stage(
-        state,
-        config,
-        task_id,
-        run_context,
-        collaboration_id,
-        "conductor_plan",
-        ModelRole::Planner,
-        conductor_model,
-        harness.planning_prompt(),
-        AgentModelAttribution::service(
-            AgentService::Conductor,
-            AgentStage::Plan,
-            AgentModelProfile::Reasoning,
-        ),
-    );
-    let mut conductor_response = match conductor_response {
-        Ok(response) => response,
-        Err(error) => {
-            if error == COLLABORATION_STEER_INTERRUPTED || collaboration_steer_pending(cancellation)
-            {
-                cancel_anytime_background(anchor_supervisor.as_ref(), None);
-                return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-            }
-            if await_direct_anchor_fallback(
-                state,
-                task_id,
-                run_context,
-                collaboration_id,
-                anchor_spec,
-                prompt_genome.verification,
-                cancellation,
-                anchor_supervisor,
-                direct_anchor_output,
-                Duration::from_millis(500),
-            )?
-            .is_some()
-            {
-                return Ok(AdaptiveConductorOutcome::DirectCommit);
-            }
-            return Err(error);
-        }
-    };
+}
 
-    let mut attempts = 1usize;
-    loop {
-        if collaboration_steer_pending(cancellation) {
-            cancel_anytime_background(anchor_supervisor.as_ref(), None);
-            return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-        }
-        match harness.parse_plan(&conductor_response) {
-            Ok(workflow_plan) => {
-                return Ok(AdaptiveConductorOutcome::Plan {
-                    workflow_plan: Box::new(workflow_plan),
-                    attempts,
-                    source: if prior.is_some() {
-                        AdaptiveWorkflowPlanSource::ParetoSearchTeacher
-                    } else {
-                        AdaptiveWorkflowPlanSource::ModelColdStart
-                    },
-                });
-            }
-            Err(error) if attempts < CONDUCTOR_MAX_ATTEMPTS => {
-                if let Some(control) = cancellation {
-                    match control.begin_repair_attempt_at(
-                        run_context_steer_epoch(run_context),
-                        "conductor_repair",
-                    ) {
-                        Ok(Some(_)) => {}
-                        Ok(None) => return Err(COLLABORATION_STEER_INTERRUPTED.to_string()),
-                        Err(reason) => {
-                            if await_direct_anchor_fallback(
-                                state,
-                                task_id,
-                                run_context,
-                                collaboration_id,
-                                anchor_spec,
-                                prompt_genome.verification,
-                                cancellation,
-                                anchor_supervisor,
-                                direct_anchor_output,
-                                Duration::from_millis(500),
-                            )?
-                            .is_some()
-                            {
-                                return Ok(AdaptiveConductorOutcome::DirectCommit);
-                            }
-                            return Err(format!(
-                                "Conductor repair budget exhausted: {}",
-                                reason.code()
-                            ));
-                        }
-                    }
-                }
-                record_conductor_rejection(
-                    state,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    attempts,
-                    &error,
-                );
-                conductor_response = match run_collaboration_stage(
-                    state,
-                    config,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    "conductor_repair",
-                    ModelRole::Planner,
-                    conductor_model,
-                    harness.repair_prompt(&conductor_response, &error),
-                    AgentModelAttribution::service(
-                        AgentService::Conductor,
-                        AgentStage::Plan,
-                        AgentModelProfile::Reasoning,
-                    ),
-                ) {
-                    Ok(response) => response,
-                    Err(repair_error) => {
-                        if repair_error == COLLABORATION_STEER_INTERRUPTED
-                            || collaboration_steer_pending(cancellation)
-                        {
-                            cancel_anytime_background(anchor_supervisor.as_ref(), None);
-                            return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-                        }
-                        if await_direct_anchor_fallback(
-                            state,
-                            task_id,
-                            run_context,
-                            collaboration_id,
-                            anchor_spec,
-                            prompt_genome.verification,
-                            cancellation,
-                            anchor_supervisor,
-                            direct_anchor_output,
-                            Duration::from_millis(500),
-                        )?
-                        .is_some()
-                        {
-                            return Ok(AdaptiveConductorOutcome::DirectCommit);
-                        }
-                        return Err(format!(
-                            "Conductor repair failed after {attempts} attempt(s): {repair_error}"
-                        ));
-                    }
-                };
-                attempts += 1;
-            }
-            Err(error) => {
-                if await_direct_anchor_fallback(
-                    state,
-                    task_id,
-                    run_context,
-                    collaboration_id,
-                    anchor_spec,
-                    prompt_genome.verification,
-                    cancellation,
-                    anchor_supervisor,
-                    direct_anchor_output,
-                    Duration::from_millis(500),
-                )?
-                .is_some()
-                {
-                    return Ok(AdaptiveConductorOutcome::DirectCommit);
-                }
-                return Err(format!(
-                    "Conductor failed to produce a valid workflow after {attempts} attempts: {error}"
-                ));
-            }
-        }
-    }
+pub(super) fn route_workflow_capacity(proposal: &WorkflowPlanProposal) -> (usize, usize) {
+    let model_count = proposal
+        .steps
+        .iter()
+        .map(|step| step.model.trim())
+        .filter(|model| !model.is_empty())
+        .collect::<BTreeSet<_>>()
+        .len();
+    (
+        proposal.steps.len().clamp(1, MAX_ADAPTIVE_WORKFLOW_STEPS),
+        model_count.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS),
+    )
 }
 
 fn record_conductor_rejection(

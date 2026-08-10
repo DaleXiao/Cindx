@@ -491,6 +491,14 @@ fn validate_matched_route_receipts(
             case.id
         ));
     }
+    if direct.execution_constraint.as_deref() != Some("matched_direct")
+        || workflow.execution_constraint.as_deref() != Some("matched_workflow")
+    {
+        return Err(format!(
+            "matched route pair {} is missing its treatment constraints",
+            case.id
+        ));
+    }
     if direct.profile_sha256.is_none()
         || direct.profile_sha256 != workflow.profile_sha256
         || direct.route_profile_sha256 != workflow.route_profile_sha256
@@ -515,6 +523,73 @@ fn validate_matched_route_receipts(
     {
         return Err(format!(
             "matched route pair {} is missing runtime treatment authority receipts",
+            case.id
+        ));
+    }
+    let direct_exposure = direct.treatment_exposure.as_ref().ok_or_else(|| {
+        format!(
+            "matched route pair {} is missing Direct treatment exposure",
+            case.id
+        )
+    })?;
+    let workflow_exposure = workflow.treatment_exposure.as_ref().ok_or_else(|| {
+        format!(
+            "matched route pair {} is missing Workflow treatment exposure",
+            case.id
+        )
+    })?;
+    if direct_exposure.logical_model_calls != direct.model_calls
+        || workflow_exposure.logical_model_calls != workflow.model_calls
+    {
+        return Err(format!(
+            "matched route pair {} changed the model-call counting boundary",
+            case.id
+        ));
+    }
+    if direct_exposure.non_owner_permission_gated_calls > 0
+        || workflow_exposure.non_owner_permission_gated_calls > 0
+    {
+        return Err(format!(
+            "matched route pair {} exposed permission-gated authority outside Owner",
+            case.id
+        ));
+    }
+    if direct_exposure.workflow_planned
+        || direct_exposure.workflow_completed
+        || direct_exposure.worker_model_calls > 0
+        || direct_exposure.successful_specialist_model_calls > 0
+        || direct_exposure.successful_independent_verifier_model_calls > 0
+        || direct_exposure.direct_anchor_competition_calls > 0
+    {
+        return Err(format!(
+            "matched route pair {} exposed workflow workers in Direct",
+            case.id
+        ));
+    }
+    if !workflow_exposure.workflow_planned
+        || !workflow_exposure.workflow_completed
+        || workflow_exposure.successful_workflow_specialist_model_calls != 1
+        || workflow_exposure
+            .successful_workflow_specialist_models
+            .len()
+            != 1
+        || workflow.workflow_verifier_steps > 1
+        || workflow_exposure.successful_workflow_verifier_model_calls
+            != workflow.workflow_verifier_steps
+        || workflow_exposure.successful_workflow_verifier_models.len()
+            != workflow.workflow_verifier_steps
+        || (workflow.workflow_verifier_steps == 1
+            && !workflow_exposure
+                .successful_workflow_specialist_models
+                .is_disjoint(&workflow_exposure.successful_workflow_verifier_models))
+        || workflow_exposure.successful_specialist_model_calls
+            != workflow_exposure.successful_workflow_specialist_model_calls
+        || workflow_exposure.successful_independent_verifier_model_calls
+            != workflow_exposure.successful_workflow_verifier_model_calls
+        || workflow_exposure.direct_anchor_competition_calls > 0
+    {
+        return Err(format!(
+            "matched route pair {} did not expose the completed Workflow treatment",
             case.id
         ));
     }
@@ -645,9 +720,34 @@ pub(super) fn project_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use super::super::receipts::TreatmentExposureReceipt;
+    use std::{collections::BTreeSet, fs};
 
     fn route_receipt(execution_mode: &str) -> ProductRunReceipt {
+        let workflow = execution_mode == "workflow";
+        let treatment_exposure = if workflow {
+            TreatmentExposureReceipt {
+                logical_model_calls: 2,
+                worker_model_calls: 2,
+                successful_specialist_model_calls: 1,
+                successful_independent_verifier_model_calls: 1,
+                successful_workflow_specialist_model_calls: 1,
+                successful_workflow_verifier_model_calls: 1,
+                successful_workflow_specialist_models: BTreeSet::from([
+                    "specialist-model".to_string()
+                ]),
+                successful_workflow_verifier_models: BTreeSet::from(["verifier-model".to_string()]),
+                workflow_planned: true,
+                workflow_completed: true,
+                ..TreatmentExposureReceipt::default()
+            }
+        } else {
+            TreatmentExposureReceipt {
+                logical_model_calls: 1,
+                successful_owner_model_calls: 1,
+                ..TreatmentExposureReceipt::default()
+            }
+        };
         ProductRunReceipt {
             case_id: "case".to_string(),
             category: "coding".to_string(),
@@ -655,6 +755,11 @@ mod tests {
             replicate: 1,
             treatment: "pro".to_string(),
             execution_mode: execution_mode.to_string(),
+            execution_constraint: Some(if workflow {
+                "matched_workflow".to_string()
+            } else {
+                "matched_direct".to_string()
+            }),
             completed: true,
             terminal_status: "completed".to_string(),
             behavior_checks_passed: 1,
@@ -663,7 +768,7 @@ mod tests {
             quality_passed: true,
             safety_violations: 0,
             latency_ms: 1,
-            model_calls: 1,
+            model_calls: treatment_exposure.logical_model_calls,
             total_tokens: 1,
             output_sha256: "a".repeat(64),
             conductor_candidate_sha256: Some("0".repeat(64)),
@@ -674,10 +779,11 @@ mod tests {
             execution_plan_sha256: Some("d".repeat(64)),
             execution_plan_semantic_sha256: Some("e".repeat(64)),
             execution_plan_authority: Some("runtime_constraint".to_string()),
-            workflow_execution_profile_sha256: (execution_mode == "workflow")
-                .then(|| "f".repeat(64)),
+            workflow_execution_profile_sha256: workflow.then(|| "f".repeat(64)),
             route_profile_semantics_exercised: true,
-            workflow_profile_exercised: execution_mode == "workflow",
+            workflow_profile_exercised: workflow,
+            workflow_verifier_steps: usize::from(workflow),
+            treatment_exposure: Some(treatment_exposure),
         }
     }
 
@@ -693,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn matched_route_pair_requires_exact_treatment_and_profile_identity() {
+    fn agent_execution_graph_contract_preserves_shared_anchor_and_balanced_order() {
         let case = RealworldCase {
             id: "case".to_string(),
             category: "coding".to_string(),
@@ -710,6 +816,30 @@ mod tests {
         let direct = route_receipt("direct");
         let workflow = route_receipt("workflow");
         validate_matched_route_receipts(&case, &direct, &workflow).unwrap();
+        let mut workflow_without_verifier = workflow.clone();
+        workflow_without_verifier.workflow_verifier_steps = 0;
+        let exposure = workflow_without_verifier
+            .treatment_exposure
+            .as_mut()
+            .unwrap();
+        exposure.successful_independent_verifier_model_calls = 0;
+        exposure.successful_workflow_verifier_model_calls = 0;
+        exposure.successful_workflow_verifier_models.clear();
+        validate_matched_route_receipts(&case, &direct, &workflow_without_verifier).unwrap();
+
+        let mut correlated_verifier = workflow.clone();
+        correlated_verifier
+            .treatment_exposure
+            .as_mut()
+            .unwrap()
+            .successful_workflow_verifier_models = BTreeSet::from(["specialist-model".to_string()]);
+        assert!(validate_matched_route_receipts(&case, &direct, &correlated_verifier).is_err());
+        for pair_index in 0..4 {
+            assert_ne!(
+                candidate_executes_first(pair_index, 1),
+                candidate_executes_first(pair_index + 4, 2),
+            );
+        }
 
         let mut drifted = workflow.clone();
         drifted.route_profile_sha256 = Some("9".repeat(64));
@@ -721,6 +851,93 @@ mod tests {
         different_proposal.workflow_proposal_sha256 = Some("7".repeat(64));
         assert!(validate_matched_route_receipts(&case, &direct, &different_proposal).is_err());
         assert!(validate_matched_route_receipts(&case, &direct, &direct).is_err());
+    }
+
+    #[test]
+    fn agent_execution_graph_contract_rejects_label_only_workflow() {
+        let case = RealworldCase {
+            id: "case".to_string(),
+            category: "coding".to_string(),
+            objective: "objective".to_string(),
+            campaign_split: Some("train".to_string()),
+            expected_execution_mode: None,
+            seed_memory_prompt: None,
+            index_workspace: false,
+            files: Vec::new(),
+            permission_policy: super::super::PermissionPolicy::AllowOnce,
+            verification: Default::default(),
+            memory_effect: None,
+        };
+        let direct = route_receipt("direct");
+        let mut workflow = route_receipt("workflow");
+        let exposure = workflow.treatment_exposure.as_mut().unwrap();
+        exposure.workflow_planned = false;
+        exposure.workflow_completed = false;
+        exposure.successful_workflow_specialist_model_calls = 0;
+        exposure.successful_workflow_verifier_model_calls = 0;
+
+        assert!(validate_matched_route_receipts(&case, &direct, &workflow).is_err());
+
+        let mut extra_verifier = route_receipt("workflow");
+        let exposure = extra_verifier.treatment_exposure.as_mut().unwrap();
+        exposure.successful_independent_verifier_model_calls = 2;
+        exposure.successful_workflow_verifier_model_calls = 2;
+        assert!(validate_matched_route_receipts(&case, &direct, &extra_verifier).is_err());
+    }
+
+    #[test]
+    fn agent_execution_graph_contract_rejects_direct_worker_exposure() {
+        let case = RealworldCase {
+            id: "case".to_string(),
+            category: "coding".to_string(),
+            objective: "objective".to_string(),
+            campaign_split: Some("train".to_string()),
+            expected_execution_mode: None,
+            seed_memory_prompt: None,
+            index_workspace: false,
+            files: Vec::new(),
+            permission_policy: super::super::PermissionPolicy::AllowOnce,
+            verification: Default::default(),
+            memory_effect: None,
+        };
+        let mut direct = route_receipt("direct");
+        direct
+            .treatment_exposure
+            .as_mut()
+            .unwrap()
+            .successful_specialist_model_calls = 1;
+        let workflow = route_receipt("workflow");
+
+        assert!(validate_matched_route_receipts(&case, &direct, &workflow).is_err());
+
+        let mut attempted_worker = route_receipt("direct");
+        attempted_worker
+            .treatment_exposure
+            .as_mut()
+            .unwrap()
+            .worker_model_calls = 1;
+        assert!(validate_matched_route_receipts(&case, &attempted_worker, &workflow).is_err());
+
+        let mut unsafe_direct = route_receipt("direct");
+        unsafe_direct
+            .treatment_exposure
+            .as_mut()
+            .unwrap()
+            .non_owner_permission_gated_calls = 1;
+        assert!(validate_matched_route_receipts(&case, &unsafe_direct, &workflow).is_err());
+
+        let mut recounted_workflow = workflow;
+        recounted_workflow
+            .treatment_exposure
+            .as_mut()
+            .unwrap()
+            .logical_model_calls += 1;
+        assert!(validate_matched_route_receipts(
+            &case,
+            &route_receipt("direct"),
+            &recounted_workflow
+        )
+        .is_err());
     }
 
     #[test]

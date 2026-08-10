@@ -49,7 +49,11 @@ Never use `reset --hard` or force-push to synchronize this checkout.
 
 - Fast is a direct single-model route.
 - Auto and Pro use one Conductor-owned typed execution plan. Pro has larger
-  bounded collaboration capacity; it does not blindly activate all models.
+  bounded planning capacity; it does not blindly activate all models.
+- A production Workflow runs exactly one read-only Specialist, optionally one
+  model-distinct Independent Verifier, then a deterministic checkpoint handoff
+  to the Owner. It has no competing anchor, reviewer tournament, or model
+  synthesis layer.
 - One shared kernel owns model/tool turns, permission suspension, steer,
   recovery, and terminal commit.
 - Workspace retrieval, durable memory, task graph, and prompt evolution are
@@ -82,6 +86,25 @@ This work did not change production route selection, model configuration,
 budgets, permissions, tool authority, UI behavior, or provider call counts. No
 provider evaluation was run, and no intelligence improvement is claimed.
 
+Goal 2 is also complete in the current source:
+
+1. Direct remains the foreground Owner path; Workflow is constrained to one
+   Specialist, an optional planned Independent Verifier, and the same Owner.
+2. The compatibility synthesis node is completed deterministically from the
+   durable checkpoint and consumes no model attempt.
+3. Direct-anchor competition, post-team quality/reviewer competition, model
+   synthesis, uplift repair, and secondary Conductor replanning were removed
+   from the production Workflow path. Bounded retry remains within the same
+   logical Specialist or Verifier lane.
+4. Permission-gated effects and final delivery remain Owner-only. Missing or
+   failed required verification falls through to the direct Owner path.
+5. Matched evaluation now validates actual Actor exposure instead of trusting
+   Direct/Workflow labels alone, while retaining total call and token accounting.
+
+These are deterministic graph, safety, and attribution guarantees. No provider
+evaluation was run, so they do not establish quality, latency, token, or
+intelligence improvement.
+
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
 1. `ff8c238` separated route/task-graph evidence from direct-finalizer evidence
@@ -108,18 +131,13 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-After explicit user confirmation, Goal 2 is to narrow the production execution
-graph to Owner plus an optional Specialist and optional Independent Verifier,
-removing only demonstrably duplicate model competition or synthesis while
-preserving every safety, permission, recovery, and fallback contract. Direct
-and Workflow evaluation treatments must remain distinct; conceptual elegance
-is not evidence of quality gain.
-
-Goal 3 may then teach structured expert invocation, context allocation,
-verification, repair, and stopping from externally verifiable outcomes. A
-single fixed-budget narrow provider gate is allowed only after both goals pass
-their deterministic review. No uplift freezes that collaboration type instead
-of changing the protocol repeatedly.
+After explicit user confirmation, Goal 3 may teach structured expert invocation,
+context allocation, verification, repair, and stopping from externally
+verifiable outcomes. It must keep the Goal 2 graph and Owner authority fixed,
+collect continuously, and promote only discrete, reviewed candidates. A single
+fixed-budget narrow provider gate is allowed only after Goal 3 passes its
+deterministic review. No uplift freezes that collaboration type instead of
+changing the protocol repeatedly.
 
 ## Structural Risks
 

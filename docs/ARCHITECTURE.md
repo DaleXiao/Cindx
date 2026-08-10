@@ -35,7 +35,8 @@ role names as one ontology:
 The Owner alone owns permission-gated effects and final user delivery.
 Specialists contribute bounded internal plans or evidence. Independent
 Verifiers evaluate an artifact without effect authority. Utility-profile model
-calls can prepare internal synthesis but do not own final delivery.
+calls support bounded background preparation but do not participate in the
+production Workflow decision or own final delivery.
 Background prompt mutation is recorded as a learning utility service, not a
 production Specialist.
 
@@ -136,16 +137,24 @@ canonical chat history.
 
 ### 4. Optional workflow and task graph
 
-`orchestrator` materializes a bounded dependency graph only for a validated
-Workflow decision. Analysis and verification nodes receive admitted read-only
-catalogs; synthesis is tool-free. Side effects remain with the foreground
-executor.
+`orchestrator` materializes a fixed owner-execution graph only for a validated
+Workflow decision: one dependency-free Analysis or Evidence Specialist,
+optionally one tool-free and model-distinct Independent Verifier, and one final
+compatibility sink. The Specialist receives only its admitted read-only catalog.
+Side effects remain with the foreground Owner.
 
-The scheduler follows dependencies required by the delivery target. A typed
-verification receipt must cite the evidence it reviewed. Team guidance reaches
-the foreground actor only after the independent uplift decision accepts it;
-unproven, unavailable, failed, or regressed collaboration falls through to the
-direct control path.
+The final sink is not a model Actor. The runtime completes it deterministically
+from the checkpoint after its dependency succeeds, preserving step identity,
+input and output digests, evidence lineage, resume identity, and typed
+verification receipts. The resulting packet is untrusted internal guidance;
+the Owner independently reconciles it and owns final delivery. Missing,
+malformed, failed, or required-but-unsatisfied verification rejects the handoff
+and falls through to the direct Owner path. Checkpoint loading separates an
+executable resume from an untrusted Owner-only handoff: retired models and a
+legacy final sink that already consumed a model attempt are never scheduled,
+while completed outputs remain available as partial context. The production
+graph has no direct anchor competition, reviewer tournament, model synthesis,
+uplift repair, or second Conductor planner.
 
 ### 5. Kernel and effects
 

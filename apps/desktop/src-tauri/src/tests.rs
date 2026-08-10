@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent_collaboration_runtime::{
-    collaboration_candidate_handoff, collaboration_candidate_quorum,
+    adaptive_collaboration_model_catalog, collaboration_candidate_handoff, collaboration_candidate_quorum,
     collaboration_candidate_quorum_grace, collaboration_error_blocks_executor,
 };
 use crate::agent_conductor_runtime::{conductor_call_limits, conductor_repair_recovery_window};
@@ -35,10 +35,10 @@ use orchestrator::{
     AgentVerificationPolicy, CausalRouteReason, CausalRouteSelectionV2, ExecutionPlan,
     ExecutionPlanAuthority, ExecutionPlanDecisionReason, ModelCapabilitySource,
     PromptDatasetCaseIdentityV1, PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1,
-    PromptTransferProvenance, RouteFeatureRequest, RouteFeatureSnapshotV2, WorkflowOutputKind,
-    WorkflowPlanProposal, WorkflowPlanProposalStep, WorkflowToolPolicy,
-    CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
-    PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
+    PromptTransferProvenance, RouteFeatureRequest, RouteFeatureSnapshotV2,
+    WorkflowCompletionCriteria, WorkflowOutputKind, WorkflowPlanProposal, WorkflowPlanProposalStep,
+    WorkflowPlanStep, WorkflowStepContract, WorkflowToolPolicy, CAUSAL_ROUTE_MAX_RECEIPT_BYTES,
+    PROMPT_EXECUTION_CONTEXT_SCHEMA_V1, PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -363,20 +363,11 @@ fn test_workflow_proposal(model: &str) -> WorkflowPlanProposal {
                 tool_policy: WorkflowToolPolicy::None,
             },
             WorkflowPlanProposalStep {
-                id: "counterexample".to_string(),
-                role: "critic".to_string(),
+                id: "owner_handoff".to_string(),
+                role: "owner_handoff".to_string(),
                 model: model.to_string(),
-                subtask: "search for an independent counterexample".to_string(),
-                access: Vec::new(),
-                output_kind: WorkflowOutputKind::Verification,
-                tool_policy: WorkflowToolPolicy::None,
-            },
-            WorkflowPlanProposalStep {
-                id: "synthesis".to_string(),
-                role: "synthesizer".to_string(),
-                model: model.to_string(),
-                subtask: "reconcile both contributions".to_string(),
-                access: vec!["analysis".to_string(), "counterexample".to_string()],
+                subtask: "hand the specialist result to the foreground Owner".to_string(),
+                access: vec!["analysis".to_string()],
                 output_kind: WorkflowOutputKind::Synthesis,
                 tool_policy: WorkflowToolPolicy::None,
             },
@@ -385,17 +376,114 @@ fn test_workflow_proposal(model: &str) -> WorkflowPlanProposal {
 }
 
 #[test]
+fn agent_execution_graph_contract_adaptive_capacity_is_independent_from_parallelism() {
+    let config = ProviderConfig {
+        model: "specialist-a".to_string(),
+        planner_model: "specialist-a".to_string(),
+        executor_model: "specialist-a".to_string(),
+        reviewer_model: "verifier-b".to_string(),
+        summarizer_model: "utility-c".to_string(),
+        ..ProviderConfig::default()
+    };
+    let models = adaptive_collaboration_model_catalog(&config, Some("specialist-a"));
+    assert_eq!(models.first().map(String::as_str), Some("specialist-a"));
+    assert!(models.iter().any(|model| model == "verifier-b"));
+    assert!(models.iter().any(|model| model == "utility-c"));
+
+    for verification in [
+        AgentVerificationPolicy::None,
+        AgentVerificationPolicy::Independent,
+    ] {
+        let mut decision = AgentRunDecision::direct("specialist-a");
+        decision.execution = AgentExecutionMode::Workflow;
+        decision.verification = verification;
+        decision.max_parallelism = 1;
+        decision.min_successful_branches = 1;
+        decision.distinct_contributions = 1;
+        decision.estimated_steps = if verification == AgentVerificationPolicy::Independent {
+            3
+        } else {
+            2
+        };
+        decision.stop_policy = ConductorStopPolicy::Exhaustive;
+        let mut proposal = test_workflow_proposal("specialist-a");
+        if verification == AgentVerificationPolicy::Independent {
+            proposal.steps.insert(
+                1,
+                WorkflowPlanProposalStep {
+                    id: "verify".to_string(),
+                    role: "independent_verifier".to_string(),
+                    model: "verifier-b".to_string(),
+                    subtask: "audit only the specialist result".to_string(),
+                    access: vec!["analysis".to_string()],
+                    output_kind: WorkflowOutputKind::Verification,
+                    tool_policy: WorkflowToolPolicy::None,
+                },
+            );
+            proposal.steps[2].access = vec!["verify".to_string()];
+        }
+
+        let (max_steps, max_models) = route_workflow_capacity(&proposal);
+        let execution_contract = decision.execution_contract("pro");
+        let harness = ConductorHarness::new(ConductorRequest {
+            workflow_id: "owner-execution-capacity".to_string(),
+            objective: "prepare a bounded owner handoff".to_string(),
+            recent_context: String::new(),
+            effort: "pro".to_string(),
+            policy: "best_of_n".to_string(),
+            conductor_model: "conductor".to_string(),
+            primary_model: "specialist-a".to_string(),
+            worker_models: models.clone(),
+            role_hints: ConductorRoleHints {
+                planner: "specialist-a".to_string(),
+                executor: "specialist-a".to_string(),
+                reviewer: "verifier-b".to_string(),
+                synthesizer: "specialist-a".to_string(),
+            },
+            budget: WorkflowBudget {
+                max_steps,
+                max_models,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 2,
+                max_output_tokens_per_step: 2_048,
+            },
+            execution_contract,
+            prior_hint: None,
+            prompt_evolution_enabled: false,
+            prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
+        });
+
+        assert_eq!(harness.request().execution_contract.max_parallelism, 1);
+        assert_eq!(harness.request().budget.max_steps, proposal.steps.len());
+        assert_eq!(harness.request().budget.max_models, max_models);
+        let plan = harness
+            .plan_from_proposal(&proposal)
+            .expect("sequential owner execution proposal should materialize");
+        plan.validate_owner_execution_graph(
+            verification == AgentVerificationPolicy::Independent,
+        )
+        .unwrap();
+        let checkpoint = WorkflowExecutionCheckpoint::new("capacity", plan, 1);
+        let handoff = checkpoint
+            .steps
+            .get("owner_handoff")
+            .expect("owner handoff checkpoint");
+        assert_eq!(handoff.attempts, 0);
+    }
+}
+
+#[test]
 fn workflow_proposal_is_bound_to_context_and_direct_clears_it() {
     let mut workflow = AgentRunDecision::direct("executor");
     workflow.execution = AgentExecutionMode::Workflow;
-    workflow.verification = AgentVerificationPolicy::SelfCheck;
-    workflow.max_parallelism = 2;
-    workflow.min_successful_branches = 2;
-    workflow.distinct_contributions = 2;
-    workflow.estimated_steps = 3;
+    workflow.verification = AgentVerificationPolicy::None;
+    workflow.max_parallelism = 1;
+    workflow.min_successful_branches = 1;
+    workflow.distinct_contributions = 1;
+    workflow.estimated_steps = 2;
     workflow.expected_uplift_bps = 4_000;
     workflow.confidence_bps = 8_000;
-    workflow.stop_policy = ConductorStopPolicy::Quorum;
+    workflow.stop_policy = ConductorStopPolicy::Exhaustive;
     let mut planned = test_planned_agent_run(workflow, AgentPolicy::Pro);
     planned.workflow_plan = Some(test_workflow_proposal("executor"));
     let mut context = Metadata::new();
@@ -422,7 +510,7 @@ fn workflow_proposal_is_bound_to_context_and_direct_clears_it() {
             .expect("typed workflow proposal")
             .steps
             .len(),
-        3
+        2
     );
     assert_eq!(
         route_workflow_proposal_from_context(&context, false, &["executor".to_string()])
@@ -447,7 +535,7 @@ fn workflow_proposal_is_bound_to_context_and_direct_clears_it() {
 
     let mut semantically_tampered = context.clone();
     let mut proposal = planned.workflow_plan.clone().expect("workflow proposal");
-    proposal.steps[2].access = vec!["analysis".to_string()];
+    proposal.steps[1].access.clear();
     let encoded = serde_json::to_string(&proposal).expect("tampered proposal json");
     semantically_tampered.insert(
         "conductor_workflow_proposal_sha256".to_string(),
@@ -475,13 +563,13 @@ fn execution_plan_context_keeps_compatibility_policy_shadow_only() {
     let mut candidate = AgentRunDecision::direct("executor");
     candidate.execution = AgentExecutionMode::Workflow;
     candidate.verification = AgentVerificationPolicy::Independent;
-    candidate.max_parallelism = 2;
-    candidate.min_successful_branches = 2;
-    candidate.distinct_contributions = 2;
+    candidate.max_parallelism = 1;
+    candidate.min_successful_branches = 1;
+    candidate.distinct_contributions = 1;
     candidate.estimated_steps = 3;
     candidate.expected_uplift_bps = 2_999;
     candidate.confidence_bps = 8_000;
-    candidate.stop_policy = ConductorStopPolicy::Quorum;
+    candidate.stop_policy = ConductorStopPolicy::Exhaustive;
     let planned =
         test_planned_agent_run_with_candidate(candidate.clone(), candidate, AgentPolicy::Auto);
     let mut context = Metadata::new();
@@ -545,13 +633,13 @@ fn conductor_verification_policies_reach_the_persistent_task_contract() {
     let mut independent = AgentRunDecision::direct("executor");
     independent.execution = AgentExecutionMode::Workflow;
     independent.verification = AgentVerificationPolicy::Independent;
-    independent.max_parallelism = 2;
-    independent.min_successful_branches = 2;
-    independent.distinct_contributions = 2;
+    independent.max_parallelism = 1;
+    independent.min_successful_branches = 1;
+    independent.distinct_contributions = 1;
     independent.estimated_steps = 3;
     independent.expected_uplift_bps = 2_500;
     independent.confidence_bps = 7_000;
-    independent.stop_policy = ConductorStopPolicy::Quorum;
+    independent.stop_policy = ConductorStopPolicy::Exhaustive;
     independent
         .validate(&["executor".to_string(), "reviewer".to_string()], 2)
         .expect("independent fallback should remain valid");
@@ -2108,147 +2196,6 @@ fn partial_handoff_enters_the_anytime_frontier_and_checkpoint() {
     assert_eq!(verdict.evidence_count, 4);
     assert!(!verdict.verified);
     assert!(!checkpoint.anytime_controller_json.is_empty());
-}
-
-#[test]
-fn adaptive_quality_gate_is_bounded_and_requires_safe_passing_score() {
-    assert_eq!(
-        adaptive_quality_repair_budget(PromptVerification::Minimal),
-        0
-    );
-    assert_eq!(
-        adaptive_quality_repair_budget(PromptVerification::Evidence),
-        1
-    );
-    assert_eq!(
-        adaptive_quality_repair_budget(PromptVerification::Adversarial),
-        2
-    );
-
-    let mut gate = CollaborationQualityPayload {
-        pass: true,
-        score: ADAPTIVE_QUALITY_PASS_SCORE,
-        issues: Vec::new(),
-        safety_violations: 0,
-    };
-    assert!(adaptive_quality_gate_passes(&gate));
-    gate.score = ADAPTIVE_QUALITY_PASS_SCORE - 0.01;
-    assert!(!adaptive_quality_gate_passes(&gate));
-    gate.score = 1.0;
-    gate.safety_violations = 1;
-    assert!(!adaptive_quality_gate_passes(&gate));
-    gate.safety_violations = 0;
-    gate.score = 1.01;
-    assert!(!adaptive_quality_gate_passes(&gate));
-    gate.score = f32::NAN;
-    assert!(!adaptive_quality_gate_passes(&gate));
-}
-
-#[test]
-fn default_provider_quality_review_prefers_a_distinct_hidden_evaluator_model() {
-    let openai = ProviderConfig::default();
-    let openai_participants = [
-        openai.model_for_conductor(),
-        openai.model_for_role(&ModelRole::Planner),
-        openai.model_for_role(&ModelRole::Executor),
-    ]
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    assert_eq!(
-        adaptive_quality_reviewer_models(&openai, &openai_participants)
-            .first()
-            .map(String::as_str),
-        Some("gpt-4.1-mini")
-    );
-
-    let alibaba = ProviderConfig {
-        provider_id: PROVIDER_ALIBABA_CN.to_string(),
-        model: "qwen3.7-plus".to_string(),
-        conductor_model: "qwen3.7-plus".to_string(),
-        planner_model: "qwen3.7-plus".to_string(),
-        executor_model: "qwen3.7-plus".to_string(),
-        reviewer_model: "qwen3.7-plus".to_string(),
-        summarizer_model: "qwen3.7-flash".to_string(),
-        ..ProviderConfig::default()
-    };
-    let alibaba_participants = [
-        alibaba.model_for_conductor(),
-        alibaba.model_for_role(&ModelRole::Planner),
-        alibaba.model_for_role(&ModelRole::Executor),
-    ]
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    assert_eq!(
-        adaptive_quality_reviewer_models(&alibaba, &alibaba_participants)
-            .first()
-            .map(String::as_str),
-        Some("qwen3.7-flash")
-    );
-}
-
-#[test]
-fn adaptive_quality_search_preserves_the_safest_highest_scoring_anchor() {
-    let anchor = CollaborationQualityPayload {
-        pass: false,
-        score: 0.74,
-        issues: vec!["one remaining issue".to_string()],
-        safety_violations: 0,
-    };
-    let regressed_repair = CollaborationQualityPayload {
-        pass: true,
-        score: 0.96,
-        issues: Vec::new(),
-        safety_violations: 1,
-    };
-    assert!(!adaptive_quality_candidate_is_better(
-        &regressed_repair,
-        &anchor
-    ));
-
-    let improved_repair = CollaborationQualityPayload {
-        pass: true,
-        score: ADAPTIVE_QUALITY_PASS_SCORE,
-        issues: Vec::new(),
-        safety_violations: 0,
-    };
-    assert!(adaptive_quality_candidate_is_better(
-        &improved_repair,
-        &anchor
-    ));
-}
-
-#[test]
-fn adaptive_quality_handoff_preserves_issues_and_fails_closed_on_safety() {
-    let unresolved = AdaptiveQualityGateResult {
-        output: "candidate guidance".to_string(),
-        score: 0.61,
-        safety_violations: 0,
-        passed: false,
-        issues: vec!["verify the generated artifact".to_string()],
-    };
-    let handoff = adaptive_quality_handoff(&unresolved).expect("safe issues should be delegated");
-    assert!(handoff.contains("INTERNAL QUALITY HANDOFF"));
-    assert!(handoff.contains("verify the generated artifact"));
-    assert!(handoff.contains("candidate guidance"));
-
-    let passed = AdaptiveQualityGateResult {
-        passed: true,
-        issues: Vec::new(),
-        score: 0.9,
-        ..unresolved
-    };
-    assert_eq!(
-        adaptive_quality_handoff(&passed).expect("passing guidance should flow through"),
-        "candidate guidance"
-    );
-
-    let unsafe_result = AdaptiveQualityGateResult {
-        safety_violations: 1,
-        ..passed
-    };
-    let error = adaptive_quality_handoff(&unsafe_result)
-        .expect_err("safety violations must stop the workflow");
-    assert!(error.starts_with(WORKFLOW_SAFETY_ERROR_PREFIX));
 }
 
 #[test]
@@ -8016,6 +7963,216 @@ fn workflow_telemetry_restores_versioned_plan_and_quality() {
     let censored = workflow_execution_telemetry_from_events(&events, &models);
     assert_eq!(censored.len(), 1);
     assert!(!censored[0].learning_evidence.is_learnable());
+}
+
+fn workflow_checkpoint_owner_plan(prompt: &str, model: &str) -> WorkflowPlanIr {
+    WorkflowPlanIr {
+        schema: WORKFLOW_IR_SCHEMA.to_string(),
+        workflow_id: "checkpoint-owner-workflow".to_string(),
+        objective: prompt.to_string(),
+        effort: "pro".to_string(),
+        policy: "best_of_n".to_string(),
+        coordinator_model: model.to_string(),
+        prompt_profile: "checkpoint-test-profile".to_string(),
+        steps: vec![
+            WorkflowPlanStep {
+                id: "specialist".to_string(),
+                role: "worker".to_string(),
+                model: model.to_string(),
+                subtask: "prepare bounded specialist context".to_string(),
+                access: Vec::new(),
+                tool_policy: WorkflowToolPolicy::None,
+                contract: WorkflowStepContract {
+                    input_steps: Vec::new(),
+                    output_kind: WorkflowOutputKind::Analysis,
+                    completion: WorkflowCompletionCriteria::default(),
+                },
+            },
+            WorkflowPlanStep {
+                id: "owner_handoff".to_string(),
+                role: "owner_handoff".to_string(),
+                model: model.to_string(),
+                subtask: "hand the specialist result to the Owner".to_string(),
+                access: vec!["specialist".to_string()],
+                tool_policy: WorkflowToolPolicy::None,
+                contract: WorkflowStepContract {
+                    input_steps: vec!["specialist".to_string()],
+                    output_kind: WorkflowOutputKind::Synthesis,
+                    completion: WorkflowCompletionCriteria::default(),
+                },
+            },
+        ],
+        budget: WorkflowBudget {
+            max_steps: 2,
+            max_models: 1,
+            max_model_turns_per_step: 2,
+            max_tool_calls_per_step: 0,
+            max_output_tokens_per_step: 2_048,
+        },
+    }
+}
+
+fn workflow_checkpoint_snapshot_event(
+    event_id: &str,
+    sequence: u64,
+    resume_key: &str,
+    checkpoint: &WorkflowExecutionCheckpoint,
+) -> Event {
+    Event {
+        id: EventId(event_id.to_string()),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: checkpoint.updated_at_ms,
+        kind: EventKind::TaskStatusChanged,
+        summary: "Collaboration workflow checkpoint preserved".to_string(),
+        metadata: [
+            ("workflow_resume_key".to_string(), resume_key.to_string()),
+            (
+                "workflow_checkpoint".to_string(),
+                checkpoint.to_json().unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
+#[test]
+fn workflow_checkpoint_with_retired_model_is_handoff_only_and_preserves_completed_output() {
+    let prompt = "Continue from preserved specialist work";
+    let resume_key = "retired-model-checkpoint";
+    let retired_model = "retired-specialist";
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        resume_key,
+        workflow_checkpoint_owner_plan(prompt, retired_model),
+        100,
+    );
+    checkpoint
+        .complete_step(
+            "specialist",
+            retired_model,
+            "preserved retired-model output".to_string(),
+            "[]".to_string(),
+            110,
+        )
+        .unwrap();
+    let events = vec![workflow_checkpoint_snapshot_event(
+        "retired-model",
+        1,
+        resume_key,
+        &checkpoint,
+    )];
+
+    let loaded = resumable_workflow_checkpoint_from_events(
+        &events,
+        resume_key,
+        prompt,
+        &["current-specialist".to_string()],
+    )
+    .expect("retired-model output should remain available for Owner handoff");
+
+    assert!(!loaded.resumable);
+    assert_eq!(
+        loaded
+            .checkpoint
+            .completed_outputs()
+            .get("specialist")
+            .map(String::as_str),
+        Some("preserved retired-model output")
+    );
+}
+
+#[test]
+fn workflow_checkpoint_with_modeled_owner_sink_is_handoff_only() {
+    let prompt = "Quarantine a legacy modeled handoff";
+    let resume_key = "modeled-owner-handoff";
+    let model = "current-specialist";
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        resume_key,
+        workflow_checkpoint_owner_plan(prompt, model),
+        100,
+    );
+    checkpoint
+        .complete_step(
+            "specialist",
+            model,
+            "preserved specialist output".to_string(),
+            "[]".to_string(),
+            110,
+        )
+        .unwrap();
+    checkpoint.begin_step("owner_handoff", model, 120).unwrap();
+    let events = vec![workflow_checkpoint_snapshot_event(
+        "modeled-owner-handoff",
+        1,
+        resume_key,
+        &checkpoint,
+    )];
+
+    let loaded = resumable_workflow_checkpoint_from_events(
+        &events,
+        resume_key,
+        prompt,
+        &[model.to_string()],
+    )
+    .expect("legacy checkpoint should remain available for Owner handoff");
+
+    assert!(!loaded.resumable);
+    assert_eq!(
+        loaded.checkpoint.steps["owner_handoff"].status,
+        WorkflowStepStatus::Running
+    );
+    assert_eq!(loaded.checkpoint.steps["owner_handoff"].attempts, 1);
+    assert_eq!(
+        loaded
+            .checkpoint
+            .completed_outputs()
+            .get("specialist")
+            .map(String::as_str),
+        Some("preserved specialist output")
+    );
+}
+
+#[test]
+fn workflow_checkpoint_with_pristine_owner_sink_remains_resumable() {
+    let prompt = "Resume a pristine Owner handoff";
+    let resume_key = "pristine-owner-handoff";
+    let model = "current-specialist";
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        resume_key,
+        workflow_checkpoint_owner_plan(prompt, model),
+        100,
+    );
+    checkpoint
+        .complete_step(
+            "specialist",
+            model,
+            "completed specialist output".to_string(),
+            "[]".to_string(),
+            110,
+        )
+        .unwrap();
+    let events = vec![workflow_checkpoint_snapshot_event(
+        "pristine-owner-handoff",
+        1,
+        resume_key,
+        &checkpoint,
+    )];
+
+    let loaded = resumable_workflow_checkpoint_from_events(
+        &events,
+        resume_key,
+        prompt,
+        &[model.to_string()],
+    )
+    .expect("pristine Owner checkpoint should load");
+
+    assert!(loaded.resumable);
+    assert_eq!(
+        loaded.checkpoint.steps["owner_handoff"].status,
+        WorkflowStepStatus::Pending
+    );
+    assert_eq!(loaded.checkpoint.steps["owner_handoff"].attempts, 0);
 }
 
 #[test]

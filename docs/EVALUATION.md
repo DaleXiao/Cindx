@@ -97,9 +97,14 @@ treatment arms, and the evaluation projector rejects missing, duplicate, or
 mismatched lifecycle receipts. This is deterministic
 instrumentation evidence only; it does not repair the frozen V12 attempt.
 
-Complete the separately reviewed production-graph and learning-policy goals
-before requesting the final narrow provider gate. Only then freeze a successor
-protocol that:
+The production graph is now deterministically constrained to one Specialist,
+an optional planned Independent Verifier, and a non-model Owner handoff. Matched
+evaluation projection rejects a Direct arm with workflow-worker exposure, a
+Workflow arm without its planned treatment, or any reintroduced anchor/reviewer
+competition. This is structure and observability evidence, not quality uplift.
+
+Complete the separately reviewed learning-policy goal before requesting the
+final narrow provider gate. Only then freeze a successor protocol that:
 
 1. uses one shared Conductor plan and varies only the execution treatment;
 2. proves both arms persist strategy and terminal receipts;

@@ -757,27 +757,6 @@ pub(crate) fn trace_json_escape(value: &str) -> String {
     escaped
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CollaborationQualityPayload {
-    pub(crate) pass: bool,
-    pub(crate) score: f32,
-    #[serde(default)]
-    pub(crate) issues: Vec<String>,
-    #[serde(default)]
-    pub(crate) safety_violations: u64,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct AdaptiveQualityGateResult {
-    pub(crate) output: String,
-    pub(crate) score: f64,
-    pub(crate) safety_violations: u64,
-    pub(crate) passed: bool,
-    pub(crate) issues: Vec<String>,
-}
-
-pub(crate) type AdaptivePairwiseComparison = TeamAnchorComparison;
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct PromptPairwiseEvaluationPayload {
     pub(crate) score_a: f64,
