@@ -64,7 +64,25 @@ reconstruct them from old commit messages or historical reports.
 
 ## Last Completed Work
 
-The `0.2.30` release contains two scoped code changes after `0.2.29`:
+Goal 1 of the post-`0.2.30` Agent architecture work is complete in the current
+source:
+
+1. Current Agent model events have explicit Actor, Stage, model-profile,
+   service, trust, and effect-authority attribution while retaining every
+   legacy role/configuration field.
+2. Router and selected-decision events commit atomically behind a preparation
+   epoch checkpoint, before treatment execution can advance.
+3. Success, failure, cancellation, pause/recovery, and startup reconciliation
+   bind the same strategy receipt or an explicit pre-decision `not_selected`
+   explanation.
+4. Evaluation projection rejects missing, duplicate, tampered, or unlinked
+   strategy/terminal receipts.
+
+This work did not change production route selection, model configuration,
+budgets, permissions, tool authority, UI behavior, or provider call counts. No
+provider evaluation was run, and no intelligence improvement is claimed.
+
+The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
 1. `ff8c238` separated route/task-graph evidence from direct-finalizer evidence
    in the V12 causal evaluation path.
@@ -90,25 +108,18 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-Make strategy-event persistence and terminal lifecycle state one atomic,
-observable boundary shared by Direct and Workflow evaluation arms, without
-changing production route selection or UX.
+After explicit user confirmation, Goal 2 is to narrow the production execution
+graph to Owner plus an optional Specialist and optional Independent Verifier,
+removing only demonstrably duplicate model competition or synthesis while
+preserving every safety, permission, recovery, and fallback contract. Direct
+and Workflow evaluation treatments must remain distinct; conceptual elegance
+is not evidence of quality gain.
 
-Success criteria are deliberately narrow:
-
-1. Both treatments persist the selected decision before execution can advance.
-2. Terminal success, failure, cancellation, and interruption each bind to that
-   decision receipt.
-3. Recovery cannot leave a reserved provider action without a durable strategy
-   or terminal explanation.
-4. Existing Fast/Auto/Pro behavior, permissions, budgets, and serving profiles
-   remain unchanged.
-5. Deterministic lifecycle and replay tests pass before a new provider protocol
-   is proposed.
-
-Only after that goal should a new, small, frozen matched Direct-vs-Workflow
-protocol be designed. Do not add prompt genes, roles, evaluators, or broader
-benchmarks first.
+Goal 3 may then teach structured expert invocation, context allocation,
+verification, repair, and stopping from externally verifiable outcomes. A
+single fixed-budget narrow provider gate is allowed only after both goals pass
+their deterministic review. No uplift freezes that collaboration type instead
+of changing the protocol repeatedly.
 
 ## Structural Risks
 

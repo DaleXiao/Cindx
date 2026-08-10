@@ -5,9 +5,11 @@ pub(crate) use agent_application::{
     AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState, SessionTitleState,
 };
 pub(crate) use agent_core::{
-    Event, EventId, EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision,
-    PermissionRequest, PermissionRequestId, PermissionResolution, PermissionRisk, TaskId,
-    ToolArtifact, ToolContent, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    AgentActor, AgentEffectAuthority, AgentModelAttribution, AgentModelProfile, AgentService,
+    AgentStage, Event, EventId, EventKind, Message, MessageRole, Metadata, ModelRole,
+    PermissionDecision, PermissionRequest, PermissionRequestId, PermissionResolution,
+    PermissionRisk, TaskId, ToolArtifact, ToolContent, ToolInvocation, ToolOutcomeStatus,
+    ToolResult, ToolRisk, ToolSpec,
 };
 pub(crate) use agent_graph::{
     extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore,

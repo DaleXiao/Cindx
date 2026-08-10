@@ -306,6 +306,12 @@ pub(super) fn record_direct_anchor_completion(
         &spec.model,
         &spec.request_id,
         completion,
+        AgentModelAttribution::actor(
+            AgentActor::Specialist,
+            AgentStage::Evidence,
+            model_profile_for_role(&role),
+            AgentEffectAuthority::None,
+        ),
         &direct_anchor_metadata(spec),
     )?;
     let content = completion
@@ -432,6 +438,12 @@ pub(super) fn start_direct_anchor_verifier(
         &role,
         &spec.model,
         &spec.request_id,
+        AgentModelAttribution::actor(
+            AgentActor::IndependentVerifier,
+            AgentStage::Verify,
+            AgentModelProfile::Verifier,
+            AgentEffectAuthority::None,
+        ),
         &direct_anchor_verifier_metadata(&spec),
     )?;
 
@@ -533,6 +545,12 @@ pub(super) fn settle_direct_anchor_verifier(
         &verifier.spec.model,
         &verifier.spec.request_id,
         completion,
+        AgentModelAttribution::actor(
+            AgentActor::IndependentVerifier,
+            AgentStage::Verify,
+            AgentModelProfile::Verifier,
+            AgentEffectAuthority::None,
+        ),
         &direct_anchor_verifier_metadata(&verifier.spec),
     )?;
 

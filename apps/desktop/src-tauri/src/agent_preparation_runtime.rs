@@ -1,6 +1,9 @@
 use crate::agent_collaboration_runtime::{
     append_agent_collaboration_context, prepare_agent_collaboration_or_degrade,
 };
+use crate::agent_failure_terminal_runtime::{
+    commit_agent_preparation_failure_terminal, AgentPreparationFailureTerminalOutcome,
+};
 use crate::agent_query_commands::{agent_run_should_stop, append_agent_progress_event};
 use crate::agent_run_engine::{
     runtime_preparation_error, AgentRunPreparationError, PreparedAgentExecution,
@@ -33,6 +36,42 @@ use orchestrator::{
 };
 use std::path::Path;
 use std::sync::Arc;
+
+enum PreparationFailureAction {
+    Finished(Box<Result<crate::view_models::AgentState, String>>),
+    RestartAfterSteer,
+    ControlStop(Metadata),
+}
+
+fn settle_preparation_failure(
+    state: &tauri::State<'_, AppState>,
+    cancellation: &AgentRunControl,
+    error: AgentRunPreparationError,
+) -> PreparationFailureAction {
+    let (message, run_context) = match error {
+        AgentRunPreparationError::Finished(result) => {
+            return PreparationFailureAction::Finished(result)
+        }
+        AgentRunPreparationError::ControlStop(run_context) => {
+            return PreparationFailureAction::ControlStop(run_context)
+        }
+        AgentRunPreparationError::Collaboration { error, run_context } => {
+            (format!("Collaboration failed: {error}"), run_context)
+        }
+        AgentRunPreparationError::Runtime { error, run_context } => (error, run_context),
+    };
+    match commit_agent_preparation_failure_terminal(state, &run_context, cancellation, message) {
+        AgentPreparationFailureTerminalOutcome::Finished(result) => {
+            PreparationFailureAction::Finished(Box::new(result))
+        }
+        AgentPreparationFailureTerminalOutcome::RestartAfterSteer => {
+            PreparationFailureAction::RestartAfterSteer
+        }
+        AgentPreparationFailureTerminalOutcome::Stopped => {
+            PreparationFailureAction::ControlStop(run_context)
+        }
+    }
+}
 
 mod memory_evaluation_constraint;
 pub(crate) use memory_evaluation_constraint::AgentMemoryEvaluationConstraint;
@@ -208,9 +247,18 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "conductor_degraded",
         "conductor_failure",
         "run_decision",
+        "execution_plan",
+        "execution_plan_sha256",
+        "execution_plan_semantic_sha256",
+        "execution_plan_authority",
         "run_decision_attempts",
         "conductor_models_attempted",
         "conductor_selected_model",
+        "agent_strategy_receipt_schema",
+        "agent_strategy_receipt_status",
+        "agent_strategy_receipt_key",
+        "agent_strategy_receipt_steer_epoch",
+        "agent_strategy_receipt_plan_sha256",
         "conductor_configured_models",
         "conductor_health_routing",
         "conductor_health_candidate_models",
@@ -244,6 +292,27 @@ pub(crate) fn prepare_agent_execution_replay(
     if !cancellation.begin_preparation() {
         return Err(AgentRunPreparationError::ControlStop(run_context));
     }
+    macro_rules! settle_failure {
+        ($error:expr) => {{
+            match settle_preparation_failure(state, cancellation, $error) {
+                PreparationFailureAction::Finished(result) => {
+                    return Err(AgentRunPreparationError::Finished(result))
+                }
+                PreparationFailureAction::ControlStop(run_context) => {
+                    return Err(AgentRunPreparationError::ControlStop(run_context))
+                }
+                PreparationFailureAction::RestartAfterSteer => continue,
+            }
+        }};
+    }
+    macro_rules! preparation_try {
+        ($result:expr) => {{
+            match $result {
+                Ok(value) => value,
+                Err(error) => settle_failure!(error),
+            }
+        }};
+    }
     loop {
         run_context = base_run_context.clone();
         reset_preparation_run_context(&mut run_context);
@@ -251,14 +320,14 @@ pub(crate) fn prepare_agent_execution_replay(
             return Err(AgentRunPreparationError::ControlStop(run_context));
         }
         if cancellation.has_pending_steer() {
-            prompt = apply_preparation_steer(
+            prompt = preparation_try!(apply_preparation_steer(
                 state,
                 workspace_root,
                 &mut runtime,
                 &run_context,
                 &prompt,
                 cancellation,
-            )?;
+            ));
             continue;
         }
         let preparation_epoch = cancellation.steer_epoch();
@@ -290,8 +359,9 @@ pub(crate) fn prepare_agent_execution_replay(
                     .insert("agent_run_id".to_string(), run_id.clone());
             }
         }
-        let (mut base_history, active_user) = preparation_prompt_parts(&runtime.messages)
-            .map_err(|error| runtime_preparation_error(&run_context, error))?;
+        let (mut base_history, active_user) =
+            preparation_try!(preparation_prompt_parts(&runtime.messages)
+                .map_err(|error| runtime_preparation_error(&run_context, error)));
         let latest_prompt_objective = active_user
             .metadata
             .get("display_content")
@@ -310,7 +380,7 @@ pub(crate) fn prepare_agent_execution_replay(
         let route_requirements =
             route_requirements_for_preparation(&run_context, &runtime.messages, &active_user);
         remove_stale_preparation_context(&mut base_history);
-        let mut history = prepare_session_history_context(
+        let mut history = preparation_try!(prepare_session_history_context(
             state,
             workspace_root,
             &run_context,
@@ -319,7 +389,7 @@ pub(crate) fn prepare_agent_execution_replay(
         )
         .map_err(|error| {
             runtime_preparation_error(&run_context, format!("context preparation failed: {error}"))
-        })?;
+        }));
 
         cancellation.mark_progress_at(
             preparation_epoch,
@@ -339,28 +409,31 @@ pub(crate) fn prepare_agent_execution_replay(
                 cancellation,
             },
         );
-        copy_prompt_profile_assignment(&run_context, &mut base_run_context)
-            .map_err(|error| runtime_preparation_error(&run_context, error))?;
+        preparation_try!(
+            copy_prompt_profile_assignment(&run_context, &mut base_run_context)
+                .map_err(|error| runtime_preparation_error(&run_context, error))
+        );
         let plan = match plan {
             Ok(plan) => plan,
             Err(CollaborationStageError::SteerInterrupted) => {
-                prompt = apply_preparation_steer(
+                prompt = preparation_try!(apply_preparation_steer(
                     state,
                     workspace_root,
                     &mut runtime,
                     &run_context,
                     &prompt,
                     cancellation,
-                )?;
+                ));
                 continue;
             }
             Err(CollaborationStageError::RunStopped) => {
                 return Err(AgentRunPreparationError::ControlStop(run_context))
             }
-            Err(error) => return Err(runtime_preparation_error(&run_context, error.message())),
+            Err(error) => settle_failure!(runtime_preparation_error(&run_context, error.message())),
         };
-        let memory_constraint = AgentMemoryEvaluationConstraint::from_context(&run_context)
-            .map_err(|error| runtime_preparation_error(&run_context, error))?;
+        let memory_constraint =
+            preparation_try!(AgentMemoryEvaluationConstraint::from_context(&run_context)
+                .map_err(|error| runtime_preparation_error(&run_context, error)));
         let effective_knowledge_decision = (!memory_constraint.is_native()).then(|| {
             memory_constraint.apply_after_routing(&mut run_context, plan.execution_plan.action())
         });
@@ -383,20 +456,20 @@ pub(crate) fn prepare_agent_execution_replay(
                 return Err(AgentRunPreparationError::ControlStop(run_context))
             }
             Err(_) if !cancellation.preparation_epoch_is_current(preparation_epoch) => {
-                prompt = apply_preparation_steer(
+                prompt = preparation_try!(apply_preparation_steer(
                     state,
                     workspace_root,
                     &mut runtime,
                     &run_context,
                     &prompt,
                     cancellation,
-                )?;
+                ));
                 continue;
             }
             Err(error) if error == MODEL_REQUEST_CANCELLED => {
                 return Err(AgentRunPreparationError::ControlStop(run_context))
             }
-            Err(error) => return Err(runtime_preparation_error(&run_context, error)),
+            Err(error) => settle_failure!(runtime_preparation_error(&run_context, error)),
         };
         append_prepared_memory_context(
             &mut run_context,
@@ -406,8 +479,12 @@ pub(crate) fn prepare_agent_execution_replay(
         if let Some(artifact_manifest) = artifact_manifest.clone() {
             history.push(artifact_manifest);
         }
-        append_skill_context_for_run(workspace_root, &planning_objective, &mut history)
-            .map_err(|error| runtime_preparation_error(&run_context, error))?;
+        preparation_try!(append_skill_context_for_run(
+            workspace_root,
+            &planning_objective,
+            &mut history
+        )
+        .map_err(|error| runtime_preparation_error(&run_context, error)));
         if let Some(workspace_context) = prepared_knowledge.workspace {
             history.push(workspace_context);
         }
@@ -415,25 +492,25 @@ pub(crate) fn prepare_agent_execution_replay(
             return Err(AgentRunPreparationError::ControlStop(run_context));
         }
         if !cancellation.preparation_epoch_is_current(preparation_epoch) {
-            prompt = apply_preparation_steer(
+            prompt = preparation_try!(apply_preparation_steer(
                 state,
                 workspace_root,
                 &mut runtime,
                 &run_context,
                 &prompt,
                 cancellation,
-            )?;
+            ));
             continue;
         }
         if cancellation.has_pending_steer() {
-            prompt = apply_preparation_steer(
+            prompt = preparation_try!(apply_preparation_steer(
                 state,
                 workspace_root,
                 &mut runtime,
                 &run_context,
                 &prompt,
                 cancellation,
-            )?;
+            ));
             continue;
         }
 
@@ -442,8 +519,13 @@ pub(crate) fn prepare_agent_execution_replay(
             "orchestration",
             "Preparing execution strategy",
         );
-        append_agent_progress_event(state, task_id, &run_context, "Preparing execution strategy")
-            .map_err(|error| runtime_preparation_error(&run_context, error))?;
+        preparation_try!(append_agent_progress_event(
+            state,
+            task_id,
+            &run_context,
+            "Preparing execution strategy",
+        )
+        .map_err(|error| runtime_preparation_error(&run_context, error)));
         let collaboration_policy = plan.execution_plan.action().policy();
         append_single_model_policy_guidance(&mut history, &collaboration_policy);
         let collaboration = match prepare_agent_collaboration_or_degrade(
@@ -466,18 +548,21 @@ pub(crate) fn prepare_agent_execution_replay(
                 return Err(AgentRunPreparationError::ControlStop(run_context))
             }
             Err(error) => {
-                return Err(AgentRunPreparationError::Collaboration { error, run_context })
+                settle_failure!(AgentRunPreparationError::Collaboration {
+                    error,
+                    run_context: run_context.clone(),
+                })
             }
         };
         if cancellation.has_pending_steer() {
-            prompt = apply_preparation_steer(
+            prompt = preparation_try!(apply_preparation_steer(
                 state,
                 workspace_root,
                 &mut runtime,
                 &run_context,
                 &prompt,
                 cancellation,
-            )?;
+            ));
             continue;
         }
         if let Some(collaboration) = collaboration.as_ref() {
@@ -521,7 +606,7 @@ pub(crate) fn prepare_agent_execution_replay(
         let preparation_commit = match preparation_commit {
             Ok(commit) => commit,
             Err(error) if error == MEMORY_RECALL_STALE_ERROR => continue,
-            Err(error) => return Err(runtime_preparation_error(&run_context, error)),
+            Err(error) => settle_failure!(runtime_preparation_error(&run_context, error)),
         };
         match preparation_commit {
             RunPreparationCommit::Committed { .. } => {
@@ -531,14 +616,14 @@ pub(crate) fn prepare_agent_execution_replay(
                 return Err(AgentRunPreparationError::ControlStop(run_context))
             }
             RunPreparationCommit::RestartAfterSteer => {
-                prompt = apply_preparation_steer(
+                prompt = preparation_try!(apply_preparation_steer(
                     state,
                     workspace_root,
                     &mut runtime,
                     &run_context,
                     &prompt,
                     cancellation,
-                )?;
+                ));
                 continue;
             }
         }

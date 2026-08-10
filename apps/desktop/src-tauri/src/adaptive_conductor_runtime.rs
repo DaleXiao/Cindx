@@ -180,6 +180,11 @@ pub(super) fn plan_adaptive_workflow(
         ModelRole::Planner,
         conductor_model,
         harness.planning_prompt(),
+        AgentModelAttribution::service(
+            AgentService::Conductor,
+            AgentStage::Plan,
+            AgentModelProfile::Reasoning,
+        ),
     );
     let mut conductor_response = match conductor_response {
         Ok(response) => response,
@@ -277,6 +282,11 @@ pub(super) fn plan_adaptive_workflow(
                     ModelRole::Planner,
                     conductor_model,
                     harness.repair_prompt(&conductor_response, &error),
+                    AgentModelAttribution::service(
+                        AgentService::Conductor,
+                        AgentStage::Plan,
+                        AgentModelProfile::Reasoning,
+                    ),
                 ) {
                     Ok(response) => response,
                     Err(repair_error) => {

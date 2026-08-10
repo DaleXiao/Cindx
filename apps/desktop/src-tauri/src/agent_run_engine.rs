@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) enum AgentRunPreparationError {
+    Finished(Box<Result<AgentState, String>>),
     ControlStop(Metadata),
     Collaboration {
         error: String,
@@ -178,6 +179,9 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
             self.cancellation,
         ) {
             Ok(prepared) => Ok(AgentRunPreparation::Prepared(prepared)),
+            Err(AgentRunPreparationError::Finished(result)) => {
+                (*result).map(AgentRunPreparation::Finished)
+            }
             Err(AgentRunPreparationError::ControlStop(run_context)) => {
                 finish_agent_run_for_control_stop_with_task_state(
                     self.app,

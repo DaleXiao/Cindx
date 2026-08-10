@@ -73,6 +73,12 @@ pub(super) fn start_adaptive_anchor(
         &anchor_role,
         &anchor_spec.model,
         &anchor_spec.request_id,
+        AgentModelAttribution::actor(
+            AgentActor::Specialist,
+            AgentStage::Evidence,
+            model_profile_for_role(&anchor_role),
+            AgentEffectAuthority::None,
+        ),
         &direct_anchor_metadata(anchor_spec),
     )?;
     if effort == "fast" && !resumed_from_checkpoint {

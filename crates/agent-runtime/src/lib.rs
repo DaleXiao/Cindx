@@ -68,9 +68,10 @@ pub use context_governor::{
 };
 pub use control::{
     AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunEpochLease,
-    RunEpochLeaseOutcome, RunExecutionStepCommit, RunPreparationCommit, RunProgressSnapshot,
-    RunStageUsageSnapshot, RunSteer, RunSteerBatchCommit, RunSteerRequestCommit, RunStopReason,
-    RunTerminalCommit, RunToolCallBatchStart, RunToolCallStart,
+    RunEpochLeaseOutcome, RunExecutionStepCommit, RunPreparationCheckpoint, RunPreparationCommit,
+    RunProgressSnapshot, RunStageUsageSnapshot, RunStartCheckpoint, RunSteer, RunSteerBatchCommit,
+    RunSteerRequestCommit, RunStopReason, RunTerminalCommit, RunToolCallBatchStart,
+    RunToolCallStart,
 };
 pub use evidence_target::{
     evidence_input_matches_anchors, evidence_target_anchors, evidence_target_witness,

@@ -85,9 +85,7 @@ pub(crate) use contract_runtime::{
 pub(crate) use contract_runtime::{
     apply_run_task_contract_with_completion_intent, planned_agent_tools,
 };
-use contract_runtime::{
-    record_retained_agent_decision_after_noop_steer, synchronize_noop_control_epoch_context,
-};
+use contract_runtime::synchronize_noop_control_epoch_context;
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentLoopExecutionOutcome {
     Finished(AgentState),
@@ -141,6 +139,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             &run_context,
             cancellation,
             &mut snapshot_cursor,
+            true,
         )? {
             AgentSteerApplication::Applied(steer) => {
                 run_context.insert("steer_epoch".to_string(), steer.epoch.to_string());
@@ -156,14 +155,18 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     prompt: steer.prompt,
                 });
             }
-            AgentSteerApplication::ResolvedNoop { epoch } => {
-                runtime_context = synchronize_noop_control_epoch_context(&mut run_context, epoch);
+            AgentSteerApplication::ResolvedNoop {
+                epoch,
+                retained_strategy_context,
+            } => {
+                if let Some(retained_strategy_context) = retained_strategy_context {
+                    run_context = retained_strategy_context;
+                    runtime_context = agent_runtime_context_for_run(&run_context);
+                } else {
+                    runtime_context =
+                        synchronize_noop_control_epoch_context(&mut run_context, epoch);
+                }
                 runtime.advance_prepared_task_control_epoch(epoch);
-                record_retained_agent_decision_after_noop_steer(
-                    state,
-                    &runtime.task_id,
-                    &run_context,
-                )?;
             }
             AgentSteerApplication::Stopped(_) => {
                 return pause_agent_loop_for_control_stop(

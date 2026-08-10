@@ -81,6 +81,7 @@ pub(super) fn settle_adaptive_step(
         &spec.model,
         &spec.request_id,
         &completion,
+        adaptive_step_attribution(&spec.output_kind, &role),
         &metadata,
     )?;
     if completion

@@ -38,6 +38,7 @@ mod agent_run_engine;
 mod agent_runtime_snapshot;
 mod agent_runtime_snapshot_cursor;
 mod agent_steer_runtime;
+mod agent_strategy_receipt_runtime;
 mod agent_strategy_runtime;
 mod agent_terminal_commit_runtime;
 mod agent_tool_runtime;

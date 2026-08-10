@@ -2,7 +2,7 @@
 
 Current application version: `0.2.30`
 
-Last code-fact review: `2026-08-09`
+Last code-fact review: `2026-08-10`
 
 This document describes the current source tree. It is not a quality claim.
 
@@ -40,6 +40,14 @@ All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
 effect authority does not.
 
+Current Agent model events also carry an additive typed attribution projection:
+the acting subject is Owner, Specialist, or Independent Verifier; the stage is
+plan, evidence, act, verify, or finalize; and the model profile is Primary,
+Reasoning, Verifier, or Utility. The Conductor and background learning utilities
+are recorded as services, not Actors. Existing role, stage, model,
+configuration, and UI fields remain unchanged, so this projection does not
+change routing or model calls.
+
 ## Run Lifecycle
 
 1. The Tauri adapter validates session, provider, workspace, attachments, and
@@ -52,6 +60,9 @@ effect authority does not.
 5. The effective objective and bounded history are compiled into context.
 6. Fast creates a direct plan; Auto and Pro validate a Conductor plan. Required
    tools, image input, effects, capability, and budget remain hard constraints.
+   The router event and selected decision are committed in one SQLite
+   transaction behind the active preparation epoch before treatment execution
+   can advance.
 7. Durable memory and requested workspace retrieval are prepared separately.
    Semantic search, file search, graph-direct lookup, and graph walk may run in
    parallel and retain source provenance.
@@ -62,8 +73,11 @@ effect authority does not.
    model turns, tool batches, typed observations, permission suspension, steer,
    recovery, and completion checks.
 10. Terminal delivery and lifecycle state are committed once for the active
-    physical attempt and steer epoch. Replay returns the existing terminal
-    event instead of creating a second completion.
+    physical attempt and steer epoch. Success, failure, and cancellation bind
+    the same strategy receipt; pre-decision termination records an explicit
+    `not_selected` explanation. Pause remains recoverable and carries the
+    receipt without becoming a terminal event. Replay returns the existing
+    terminal event instead of creating a second completion.
 
 ## Tools and Permissions
 
@@ -128,6 +142,10 @@ The latest route-causal attempt, V12 on source `ff8c238`, is
 completion, while the Workflow arm stopped before its strategy event was
 persisted. It produced no matched pair and no GO/NO-GO result. Production Fast,
 Auto, Pro, and profile serving were unchanged by that attempt.
+
+The current source repairs that observability prerequisite with deterministic
+contracts. It does not retroactively validate V12, prove an intelligence gain,
+or authorize another provider run.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 

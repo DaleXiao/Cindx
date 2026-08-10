@@ -687,6 +687,96 @@ fn pending_steer_interrupts_collaboration_without_stopping_the_run() {
 }
 
 #[test]
+fn goal1_collaboration_start_and_finish_persist_the_same_typed_attribution() {
+    let task_id = phase16_task_id();
+    let run_context = [("session_id".to_string(), "typed-pair".to_string())]
+        .into_iter()
+        .collect::<Metadata>();
+    let attribution = AgentModelAttribution::actor(
+        AgentActor::Specialist,
+        AgentStage::Plan,
+        AgentModelProfile::Reasoning,
+        agent_core::AgentEffectAuthority::ReadOnly,
+    );
+    let started = collaboration_stage_started_metadata(
+        "collaboration-pair",
+        "analysis",
+        &ModelRole::Planner,
+        "reasoning-model",
+        "request-pair",
+        attribution,
+        &Metadata::new(),
+    )
+    .expect("started attribution should be valid");
+    let completion = CollaborationCompletion::completed_worker(
+        "grounded plan".to_string(),
+        7,
+        Metadata::new(),
+        Vec::new(),
+    );
+    let (summary, finished) = collaboration_stage_finished_metadata(
+        "collaboration-pair",
+        "analysis",
+        &ModelRole::Planner,
+        "reasoning-model",
+        "request-pair",
+        &completion,
+        attribution,
+        &Metadata::new(),
+    )
+    .expect("finished attribution should be valid");
+
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    append_event(
+        &mut store,
+        &task_id,
+        EventKind::ModelRequestStarted,
+        "Collaboration analysis started",
+        metadata_with_context(started, &run_context),
+    )
+    .expect("started event should persist");
+    append_event(
+        &mut store,
+        &task_id,
+        EventKind::ModelRequestFinished,
+        summary,
+        metadata_with_context(finished, &run_context),
+    )
+    .expect("finished event should persist");
+
+    let events = store
+        .list_by_task(&task_id)
+        .expect("attribution events should load");
+    assert_eq!(events.len(), 2);
+    for key in [
+        "agent_model_attribution_schema",
+        "agent_actor",
+        "agent_service",
+        "agent_stage",
+        "agent_model_profile",
+        "agent_output_trust",
+        "agent_effect_authority",
+        "agent_attribution_component",
+        "agent_attribution_model",
+        "agent_attribution_legacy_role",
+    ] {
+        assert_eq!(
+            events[0].metadata.get(key),
+            events[1].metadata.get(key),
+            "typed attribution diverged at {key}"
+        );
+    }
+    assert_eq!(
+        events[0].metadata.get("agent_actor").map(String::as_str),
+        Some("specialist")
+    );
+    assert_eq!(
+        events[0].metadata.get("agent_stage").map(String::as_str),
+        Some("plan")
+    );
+}
+
+#[test]
 fn goal2_collaboration_terminal_status_distinguishes_interruptions_and_stage_deadlines() {
     let completed = CollaborationCompletion::completed_worker(
         "usable decision".to_string(),

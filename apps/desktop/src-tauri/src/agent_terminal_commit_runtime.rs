@@ -127,6 +127,83 @@ mod tests {
     }
 
     #[test]
+    fn agent_strategy_lifecycle_contract_terminal_paths_share_one_receipt() {
+        for (index, kind, summary) in [
+            (0, EventKind::TaskStatusChanged, "Agent task completed"),
+            (1, EventKind::Error, "Agent task failed"),
+            (2, EventKind::TaskStatusChanged, "Agent task cancelled"),
+        ] {
+            let mut store = SqliteStore::in_memory().expect("store should open");
+            let session_id = format!("session-lifecycle-{index}");
+            let run_id = format!("run-lifecycle-{index}");
+            let mut context = Metadata::from([
+                ("project_id".to_string(), "project-lifecycle".to_string()),
+                ("session_id".to_string(), session_id.clone()),
+                ("agent_run_id".to_string(), run_id.clone()),
+                ("steer_epoch".to_string(), "0".to_string()),
+            ]);
+            let receipt = agent_application::AgentStrategyDecisionReceipt::new(
+                &phase16_task_id(),
+                &context,
+                &format!("{index}").repeat(64),
+            )
+            .unwrap();
+            receipt.insert_into(&mut context).unwrap();
+            append_event(
+                &mut store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                "Agent run decision selected",
+                context.clone(),
+            )
+            .unwrap();
+
+            let writes = AtomicUsize::new(0);
+            let persisted = persist_agent_terminal_once(
+                &mut store,
+                &phase16_task_id(),
+                &context,
+                0,
+                |store, identity| {
+                    writes.fetch_add(1, Ordering::SeqCst);
+                    append_event(
+                        store,
+                        &phase16_task_id(),
+                        kind,
+                        summary,
+                        metadata_with_context(identity.metadata(), &context),
+                    )?;
+                    agent_state_for_session(store, None, Some(&session_id))
+                },
+            )
+            .unwrap();
+            assert!(persisted.inserted);
+            assert_eq!(writes.load(Ordering::SeqCst), 1);
+
+            let replay =
+                persist_agent_terminal_once(&mut store, &phase16_task_id(), &context, 0, |_, _| {
+                    panic!("terminal replay must not invoke its writer")
+                })
+                .unwrap();
+            assert!(!replay.inserted);
+            let terminal = store
+                .list_by_task_and_metadata(&phase16_task_id(), "agent_run_id", &run_id)
+                .unwrap()
+                .into_iter()
+                .find(|event| event.summary == summary)
+                .expect("terminal event should persist");
+            assert_eq!(
+                terminal
+                    .metadata
+                    .get(agent_application::AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY)
+                    .map(String::as_str),
+                Some(receipt.key())
+            );
+        }
+        println!("cindx.agent-strategy-lifecycle.v1");
+    }
+
+    #[test]
     fn independent_run_controls_replay_one_durable_terminal_commit() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let context = run_context();

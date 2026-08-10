@@ -1,6 +1,57 @@
 use super::*;
 
 impl AgentRunControl {
+    /// Commits the durable start of one physical run while cancellation and
+    /// terminalization are serialized behind the same state lock. Pending
+    /// steers remain valid work for the resumed run and do not block its start.
+    /// The closure must not call back into this control.
+    pub fn commit_start_checkpoint_with<T, E, F>(
+        &self,
+        commit: F,
+    ) -> Result<RunStartCheckpoint<T>, E>
+    where
+        F: FnOnce() -> Result<T, E>,
+    {
+        let mut state = self.state.lock().expect("run control state poisoned");
+        if let Some(reason) = self.refresh_stop_reason_locked(&mut state, Instant::now()) {
+            return Ok(RunStartCheckpoint::Stopped(reason));
+        }
+        if state.phase == RunPhase::TerminalCommitted {
+            return Ok(RunStartCheckpoint::TerminalCommitted);
+        }
+        commit().map(RunStartCheckpoint::Committed)
+    }
+
+    /// Serializes a preparation failure terminal with steering and stopping.
+    /// If a steer won the epoch race, the closure is never called and the
+    /// caller must replay preparation for the new objective.
+    pub fn commit_preparation_terminal_with<T, E, F>(
+        &self,
+        expected_epoch: u64,
+        commit: F,
+    ) -> Result<RunTerminalCommit<T>, E>
+    where
+        F: FnOnce() -> Result<T, E>,
+    {
+        let mut state = self.state.lock().expect("run control state poisoned");
+        if let Some(reason) = self.refresh_stop_reason_locked(&mut state, Instant::now()) {
+            return Ok(RunTerminalCommit::Stopped(reason));
+        }
+        if state.phase == RunPhase::TerminalCommitted {
+            return Ok(RunTerminalCommit::AlreadyCommitted);
+        }
+        if state.phase != RunPhase::Preparing
+            || !state.pending_steers.is_empty()
+            || state.applied_steer_epoch != expected_epoch
+            || self.steer_epoch.load(Ordering::SeqCst) != expected_epoch
+        {
+            return Ok(RunTerminalCommit::RestartAfterSteer);
+        }
+        let value = commit()?;
+        state.phase = RunPhase::TerminalCommitted;
+        Ok(RunTerminalCommit::Committed(value))
+    }
+
     /// Executes one durable steer batch with stop-first semantics. The closure
     /// runs under the control-state lock and therefore must not call back into
     /// this control. Failed closures leave the pending queue untouched.

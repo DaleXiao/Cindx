@@ -51,6 +51,11 @@ pub(crate) fn run_background_prompt_mutation_stage_with_liveness(
         &role,
         &model,
         &request_id,
+        AgentModelAttribution::service(
+            AgentService::LearningUtility,
+            AgentStage::Plan,
+            AgentModelProfile::Reasoning,
+        ),
         &Metadata::new(),
     )?;
     let completion = complete_collaboration_model_for_stage_with_recovery_control(
@@ -75,6 +80,11 @@ pub(crate) fn run_background_prompt_mutation_stage_with_liveness(
         &model,
         &request_id,
         &completion,
+        AgentModelAttribution::service(
+            AgentService::LearningUtility,
+            AgentStage::Plan,
+            AgentModelProfile::Reasoning,
+        ),
         &Metadata::new(),
     )?;
     completion.content.ok_or_else(|| {

@@ -37,6 +37,9 @@
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
+      "agent-strategy-lifecycle-contract",
+      "agent-strategy-control-contract",
+      "agent-terminal-lifecycle-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -69,6 +72,9 @@
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
+      "agent-strategy-lifecycle-contract",
+      "agent-strategy-control-contract",
+      "agent-terminal-lifecycle-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -144,6 +150,9 @@
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
+      "agent-strategy-lifecycle-contract",
+      "agent-strategy-control-contract",
+      "agent-terminal-lifecycle-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -420,6 +429,60 @@
       ],
       "required_output": [
         "test result: ok. 1 passed; 0 failed"
+      ]
+    },
+    {
+      "id": "agent-strategy-lifecycle-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--features",
+        "realworld-eval",
+        "agent_strategy_lifecycle_contract",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 6 passed; 0 failed",
+        "cindx.agent-strategy-lifecycle.v1"
+      ]
+    },
+    {
+      "id": "agent-strategy-control-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-runtime",
+        "agent_strategy_lifecycle_contract",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 5 passed; 0 failed"
+      ]
+    },
+    {
+      "id": "agent-terminal-lifecycle-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-application",
+        "agent_strategy_lifecycle_contract",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 3 passed; 0 failed"
       ]
     },
     {

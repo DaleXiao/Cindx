@@ -1757,7 +1757,8 @@ assert(
     agentRuntimeSource.includes(
       "continuation_starts_a_fresh_bounded_segment_after_budget_exhaustion"
     ) &&
-    rustLib.includes("begin_agent_run_control_for_continuation") &&
+    rustLib.includes("AgentRunControl::from_snapshot_for_continuation") &&
+    rustLib.includes("commit_agent_run_start_with") &&
     rustLib.includes("suspended_agent_run_control_snapshot"),
   "Paused long-running work must continue in a fresh bounded segment without weakening permission or cancellation semantics"
 );
@@ -2658,7 +2659,9 @@ assert(
     rustLib.includes("queued_steer_commit_revalidates_the_current_queue_item") &&
     rustLib
       .slice(
-        rustLib.indexOf("fn run_agent_task_blocking_inner("),
+        rustLib.indexOf(
+          "fn run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate("
+        ),
         rustLib.indexOf("fn cancel_agent_task(")
       )
       .includes("with_immediate_transaction(|store|") &&
