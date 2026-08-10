@@ -174,6 +174,215 @@ fn workflow_plan(workflow_id: &str, with_verifier: bool) -> WorkflowPlanIr {
     )
 }
 
+fn owner_execution_plan(required_verification: bool) -> WorkflowPlanIr {
+    let specialist = WorkflowPlanStep {
+        id: "specialist".to_string(),
+        role: "worker".to_string(),
+        model: "planner".to_string(),
+        subtask: "collect the bounded evidence".to_string(),
+        access: Vec::new(),
+        tool_policy: WorkflowToolPolicy::ReadOnlyEvidence,
+        contract: WorkflowStepContract {
+            input_steps: Vec::new(),
+            output_kind: WorkflowOutputKind::Evidence,
+            completion: WorkflowCompletionCriteria::default(),
+        },
+    };
+    let mut steps = vec![specialist];
+    if required_verification {
+        steps.push(WorkflowPlanStep {
+            id: "verify".to_string(),
+            role: "verifier".to_string(),
+            model: "reviewer".to_string(),
+            subtask: "verify the specialist handoff".to_string(),
+            access: vec!["specialist".to_string()],
+            tool_policy: WorkflowToolPolicy::None,
+            contract: WorkflowStepContract {
+                input_steps: vec!["specialist".to_string()],
+                output_kind: WorkflowOutputKind::Verification,
+                completion: WorkflowCompletionCriteria::default(),
+            },
+        });
+    }
+    let handoff_inputs = vec![steps.last().unwrap().id.clone()];
+    steps.push(WorkflowPlanStep {
+        id: "owner_handoff".to_string(),
+        role: "owner_handoff".to_string(),
+        model: "planner".to_string(),
+        subtask: "package the verified inputs for the owner".to_string(),
+        access: handoff_inputs.clone(),
+        tool_policy: WorkflowToolPolicy::None,
+        contract: WorkflowStepContract {
+            input_steps: handoff_inputs,
+            output_kind: WorkflowOutputKind::Synthesis,
+            completion: WorkflowCompletionCriteria::default(),
+        },
+    });
+    WorkflowPlanIr {
+        schema: WORKFLOW_IR_SCHEMA.to_string(),
+        workflow_id: "owner-execution".to_string(),
+        objective: "prepare a bounded owner handoff".to_string(),
+        effort: "auto".to_string(),
+        policy: "owner_execution".to_string(),
+        coordinator_model: "planner".to_string(),
+        prompt_profile: "test-profile".to_string(),
+        budget: WorkflowBudget {
+            max_steps: steps.len(),
+            max_models: 2,
+            max_model_turns_per_step: 2,
+            max_tool_calls_per_step: 2,
+            max_output_tokens_per_step: 2_048,
+        },
+        steps,
+    }
+}
+
+#[test]
+fn owner_execution_graph_accepts_only_the_required_optional_verifier_shape() {
+    let allowed_models = vec!["planner".to_string(), "reviewer".to_string()];
+    let without_verifier = owner_execution_plan(false);
+    without_verifier.validate(&allowed_models).unwrap();
+    assert_eq!(
+        without_verifier.validate_owner_execution_graph(false),
+        Ok(())
+    );
+    assert_eq!(
+        without_verifier.validate_owner_execution_graph(true),
+        Err("owner execution graph requires exactly one verification step".to_string())
+    );
+
+    let with_verifier = owner_execution_plan(true);
+    with_verifier.validate(&allowed_models).unwrap();
+    assert_eq!(with_verifier.validate_owner_execution_graph(true), Ok(()));
+    assert_eq!(
+        with_verifier.validate_owner_execution_graph(false),
+        Err(
+            "owner execution graph cannot include verification when it is not required".to_string()
+        )
+    );
+}
+
+#[test]
+fn owner_execution_graph_rejects_competition_and_incomplete_handoff_edges() {
+    let mut duplicate_specialist = owner_execution_plan(false);
+    let mut second = duplicate_specialist.steps[0].clone();
+    second.id = "specialist_two".to_string();
+    second.subtask = "compete with the first specialist".to_string();
+    duplicate_specialist.steps.insert(1, second);
+    let handoff = duplicate_specialist.steps.last_mut().unwrap();
+    handoff.access.insert(1, "specialist_two".to_string());
+    handoff.contract.input_steps = handoff.access.clone();
+    duplicate_specialist.budget.max_steps = 3;
+    assert_eq!(
+        duplicate_specialist.validate_owner_execution_graph(false),
+        Err(
+            "owner execution graph requires exactly one analysis or evidence specialist step"
+                .to_string()
+        )
+    );
+
+    let mut incomplete_handoff = owner_execution_plan(true);
+    incomplete_handoff.steps.last_mut().unwrap().access = vec!["specialist".to_string()];
+    incomplete_handoff
+        .steps
+        .last_mut()
+        .unwrap()
+        .contract
+        .input_steps = vec!["specialist".to_string()];
+    assert_eq!(
+        incomplete_handoff.validate_owner_execution_graph(true),
+        Err(
+            "owner execution graph synthesis handoff must depend only on the final specialist or verifier output"
+                .to_string()
+        )
+    );
+
+    let mut tool_using_verifier = owner_execution_plan(true);
+    tool_using_verifier.steps[1].tool_policy = WorkflowToolPolicy::ReadOnlyEvidence;
+    assert_eq!(
+        tool_using_verifier.validate_owner_execution_graph(true),
+        Err(
+            "owner execution graph verifier must use a different configured model and depend only on the specialist without tools"
+                .to_string()
+        )
+    );
+
+    let mut same_model_verifier = owner_execution_plan(true);
+    same_model_verifier.steps[1].model = same_model_verifier.steps[0].model.clone();
+    assert_eq!(
+        same_model_verifier.validate_owner_execution_graph(true),
+        Err(
+            "owner execution graph verifier must use a different configured model and depend only on the specialist without tools"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn owner_handoff_completion_reuses_semantic_checks_without_a_model_attempt() {
+    let plan = owner_execution_plan(false);
+    let mut checkpoint = WorkflowExecutionCheckpoint::new("owner-handoff", plan, 1);
+    let evidence = WorkflowEvidenceSummary::from_items(
+        [("specialist".to_string(), "specialist::read".to_string())],
+        "owner_handoff",
+    );
+
+    assert_eq!(
+        checkpoint.complete_owner_handoff(
+            "owner_handoff",
+            "bounded owner context".to_string(),
+            "[{}]".to_string(),
+            evidence.clone(),
+            2,
+        ),
+        Err("workflow step owner_handoff cannot complete before input specialist".to_string())
+    );
+    assert_eq!(checkpoint.steps["owner_handoff"].attempts, 0);
+
+    checkpoint
+        .complete_step(
+            "specialist",
+            "planner",
+            "grounded specialist finding".to_string(),
+            "[]".to_string(),
+            3,
+        )
+        .unwrap();
+    assert!(checkpoint
+        .complete_owner_handoff(
+            "owner_handoff",
+            "bounded owner context".to_string(),
+            "[]".to_string(),
+            evidence.clone(),
+            4,
+        )
+        .unwrap_err()
+        .contains("inconsistent evidence summary"));
+    assert_eq!(checkpoint.steps["owner_handoff"].attempts, 0);
+
+    checkpoint
+        .complete_owner_handoff(
+            "owner_handoff",
+            "bounded owner context".to_string(),
+            "[{}]".to_string(),
+            evidence,
+            5,
+        )
+        .unwrap();
+    let specialist = &checkpoint.steps["specialist"];
+    let handoff = &checkpoint.steps["owner_handoff"];
+    assert_eq!(handoff.status, WorkflowStepStatus::Completed);
+    assert_eq!(handoff.attempts, 0);
+    assert_eq!(handoff.model, "planner");
+    assert_eq!(handoff.evidence_count, 1);
+    assert_eq!(handoff.semantic.output_kind, WorkflowOutputKind::Synthesis);
+    assert!(handoff.semantic.completion_satisfied);
+    assert_eq!(
+        handoff.semantic.input_digests.get("specialist"),
+        Some(&specialist.semantic.output_digest)
+    );
+}
+
 #[test]
 fn workflow_verification_requires_a_typed_lineage_receipt() {
     let mut checkpoint = WorkflowExecutionCheckpoint::new(

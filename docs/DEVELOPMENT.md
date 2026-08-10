@@ -67,6 +67,34 @@ node scripts/run-quality-gates.mjs \
   --report target/quality-gate-report.json
 ```
 
+The `ci-contract`, `control-plane`, and `full` profiles include the
+`agent-strategy-lifecycle-contract`, `agent-strategy-control-contract`, and
+`agent-terminal-lifecycle-contract` gates. They also include the
+`agent-execution-graph-contract`, which projects typed model attribution to
+prove that matched Direct exposes no workflow worker while matched Workflow
+completes exactly one read-only Specialist and its optional planned Independent
+Verifier. When present, the actual Verifier attribution must use a different
+configured model from the Specialist. The gate retains the existing total
+model-call boundary. Together these checks cover preparation and start
+linearization, selected-decision recovery, success/failure/cancellation terminal
+linkage, exactly-once replay, and evaluation fail-closed behavior without
+contacting a provider.
+
+The lifecycle filters include the preparation failure race against cancellation
+and steer, including exactly-once terminal persistence for the winning epoch.
+
+The same profiles include `agent-outcome-evidence-contract`. This provider-free
+gate checks exact lifecycle, treatment-exposure, and resource bindings;
+integer positive, partial, and negative scoring from external postconditions;
+zero-score retention for valid safety or preservation failures; tamper
+censoring; and isolation from production learning consumers.
+
+```sh
+node scripts/run-quality-gates.mjs \
+  --profile control-plane \
+  --report target/quality-gate-report.json
+```
+
 For a performance change, use two clean checkouts on the same machine:
 
 ```sh

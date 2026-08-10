@@ -101,18 +101,16 @@ pub(crate) fn collaboration_stage_result(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn record_collaboration_stage_finished(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
-    run_context: &Metadata,
+pub(crate) fn collaboration_stage_finished_metadata(
     collaboration_id: &str,
     stage: &str,
     role: &ModelRole,
     model: &str,
     request_id: &str,
     completion: &CollaborationCompletion,
+    attribution: AgentModelAttribution,
     stage_metadata: &Metadata,
-) -> Result<(), String> {
+) -> Result<(String, Metadata), String> {
     let mut metadata = [
         ("collaboration_id".to_string(), collaboration_id.to_string()),
         ("request_id".to_string(), request_id.to_string()),
@@ -141,6 +139,9 @@ pub(crate) fn record_collaboration_stage_finished(
     for (key, value) in stage_metadata {
         metadata.insert(key.clone(), value.clone());
     }
+    attribution
+        .insert_into(&mut metadata, model, role_label(role), stage)
+        .map_err(|error| error.to_string())?;
     if let Some(failure) = completion.failure.as_ref() {
         metadata.insert("failure_code".to_string(), failure.code.clone());
         metadata.insert(
@@ -181,6 +182,33 @@ pub(crate) fn record_collaboration_stage_finished(
         }
         format!("Collaboration {stage} {terminal_verb}")
     };
+    Ok((summary, metadata))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_collaboration_stage_finished(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: &ModelRole,
+    model: &str,
+    request_id: &str,
+    completion: &CollaborationCompletion,
+    attribution: AgentModelAttribution,
+    stage_metadata: &Metadata,
+) -> Result<(), String> {
+    let (summary, metadata) = collaboration_stage_finished_metadata(
+        collaboration_id,
+        stage,
+        role,
+        model,
+        request_id,
+        completion,
+        attribution,
+        stage_metadata,
+    )?;
     let mut store = state
         .store
         .lock()
@@ -206,6 +234,7 @@ pub(crate) fn run_collaboration_stage(
     role: ModelRole,
     model: &str,
     prompt: String,
+    attribution: AgentModelAttribution,
 ) -> Result<String, String> {
     run_collaboration_stage_typed(
         state,
@@ -217,6 +246,7 @@ pub(crate) fn run_collaboration_stage(
         role,
         model,
         prompt,
+        attribution,
         CollaborationCallLimits::default(),
         |_| {},
     )
@@ -246,6 +276,11 @@ pub(crate) fn run_conductor_collaboration_stage(
         role,
         model,
         prompt,
+        AgentModelAttribution::service(
+            AgentService::Conductor,
+            AgentStage::Plan,
+            AgentModelProfile::Reasoning,
+        ),
         limits,
         |_| {},
     )
@@ -262,6 +297,7 @@ fn run_collaboration_stage_typed(
     role: ModelRole,
     model: &str,
     prompt: String,
+    attribution: AgentModelAttribution,
     mut limits: CollaborationCallLimits,
     on_delta: impl FnMut(&str),
 ) -> Result<String, CollaborationStageError> {
@@ -287,6 +323,7 @@ fn run_collaboration_stage_typed(
         &role,
         model,
         &request_id,
+        attribution,
         &Metadata::new(),
     )
     .map_err(CollaborationStageError::Failed)?;
@@ -315,6 +352,7 @@ fn run_collaboration_stage_typed(
         model,
         &request_id,
         &completion,
+        attribution,
         &Metadata::new(),
     )
     .map_err(CollaborationStageError::Failed)?;

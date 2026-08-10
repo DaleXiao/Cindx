@@ -1,6 +1,6 @@
 use crate::{
     OrchestrationPolicy, PromptCommitStrategy, RoutingContext, TaskClass, WorkflowBudget,
-    WorkflowOutputKind, WorkflowPlanIr, MAX_ADAPTIVE_WORKFLOW_STEPS,
+    WorkflowOutputKind, WorkflowPlanIr, MAX_ADAPTIVE_WORKFLOW_AGENTS, MAX_ADAPTIVE_WORKFLOW_STEPS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -183,7 +183,10 @@ impl ConductorExecutionContract {
         hard_limit.max_steps = hard_limit
             .max_steps
             .min(self.effective_max_workflow_steps());
-        hard_limit.max_models = hard_limit.max_models.min(self.max_parallelism.max(1));
+        hard_limit.max_models = hard_limit.max_models.min(
+            self.effective_max_workflow_steps()
+                .min(MAX_ADAPTIVE_WORKFLOW_AGENTS),
+        );
         hard_limit
     }
 
@@ -434,6 +437,29 @@ mod tests {
         assert_eq!(already_narrow.max_model_turns_per_step, 2);
         assert_eq!(already_narrow.max_tool_calls_per_step, 3);
         assert_eq!(already_narrow.max_output_tokens_per_step, 1_024);
+    }
+
+    #[test]
+    fn sequential_workflow_keeps_model_capacity_independent_from_parallelism() {
+        let mut contract = ConductorExecutionContract::from_routing(
+            &context("Audit one specialist result with an independent model"),
+            "pro",
+            OrchestrationPolicy::BestOfN { candidates: 3 },
+        );
+        contract.max_parallelism = 1;
+        contract.max_workflow_steps = 3;
+
+        let narrowed = contract.constrain_workflow_budget(WorkflowBudget {
+            max_steps: 3,
+            max_models: 3,
+            max_model_turns_per_step: 2,
+            max_tool_calls_per_step: 2,
+            max_output_tokens_per_step: 2_048,
+        });
+
+        assert_eq!(contract.max_parallelism, 1);
+        assert_eq!(narrowed.max_steps, 3);
+        assert_eq!(narrowed.max_models, 3);
     }
 
     #[test]

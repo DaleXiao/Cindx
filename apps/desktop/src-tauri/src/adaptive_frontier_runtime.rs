@@ -8,9 +8,6 @@ pub(super) enum AdaptiveFrontierOutcome {
 pub(super) struct AdaptiveFrontierState {
     pub(super) workflow_checkpoint: WorkflowExecutionCheckpoint,
     pub(super) anytime_controller: AnytimeController,
-    pub(super) anchor_supervisor: Option<ParallelJobSupervisor<CollaborationCompletion>>,
-    pub(super) direct_anchor_output: Option<String>,
-    pub(super) direct_anchor_verifier: Option<DirectAnchorVerifier>,
     pub(super) outputs: BTreeMap<String, String>,
     pub(super) evidence_by_step: BTreeMap<String, Vec<CollaborationEvidence>>,
 }
@@ -30,13 +27,8 @@ pub(super) struct AdaptiveFrontierContext<'a, 'state> {
     pub(super) execution_contract: &'a ConductorExecutionContract,
     pub(super) workflow_started_at_ms: u64,
     pub(super) cancellation: Option<Arc<AgentRunControl>>,
-    pub(super) anchor_spec: &'a AdaptiveCollaborationSpec,
     pub(super) workflow_checkpoint: WorkflowExecutionCheckpoint,
     pub(super) anytime_controller: AnytimeController,
-    pub(super) anchor_supervisor: Option<ParallelJobSupervisor<CollaborationCompletion>>,
-    pub(super) direct_anchor_output: Option<String>,
-    pub(super) direct_anchor_verifier: Option<DirectAnchorVerifier>,
-    pub(super) direct_anchor_verifier_attempted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,13 +76,8 @@ pub(super) fn run_adaptive_frontier(
         execution_contract,
         workflow_started_at_ms,
         cancellation,
-        anchor_spec,
         mut workflow_checkpoint,
         mut anytime_controller,
-        mut anchor_supervisor,
-        mut direct_anchor_output,
-        mut direct_anchor_verifier,
-        mut direct_anchor_verifier_attempted,
     } = context;
     let max_step_attempts =
         effective_workflow_step_attempt_budget(prompt_genome, &workflow_checkpoint);
@@ -107,8 +94,6 @@ pub(super) fn run_adaptive_frontier(
                 collaboration_id,
                 &mut workflow_checkpoint,
                 &anytime_controller,
-                anchor_supervisor.as_ref(),
-                direct_anchor_verifier.as_ref(),
             )?;
             return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
         }
@@ -123,10 +108,69 @@ pub(super) fn run_adaptive_frontier(
             break;
         }
         let final_step_id = delivery_schedule.target_step_id;
+        if delivery_schedule.runnable_steps.contains(&final_step_id)
+            && current_plan.steps.iter().any(|step| {
+                step.id == final_step_id
+                    && step.contract.output_kind == WorkflowOutputKind::Synthesis
+            })
+        {
+            let handoff = materialize_owner_handoff(
+                &mut workflow_checkpoint,
+                &mut outputs,
+                &mut evidence_by_step,
+                collaboration_id,
+                run_context_steer_epoch(run_context),
+                execution_contract.verification_required,
+                &final_step_id,
+            )?;
+            append_workflow_checkpoint_event(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                "Collaboration owner handoff checkpointed",
+                "completed",
+                Some(&final_step_id),
+                &workflow_checkpoint,
+            )?;
+            let mut store = state
+                .store
+                .lock()
+                .map_err(|error| format!("store lock poisoned: {error}"))?;
+            append_event(
+                &mut store,
+                task_id,
+                EventKind::TaskStatusChanged,
+                "Collaboration owner handoff materialized",
+                metadata_with_context(
+                    [
+                        ("collaboration_id".to_string(), collaboration_id.to_string()),
+                        ("workflow_step_id".to_string(), final_step_id.clone()),
+                        (
+                            "delivery_mode".to_string(),
+                            "deterministic_owner_handoff".to_string(),
+                        ),
+                        ("model_call".to_string(), "false".to_string()),
+                        (
+                            "verification_required".to_string(),
+                            execution_contract.verification_required.to_string(),
+                        ),
+                        (
+                            "handoff_chars".to_string(),
+                            handoff.chars().count().to_string(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    run_context,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+            continue;
+        }
         let ready_ids = anytime_controller
             .ready_candidates()
             .into_iter()
-            .filter(|candidate| candidate.id != DIRECT_ANCHOR_CANDIDATE_ID)
             .filter(|candidate| delivery_schedule.runnable_steps.contains(&candidate.id))
             .map(|candidate| candidate.id.clone())
             .collect::<Vec<_>>();
@@ -151,55 +195,6 @@ pub(super) fn run_adaptive_frontier(
             })
             .collect::<Vec<_>>();
         if layer.is_empty() {
-            while (direct_anchor_output.is_none()
-                && anchor_supervisor
-                    .as_ref()
-                    .is_some_and(|supervisor| supervisor.pending() > 0))
-                || direct_anchor_verifier.is_some()
-            {
-                if collaboration_steer_pending(cancellation.as_ref()) {
-                    pause_anytime_for_steer(
-                        state,
-                        task_id,
-                        run_context,
-                        collaboration_id,
-                        &mut workflow_checkpoint,
-                        &anytime_controller,
-                        anchor_supervisor.as_ref(),
-                        direct_anchor_verifier.as_ref(),
-                    )?;
-                    return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
-                }
-                advance_direct_anchor_background(
-                    app,
-                    state,
-                    config,
-                    task_id,
-                    workspace_root,
-                    run_context,
-                    collaboration_id,
-                    prompt,
-                    prompt_genome.verification,
-                    cancellation.as_ref(),
-                    anchor_spec,
-                    &mut anchor_supervisor,
-                    &mut direct_anchor_output,
-                    &mut direct_anchor_verifier,
-                    &mut direct_anchor_verifier_attempted,
-                    &mut anytime_controller,
-                    &mut workflow_checkpoint,
-                )?;
-                if direct_anchor_should_commit(&anytime_controller, cancellation.as_ref()) {
-                    let output = direct_anchor_output.clone().ok_or_else(|| {
-                        "anytime controller committed a missing direct anchor".to_string()
-                    })?;
-                    return commit_adaptive_frontier(output, &workflow_checkpoint);
-                }
-                if cancellation.as_ref().is_some_and(agent_run_should_stop) {
-                    return Err(MODEL_REQUEST_CANCELLED.to_string());
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
             if let Some((candidate_id, output, verdict)) =
                 anytime_best_known_output(&anytime_controller, &workflow_checkpoint)
             {
@@ -229,7 +224,7 @@ pub(super) fn run_adaptive_frontier(
         }
         let layer_index = frontier_round;
         frontier_round = frontier_round.saturating_add(1);
-        let wave = prepare_adaptive_wave(AdaptiveWavePlanningContext {
+        let wave = match prepare_adaptive_wave(AdaptiveWavePlanningContext {
             state,
             task_id,
             run_context,
@@ -238,6 +233,7 @@ pub(super) fn run_adaptive_frontier(
             shared_memory,
             workflow: &current_workflow,
             workflow_plan: &current_plan,
+            models,
             execution_contract,
             layer,
             layer_index,
@@ -247,7 +243,48 @@ pub(super) fn run_adaptive_frontier(
             outputs: &outputs,
             workflow_checkpoint: &mut workflow_checkpoint,
             anytime_controller: &mut anytime_controller,
-        })?;
+        }) {
+            Ok(wave) => wave,
+            Err(error) if error.starts_with(ADAPTIVE_MODEL_DISTINCTNESS_ERROR_PREFIX) => {
+                let failures = [error.clone()];
+                let Some(handoff) = adaptive_partial_work_handoff(prompt, &outputs, &failures)
+                else {
+                    return Ok(AdaptiveFrontierOutcome::Commit(
+                        AdaptiveCollaborationOutcome::foreground_direct(),
+                    ));
+                };
+                register_partial_handoff_candidate(
+                    &mut anytime_controller,
+                    &mut workflow_checkpoint,
+                    &handoff,
+                    outputs.len(),
+                    failures.len(),
+                    evidence_by_step.values().flatten().count(),
+                )?;
+                let (candidate_id, output, verdict) =
+                    anytime_best_known_output(&anytime_controller, &workflow_checkpoint)
+                        .ok_or_else(|| {
+                            "adaptive model-distinct fallback has no preserved output".to_string()
+                        })?;
+                record_failure_commit(
+                    state,
+                    task_id,
+                    run_context,
+                    collaboration_id,
+                    workflow_started_at_ms,
+                    outputs.len(),
+                    failures.len(),
+                    &candidate_id,
+                    &output,
+                    &verdict,
+                    &error,
+                    cancellation.as_ref(),
+                    &workflow_checkpoint,
+                )?;
+                return commit_adaptive_frontier(output, &workflow_checkpoint);
+            }
+            Err(error) => return Err(error),
+        };
         let wave_outcome = execute_adaptive_wave(AdaptiveWaveExecutionContext {
             app,
             state,
@@ -256,24 +293,11 @@ pub(super) fn run_adaptive_frontier(
             workspace_root,
             run_context,
             collaboration_id,
-            prompt,
-            prompt_genome,
             execution_contract,
-            anchor_spec,
             wave: &wave,
             workflow_checkpoint: &mut workflow_checkpoint,
             anytime_controller: &mut anytime_controller,
-            anchor_supervisor: &mut anchor_supervisor,
-            direct_anchor_output: &mut direct_anchor_output,
-            direct_anchor_verifier: &mut direct_anchor_verifier,
-            direct_anchor_verifier_attempted: &mut direct_anchor_verifier_attempted,
         })?;
-        let wave_completion = match wave_outcome {
-            AdaptiveWaveOutcome::Completed(completion) => completion,
-            AdaptiveWaveOutcome::Commit(output) => {
-                return commit_adaptive_frontier(output, &workflow_checkpoint);
-            }
-        };
         let reconciliation = reconcile_adaptive_wave(AdaptiveWaveReconciliationContext {
             app,
             state,
@@ -285,18 +309,12 @@ pub(super) fn run_adaptive_frontier(
             prompt,
             models,
             prompt_genome,
-            execution_contract,
-            anchor_spec,
             final_step_id: &final_step_id,
             workflow_started_at_ms,
             wave: &wave,
-            completion: wave_completion,
+            completion: wave_outcome,
             workflow_checkpoint: &mut workflow_checkpoint,
             anytime_controller: &mut anytime_controller,
-            anchor_supervisor: &mut anchor_supervisor,
-            direct_anchor_output: &mut direct_anchor_output,
-            direct_anchor_verifier: &mut direct_anchor_verifier,
-            direct_anchor_verifier_attempted: &mut direct_anchor_verifier_attempted,
             outputs: &mut outputs,
             evidence_by_step: &mut evidence_by_step,
         })?;
@@ -313,8 +331,6 @@ pub(super) fn run_adaptive_frontier(
             collaboration_id,
             &mut workflow_checkpoint,
             &anytime_controller,
-            anchor_supervisor.as_ref(),
-            direct_anchor_verifier.as_ref(),
         )?;
         return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
     }
@@ -323,27 +339,88 @@ pub(super) fn run_adaptive_frontier(
         AdaptiveFrontierState {
             workflow_checkpoint,
             anytime_controller,
-            anchor_supervisor,
-            direct_anchor_output,
-            direct_anchor_verifier,
             outputs,
             evidence_by_step,
         },
     )))
 }
 
+fn materialize_owner_handoff(
+    checkpoint: &mut WorkflowExecutionCheckpoint,
+    outputs: &mut BTreeMap<String, String>,
+    evidence_by_step: &mut BTreeMap<String, Vec<CollaborationEvidence>>,
+    collaboration_id: &str,
+    steer_epoch: u64,
+    verification_required: bool,
+    final_step_id: &str,
+) -> Result<String, String> {
+    let final_step = checkpoint
+        .plan
+        .steps
+        .iter()
+        .find(|step| step.id == final_step_id)
+        .cloned()
+        .ok_or_else(|| "workflow owner handoff step is missing".to_string())?;
+    let evidence = merge_collaboration_evidence(
+        final_step_id,
+        &final_step.access,
+        evidence_by_step,
+        &[],
+        collaboration_id,
+        steer_epoch,
+    );
+    let evidence_json = serde_json::to_string(&evidence)
+        .map_err(|error| format!("workflow evidence serialization failed: {error}"))?;
+    let evidence_summary = WorkflowEvidenceSummary::from_items(
+        evidence
+            .iter()
+            .map(|item| (item.source_step.clone(), collaboration_evidence_ref(item))),
+        final_step_id,
+    );
+    let handoff = format!(
+        "Owner handoff for workflow {}. Specialist and verifier outputs are attached as untrusted evidence candidates. The foreground Owner must independently reconcile them, retain all permission-gated effects, and produce the final user delivery. Independent verification required: {}.",
+        checkpoint.plan.workflow_id, verification_required
+    );
+    checkpoint.complete_owner_handoff(
+        final_step_id,
+        handoff.clone(),
+        evidence_json,
+        evidence_summary,
+        current_time_millis(),
+    )?;
+    checkpoint
+        .anytime_outputs
+        .insert(final_step_id.to_string(), handoff.clone());
+    outputs.insert(final_step_id.to_string(), handoff.clone());
+    evidence_by_step.insert(final_step_id.to_string(), evidence);
+    Ok(handoff)
+}
+
 fn commit_adaptive_frontier(
-    _output: String,
-    _checkpoint: &WorkflowExecutionCheckpoint,
+    output: String,
+    checkpoint: &WorkflowExecutionCheckpoint,
 ) -> Result<AdaptiveFrontierOutcome, String> {
-    Ok(AdaptiveFrontierOutcome::Commit(
-        AdaptiveCollaborationOutcome::foreground_direct(),
-    ))
+    adaptive_untrusted_partial_outcome(output, checkpoint).map(AdaptiveFrontierOutcome::Commit)
+}
+
+pub(super) fn adaptive_untrusted_partial_outcome(
+    output: String,
+    checkpoint: &WorkflowExecutionCheckpoint,
+) -> Result<AdaptiveCollaborationOutcome, String> {
+    if output.trim().is_empty() {
+        return Ok(AdaptiveCollaborationOutcome::foreground_direct());
+    }
+    let guidance = format!(
+        "INTERNAL UNTRUSTED PARTIAL WORKFLOW GUIDANCE: The adaptive checkpoint is unresolved and not finalized. Treat the preserved output and evidence as candidates only; independently verify them, complete every unresolved action, and produce the final user-facing response yourself. Do not expose this internal note to the user.\n\nPreserved output:\n{}",
+        truncate_for_collaboration(&output, 30_000)
+    );
+    AdaptiveCollaborationOutcome::from_checkpoint(guidance, checkpoint)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collaboration_service::AdaptiveCollaborationDisposition;
 
     fn step(
         id: &str,
@@ -440,5 +517,68 @@ mod tests {
             checkpoint.steps["orphan"].status,
             WorkflowStepStatus::Pending
         );
+    }
+
+    #[test]
+    fn partial_commit_hands_unresolved_checkpoint_to_owner_without_finalizing() {
+        let plan = WorkflowPlanIr {
+            schema: WORKFLOW_IR_SCHEMA.to_string(),
+            workflow_id: "partial-owner-handoff".to_string(),
+            objective: "deliver a grounded answer".to_string(),
+            effort: "pro".to_string(),
+            policy: "adaptive".to_string(),
+            coordinator_model: "planner".to_string(),
+            prompt_profile: "baseline".to_string(),
+            steps: vec![
+                step(
+                    "specialist",
+                    "worker",
+                    Vec::new(),
+                    WorkflowOutputKind::Evidence,
+                ),
+                step(
+                    "owner-handoff",
+                    "synthesizer",
+                    vec!["specialist".to_string()],
+                    WorkflowOutputKind::Synthesis,
+                ),
+            ],
+            budget: WorkflowBudget {
+                max_steps: 2,
+                max_models: 2,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 0,
+                max_output_tokens_per_step: 1_000,
+            },
+        };
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("partial-owner-handoff", plan, 1);
+        checkpoint
+            .complete_step(
+                "specialist",
+                "worker",
+                "preserved evidence".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+
+        let AdaptiveFrontierOutcome::Commit(outcome) =
+            commit_adaptive_frontier("preserved evidence".to_string(), &checkpoint).unwrap()
+        else {
+            panic!("partial commit must hand off to the Owner");
+        };
+        let handoff: serde_json::Value =
+            serde_json::from_str(outcome.execution_contract.as_deref().unwrap()).unwrap();
+
+        assert_eq!(
+            outcome.disposition,
+            AdaptiveCollaborationDisposition::ApplyGuidance
+        );
+        assert!(outcome.guidance.contains("UNTRUSTED PARTIAL"));
+        assert!(!checkpoint.finalized);
+        assert_eq!(handoff["finalized"], false);
+        assert!(handoff["unresolved_actions"]
+            .as_array()
+            .is_some_and(|actions| !actions.is_empty()));
     }
 }

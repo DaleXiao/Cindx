@@ -1,35 +1,36 @@
 use super::{causal_route, requirements, PlannedAgentRun};
 use crate::app_state::AppState;
 use crate::collaboration_service::truncate_for_collaboration;
+use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
 use crate::workflow_routing_runtime::append_router_decision_event;
-use agent_application::insert_run_objectives;
-use agent_core::{EventKind, Metadata, TaskId};
+use agent_application::{insert_run_objectives, AgentStrategyDecisionReceipt};
+use agent_core::{decode_event_type, DecodedEventType, EventKind, EventTypeV1, Metadata, TaskId};
+use agent_runtime::{AgentRunControl, RunPreparationCheckpoint};
 
 pub(super) fn record_planned_agent_run(
     state: &tauri::State<'_, AppState>,
     task_id: &TaskId,
-    run_context: &Metadata,
+    run_context: &mut Metadata,
     planned: &PlannedAgentRun,
     profile_source: &str,
-) -> Result<(), String> {
+    cancellation: &AgentRunControl,
+) -> Result<(), CollaborationStageError> {
     let decision = planned.execution_plan.action();
     let causal_route_metadata =
-        causal_route::causal_route_event_metadata(run_context, &planned.execution_plan)?;
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_router_decision_event(
-        &mut store,
-        task_id,
-        run_context,
-        &planned.routing_context,
-        &planned.routing_decision,
-        0,
-    )
-    .map_err(|error| error.to_string())?;
+        causal_route::causal_route_event_metadata(run_context, &planned.execution_plan)
+            .map_err(CollaborationStageError::Failed)?;
+    let plan_sha256 = planned
+        .execution_plan
+        .semantic_digest()
+        .map_err(CollaborationStageError::Failed)?;
+    let receipt = AgentStrategyDecisionReceipt::new(task_id, run_context, &plan_sha256)
+        .map_err(|error| CollaborationStageError::Failed(error.to_string()))?;
+    let mut committed_context = run_context.clone();
+    receipt
+        .insert_into(&mut committed_context)
+        .map_err(|error| CollaborationStageError::Failed(error.to_string()))?;
     let mut decision_metadata = [
         (
             "decision_source".to_string(),
@@ -57,12 +58,12 @@ pub(super) fn record_planned_agent_run(
         ),
         (
             "execution_plan_sha256".to_string(),
-            planned.execution_plan.digest()?,
+            planned
+                .execution_plan
+                .digest()
+                .map_err(CollaborationStageError::Failed)?,
         ),
-        (
-            "execution_plan_semantic_sha256".to_string(),
-            planned.execution_plan.semantic_digest()?,
-        ),
+        ("execution_plan_semantic_sha256".to_string(), plan_sha256),
         (
             "execution_plan_authority".to_string(),
             planned.execution_plan.authority.label().to_string(),
@@ -104,12 +105,67 @@ pub(super) fn record_planned_agent_run(
     .chain(requirements::route_decision_metadata(planned))
     .collect();
     insert_run_objectives(&mut decision_metadata, run_context);
-    append_event(
-        &mut store,
-        task_id,
-        EventKind::TaskStatusChanged,
-        "Agent run decision selected",
-        metadata_with_context(decision_metadata, run_context),
-    )
-    .map_err(|error| error.to_string())
+    receipt
+        .insert_into(&mut decision_metadata)
+        .map_err(|error| CollaborationStageError::Failed(error.to_string()))?;
+    let checkpoint = cancellation.commit_preparation_checkpoint_with(receipt.steer_epoch(), || {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .with_immediate_transaction(|store| {
+                let existing = store.list_by_task_and_metadata(
+                    task_id,
+                    "agent_run_id",
+                    receipt.agent_run_id(),
+                )?;
+                let mut decisions = existing.iter().filter(|event| {
+                    matches!(
+                        decode_event_type(event),
+                        DecodedEventType::V1(typed)
+                            if typed.event_type() == EventTypeV1::AgentRunDecisionSelected
+                    ) && event
+                        .metadata
+                        .get("steer_epoch")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        == Some(receipt.steer_epoch())
+                });
+                if let Some(existing) = decisions.next() {
+                    if decisions.next().is_some() || !receipt.matches_decision_event(existing) {
+                        return Err(agent_storage::StorageError::new(
+                            "agent strategy receipt conflicts with a durable decision",
+                        ));
+                    }
+                    return Ok(());
+                }
+                append_router_decision_event(
+                    store,
+                    task_id,
+                    run_context,
+                    &planned.routing_context,
+                    &planned.routing_decision,
+                    0,
+                )?;
+                append_event(
+                    store,
+                    task_id,
+                    EventKind::TaskStatusChanged,
+                    "Agent run decision selected",
+                    metadata_with_context(decision_metadata, run_context),
+                )
+            })
+            .map_err(|error| error.to_string())
+    });
+    match checkpoint {
+        Ok(RunPreparationCheckpoint::Committed(())) => {
+            *run_context = committed_context;
+            Ok(())
+        }
+        Ok(RunPreparationCheckpoint::RestartAfterSteer) => {
+            Err(CollaborationStageError::SteerInterrupted)
+        }
+        Ok(RunPreparationCheckpoint::Stopped(_)) => Err(CollaborationStageError::RunStopped),
+        Err(error) => Err(CollaborationStageError::Failed(error)),
+    }
 }

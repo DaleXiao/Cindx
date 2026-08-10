@@ -15,6 +15,7 @@ mod evolution_campaign;
 mod execution_constraint;
 mod execution_contract;
 mod execution_plan;
+mod owner_execution_graph;
 mod policy;
 mod prompt_distillation_gate;
 mod prompt_evolution;

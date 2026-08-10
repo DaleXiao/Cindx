@@ -300,18 +300,56 @@ fn persist_agent_error_terminalization_with(
     terminal_metadata: Metadata,
     delete_snapshots: impl FnOnce(&mut SqliteStore, Option<&str>) -> Result<(), StorageError>,
 ) -> Result<AgentState, String> {
-    store
-        .with_immediate_transaction(|store| {
+    if !run_context.contains_key("agent_run_id") {
+        return store
+            .with_immediate_transaction(|store| {
+                persist_agent_error_terminalization_in_transaction_with(
+                    store,
+                    &phase16_task_id(),
+                    run_context,
+                    message,
+                    terminal_metadata,
+                    delete_snapshots,
+                )
+            })
+            .map_err(|error| error.to_string());
+    }
+    let session_id = run_context.get("session_id").map(String::as_str);
+    let events = agent_events_for_session(store, &phase16_task_id(), session_id)
+        .map_err(|error| error.to_string())?;
+    let active_events = active_agent_events_for_session(&events, session_id);
+    let mut terminal_context = run_context.clone();
+    let mut receipt_context = Metadata::new();
+    crate::agent_strategy_receipt_runtime::bind_strategy_receipt_from_events(
+        &active_events,
+        run_context,
+        &mut receipt_context,
+    )?;
+    terminal_context.extend(receipt_context);
+    let steer_epoch = terminal_context
+        .get("steer_epoch")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    crate::agent_terminal_commit_runtime::persist_agent_terminal_once(
+        store,
+        &phase16_task_id(),
+        &terminal_context,
+        steer_epoch,
+        |store, identity| {
+            let mut terminal_metadata = terminal_metadata;
+            terminal_metadata.extend(identity.metadata());
             persist_agent_error_terminalization_in_transaction_with(
                 store,
                 &phase16_task_id(),
-                run_context,
+                &terminal_context,
                 message,
                 terminal_metadata,
                 delete_snapshots,
             )
-        })
-        .map_err(|error| error.to_string())
+        },
+    )
+    .map(|persisted| persisted.state)
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) fn persist_agent_error_terminalization_in_transaction(

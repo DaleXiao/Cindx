@@ -2,7 +2,7 @@
 
 Current application version: `0.2.30`
 
-Last code-fact review: `2026-08-09`
+Last code-fact review: `2026-08-10`
 
 This document describes the current source tree. It is not a quality claim.
 
@@ -25,20 +25,34 @@ The desktop app currently includes:
 
 - **Fast** bypasses the Conductor and selects one configured model for direct
   execution.
-- **Auto** asks the Conductor for one typed direct-or-workflow candidate with a
-  requested parallelism ceiling of two.
-- **Pro** uses the same decision contract with a requested parallelism ceiling
-  of three and a larger bounded workflow budget.
+- **Auto** asks the Conductor for one typed direct-or-workflow candidate under
+  its bounded planning budget.
+- **Pro** uses the same decision contract with a larger bounded planning and
+  execution budget.
 
 Auto and Pro do not automatically run every configured model. The Conductor
 selects the route, model roles, retrieval needs, decomposition, and verification
-requirements in one validated execution plan. Invalid candidates receive
-bounded repair; if planning still fails, execution falls back to the shared
-foreground actor without manufacturing a workflow.
+requirements in one validated execution plan. A production Workflow contains
+exactly one bounded Specialist, optionally one Independent Verifier, and a
+deterministic handoff to the foreground Owner. It does not run competing
+anchors, reviewer tournaments, repair syntheses, or a model-authored final
+synthesis. An Independent Verifier must use a different configured model from
+the Specialist; a second prompt to the same model is not treated as
+independence. Invalid candidates receive bounded repair; if planning still
+fails, execution falls back to the shared foreground Owner without
+manufacturing a workflow.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
 effect authority does not.
+
+Current Agent model events also carry an additive typed attribution projection:
+the acting subject is Owner, Specialist, or Independent Verifier; the stage is
+plan, evidence, act, verify, or finalize; and the model profile is Primary,
+Reasoning, Verifier, or Utility. The Conductor and background learning utilities
+are recorded as services, not Actors. Existing role, stage, model,
+configuration, and UI fields remain unchanged, so this projection does not
+change routing or model calls.
 
 ## Run Lifecycle
 
@@ -52,18 +66,25 @@ effect authority does not.
 5. The effective objective and bounded history are compiled into context.
 6. Fast creates a direct plan; Auto and Pro validate a Conductor plan. Required
    tools, image input, effects, capability, and budget remain hard constraints.
+   The router event and selected decision are committed in one SQLite
+   transaction behind the active preparation epoch before treatment execution
+   can advance.
 7. Durable memory and requested workspace retrieval are prepared separately.
    Semantic search, file search, graph-direct lookup, and graph walk may run in
    parallel and retain source provenance.
-8. A validated workflow may execute a bounded task graph. Tool effects remain
-   exclusive to the foreground executor; workflow analysis and verification
-   can use only their admitted read-only catalogs.
+8. A validated workflow may execute one read-only Specialist and, when planned,
+   one tool-free Independent Verifier. The runtime materializes their checked
+   checkpoint as a deterministic handoff; the foreground Owner independently
+   decides and performs any effects and final delivery.
 9. `agent-application` drives prepared epochs through `AgentKernel`, including
    model turns, tool batches, typed observations, permission suspension, steer,
    recovery, and completion checks.
 10. Terminal delivery and lifecycle state are committed once for the active
-    physical attempt and steer epoch. Replay returns the existing terminal
-    event instead of creating a second completion.
+    physical attempt and steer epoch. Success, failure, and cancellation bind
+    the same strategy receipt; pre-decision termination records an explicit
+    `not_selected` explanation. Pause remains recoverable and carries the
+    receipt without becoming a terminal event. Replay returns the existing
+    terminal event instead of creating a second completion.
 
 ## Tools and Permissions
 
@@ -128,6 +149,19 @@ The latest route-causal attempt, V12 on source `ff8c238`, is
 completion, while the Workflow arm stopped before its strategy event was
 persisted. It produced no matched pair and no GO/NO-GO result. Production Fast,
 Auto, Pro, and profile serving were unchanged by that attempt.
+
+The current source repairs that observability prerequisite and narrows the
+production Workflow graph with deterministic contracts. It does not
+retroactively validate V12, prove an intelligence or provider-cost gain, or
+authorize another provider run.
+
+The current evaluation projection can also derive one bounded, typed
+externally verified outcome for either Direct or Workflow from validated
+strategy and terminal lineage, actual Actor exposure, external postconditions,
+preservation checks, and complete resource receipts. This is shadow evidence
+only: it is not production `LearningEvidenceV1`, does not enter routing, prompt
+evolution, memory, canary, or serving, and does not establish an intelligence
+gain.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 

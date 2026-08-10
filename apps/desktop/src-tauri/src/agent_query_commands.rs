@@ -272,47 +272,6 @@ pub(crate) fn begin_agent_run_control_for_effort(
     register_agent_run_control_for_session(state, session_id, control)
 }
 
-#[cfg(feature = "realworld-eval")]
-pub(crate) fn begin_agent_run_control_with_budget(
-    state: &tauri::State<'_, AppState>,
-    session_id: &str,
-    budget: RunBudget,
-) -> Result<RegisteredRun, String> {
-    cancel_background_prompt_evaluations(state)?;
-    register_agent_run_control_for_session(
-        state,
-        session_id,
-        Arc::new(AgentRunControl::with_budget(budget)),
-    )
-}
-
-pub(crate) fn begin_agent_run_control_for_continuation(
-    state: &tauri::State<'_, AppState>,
-    session_id: &str,
-    snapshot: RunControlSnapshot,
-) -> Result<RegisteredRun, String> {
-    cancel_background_prompt_evaluations(state)?;
-    let control = Arc::new(
-        AgentRunControl::from_snapshot_for_continuation(snapshot)
-            .map_err(|reason| format!("agent run cannot continue after {}", reason.code()))?,
-    );
-    register_agent_run_control_for_session(state, session_id, control)
-}
-
-pub(crate) fn begin_agent_run_control_at_steer_epoch(
-    state: &tauri::State<'_, AppState>,
-    session_id: &str,
-    effort: &str,
-    applied_epoch: u64,
-) -> Result<RegisteredRun, String> {
-    cancel_background_prompt_evaluations(state)?;
-    register_agent_run_control_for_session(
-        state,
-        session_id,
-        Arc::new(AgentRunControl::new_at_steer_epoch(effort, applied_epoch)),
-    )
-}
-
 pub(crate) fn begin_agent_run_control_from_persisted_resources(
     state: &tauri::State<'_, AppState>,
     session_id: &str,

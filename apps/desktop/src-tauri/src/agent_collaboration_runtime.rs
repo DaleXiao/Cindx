@@ -1,6 +1,7 @@
 use crate::desktop_prelude::*;
 use crate::{
     adaptive_collaboration_execution::run_adaptive_collaboration,
+    agent_conductor_runtime::unique_configured_models,
     agent_query_commands::{active_agent_run_control, agent_run_should_stop},
     app_state::AppState,
     collaboration_execution::{
@@ -16,6 +17,7 @@ use crate::{
     project_session_persistence::metadata_with_context,
     runtime_constants::COLLABORATION_MAX_OUTPUT_TOKENS,
     runtime_values::{run_context_steer_epoch, unique_id},
+    workflow_routing_runtime::model_candidates_for_config,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -76,6 +78,12 @@ pub(crate) fn run_collaboration_candidates(
             &ModelRole::Planner,
             &spec.model,
             &spec.request_id,
+            AgentModelAttribution::actor(
+                AgentActor::Specialist,
+                AgentStage::Plan,
+                AgentModelProfile::Reasoning,
+                AgentEffectAuthority::ReadOnly,
+            ),
             &Metadata::new(),
         )?;
     }
@@ -236,6 +244,12 @@ pub(crate) fn run_collaboration_candidates(
             &spec.model,
             &spec.request_id,
             completion,
+            AgentModelAttribution::actor(
+                AgentActor::Specialist,
+                AgentStage::Plan,
+                AgentModelProfile::Reasoning,
+                AgentEffectAuthority::ReadOnly,
+            ),
             &Metadata::new(),
         )?;
         if let Some(content) = completion
@@ -266,6 +280,12 @@ pub(crate) fn run_collaboration_candidates(
         ModelRole::Reviewer,
         &config.model_for_role(&ModelRole::Reviewer),
         build_collaboration_arbiter_prompt(prompt, &candidates, conductor_directive.as_deref()),
+        AgentModelAttribution::actor(
+            AgentActor::IndependentVerifier,
+            AgentStage::Verify,
+            AgentModelProfile::Verifier,
+            AgentEffectAuthority::None,
+        ),
     );
     match arbiter_result {
         Ok(guidance) => Ok(guidance),
@@ -361,14 +381,22 @@ pub(crate) fn prepare_agent_collaboration(
     };
     let id = unique_id("collab");
     let agent_budget = collaboration_agent_budget(*candidates);
-    let mut models = collaboration_candidate_models(config, agent_budget);
-    prioritize_collaboration_model(
-        &mut models,
-        run_context.get("agent_model").map(String::as_str),
-        agent_budget,
-    );
-    let fallback_models = collaboration_fallback_models(&models, agent_budget);
     let bounded = run_context.get("collaboration_profile").map(String::as_str) == Some("bounded");
+    let models = if bounded {
+        let mut models = collaboration_candidate_models(config, agent_budget);
+        prioritize_collaboration_model(
+            &mut models,
+            run_context.get("agent_model").map(String::as_str),
+            agent_budget,
+        );
+        models
+    } else {
+        adaptive_collaboration_model_catalog(
+            config,
+            run_context.get("agent_model").map(String::as_str),
+        )
+    };
+    let fallback_models = collaboration_fallback_models(&models, agent_budget);
     let effort = run_context
         .get("agent_effort")
         .cloned()
@@ -481,6 +509,22 @@ pub(crate) fn prepare_agent_collaboration(
         evidence_packet: outcome.evidence_packet,
         grounding_receipts: outcome.grounding_receipts,
     }))
+}
+
+pub(crate) fn adaptive_collaboration_model_catalog(
+    config: &ProviderConfig,
+    primary_model: Option<&str>,
+) -> Vec<String> {
+    let mut models = unique_configured_models(&model_candidates_for_config(config));
+    if let Some(primary_index) = primary_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .and_then(|primary| models.iter().position(|model| model == primary))
+    {
+        let primary = models.remove(primary_index);
+        models.insert(0, primary);
+    }
+    models
 }
 
 #[allow(clippy::too_many_arguments)]

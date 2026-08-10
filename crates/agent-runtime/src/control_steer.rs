@@ -44,6 +44,20 @@ pub enum RunPreparationCommit<T> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum RunPreparationCheckpoint<T> {
+    Committed(T),
+    RestartAfterSteer,
+    Stopped(RunStopReason),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunStartCheckpoint<T> {
+    Committed(T),
+    Stopped(RunStopReason),
+    TerminalCommitted,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum RunExecutionStepCommit<T> {
     Committed(T),
     RestartAfterSteer,

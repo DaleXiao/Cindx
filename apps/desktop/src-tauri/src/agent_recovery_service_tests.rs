@@ -1,7 +1,12 @@
 use super::*;
 use crate::append_message_event_with_metadata;
+use crate::agent_strategy_receipt_runtime::bind_strategy_receipt_from_events;
+use agent_application::{
+    insert_strategy_not_selected, strategy_receipt_is_explicitly_not_selected,
+    AgentStrategyDecisionReceipt,
+};
 use agent_core::{
-    insert_event_type_v1, EventTypeV1, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,
+    insert_event_type_v1, EventId, EventTypeV1, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,
     AGENT_RUN_IDENTITY_V1_SCHEMA, EVENT_TYPE_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
     SOURCE_AGENT_RUN_ID_METADATA_KEY,
 };
@@ -25,6 +30,170 @@ fn run_metadata(session_id: &str, run_id: &str, with_prompt: bool) -> Metadata {
         metadata.insert("prompt".to_string(), "finish the task".to_string());
     }
     metadata
+}
+
+#[test]
+fn agent_strategy_lifecycle_contract_recovery_binds_or_explains() {
+    let mut context = run_metadata("session-receipt", "run-receipt", true);
+    context.insert("steer_epoch".to_string(), "3".to_string());
+    let receipt =
+        AgentStrategyDecisionReceipt::new(&phase16_task_id(), &context, &"a".repeat(64)).unwrap();
+    let mut decision_metadata = context.clone();
+    receipt.insert_into(&mut decision_metadata).unwrap();
+    insert_event_type_v1(
+        &EventKind::TaskStatusChanged,
+        &mut decision_metadata,
+        EventTypeV1::AgentRunDecisionSelected,
+    )
+    .unwrap();
+    let decision = Event {
+        id: EventId("decision-receipt".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 3,
+        timestamp_ms: 1,
+        kind: EventKind::TaskStatusChanged,
+        summary: "localized decision".to_string(),
+        metadata: decision_metadata,
+    };
+
+    let mut recovered = Metadata::new();
+    bind_strategy_receipt_from_events(std::slice::from_ref(&decision), &context, &mut recovered)
+        .unwrap();
+    let recovered = metadata_with_context(recovered, &context);
+    assert_eq!(
+        AgentStrategyDecisionReceipt::from_metadata(&recovered).unwrap(),
+        Some(receipt.clone())
+    );
+
+    let mut stale_context = run_metadata("session-receipt", "run-prior", true);
+    stale_context.insert("steer_epoch".to_string(), "9".to_string());
+    let stale_receipt =
+        AgentStrategyDecisionReceipt::new(&phase16_task_id(), &stale_context, &"c".repeat(64))
+            .unwrap();
+    stale_receipt.insert_into(&mut stale_context).unwrap();
+    insert_event_type_v1(
+        &EventKind::TaskStatusChanged,
+        &mut stale_context,
+        EventTypeV1::AgentRunDecisionSelected,
+    )
+    .unwrap();
+    let stale_decision = Event {
+        id: EventId("decision-prior-run".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 1,
+        timestamp_ms: 1,
+        kind: EventKind::TaskStatusChanged,
+        summary: "prior decision".to_string(),
+        metadata: stale_context,
+    };
+    let mut start_metadata = run_metadata("session-receipt", "run-receipt", true);
+    start_metadata.insert("steer_epoch".to_string(), "3".to_string());
+    insert_event_type_v1(
+        &EventKind::TaskStatusChanged,
+        &mut start_metadata,
+        EventTypeV1::AgentRunStarted,
+    )
+    .unwrap();
+    let start = Event {
+        id: EventId("start-current-run".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 2,
+        timestamp_ms: 1,
+        kind: EventKind::TaskStatusChanged,
+        summary: "localized start".to_string(),
+        metadata: start_metadata,
+    };
+    let mut retained_context = run_metadata("session-receipt", "run-receipt", true);
+    retained_context.insert("steer_epoch".to_string(), "4".to_string());
+    let retained_receipt =
+        AgentStrategyDecisionReceipt::new(&phase16_task_id(), &retained_context, &"d".repeat(64))
+            .unwrap();
+    retained_receipt
+        .insert_into(&mut retained_context)
+        .unwrap();
+    insert_event_type_v1(
+        &EventKind::TaskStatusChanged,
+        &mut retained_context,
+        EventTypeV1::AgentRunDecisionSelected,
+    )
+    .unwrap();
+    let retained_decision = Event {
+        id: EventId("decision-retained".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 4,
+        timestamp_ms: 1,
+        kind: EventKind::TaskStatusChanged,
+        summary: "retained decision".to_string(),
+        metadata: retained_context.clone(),
+    };
+    let mut malformed_metadata = run_metadata("session-receipt", "run-receipt", true);
+    malformed_metadata.insert("steer_epoch".to_string(), "10".to_string());
+    insert_event_type_v1(
+        &EventKind::TaskStatusChanged,
+        &mut malformed_metadata,
+        EventTypeV1::AgentRunDecisionSelected,
+    )
+    .unwrap();
+    let malformed_decision = Event {
+        id: EventId("decision-malformed".to_string()),
+        task_id: phase16_task_id(),
+        sequence: 5,
+        timestamp_ms: 1,
+        kind: EventKind::TaskStatusChanged,
+        summary: "malformed decision".to_string(),
+        metadata: malformed_metadata,
+    };
+    let active_events = vec![
+        stale_decision,
+        start,
+        decision.clone(),
+        retained_decision,
+        malformed_decision,
+    ];
+    assert_eq!(latest_applied_agent_steer_epoch(&active_events), 4);
+    let mut retained_recovery = Metadata::new();
+    bind_strategy_receipt_from_events(
+        &active_events,
+        &retained_context,
+        &mut retained_recovery,
+    )
+    .unwrap();
+    let retained_recovery = metadata_with_context(retained_recovery, &retained_context);
+    assert_eq!(
+        AgentStrategyDecisionReceipt::from_metadata(&retained_recovery).unwrap(),
+        Some(retained_receipt)
+    );
+
+    let mut pre_decision = Metadata::new();
+    bind_strategy_receipt_from_events(&[], &context, &mut pre_decision).unwrap();
+    assert!(strategy_receipt_is_explicitly_not_selected(&pre_decision));
+
+    let mut stale_not_selected = context.clone();
+    insert_strategy_not_selected(&mut stale_not_selected, 2).unwrap();
+    assert!(
+        bind_strategy_receipt_from_events(&[], &stale_not_selected, &mut Metadata::new(),)
+            .expect_err("stale not-selected epoch must fail closed")
+            .contains("mismatched epoch")
+    );
+
+    let conflicting =
+        AgentStrategyDecisionReceipt::new(&phase16_task_id(), &context, &"b".repeat(64)).unwrap();
+    let mut conflicting_context = context.clone();
+    conflicting.insert_into(&mut conflicting_context).unwrap();
+    assert!(bind_strategy_receipt_from_events(
+        std::slice::from_ref(&decision),
+        &conflicting_context,
+        &mut Metadata::new(),
+    )
+    .expect_err("mismatched context must fail closed")
+    .contains("does not match"));
+    assert!(bind_strategy_receipt_from_events(
+        &[decision.clone(), decision],
+        &context,
+        &mut Metadata::new(),
+    )
+    .expect_err("duplicate decision must fail closed")
+    .contains("duplicate"));
 }
 
 #[test]
@@ -417,9 +586,42 @@ fn recovery_claim_rolls_back_with_its_enclosing_transaction() {
         )
         .map_err(StorageError::new)?
         .expect("checkpoint should be claimable inside the transaction");
-        Err::<(), _>(StorageError::new("injected post-claim failure"))
+        append_event(
+            store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent task retry started",
+            context.clone(),
+        )?;
+        let mut replay = context.clone();
+        replay.insert("continuation_replay".to_string(), "true".to_string());
+        append_message_event_with_metadata(
+            store,
+            &phase16_task_id(),
+            MessageRole::User,
+            "finish the task",
+            replay,
+        )?;
+        Err::<(), _>(StorageError::new("injected post-replay failure"))
     });
     assert!(injected.is_err());
+
+    let rolled_back = store
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-claim-rollback")
+        .expect("rolled-back events should load");
+    assert!(!rolled_back
+        .iter()
+        .any(|event| event.summary == "Recovery resume claimed"));
+    assert!(!rolled_back
+        .iter()
+        .any(|event| event.summary == "Agent task retry started"));
+    assert!(!rolled_back.iter().any(|event| {
+        event
+            .metadata
+            .get("continuation_replay")
+            .map(String::as_str)
+            == Some("true")
+    }));
 
     let claimed = claim_agent_recovery_envelope(
         &mut store,

@@ -323,10 +323,6 @@ impl CollaborationWorkerAccess {
             tool_policy,
         }
     }
-
-    pub(crate) fn none(evidence_source: impl Into<String>) -> Self {
-        Self::new(evidence_source, WorkflowToolPolicy::None)
-    }
 }
 
 #[derive(Debug)]
@@ -731,32 +727,6 @@ pub(crate) fn collaboration_step_result(
 
 pub(crate) fn collaboration_evidence_ref(evidence: &CollaborationEvidence) -> String {
     format!("{}::{}", evidence.source_step, evidence.tool_call_id)
-}
-
-pub(crate) fn collaboration_recovery_evidence(evidence: &[CollaborationEvidence]) -> String {
-    if evidence.is_empty() {
-        return "(no prior tool evidence recorded)".to_string();
-    }
-    let mut output = evidence
-        .iter()
-        .take(12)
-        .map(|entry| {
-            format!(
-                "- tool={} status={}\n{}",
-                entry.tool_name,
-                entry.status,
-                truncate_for_collaboration(&entry.output, 1_500)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if evidence.len() > 12 {
-        output.push_str(&format!(
-            "\n- {} additional evidence entries omitted",
-            evidence.len() - 12
-        ));
-    }
-    output
 }
 
 pub(crate) fn merge_collaboration_evidence(

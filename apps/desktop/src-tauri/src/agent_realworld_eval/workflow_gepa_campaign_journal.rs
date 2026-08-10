@@ -305,6 +305,7 @@ mod tests {
             replicate: 1,
             treatment: "pro".to_string(),
             execution_mode: "direct".to_string(),
+            execution_constraint: None,
             completed: true,
             terminal_status: "completed".to_string(),
             behavior_checks_passed: 1,
@@ -327,6 +328,8 @@ mod tests {
             workflow_execution_profile_sha256: None,
             route_profile_semantics_exercised: false,
             workflow_profile_exercised: false,
+            workflow_verifier_steps: 0,
+            treatment_exposure: None,
         }
     }
 

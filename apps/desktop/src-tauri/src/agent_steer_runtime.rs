@@ -31,7 +31,10 @@ pub(crate) struct AppliedAgentSteer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentSteerApplication {
     NoPending,
-    ResolvedNoop { epoch: u64 },
+    ResolvedNoop {
+        epoch: u64,
+        retained_strategy_context: Option<Metadata>,
+    },
     Applied(AppliedAgentSteer),
     Stopped(RunStopReason),
 }
@@ -41,6 +44,7 @@ struct CommittedSteerBatch {
     acknowledged_queue_ids: Vec<String>,
     latest: Option<AppliedAgentSteer>,
     snapshot_context: Option<Metadata>,
+    retained_strategy_context: Option<Metadata>,
 }
 
 fn steer_storage_error(error: impl Into<String>) -> StorageError {
@@ -196,6 +200,7 @@ fn commit_pending_steers(
         acknowledged_queue_ids,
         latest,
         snapshot_context,
+        retained_strategy_context: None,
     })
 }
 
@@ -206,12 +211,14 @@ fn persist_pending_agent_steer_batch(
     run_context: &Metadata,
     pending: &[RunSteer],
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
+    retain_strategy_on_noop: bool,
 ) -> Result<CommittedSteerBatch, StorageError> {
+    let task_id = runtime.task_id.clone();
     let mut transaction = AgentLoopAppendTransaction::begin(runtime);
     let previous_message_count = transaction.original_message_count();
     let mut committed_cursor = None;
     let committed = store.with_immediate_transaction(|store| {
-        let committed = transaction.with_append_only_mutation(|runtime| {
+        let mut committed = transaction.with_append_only_mutation(|runtime| {
             commit_pending_steers(store, workspace_root, runtime, run_context, pending)
         })?;
         if committed.acknowledged_queue_ids.len() != pending.len() {
@@ -220,6 +227,19 @@ fn persist_pending_agent_steer_batch(
                 committed.acknowledged_queue_ids.len(),
                 pending.len()
             )));
+        }
+        if retain_strategy_on_noop && committed.latest.is_none() {
+            let epoch = pending
+                .last()
+                .expect("a committed steer batch cannot be empty")
+                .epoch;
+            committed.retained_strategy_context =
+                crate::agent_strategy_receipt_runtime::persist_retained_strategy_decision(
+                    store,
+                    &task_id,
+                    run_context,
+                    epoch,
+                )?;
         }
         if let Some(snapshot_context) = committed.snapshot_context.as_ref() {
             let (prepared_snapshot, next_cursor) = snapshot_cursor.prepare_after_append(
@@ -255,6 +275,7 @@ pub(crate) fn apply_pending_agent_steers(
         run_context,
         cancellation,
         &mut snapshot_cursor,
+        false,
     )
 }
 
@@ -265,6 +286,7 @@ pub(crate) fn apply_pending_agent_steers_with_cursor(
     run_context: &Metadata,
     cancellation: &AgentRunControl,
     snapshot_cursor: &mut AgentRuntimeSnapshotCursor,
+    retain_strategy_on_noop: bool,
 ) -> Result<AgentSteerApplication, String> {
     let committed = cancellation
         .commit_pending_steers_with_applied_objective(
@@ -279,6 +301,7 @@ pub(crate) fn apply_pending_agent_steers_with_cursor(
                     run_context,
                     pending,
                     snapshot_cursor,
+                    retain_strategy_on_noop,
                 )
             },
             |committed| committed.latest.is_some(),
@@ -305,7 +328,10 @@ pub(crate) fn apply_pending_agent_steers_with_cursor(
                     .last()
                     .expect("a committed steer batch cannot be empty")
                     .epoch;
-                Ok(AgentSteerApplication::ResolvedNoop { epoch })
+                Ok(AgentSteerApplication::ResolvedNoop {
+                    epoch,
+                    retained_strategy_context: committed.retained_strategy_context,
+                })
             }
         }
     }
@@ -316,6 +342,7 @@ mod tests {
     use super::*;
     use crate::event_persistence::append_event;
     use crate::runtime_constants::AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE;
+    use agent_application::AgentStrategyDecisionReceipt;
     use agent_core::EventKind;
     use agent_runtime::{start_agent_loop, AgentRuntimeConfig};
     use agent_storage::{EventStore, SqliteStore};
@@ -525,6 +552,108 @@ mod tests {
     }
 
     #[test]
+    fn agent_strategy_lifecycle_contract_preparation_noop_replans_without_precommitting_a_decision(
+    ) {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let mut run_context = test_run_context();
+        run_context.insert("steer_epoch".to_string(), "0".to_string());
+        let initial_plan_sha256 = "a".repeat(64);
+        run_context.insert(
+            "execution_plan_semantic_sha256".to_string(),
+            initial_plan_sha256.clone(),
+        );
+        let initial_receipt = AgentStrategyDecisionReceipt::new(
+            &phase16_task_id(),
+            &run_context,
+            &initial_plan_sha256,
+        )
+        .expect("initial receipt should build");
+        initial_receipt
+            .insert_into(&mut run_context)
+            .expect("initial receipt should attach");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent run decision selected",
+            run_context.clone(),
+        )
+        .expect("initial decision should persist");
+        append_queue_action(&mut store, &run_context, "enqueue", "queue-preparation-noop");
+        append_queue_action(&mut store, &run_context, "delete", "queue-preparation-noop");
+
+        let control = AgentRunControl::new("pro");
+        assert_eq!(control.request_steer("queue-preparation-noop"), Ok(true));
+        let mut runtime = start_agent_loop(
+            phase16_task_id(),
+            "Original objective",
+            AgentRuntimeConfig::default(),
+        );
+        let mut snapshot_cursor = AgentRuntimeSnapshotCursor::rebuild(&runtime, &run_context);
+        let committed = control
+            .commit_pending_steers_with_applied_objective(
+                |pending| {
+                    persist_pending_agent_steer_batch(
+                        &mut store,
+                        Path::new("."),
+                        &mut runtime,
+                        &run_context,
+                        pending,
+                        &mut snapshot_cursor,
+                        false,
+                    )
+                },
+                |committed| committed.latest.is_some(),
+            )
+            .expect("deleted preparation steer should resolve");
+        let RunSteerBatchCommit::Committed { value, .. } = committed else {
+            panic!("deleted preparation steer should commit as a no-op")
+        };
+        assert!(value.retained_strategy_context.is_none());
+        assert_eq!(control.steer_epoch(), 1);
+
+        let decisions = store
+            .list_by_task(&phase16_task_id())
+            .expect("decisions should load")
+            .into_iter()
+            .filter_map(|event| AgentStrategyDecisionReceipt::from_decision_event(&event).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].steer_epoch(), 0);
+
+        let mut replanned_context = test_run_context();
+        replanned_context.insert("steer_epoch".to_string(), "1".to_string());
+        let replanned_sha256 = "b".repeat(64);
+        let replanned_receipt = AgentStrategyDecisionReceipt::new(
+            &phase16_task_id(),
+            &replanned_context,
+            &replanned_sha256,
+        )
+        .expect("replanned receipt should build");
+        replanned_receipt
+            .insert_into(&mut replanned_context)
+            .expect("replanned receipt should attach");
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            EventKind::TaskStatusChanged,
+            "Agent run decision selected",
+            replanned_context,
+        )
+        .expect("a different plan should persist for the advanced epoch");
+        let decisions = store
+            .list_by_task(&phase16_task_id())
+            .expect("replanned decisions should load")
+            .into_iter()
+            .filter_map(|event| AgentStrategyDecisionReceipt::from_decision_event(&event).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 2);
+        assert!(decisions.iter().any(|receipt| {
+            receipt.steer_epoch() == 1 && receipt.plan_sha256() == replanned_sha256
+        }));
+    }
+
+    #[test]
     fn steer_persists_synthetic_tool_closure_before_the_user_instruction() {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let run_context = test_run_context();
@@ -642,6 +771,7 @@ mod tests {
                 &run_context,
                 pending,
                 &mut snapshot_cursor,
+                true,
             )
         });
 
@@ -686,6 +816,7 @@ mod tests {
                     &run_context,
                     pending,
                     &mut snapshot_cursor,
+                    true,
                 )
             })
             .expect("steer retry should persist");

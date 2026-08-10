@@ -1,4 +1,10 @@
 use crate::runtime_values::unique_id;
+use agent_application::{
+    AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY, AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY, AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY,
+    AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY, AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY,
+    AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY, AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY,
+};
 use agent_core::{
     agent_run_id, AgentRunIdentity, AgentRunLineage, Event, Metadata,
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_ID_METADATA_KEY,
@@ -14,6 +20,14 @@ fn replace_agent_run_identity(
         LOGICAL_AGENT_RUN_ID_METADATA_KEY,
         AGENT_RUN_ID_METADATA_KEY,
         SOURCE_AGENT_RUN_ID_METADATA_KEY,
+        AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY,
+        AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY,
+        AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY,
+        AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY,
+        AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY,
+        AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY,
+        AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY,
+        AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY,
     ] {
         run_context.remove(key);
     }
@@ -111,6 +125,18 @@ mod tests {
             .expect("versioned identity should exist");
         let logical_run_id = initial.logical_run_id().to_string();
         let source_attempt_run_id = initial.attempt_run_id().to_string();
+        for key in [
+            AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY,
+            AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY,
+            AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY,
+            AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY,
+        ] {
+            context.insert(key.to_string(), "stale".to_string());
+        }
 
         assign_continuation_agent_run_identity(
             &mut context,
@@ -128,6 +154,18 @@ mod tests {
             continuation.source_attempt_run_id(),
             Some(source_attempt_run_id.as_str())
         );
+        for key in [
+            AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY,
+            AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY,
+            AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY,
+            AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY,
+            AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY,
+        ] {
+            assert!(!context.contains_key(key));
+        }
 
         let second_source_attempt_run_id = continuation.attempt_run_id().to_string();
         assign_continuation_agent_run_identity(

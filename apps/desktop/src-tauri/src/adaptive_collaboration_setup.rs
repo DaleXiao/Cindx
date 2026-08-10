@@ -9,6 +9,7 @@ pub(super) struct AdaptiveCollaborationSetup {
     pub(super) execution_contract: ConductorExecutionContract,
     pub(super) resume_key: String,
     pub(super) workflow_checkpoint: Option<WorkflowExecutionCheckpoint>,
+    pub(super) checkpoint_resumable: bool,
     pub(super) resumed_from_workflow_id: Option<String>,
     pub(super) resumed_from_checkpoint: bool,
     pub(super) prior: Option<WorkflowTopologyPrior>,
@@ -17,7 +18,6 @@ pub(super) struct AdaptiveCollaborationSetup {
     pub(super) prompt_genome: ConductorPromptGenome,
     pub(super) prompt_genome_json: String,
     pub(super) shared_memory: String,
-    pub(super) anchor_spec: AdaptiveCollaborationSpec,
     pub(super) cancellation: Option<Arc<AgentRunControl>>,
 }
 
@@ -59,7 +59,7 @@ pub(super) fn prepare_adaptive_collaboration(
                 parse_policy(&policy).unwrap_or(OrchestrationPolicy::AutoRouter),
             )
         });
-    let (resume_key, mut workflow_checkpoint) = load_workflow_checkpoint_for_run(
+    let (resume_key, loaded_checkpoint) = load_workflow_checkpoint_for_run(
         state,
         task_id,
         run_context,
@@ -68,30 +68,40 @@ pub(super) fn prepare_adaptive_collaboration(
         &policy,
         models,
     )?;
+    let checkpoint_resumable = loaded_checkpoint
+        .as_ref()
+        .is_some_and(|loaded| loaded.resumable);
+    let mut workflow_checkpoint = loaded_checkpoint.map(|loaded| loaded.checkpoint);
+    let checkpoint_loaded = workflow_checkpoint.is_some();
     let resumed_from_workflow_id = workflow_checkpoint
         .as_ref()
         .map(|checkpoint| checkpoint.plan.workflow_id.clone());
-    if let Some(checkpoint) = workflow_checkpoint.as_mut() {
+    if checkpoint_resumable {
+        let checkpoint = workflow_checkpoint
+            .as_mut()
+            .expect("resumable workflow checkpoint must be loaded");
         let prior_workflow_id = checkpoint.plan.workflow_id.clone();
         rebind_checkpoint_grounding_provenance(checkpoint, &prior_workflow_id, collaboration_id)?;
         checkpoint.plan.workflow_id = collaboration_id.to_string();
         let additional_turns = checkpoint.plan.budget.max_model_turns_per_step;
         checkpoint.continue_with_budget(additional_turns, workflow_started_at_ms);
     }
-    let resumed_from_checkpoint = workflow_checkpoint.is_some();
-    let prior = if resumed_from_checkpoint {
+    let resumed_from_checkpoint = checkpoint_resumable;
+    let prior = if checkpoint_loaded {
         None
     } else {
         workflow_prior_for_run(state, run_context, models, agent_budget)?
     };
     let route_workflow_proposal =
-        route_workflow_proposal_from_context(run_context, resumed_from_checkpoint, models)?;
-    let strategy_genome = (!resumed_from_checkpoint)
+        route_workflow_proposal_from_context(run_context, checkpoint_loaded, models)?;
+    let strategy_genome = (!checkpoint_loaded)
         .then(|| run_context.get("prompt_genome"))
         .flatten()
         .and_then(|encoded| serde_json::from_str::<ConductorPromptGenome>(encoded).ok());
     let selection_mode = if resumed_from_checkpoint {
         "checkpoint_resume".to_string()
+    } else if checkpoint_loaded {
+        "checkpoint_owner_handoff".to_string()
     } else if strategy_genome.is_some() {
         run_context
             .get("prompt_profile_source")
@@ -140,7 +150,6 @@ pub(super) fn prepare_adaptive_collaboration(
     )?;
 
     let shared_memory = collaboration_context_for_genome(history, prompt_genome.context_policy);
-    let anchor_spec = direct_anchor_spec(&role_hints, prompt, &shared_memory);
     let cancellation =
         active_agent_run_control(state, run_context.get("session_id").map(String::as_str))?;
     if collaboration_steer_pending(cancellation.as_ref()) {
@@ -155,6 +164,7 @@ pub(super) fn prepare_adaptive_collaboration(
         execution_contract,
         resume_key,
         workflow_checkpoint,
+        checkpoint_resumable,
         resumed_from_workflow_id,
         resumed_from_checkpoint,
         prior,
@@ -163,7 +173,6 @@ pub(super) fn prepare_adaptive_collaboration(
         prompt_genome,
         prompt_genome_json,
         shared_memory,
-        anchor_spec,
         cancellation,
     })
 }

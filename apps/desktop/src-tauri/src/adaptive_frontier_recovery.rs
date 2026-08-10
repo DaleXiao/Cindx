@@ -22,15 +22,12 @@ pub(super) struct AdaptiveStepRecoveryContext<'a, 'state> {
     pub(super) workspace_root: &'a Path,
     pub(super) run_context: &'a Metadata,
     pub(super) collaboration_id: &'a str,
-    pub(super) prompt: &'a str,
     pub(super) models: &'a [String],
     pub(super) prompt_genome: &'a ConductorPromptGenome,
     pub(super) cancellation: Option<Arc<AgentRunControl>>,
     pub(super) spec: &'a AdaptiveCollaborationSpec,
     pub(super) workflow_checkpoint: &'a mut WorkflowExecutionCheckpoint,
     pub(super) anytime_controller: &'a AnytimeController,
-    pub(super) anchor_supervisor: Option<&'a ParallelJobSupervisor<CollaborationCompletion>>,
-    pub(super) direct_anchor_verifier: Option<&'a DirectAnchorVerifier>,
 }
 
 pub(super) fn settle_adaptive_step(
@@ -45,15 +42,12 @@ pub(super) fn settle_adaptive_step(
         workspace_root,
         run_context,
         collaboration_id,
-        prompt,
         models,
         prompt_genome,
         cancellation,
         spec,
         workflow_checkpoint,
         anytime_controller,
-        anchor_supervisor,
-        direct_anchor_verifier,
     } = context;
 
     if collaboration_steer_pending(cancellation.as_ref()) {
@@ -64,8 +58,6 @@ pub(super) fn settle_adaptive_step(
             collaboration_id,
             workflow_checkpoint,
             anytime_controller,
-            anchor_supervisor,
-            direct_anchor_verifier,
         )?;
         return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
     }
@@ -81,6 +73,7 @@ pub(super) fn settle_adaptive_step(
         &spec.model,
         &spec.request_id,
         &completion,
+        adaptive_step_attribution(&spec.output_kind, &role),
         &metadata,
     )?;
     if completion
@@ -178,11 +171,12 @@ pub(super) fn settle_adaptive_step(
         }
 
         let recovery_attempt = attempts.saturating_add(1);
+        let distinct_models = adaptive_distinct_recovery_models(spec, workflow_checkpoint, models);
         let replacement_model = match adaptive_recovery_model(
             &spec.step_id,
             &completed_model,
             recovery_attempt,
-            models,
+            &distinct_models,
             prompt_genome.retry_policy,
             &failure,
         ) {
@@ -203,6 +197,23 @@ pub(super) fn settle_adaptive_step(
                 )));
             }
         };
+        if let Some(error) =
+            adaptive_worker_model_distinctness_error(spec, &replacement_model, workflow_checkpoint)
+        {
+            fail_adaptive_step(
+                state,
+                task_id,
+                run_context,
+                collaboration_id,
+                workflow_checkpoint,
+                &spec.step_id,
+                &error,
+            )?;
+            return Ok(AdaptiveStepSettlement::Failed(format!(
+                "step {} failed after recovery: {error}",
+                spec.step_id
+            )));
+        }
         workflow_checkpoint.begin_step_with_attempt_limit(
             &spec.step_id,
             &replacement_model,
@@ -227,7 +238,6 @@ pub(super) fn settle_adaptive_step(
             workspace_root,
             run_context,
             collaboration_id,
-            user_prompt: prompt,
             spec,
             failed: &effective_completion,
             failed_model: &completed_model,
@@ -251,8 +261,6 @@ pub(super) fn settle_adaptive_step(
                         collaboration_id,
                         workflow_checkpoint,
                         anytime_controller,
-                        anchor_supervisor,
-                        direct_anchor_verifier,
                     )?;
                     return Err(COLLABORATION_STEER_INTERRUPTED.to_string());
                 }

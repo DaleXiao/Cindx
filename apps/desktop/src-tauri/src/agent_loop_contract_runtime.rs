@@ -1,6 +1,5 @@
 use crate::desktop_prelude::*;
 use crate::{
-    app_state::AppState, event_persistence::append_event,
     prepared_task_state_metadata::prepared_task_state_from_legacy_metadata,
     runtime_values::agent_runtime_context_for_run,
 };
@@ -530,31 +529,6 @@ pub(super) fn synchronize_noop_control_epoch_context(
     agent_runtime_context_for_run(run_context)
 }
 
-pub(super) fn record_retained_agent_decision_after_noop_steer(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
-    run_context: &Metadata,
-) -> Result<(), String> {
-    let mut metadata = run_context.clone();
-    metadata.insert(
-        "decision_source".to_string(),
-        "retained_after_noop_steer".to_string(),
-    );
-    metadata.insert("decision_attempts".to_string(), "0".to_string());
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_event(
-        &mut store,
-        task_id,
-        EventKind::TaskStatusChanged,
-        "Agent run decision selected",
-        metadata,
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(())
-}
 
 #[cfg(test)]
 #[path = "agent_loop_contract_runtime_tests.rs"]

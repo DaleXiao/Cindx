@@ -1773,6 +1773,215 @@ fn preparation_commit_linearizes_against_new_steers() {
 }
 
 #[test]
+fn agent_strategy_lifecycle_contract_preparation_checkpoint_linearizes_without_starting_execution()
+{
+    let control = AgentRunControl::with_budget(test_budget());
+    assert!(control.begin_preparation());
+
+    assert_eq!(
+        control
+            .commit_preparation_checkpoint_with(0, || Ok::<_, ()>("decision"))
+            .unwrap(),
+        RunPreparationCheckpoint::Committed("decision")
+    );
+    assert!(matches!(
+        control.execution_epoch_lease(),
+        RunEpochLeaseOutcome::RestartAfterSteer
+    ));
+    assert!(control.commit_preparation(0));
+}
+
+#[test]
+fn agent_strategy_lifecycle_contract_preparation_checkpoint_rejects_steer_and_cancel_winners() {
+    let steered = AgentRunControl::with_budget(test_budget());
+    assert!(steered.begin_preparation());
+    assert_eq!(steered.request_steer("new-objective"), Ok(true));
+    let mut persisted = false;
+    assert_eq!(
+        steered
+            .commit_preparation_checkpoint_with(0, || {
+                persisted = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        RunPreparationCheckpoint::RestartAfterSteer
+    );
+    assert!(!persisted);
+
+    let cancelled = AgentRunControl::with_budget(test_budget());
+    assert!(cancelled.begin_preparation());
+    assert!(cancelled.request_cancel());
+    let mut persisted = false;
+    assert!(matches!(
+        cancelled
+            .commit_preparation_checkpoint_with(0, || {
+                persisted = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        RunPreparationCheckpoint::Stopped(RunStopReason::UserCancelled)
+    ));
+    assert!(!persisted);
+}
+
+#[test]
+fn agent_strategy_lifecycle_contract_start_checkpoint_preserves_pending_steers_and_rejects_cancel_winner(
+) {
+    let steered = AgentRunControl::with_budget(test_budget());
+    assert_eq!(steered.request_steer("queued-objective"), Ok(true));
+    assert_eq!(
+        steered
+            .commit_start_checkpoint_with(|| Ok::<_, ()>("started"))
+            .unwrap(),
+        RunStartCheckpoint::Committed("started")
+    );
+    assert_eq!(
+        steered
+            .pending_steers_snapshot()
+            .into_iter()
+            .map(|steer| steer.queue_id)
+            .collect::<Vec<_>>(),
+        vec!["queued-objective".to_string()]
+    );
+
+    let cancelled = AgentRunControl::with_budget(test_budget());
+    assert!(cancelled.request_cancel());
+    let mut persisted = false;
+    assert!(matches!(
+        cancelled
+            .commit_start_checkpoint_with(|| {
+                persisted = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        RunStartCheckpoint::Stopped(RunStopReason::UserCancelled)
+    ));
+    assert!(!persisted);
+}
+
+#[test]
+fn agent_strategy_lifecycle_contract_start_checkpoint_linearizes_a_concurrent_cancel_after_the_start_commit(
+) {
+    let control = Arc::new(AgentRunControl::with_budget(test_budget()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_control = Arc::clone(&control);
+    let writer = thread::spawn(move || {
+        writer_control
+            .commit_start_checkpoint_with(|| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok::<_, ()>("started")
+            })
+            .unwrap()
+    });
+    entered_rx.recv().unwrap();
+
+    let (attempting_tx, attempting_rx) = mpsc::channel();
+    let (cancelled_tx, cancelled_rx) = mpsc::channel();
+    let cancel_control = Arc::clone(&control);
+    let canceller = thread::spawn(move || {
+        attempting_tx.send(()).unwrap();
+        let cancelled = cancel_control.request_cancel();
+        cancelled_tx.send(cancelled).unwrap();
+    });
+    attempting_rx.recv().unwrap();
+    thread::yield_now();
+    assert!(cancelled_rx.try_recv().is_err());
+
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        writer.join().unwrap(),
+        RunStartCheckpoint::Committed("started")
+    );
+    assert!(cancelled_rx.recv().unwrap());
+    canceller.join().unwrap();
+    assert_eq!(control.stop_reason(), Some(RunStopReason::UserCancelled));
+}
+
+#[test]
+fn agent_strategy_lifecycle_contract_preparation_terminal_linearizes_failure_steer_and_cancel() {
+    let cancelled = AgentRunControl::with_budget(test_budget());
+    assert!(cancelled.begin_preparation());
+    assert!(cancelled.request_cancel());
+    let mut cancelled_writer_ran = false;
+    assert!(matches!(
+        cancelled
+            .commit_preparation_terminal_with(0, || {
+                cancelled_writer_ran = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        RunTerminalCommit::Stopped(RunStopReason::UserCancelled)
+    ));
+    assert!(!cancelled_writer_ran);
+
+    let steered = AgentRunControl::with_budget(test_budget());
+    assert!(steered.begin_preparation());
+    assert_eq!(steered.request_steer("new-objective"), Ok(true));
+    let mut steered_writer_ran = false;
+    assert_eq!(
+        steered
+            .commit_preparation_terminal_with(0, || {
+                steered_writer_ran = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        RunTerminalCommit::RestartAfterSteer
+    );
+    assert!(!steered_writer_ran);
+
+    let control = Arc::new(AgentRunControl::with_budget(test_budget()));
+    assert!(control.begin_preparation());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let terminal_control = Arc::clone(&control);
+    let terminal = thread::spawn(move || {
+        terminal_control
+            .commit_preparation_terminal_with(0, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok::<_, ()>("failed")
+            })
+            .unwrap()
+    });
+    entered_rx.recv().unwrap();
+
+    let (cancelled_tx, cancelled_rx) = mpsc::channel();
+    let cancel_control = Arc::clone(&control);
+    let canceller = thread::spawn(move || {
+        cancelled_tx.send(cancel_control.request_cancel()).unwrap();
+    });
+    let (steered_tx, steered_rx) = mpsc::channel();
+    let steer_control = Arc::clone(&control);
+    let steerer = thread::spawn(move || {
+        steered_tx
+            .send(
+                steer_control
+                    .commit_steer_request_with("too-late", || Ok::<_, ()>(()))
+                    .unwrap(),
+            )
+            .unwrap();
+    });
+    thread::yield_now();
+    assert!(cancelled_rx.try_recv().is_err());
+    assert!(steered_rx.try_recv().is_err());
+
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        terminal.join().unwrap(),
+        RunTerminalCommit::Committed("failed")
+    );
+    assert!(!cancelled_rx.recv().unwrap());
+    assert_eq!(
+        steered_rx.recv().unwrap(),
+        RunSteerRequestCommit::TerminalCommitted
+    );
+    canceller.join().unwrap();
+    steerer.join().unwrap();
+}
+
+#[test]
 fn terminal_commit_rejects_a_stale_response_after_the_steer_is_applied() {
     let control = AgentRunControl::new("pro");
     let stale_lease = match control.execution_epoch_lease() {
