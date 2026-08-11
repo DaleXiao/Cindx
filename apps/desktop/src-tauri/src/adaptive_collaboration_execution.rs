@@ -91,7 +91,10 @@ pub(crate) fn run_adaptive_collaboration(
     });
     workflow_checkpoint.plan = workflow_plan.clone();
     workflow_checkpoint.prompt_genome_json = prompt_genome_json.clone();
-    workflow_checkpoint.validate(models)?;
+    let validation_models = crate::agent_conductor_runtime::unique_configured_models(
+        &crate::workflow_routing_runtime::model_candidates_for_config(config),
+    );
+    workflow_checkpoint.validate(&validation_models)?;
     let anytime_controller =
         initialize_anytime_controller(&execution_contract, &workflow, &mut workflow_checkpoint)?;
     persist_anytime_controller(&mut workflow_checkpoint, &anytime_controller)?;

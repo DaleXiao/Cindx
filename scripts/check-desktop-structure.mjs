@@ -3215,11 +3215,17 @@ assert(
   "Session title, context usage, and runtime status must be integrated into the window titlebar"
 );
 assert(
-  settingsPageSource.includes("Default effort") &&
-    settingsPageSource.includes("Cindx Fast") &&
-    settingsPageSource.includes("Cindx Auto") &&
-    settingsPageSource.includes("Cindx Pro"),
-  "Provider settings must expose the three Cindx effort modes"
+  settingsModelsPanelSource.includes("Model profiles") &&
+    settingsModelsPanelSource.includes('label="Primary"') &&
+    settingsModelsPanelSource.includes('label="Reasoning"') &&
+    settingsModelsPanelSource.includes('label="Verifier"') &&
+    settingsModelsPanelSource.includes('label="Utility"') &&
+    settingsModelsPanelSource.includes("Planning service override") &&
+    settingsModelsPanelSource.includes("Fast &amp; compatibility") &&
+    settingsModelsPanelSource.includes("Apply to all profiles") &&
+    !settingsModelsPanelSource.includes("Default effort") &&
+    !settingsModelsPanelSource.includes("4 worker roles"),
+  "Provider settings must expose model profiles and services without legacy role semantics"
 );
 assert(settingsPageSource.includes("Archived sessions"), "Settings must expose archived session recovery");
 assert(

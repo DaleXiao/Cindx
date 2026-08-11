@@ -3,7 +3,9 @@ use crate::agent_collaboration_runtime::{
     adaptive_collaboration_model_catalog, collaboration_candidate_handoff, collaboration_candidate_quorum,
     collaboration_candidate_quorum_grace, collaboration_error_blocks_executor,
 };
-use crate::agent_conductor_runtime::{conductor_call_limits, conductor_repair_recovery_window};
+use crate::agent_conductor_runtime::{
+    conductor_call_limits, conductor_model_sequence, conductor_repair_recovery_window,
+};
 use crate::agent_conductor_scheduler::{
     schedule_conductor_decision, ConductorDecisionOutcome, ConductorDecisionSchedule,
 };
@@ -388,7 +390,7 @@ fn agent_execution_graph_contract_adaptive_capacity_is_independent_from_parallel
     let models = adaptive_collaboration_model_catalog(&config, Some("specialist-a"));
     assert_eq!(models.first().map(String::as_str), Some("specialist-a"));
     assert!(models.iter().any(|model| model == "verifier-b"));
-    assert!(models.iter().any(|model| model == "utility-c"));
+    assert!(!models.iter().any(|model| model == "utility-c"));
 
     for verification in [
         AgentVerificationPolicy::None,
@@ -422,9 +424,20 @@ fn agent_execution_graph_contract_adaptive_capacity_is_independent_from_parallel
             );
             proposal.steps[2].access = vec!["verify".to_string()];
         }
+        proposal.steps.last_mut().unwrap().model = "utility-c".to_string();
 
         let (max_steps, max_models) = route_workflow_capacity(&proposal);
+        assert_eq!(
+            max_models,
+            if verification == AgentVerificationPolicy::Independent {
+                2
+            } else {
+                1
+            }
+        );
         let execution_contract = decision.execution_contract("pro");
+        let mut validation_models = models.clone();
+        validation_models.push("utility-c".to_string());
         let harness = ConductorHarness::new(ConductorRequest {
             workflow_id: "owner-execution-capacity".to_string(),
             objective: "prepare a bounded owner handoff".to_string(),
@@ -433,7 +446,7 @@ fn agent_execution_graph_contract_adaptive_capacity_is_independent_from_parallel
             policy: "best_of_n".to_string(),
             conductor_model: "conductor".to_string(),
             primary_model: "specialist-a".to_string(),
-            worker_models: models.clone(),
+            worker_models: validation_models,
             role_hints: ConductorRoleHints {
                 planner: "specialist-a".to_string(),
                 executor: "specialist-a".to_string(),
@@ -459,6 +472,7 @@ fn agent_execution_graph_contract_adaptive_capacity_is_independent_from_parallel
         let plan = harness
             .plan_from_proposal(&proposal)
             .expect("sequential owner execution proposal should materialize");
+        assert_eq!(plan.physical_model_count(), max_models);
         plan.validate_owner_execution_graph(
             verification == AgentVerificationPolicy::Independent,
         )
@@ -5549,7 +5563,7 @@ fn custom_catalog_must_include_the_configured_chat_model() {
 }
 
 #[test]
-fn ensemble_uses_distinct_role_models_in_stable_order() {
+fn production_model_pools_keep_utility_and_verifier_in_their_own_lanes() {
     let config = ProviderConfig {
         model: "default".to_string(),
         conductor_model: "conductor-z".to_string(),
@@ -5562,31 +5576,45 @@ fn ensemble_uses_distinct_role_models_in_stable_order() {
 
     assert_eq!(
         collaboration_candidate_models(&config, 3),
-        vec![
-            "planner-a".to_string(),
-            "executor-b".to_string(),
-            "reviewer-c".to_string(),
-        ]
+        vec!["planner-a".to_string(), "executor-b".to_string()]
     );
     assert_eq!(config.model_for_conductor(), "conductor-z");
     let oversized_pool = collaboration_candidate_models(&config, 5);
-    assert_eq!(oversized_pool.len(), MAX_ADAPTIVE_WORKFLOW_AGENTS);
+    assert_eq!(oversized_pool.len(), 2);
     assert!(!oversized_pool.contains(&"conductor-z".to_string()));
+    assert!(!oversized_pool.contains(&"reviewer-c".to_string()));
+    assert!(!oversized_pool.contains(&"summary-d".to_string()));
 
-    let worker_models = collaboration_candidate_models(&config, 3);
+    let worker_models = adaptive_collaboration_model_catalog(&config, Some("executor-b"));
     let hints = collaboration_role_hints(&config, &worker_models);
     assert_eq!(hints.planner, "planner-a");
     assert_eq!(hints.executor, "executor-b");
     assert_eq!(hints.reviewer, "reviewer-c");
-    assert_eq!(hints.synthesizer, "planner-a");
+    assert_eq!(hints.synthesizer, "executor-b");
     assert!([
         &hints.planner,
         &hints.executor,
         &hints.reviewer,
         &hints.synthesizer,
     ]
-    .iter()
-    .all(|model| worker_models.contains(model)));
+        .iter()
+        .all(|model| worker_models.contains(model)));
+
+    let routed_candidates = model_candidates_for_config(&config);
+    assert!(routed_candidates
+        .iter()
+        .any(|candidate| candidate.role == ModelRole::Reviewer));
+    assert!(routed_candidates
+        .iter()
+        .any(|candidate| candidate.role == ModelRole::Summarizer));
+    assert_eq!(
+        conductor_model_sequence(&config),
+        vec![
+            "conductor-z".to_string(),
+            "planner-a".to_string(),
+            "executor-b".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -5599,7 +5627,7 @@ fn role_hints_preserve_configured_model_reuse() {
         summarizer_model: "frontier".to_string(),
         ..ProviderConfig::default()
     };
-    let worker_models = collaboration_candidate_models(&config, 3);
+    let worker_models = adaptive_collaboration_model_catalog(&config, Some("frontier"));
     let hints = collaboration_role_hints(&config, &worker_models);
 
     assert_eq!(hints.planner, "frontier");

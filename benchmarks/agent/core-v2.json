@@ -362,25 +362,25 @@
       "id": "complex-production-migration",
       "category": "complex_collaboration",
       "prompt": "Compare production migration architectures, investigate root causes, and propose a safe strategy.",
-      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "reviewer" }
+      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "planner" }
     },
     {
       "id": "complex-security-architecture",
       "category": "complex_collaboration",
       "prompt": "Investigate and compare a critical security architecture tradeoff before production migration.",
-      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "reviewer" }
+      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "planner" }
     },
     {
       "id": "complex-chinese-migration",
       "category": "complex_collaboration",
       "prompt": "比较生产迁移架构，深入调查根因并制定安全策略。",
-      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "reviewer" }
+      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "planner" }
     },
     {
       "id": "complex-legal-financial",
       "category": "complex_collaboration",
       "prompt": "Compare legal and financial risks across critical migration strategies.",
-      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "reviewer" }
+      "expected": { "task_class": "research", "auto_policy": "best_of_n", "auto_candidates": 3, "retrieval_mode": "none", "primary_model_role": "planner" }
     },
     {
       "id": "complex-bounded-coding",
@@ -441,7 +441,7 @@
       "id": "latency-high-stakes",
       "category": "latency_sensitive",
       "prompt": "Quickly compare production migration strategies.",
-      "expected": { "task_class": "research", "auto_policy": "plan_execute_review", "retrieval_mode": "none", "primary_model_role": "reviewer" }
+      "expected": { "task_class": "research", "auto_policy": "plan_execute_review", "retrieval_mode": "none", "primary_model_role": "planner" }
     }
   ]
 }

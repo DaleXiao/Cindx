@@ -1,8 +1,9 @@
 use super::{causal_route, requirements, AgentPlanningSource, PlannedAgentRun};
 use orchestrator::{
-    AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
-    CausalRouteSelectionV2, ConductorPromptGenome, ExecutionPlan, ExecutionPlanDecisionReason,
-    ModelCandidate, WorkflowPlanProposal,
+    validate_primary_model_profile, validate_workflow_model_profiles, AgentExecutionMode,
+    AgentPolicy, AgentRouteRequirements, AgentRunDecision, CausalRouteSelectionV2,
+    ConductorPromptGenome, ExecutionPlan, ExecutionPlanDecisionReason, ModelCandidate,
+    WorkflowPlanProposal,
 };
 
 pub(super) struct PlannedRunFinalizeInput {
@@ -59,6 +60,11 @@ pub(super) fn finalize_planned_run(
         &candidates,
         route_requirements,
     )?;
+    validate_primary_model_profile(&decision, &candidates)?;
+    validate_primary_model_profile(&conductor_candidate, &candidates)?;
+    if let Some(workflow_plan) = workflow_plan.as_ref() {
+        validate_workflow_model_profiles(workflow_plan, &candidates)?;
+    }
     let compatibility_route = causal_route::finalize_causal_route(
         prompt,
         &recent_context,
