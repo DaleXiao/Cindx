@@ -519,7 +519,11 @@ pub(crate) fn adaptive_collaboration_model_catalog(
     config: &ProviderConfig,
     primary_model: Option<&str>,
 ) -> Vec<String> {
-    let mut models = unique_configured_models(&model_candidates_for_config(config));
+    let dispatch_candidates = model_candidates_for_config(config)
+        .into_iter()
+        .filter(|candidate| candidate.role != ModelRole::Summarizer)
+        .collect::<Vec<_>>();
+    let mut models = unique_configured_models(&dispatch_candidates);
     if let Some(primary_index) = primary_model
         .map(str::trim)
         .filter(|model| !model.is_empty())

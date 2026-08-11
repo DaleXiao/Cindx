@@ -16,7 +16,7 @@ fn auto_transfer_followup_uses_the_current_pro_contract() {
     assert_eq!(effort, "pro");
     assert_eq!(policy, "best_of_n");
     assert_eq!(agent_budget, AgentPolicy::Pro.max_parallelism());
-    assert_eq!(worker_models, vec!["planner", "executor", "reviewer"]);
+    assert_eq!(worker_models, vec!["planner", "executor"]);
     assert_eq!(profile.id, ConductorPromptGenome::seed_for_effort("pro").id);
     assert!(profile.require_final_synthesis);
 }

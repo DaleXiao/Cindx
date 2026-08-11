@@ -73,6 +73,10 @@ fn terminal_selection_stage(
         .unwrap_or_else(|| fallback_stage.to_string())
 }
 
+fn routed_terminal_model(config: &ProviderConfig, run_context: &Metadata) -> String {
+    crate::configuration_models::agent_model_for_run(config, run_context)
+}
+
 fn terminal_selection_is_eligible(
     candidate: &agent_runtime::BestKnownResult,
     delivered_answer: &str,
@@ -263,7 +267,7 @@ pub(crate) fn finalize_agent_completion(
                     } else if delivery.used_fallback() {
                         "grounded-fallback".to_string()
                     } else {
-                        config.model_for_role(&ModelRole::Summarizer)
+                        routed_terminal_model(config, run_context)
                     },
                 ),
                 (
@@ -636,6 +640,28 @@ mod tests {
             "short synthesis",
             true
         ));
+    }
+
+    #[test]
+    fn finalizer_metadata_uses_the_routed_owner_model_not_the_utility_profile() {
+        let config = ProviderConfig {
+            executor_model: "primary".to_string(),
+            summarizer_model: "utility".to_string(),
+            ..ProviderConfig::default()
+        };
+        let run_context = Metadata::from([(
+            "agent_model".to_string(),
+            "routed-primary".to_string(),
+        )]);
+
+        assert_eq!(
+            routed_terminal_model(&config, &run_context),
+            "routed-primary"
+        );
+        assert_ne!(
+            routed_terminal_model(&config, &run_context),
+            config.model_for_role(&ModelRole::Summarizer)
+        );
     }
 
     #[test]

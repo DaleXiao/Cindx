@@ -15,6 +15,7 @@ pub(super) struct AdaptiveWaveCompletion {
 
 pub(super) struct AdaptiveWavePlanningContext<'a, 'state> {
     pub(super) state: &'a tauri::State<'state, AppState>,
+    pub(super) config: &'a ProviderConfig,
     pub(super) task_id: &'a TaskId,
     pub(super) run_context: &'a Metadata,
     pub(super) collaboration_id: &'a str,
@@ -39,6 +40,7 @@ pub(super) fn prepare_adaptive_wave(
 ) -> Result<AdaptiveWave, String> {
     let AdaptiveWavePlanningContext {
         state,
+        config,
         task_id,
         run_context,
         collaboration_id,
@@ -138,16 +140,25 @@ pub(super) fn prepare_adaptive_wave(
         .collect::<Result<Vec<_>, String>>()?;
 
     for spec in &mut specs {
-        if let Some(error) =
-            adaptive_worker_model_distinctness_error(spec, &spec.model, workflow_checkpoint)
-        {
-            let Some(replacement_model) = models.iter().find(|model| {
-                adaptive_worker_model_distinctness_error(spec, model, workflow_checkpoint).is_none()
-            }) else {
-                return Err(error);
-            };
-            spec.model = replacement_model.clone();
+        let eligible_models =
+            adaptive_dispatch_models_for_output(config, &spec.output_kind, models);
+        let profile_eligible = eligible_models.iter().any(|model| model == &spec.model);
+        let distinctness_error =
+            adaptive_worker_model_distinctness_error(spec, &spec.model, workflow_checkpoint);
+        if profile_eligible && distinctness_error.is_none() {
+            continue;
         }
+        let Some(replacement_model) = eligible_models.iter().find(|model| {
+            adaptive_worker_model_distinctness_error(spec, model, workflow_checkpoint).is_none()
+        }) else {
+            return Err(distinctness_error.unwrap_or_else(|| {
+                format!(
+                    "workflow step {} has no configured dispatch model for {:?}",
+                    spec.step_id, spec.output_kind
+                )
+            }));
+        };
+        spec.model = replacement_model.clone();
     }
 
     let claimed_steps = workflow_checkpoint.claim_steps(
@@ -191,7 +202,7 @@ pub(super) fn prepare_adaptive_wave(
             &role,
             &spec.model,
             &spec.request_id,
-            adaptive_step_attribution(&spec.output_kind, &role),
+            adaptive_step_attribution(config, &spec.output_kind, &spec.model)?,
             &metadata,
         )?;
     }

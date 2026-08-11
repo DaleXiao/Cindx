@@ -40,11 +40,30 @@ production Workflow decision or own final delivery.
 Background prompt mutation is recorded as a learning utility service, not a
 production Specialist.
 
+The provider configuration keeps its legacy storage keys, but their current
+product semantics are explicit:
+
+- `model` is the Fast-preferred compatibility execution model.
+- `executor_model` is the Primary profile.
+- `planner_model` is the Reasoning profile.
+- `reviewer_model` is the Verifier profile.
+- `summarizer_model` is the Utility profile.
+- `conductor_model` is a planning-service override, not an Actor profile.
+
+These slots do not assign permanent Actors to models. A concrete model may be
+configured in more than one slot, but each call is admitted by the slot needed
+for that lane: Primary and Reasoning models may execute the direct or Specialist
+path, a Verifier model may enter only the verification lane, and a model
+configured only as Utility cannot enter production routing, workflow execution,
+or Conductor fallback. The compatibility model can be copied to all four
+profiles only through an explicit Settings action; it does not overwrite the
+planning-service override.
+
 These fields are an event-local sidecar on current Agent model request events.
 Started and finished events reuse the same explicit attribution selected at the
-call site. Existing `role`, `stage`, model configuration slots, summaries, and
-event counts are preserved for compatibility; legacy events without the schema
-remain legacy and are not reclassified from display strings.
+call site. Existing `role`, `stage`, persisted model keys, summaries, and event
+counts are preserved for compatibility; legacy events without the schema remain
+legacy and are not reclassified from display strings.
 
 ## Crate Ownership
 

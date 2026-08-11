@@ -94,10 +94,7 @@ pub(crate) fn conductor_model_sequence(config: &ProviderConfig) -> Vec<String> {
     [
         config.model_for_conductor(),
         config.model_for_role(&ModelRole::Planner),
-        config.model_for_role(&ModelRole::Reviewer),
-        config.model_for_role(&ModelRole::Summarizer),
         config.model_for_role(&ModelRole::Executor),
-        config.model.clone(),
     ]
     .into_iter()
     .filter_map(|model| {

@@ -267,7 +267,7 @@ The current release is
 `Cindx-0.2.30-macOS-arm64.zip`. Do not commit application archives to the Git
 tree; publish them as GitHub Release assets.
 
-The locally installed `0.2.33` classifier-repair validation build is not a
+The locally installed `0.2.34` model-semantics validation build is not a
 GitHub release; its exact source, archive digest, and signature evidence are
 recorded in [HANDOFF.md](HANDOFF.md).
 

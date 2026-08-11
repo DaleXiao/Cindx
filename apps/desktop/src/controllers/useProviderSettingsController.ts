@@ -24,6 +24,7 @@ import {
   resolveProviderReadiness,
   type ProviderReadiness
 } from "../providerReadinessModel";
+import { configuredModelProfileCount } from "../providerModelAllocation";
 
 function normalizedEffortPolicy(policy: string) {
   if (policy === "single" || policy === "best_of_n") return policy;
@@ -226,14 +227,7 @@ export function useProviderSettingsController({
     setProviderModelsError(null);
   }, [providerApiKey]);
 
-  const collaborationModelCount = providerDraft
-    ? new Set([
-        providerDraft.plannerModel,
-        providerDraft.executorModel,
-        providerDraft.reviewerModel,
-        providerDraft.summarizerModel
-      ]).size
-    : 0;
+  const modelProfileCount = configuredModelProfileCount(providerDraft);
 
   const refreshProviderModels = useCallback(
     async (draft: ProviderConfigInput) => {
@@ -356,7 +350,7 @@ export function useProviderSettingsController({
   );
 
   return {
-    collaborationModelCount,
+    modelProfileCount,
     handleLoadProviderModels,
     handlePromptEvolutionToggle,
     handleSaveProviderConfig,

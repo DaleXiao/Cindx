@@ -204,7 +204,7 @@ impl ConductorHarness {
                 })
                 .collect(),
         };
-        self.validate_shape(&workflow)?;
+        self.validate_shape(&workflow, Some(&semantics))?;
         self.build_plan(&workflow, Some(&semantics))
     }
 
@@ -257,7 +257,7 @@ impl ConductorHarness {
                 })
                 .collect(),
         };
-        self.validate_shape(&workflow)?;
+        self.validate_shape(&workflow, Some(&semantics))?;
         self.build_plan(&workflow, Some(&semantics))
     }
 
@@ -382,7 +382,7 @@ impl ConductorHarness {
         });
 
         let workflow = AdaptiveWorkflow { steps };
-        self.validate_shape(&workflow)?;
+        self.validate_shape(&workflow, None)?;
         self.build_plan(&workflow, None)
     }
 
@@ -477,11 +477,22 @@ impl ConductorHarness {
         Ok(plan)
     }
 
-    fn validate_shape(&self, workflow: &AdaptiveWorkflow) -> Result<(), String> {
+    fn validate_shape(
+        &self,
+        workflow: &AdaptiveWorkflow,
+        semantics: Option<&[ConductorStepSemantics]>,
+    ) -> Result<(), String> {
         let selected_models = workflow
             .steps
             .iter()
-            .map(|step| step.model.as_str())
+            .enumerate()
+            .filter(|(index, _)| {
+                semantics
+                    .and_then(|values| values.get(*index))
+                    .and_then(|value| value.output_kind.as_ref())
+                    != Some(&WorkflowOutputKind::Synthesis)
+            })
+            .map(|(_, step)| step.model.as_str())
             .collect::<BTreeSet<_>>();
         if selected_models.len() > self.request.budget.max_models {
             return Err(format!(

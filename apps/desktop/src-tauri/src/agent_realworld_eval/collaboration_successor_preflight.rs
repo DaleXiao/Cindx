@@ -172,7 +172,18 @@ pub(in super::super) fn provider_binding(
     if role_models.values().any(|model| model.trim().is_empty()) {
         return Err("successor preflight requires every collaboration model role".into());
     }
-    let ordered_pool = crate::collaboration_execution::collaboration_candidate_models(config, 3);
+    let mut seen_worker_models = BTreeSet::new();
+    let ordered_pool = [
+        ModelRole::Planner,
+        ModelRole::Executor,
+        ModelRole::Reviewer,
+    ]
+    .into_iter()
+    .filter_map(|role| {
+        let model = config.model_for_role(&role).trim().to_string();
+        (!model.is_empty() && seen_worker_models.insert(model.clone())).then_some(model)
+    })
+    .collect::<Vec<_>>();
     if ordered_pool.len() != 3 {
         return Err("successor preflight requires exactly three distinct worker models".into());
     }
