@@ -1,14 +1,29 @@
 use super::*;
+use crate::agent_realworld_eval::delivery_verification_protocol::{
+    DeliveryVerificationOutputProperty, DeliveryVerificationOutputType,
+};
 use agent_runtime::{
     DeliveryVerificationSubjectV1, DeliveryVerificationVerdictV1, GroundedCompletionBasis,
     GroundedCompletionReceipt, DELIVERY_VERIFICATION_VERDICT_SCHEMA, GROUNDED_COMPLETION_SCHEMA,
     MAX_DELIVERY_VERIFICATION_BOUND_CONTEXT_BYTES,
 };
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 const OBJECTIVE: &str = "Answer using only the supplied evidence.";
 const DRAFT: &str = "The observed color is amber.";
 const REPAIRED_DRAFT: &str = "The supplied evidence reports the color as amber.";
+
+static OUTPUT_CONTRACT: LazyLock<DeliveryVerificationOutputContract> =
+    LazyLock::new(|| DeliveryVerificationOutputContract {
+        format: "json_object".to_string(),
+        additional_properties: false,
+        all_properties_required: true,
+        properties: vec![DeliveryVerificationOutputProperty {
+            name: "color".to_string(),
+            value_type: DeliveryVerificationOutputType::String,
+        }],
+    });
 
 fn grounded_receipt(candidate: &str, model_turn: u64) -> GroundedCompletionReceipt {
     GroundedCompletionReceipt {
@@ -78,6 +93,7 @@ fn verifier_input<'a>(
     DeliveryVerificationRequestInput {
         subject,
         objective: OBJECTIVE,
+        output_contract: &OUTPUT_CONTRACT,
         obligations,
         evidence,
         owner_draft: DRAFT,
@@ -273,6 +289,7 @@ fn agent_delivery_verification_contract_repair_uses_actual_owner_role_and_binds_
     let prepared = prepare_owner_repair_request(DeliveryRepairRequestInput {
         subject: &subject,
         objective: OBJECTIVE,
+        output_contract: &OUTPUT_CONTRACT,
         obligations: &obligations,
         evidence: &evidence,
         owner_draft: DRAFT,
@@ -317,6 +334,7 @@ fn agent_delivery_verification_contract_repair_accepts_planner_and_rejects_non_o
     let make_input = |owner_role| DeliveryRepairRequestInput {
         subject: &subject,
         objective: OBJECTIVE,
+        output_contract: &OUTPUT_CONTRACT,
         obligations: &obligations,
         evidence: &evidence,
         owner_draft: DRAFT,
@@ -380,6 +398,7 @@ fn agent_delivery_verification_contract_request_rejects_replaced_bound_content()
     assert!(prepare_owner_repair_request(DeliveryRepairRequestInput {
         subject: &subject,
         objective: OBJECTIVE,
+        output_contract: &OUTPUT_CONTRACT,
         obligations: &obligations,
         evidence: &changed_evidence,
         owner_draft: DRAFT,

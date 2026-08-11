@@ -12,31 +12,39 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-protocol.v2";
+    "cindx.agent-eval.delivery-verification-protocol.v3";
 pub(super) const DELIVERY_VERIFICATION_SUITE_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-suite.v1";
+    "cindx.agent-eval.delivery-verification-suite.v3";
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_ID: &str =
-    "cindx-delivery-verification-protocol-v2";
+    "cindx-delivery-verification-protocol-v3";
 pub(super) const CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID: &str =
     "cindx-delivery-verification-protocol-v1";
-pub(super) const DELIVERY_VERIFICATION_SUITE_ID: &str = "cindx-delivery-verification-v1";
+pub(super) const CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID: &str =
+    "cindx-delivery-verification-protocol-v2";
+pub(super) const DELIVERY_VERIFICATION_SUITE_ID: &str = "cindx-delivery-verification-v3";
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH: &str =
-    "benchmarks/agent/delivery-verification-protocol-v2.json";
+    "benchmarks/agent/delivery-verification-protocol-v3.json";
 pub(super) const DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH: &str =
-    "benchmarks/agent/delivery-verification-v1.json";
+    "benchmarks/agent/delivery-verification-v3.json";
 pub(super) const DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME: &str =
-    "cindx-delivery-verification-v2-execute";
+    "cindx-delivery-verification-v3-execute";
 pub(super) const DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-execution-journal.v2";
+    "cindx.agent-eval.delivery-verification-execution-journal.v3";
 
 const CASE_COUNT: usize = 32;
 const CALIBRATION_CASE_COUNT: usize = 8;
 const HOLDOUT_CASE_COUNT: usize = 24;
-const CASE_DIGEST_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-case.v1\0";
-const CASE_ORDER_DIGEST_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-case-order.v1\0";
+const CASE_DIGEST_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-case.v3\0";
+const CASE_ORDER_DIGEST_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-case-order.v3\0";
 const HIDDEN_ORACLE_DIGEST_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-model-hidden-oracle.v1\0";
-const BUDGET_DIGEST_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-budget.v1\0";
+    b"cindx.agent-eval.delivery-verification-model-hidden-oracle.v3\0";
+const BUDGET_DIGEST_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-budget.v3\0";
+const SEEDED_CANDIDATES_DIGEST_DOMAIN: &[u8] =
+    b"cindx.agent-eval.delivery-verification-seeded-candidates.v3\0";
+const MODEL_INPUTS_DIGEST_DOMAIN: &[u8] =
+    b"cindx.agent-eval.delivery-verification-model-inputs.v3\0";
+const OUTPUT_CONTRACTS_DIGEST_DOMAIN: &[u8] =
+    b"cindx.agent-eval.delivery-verification-output-contracts.v3\0";
 const MAX_PROTOCOL_BYTES: usize = 256 * 1024;
 const MAX_SUITE_BYTES: usize = 1024 * 1024;
 const MAX_OBJECTIVE_BYTES: usize = 4 * 1024;
@@ -68,6 +76,9 @@ struct FrozenSuite {
     case_count: usize,
     case_order_sha256: String,
     hidden_oracle_sha256: String,
+    seeded_candidates_sha256: String,
+    model_inputs_sha256: String,
+    output_contracts_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,7 +93,13 @@ struct FrozenDesign {
     minimum_evidence_items_per_case: usize,
     case_order: String,
     matched_arms: Vec<String>,
-    shared_owner_draft: bool,
+    seeded_control: bool,
+    seeded_defect_strata: Vec<DeliveryVerificationStratum>,
+    clean_sentinel_stratum: DeliveryVerificationStratum,
+    calibration_seeded_defects: usize,
+    calibration_clean_sentinels: usize,
+    holdout_seeded_defects: usize,
+    holdout_clean_sentinels: usize,
     control_output: String,
     treatment_workflow: Vec<String>,
     max_owner_repairs_per_case: usize,
@@ -90,6 +107,7 @@ struct FrozenDesign {
     owner_and_verifier_models_must_differ: bool,
     oracle_predicate: String,
     oracle_visibility: String,
+    output_contract_visibility: String,
     tool_calls_allowed: bool,
 }
 
@@ -101,6 +119,7 @@ struct FrozenInstrumentation {
     reservation_digest_authorities: Vec<String>,
     terminal_request_payload_binding: String,
     execution_journal_schema: String,
+    case_telemetry: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,8 +143,9 @@ pub(super) struct ProtocolBudget {
 #[serde(deny_unknown_fields)]
 struct CalibrationGate {
     complete_cases: usize,
-    minimum_control_failures: usize,
+    expected_control_failures: usize,
     minimum_treatment_only_wins: usize,
+    minimum_wins_per_defect_stratum: usize,
     maximum_control_only_losses: usize,
     maximum_structural_failures: usize,
     maximum_treatment_execution_failures: usize,
@@ -138,16 +158,19 @@ struct CalibrationGate {
 #[serde(deny_unknown_fields)]
 struct HoldoutDecision {
     complete_cases: usize,
+    expected_control_failures: usize,
     minimum_treatment_only_wins: usize,
+    minimum_wins_per_defect_stratum: usize,
     maximum_control_only_losses: usize,
     maximum_structural_failures: usize,
     maximum_treatment_execution_failures: usize,
-    primary_test: String,
+    primary_metric: String,
+    reference_null_success_rate_millionths: u64,
     alpha_millionths: u64,
-    five_zero_p_millionths: u64,
+    thirteen_of_eighteen_p_millionths: u64,
     calibration_results_excluded: bool,
     incomplete_pairs: String,
-    no_regression_required: bool,
+    finite_frozen_suite_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,8 +179,8 @@ struct StopContract {
     calibration_gate_failure: String,
     any_structural_failure: String,
     any_treatment_execution_failure: String,
-    any_holdout_control_only_loss: String,
-    insufficient_holdout_wins: String,
+    any_holdout_clean_sentinel_loss: String,
+    insufficient_holdout_repairs: String,
     budget_exhaustion: String,
     case_replacement: String,
     frozen_attempt_rerun: String,
@@ -189,15 +212,17 @@ struct DeliveryVerificationSuite {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DeliveryVerificationCase {
     ordinal: usize,
     id: String,
     split: DeliveryVerificationSplit,
     stratum: DeliveryVerificationStratum,
     objective: String,
+    output_contract: DeliveryVerificationOutputContract,
     obligations: Vec<DeliveryVerificationObligation>,
     evidence: Vec<DeliveryVerificationEvidence>,
+    seed: SeededCandidate,
     oracle: ModelHiddenOracle,
 }
 
@@ -224,12 +249,60 @@ const STRATA: [DeliveryVerificationStratum; 4] = [
     DeliveryVerificationStratum::Preservation,
 ];
 
+const DEFECT_STRATA: [DeliveryVerificationStratum; 3] = [
+    DeliveryVerificationStratum::UnsupportedClaim,
+    DeliveryVerificationStratum::OmittedObligation,
+    DeliveryVerificationStratum::Contradiction,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct DeliveryVerificationOutputContract {
+    pub(super) format: String,
+    pub(super) additional_properties: bool,
+    pub(super) all_properties_required: bool,
+    pub(super) properties: Vec<DeliveryVerificationOutputProperty>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeliveryVerificationOutputProperty {
+    pub(super) name: String,
+    #[serde(rename = "type")]
+    pub(super) value_type: DeliveryVerificationOutputType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DeliveryVerificationOutputType {
+    String,
+    Integer,
+    Boolean,
+    Null,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SeedKind {
+    UnsupportedClaim,
+    OmittedObligation,
+    Contradiction,
+    CleanPreservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SeededCandidate {
+    candidate: String,
+    hidden_metadata_from_model: bool,
+    kind: SeedKind,
+    expected_finding_kind: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModelHiddenOracle {
     hidden_from_model: bool,
-    required_groups: Vec<Vec<String>>,
-    forbidden: Vec<String>,
     exact_json: Value,
 }
 
@@ -240,8 +313,12 @@ pub(super) struct ValidatedProtocol<'a> {
     manifest_sha256: String,
     suite_sha256: String,
     case_sha256s: Vec<String>,
+    case_order_sha256: String,
     budget_sha256: String,
     hidden_oracle_sha256: String,
+    seeded_candidates_sha256: String,
+    model_inputs_sha256: String,
+    output_contracts_sha256: String,
 }
 
 #[derive(Clone, Copy)]
@@ -254,8 +331,10 @@ pub(super) struct ValidatedCase<'a> {
 #[serde(rename_all = "camelCase")]
 struct ModelInput<'a> {
     objective: &'a str,
+    output_contract: &'a DeliveryVerificationOutputContract,
     obligations: &'a [DeliveryVerificationObligation],
     evidence: &'a [DeliveryVerificationEvidence],
+    seeded_candidate: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,6 +351,10 @@ pub(super) struct MatchedPairCounts {
     pub(super) control_only_losses: usize,
     pub(super) structural_failures: usize,
     pub(super) treatment_execution_failures: usize,
+    pub(super) unsupported_claim_wins: usize,
+    pub(super) omitted_obligation_wins: usize,
+    pub(super) contradiction_wins: usize,
+    pub(super) preservation_losses: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,9 +367,9 @@ pub(super) enum CalibrationDecision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HoldoutDecisionResult {
-    EvidenceOfUplift,
-    NoEvidence,
-    Regression,
+    SeededRepairEffective,
+    NotEffective,
+    PreservationRegression,
     Inconclusive,
     Invalid,
 }
@@ -308,6 +391,9 @@ pub(super) fn parse_and_validate_protocol<'a>(
     let case_sha256s = validate_suite(&suite)?;
     let case_order_sha256 = case_order_digest(&suite, &case_sha256s)?;
     let hidden_oracle_sha256 = hidden_oracle_digest(&suite)?;
+    let seeded_candidates_sha256 = seeded_candidates_digest(&suite)?;
+    let model_inputs_sha256 = model_inputs_digest(&suite, &case_sha256s)?;
+    let output_contracts_sha256 = output_contracts_digest(&suite)?;
     let budget_sha256 = domain_hash_json(
         BUDGET_DIGEST_DOMAIN,
         &manifest.budget,
@@ -319,6 +405,9 @@ pub(super) fn parse_and_validate_protocol<'a>(
         &suite_sha256,
         &case_order_sha256,
         &hidden_oracle_sha256,
+        &seeded_candidates_sha256,
+        &model_inputs_sha256,
+        &output_contracts_sha256,
     )?;
 
     Ok(ValidatedProtocol {
@@ -328,8 +417,12 @@ pub(super) fn parse_and_validate_protocol<'a>(
         manifest_sha256: sha256_hex(manifest_bytes),
         suite_sha256,
         case_sha256s,
+        case_order_sha256,
         budget_sha256,
         hidden_oracle_sha256,
+        seeded_candidates_sha256,
+        model_inputs_sha256,
+        output_contracts_sha256,
     })
 }
 
@@ -358,6 +451,10 @@ impl ValidatedProtocol<'_> {
         &self.case_sha256s
     }
 
+    pub(super) fn case_order_sha256(&self) -> &str {
+        &self.case_order_sha256
+    }
+
     pub(super) fn budget(&self) -> &ProtocolBudget {
         &self.manifest.budget
     }
@@ -368,6 +465,18 @@ impl ValidatedProtocol<'_> {
 
     pub(super) fn hidden_oracle_sha256(&self) -> &str {
         &self.hidden_oracle_sha256
+    }
+
+    pub(super) fn seeded_candidates_sha256(&self) -> &str {
+        &self.seeded_candidates_sha256
+    }
+
+    pub(super) fn model_inputs_sha256(&self) -> &str {
+        &self.model_inputs_sha256
+    }
+
+    pub(super) fn output_contracts_sha256(&self) -> &str {
+        &self.output_contracts_sha256
     }
 
     pub(super) fn execution_authorized(&self) -> bool {
@@ -418,6 +527,10 @@ impl ValidatedCase<'_> {
         &self.case.objective
     }
 
+    pub(super) fn output_contract(&self) -> &DeliveryVerificationOutputContract {
+        &self.case.output_contract
+    }
+
     pub(super) fn obligations(&self) -> &[DeliveryVerificationObligation] {
         &self.case.obligations
     }
@@ -430,11 +543,25 @@ impl ValidatedCase<'_> {
         self.case_sha256
     }
 
+    pub(super) fn seeded_candidate(&self) -> &str {
+        &self.case.seed.candidate
+    }
+
+    pub(super) fn seeded_candidate_sha256(&self) -> String {
+        sha256_hex(self.case.seed.candidate.as_bytes())
+    }
+
+    pub(super) fn seeded_candidate_bytes(&self) -> u64 {
+        u64::try_from(self.case.seed.candidate.len()).unwrap_or(u64::MAX)
+    }
+
     pub(super) fn model_input_bytes(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(&ModelInput {
             objective: &self.case.objective,
+            output_contract: &self.case.output_contract,
             obligations: &self.case.obligations,
             evidence: &self.case.evidence,
+            seeded_candidate: &self.case.seed.candidate,
         })
         .map_err(|error| format!("could not encode model-facing case input: {error}"))
     }
@@ -446,25 +573,11 @@ impl ValidatedCase<'_> {
         let Ok(parsed) = parse_unique_json(output) else {
             return OracleEvaluation::Failed;
         };
-        if parsed != self.case.oracle.exact_json {
-            return OracleEvaluation::Failed;
+        if parsed == self.case.oracle.exact_json {
+            OracleEvaluation::Passed
+        } else {
+            OracleEvaluation::Failed
         }
-        if self
-            .case
-            .oracle
-            .required_groups
-            .iter()
-            .any(|group| !group.iter().any(|needle| output.contains(needle)))
-            || self
-                .case
-                .oracle
-                .forbidden
-                .iter()
-                .any(|needle| output.contains(needle))
-        {
-            return OracleEvaluation::Failed;
-        }
-        OracleEvaluation::Passed
     }
 }
 
@@ -478,9 +591,14 @@ pub(super) fn calibration_decision(counts: MatchedPairCounts) -> CalibrationDeci
     {
         return CalibrationDecision::Inconclusive;
     }
+    if counts.control_failures != 6 || counts.preservation_losses != counts.control_only_losses {
+        return CalibrationDecision::Invalid;
+    }
     if counts.control_only_losses > 0
-        || counts.control_failures < 2
-        || counts.treatment_only_wins < 1
+        || counts.treatment_only_wins < 4
+        || counts.unsupported_claim_wins < 1
+        || counts.omitted_obligation_wins < 1
+        || counts.contradiction_wins < 1
     {
         return CalibrationDecision::TerminalFutility;
     }
@@ -497,13 +615,20 @@ pub(super) fn holdout_decision(counts: MatchedPairCounts) -> HoldoutDecisionResu
     {
         return HoldoutDecisionResult::Inconclusive;
     }
-    if counts.control_only_losses > 0 {
-        return HoldoutDecisionResult::Regression;
+    if counts.control_failures != 18 || counts.preservation_losses != counts.control_only_losses {
+        return HoldoutDecisionResult::Invalid;
     }
-    if counts.treatment_only_wins >= 5 {
-        HoldoutDecisionResult::EvidenceOfUplift
+    if counts.control_only_losses > 0 {
+        return HoldoutDecisionResult::PreservationRegression;
+    }
+    if counts.treatment_only_wins >= 13
+        && counts.unsupported_claim_wins >= 4
+        && counts.omitted_obligation_wins >= 4
+        && counts.contradiction_wins >= 4
+    {
+        HoldoutDecisionResult::SeededRepairEffective
     } else {
-        HoldoutDecisionResult::NoEvidence
+        HoldoutDecisionResult::NotEffective
     }
 }
 
@@ -615,12 +740,20 @@ fn counts_are_possible(counts: MatchedPairCounts, maximum_cases: usize) -> bool 
         && counts.treatment_only_wins + counts.control_only_losses <= counts.complete_cases
         && counts.structural_failures <= maximum_cases - counts.complete_cases
         && counts.treatment_execution_failures <= maximum_cases
+        && counts.unsupported_claim_wins <= counts.treatment_only_wins
+        && counts.omitted_obligation_wins <= counts.treatment_only_wins
+        && counts.contradiction_wins <= counts.treatment_only_wins
+        && counts.unsupported_claim_wins
+            + counts.omitted_obligation_wins
+            + counts.contradiction_wins
+            == counts.treatment_only_wins
+        && counts.preservation_losses == counts.control_only_losses
 }
 
 fn validate_suite(suite: &DeliveryVerificationSuite) -> Result<Vec<String>, String> {
     if suite.schema != DELIVERY_VERIFICATION_SUITE_SCHEMA
         || suite.id != DELIVERY_VERIFICATION_SUITE_ID
-        || suite.version != 1
+        || suite.version != 3
         || suite.description.trim().is_empty()
         || suite.cases.len() != CASE_COUNT
     {
@@ -715,7 +848,9 @@ fn validate_case(case: &DeliveryVerificationCase) -> Result<(), String> {
             case.id
         ));
     }
-    validate_oracle(&case.id, &case.oracle)
+    validate_oracle(&case.id, &case.oracle)?;
+    validate_output_contract(&case.id, &case.output_contract, &case.oracle.exact_json)?;
+    validate_seed(case)
 }
 
 fn validate_oracle(case_id: &str, oracle: &ModelHiddenOracle) -> Result<(), String> {
@@ -724,61 +859,165 @@ fn validate_oracle(case_id: &str, oracle: &ModelHiddenOracle) -> Result<(), Stri
             "delivery verification case {case_id} exact oracle is not an object"
         ));
     };
-    if !oracle.hidden_from_model
-        || exact_object.is_empty()
-        || oracle.required_groups.is_empty()
-        || oracle.forbidden.is_empty()
-    {
+    if !oracle.hidden_from_model || exact_object.is_empty() {
         return Err(format!(
             "delivery verification case {case_id} has an incomplete model-hidden oracle"
         ));
     }
-    let exact_json = serde_json::to_string(&oracle.exact_json)
-        .map_err(|error| format!("could not encode case {case_id} exact oracle: {error}"))?;
-    let mut required = BTreeSet::new();
-    for group in &oracle.required_groups {
-        if group.is_empty() {
+    Ok(())
+}
+
+fn validate_output_contract(
+    case_id: &str,
+    contract: &DeliveryVerificationOutputContract,
+    exact_json: &Value,
+) -> Result<(), String> {
+    let exact = exact_json
+        .as_object()
+        .ok_or_else(|| format!("delivery verification case {case_id} gold is not an object"))?;
+    if contract.format != "json_object"
+        || contract.additional_properties
+        || !contract.all_properties_required
+        || contract.properties.is_empty()
+    {
+        return Err(format!(
+            "delivery verification case {case_id} output contract is not exact"
+        ));
+    }
+    let mut names = BTreeSet::new();
+    for property in &contract.properties {
+        if !is_lower_snake(&property.name) || !names.insert(property.name.as_str()) {
             return Err(format!(
-                "delivery verification case {case_id} has an empty required group"
+                "delivery verification case {case_id} output contract has an invalid property"
             ));
         }
-        let mut group_values = BTreeSet::new();
-        for value in group {
-            validate_text(value, 256, "oracle required value")?;
-            if !group_values.insert(value.as_str()) || !required.insert(value.as_str()) {
-                return Err(format!(
-                    "delivery verification case {case_id} repeats an oracle predicate"
-                ));
-            }
-        }
-        if !group.iter().any(|value| exact_json.contains(value)) {
+        let value = exact.get(&property.name).ok_or_else(|| {
+            format!("delivery verification case {case_id} output contract misses its hidden gold")
+        })?;
+        if !output_type_matches(property.value_type, value) {
             return Err(format!(
-                "delivery verification case {case_id} required oracle group misses exact JSON"
+                "delivery verification case {case_id} output type differs from hidden gold"
             ));
         }
     }
-    let mut forbidden = BTreeSet::new();
-    for value in &oracle.forbidden {
-        validate_text(value, 256, "oracle forbidden value")?;
-        if !forbidden.insert(value.as_str()) || exact_json.contains(value) {
-            return Err(format!(
-                "delivery verification case {case_id} has a conflicting forbidden predicate"
-            ));
-        }
+    if names.len() != exact.len() || exact.keys().any(|name| !names.contains(name.as_str())) {
+        return Err(format!(
+            "delivery verification case {case_id} output keys differ from hidden gold"
+        ));
     }
     Ok(())
 }
 
+fn output_type_matches(expected: DeliveryVerificationOutputType, value: &Value) -> bool {
+    match expected {
+        DeliveryVerificationOutputType::String => value.is_string(),
+        DeliveryVerificationOutputType::Integer => {
+            value.as_i64().is_some() || value.as_u64().is_some()
+        }
+        DeliveryVerificationOutputType::Boolean => value.is_boolean(),
+        DeliveryVerificationOutputType::Null => value.is_null(),
+    }
+}
+
+fn validate_seed(case: &DeliveryVerificationCase) -> Result<(), String> {
+    if !case.seed.hidden_metadata_from_model
+        || case.seed.candidate.is_empty()
+        || case.seed.candidate.len() > MAX_ORACLE_OUTPUT_BYTES
+    {
+        return Err(format!(
+            "delivery verification case {} has an invalid seeded candidate",
+            case.id
+        ));
+    }
+    let seed = parse_unique_json(&case.seed.candidate).map_err(|_| {
+        format!(
+            "delivery verification case {} seed is not unique JSON",
+            case.id
+        )
+    })?;
+    let seed = seed.as_object().ok_or_else(|| {
+        format!(
+            "delivery verification case {} seeded candidate is not an object",
+            case.id
+        )
+    })?;
+    let gold = case
+        .oracle
+        .exact_json
+        .as_object()
+        .expect("validated gold object");
+    let invalid = match case.stratum {
+        DeliveryVerificationStratum::UnsupportedClaim => {
+            case.seed.kind != SeedKind::UnsupportedClaim
+                || case.seed.expected_finding_kind.as_deref() != Some("unsupported_claim")
+                || !is_single_added_property(seed, gold)
+        }
+        DeliveryVerificationStratum::OmittedObligation => {
+            case.seed.kind != SeedKind::OmittedObligation
+                || case.seed.expected_finding_kind.as_deref() != Some("omitted_obligation")
+                || !is_single_removed_property(seed, gold)
+        }
+        DeliveryVerificationStratum::Contradiction => {
+            case.seed.kind != SeedKind::Contradiction
+                || case.seed.expected_finding_kind.as_deref() != Some("contradiction")
+                || !is_single_replaced_property(seed, gold)
+        }
+        DeliveryVerificationStratum::Preservation => {
+            case.seed.kind != SeedKind::CleanPreservation
+                || case.seed.expected_finding_kind.is_some()
+                || seed != gold
+        }
+    };
+    if invalid {
+        return Err(format!(
+            "delivery verification case {} seed does not match its frozen mutation",
+            case.id
+        ));
+    }
+    Ok(())
+}
+
+fn is_single_added_property(
+    seed: &serde_json::Map<String, Value>,
+    gold: &serde_json::Map<String, Value>,
+) -> bool {
+    seed.len() == gold.len() + 1 && gold.iter().all(|(key, value)| seed.get(key) == Some(value))
+}
+
+fn is_single_removed_property(
+    seed: &serde_json::Map<String, Value>,
+    gold: &serde_json::Map<String, Value>,
+) -> bool {
+    seed.len() + 1 == gold.len() && seed.iter().all(|(key, value)| gold.get(key) == Some(value))
+}
+
+fn is_single_replaced_property(
+    seed: &serde_json::Map<String, Value>,
+    gold: &serde_json::Map<String, Value>,
+) -> bool {
+    seed.len() == gold.len()
+        && seed.keys().all(|key| gold.contains_key(key))
+        && seed
+            .iter()
+            .filter(|(key, value)| gold.get(*key) != Some(*value))
+            .count()
+            == 1
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_manifest(
     manifest: &ProtocolManifest,
     suite: &DeliveryVerificationSuite,
     suite_sha256: &str,
     case_order_sha256: &str,
     hidden_oracle_sha256: &str,
+    seeded_candidates_sha256: &str,
+    model_inputs_sha256: &str,
+    output_contracts_sha256: &str,
 ) -> Result<(), String> {
     if manifest.schema != DELIVERY_VERIFICATION_PROTOCOL_SCHEMA
         || manifest.id != DELIVERY_VERIFICATION_PROTOCOL_ID
-        || manifest.version != 2
+        || manifest.version != 3
         || manifest.suite.path != DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH
         || manifest.suite.sha256 != suite_sha256
         || manifest.suite.schema != suite.schema
@@ -786,6 +1025,9 @@ fn validate_manifest(
         || manifest.suite.case_count != CASE_COUNT
         || manifest.suite.case_order_sha256 != case_order_sha256
         || manifest.suite.hidden_oracle_sha256 != hidden_oracle_sha256
+        || manifest.suite.seeded_candidates_sha256 != seeded_candidates_sha256
+        || manifest.suite.model_inputs_sha256 != model_inputs_sha256
+        || manifest.suite.output_contracts_sha256 != output_contracts_sha256
     {
         return Err("delivery verification protocol suite binding is invalid".into());
     }
@@ -807,6 +1049,18 @@ fn validate_instrumentation(instrumentation: &FrozenInstrumentation) -> Result<(
             != "request_payload_sha256_equals_reserved_wire_payload_sha256"
         || instrumentation.execution_journal_schema
             != DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA
+        || instrumentation.case_telemetry
+            != [
+                "initial_verifier_decision",
+                "initial_finding_counts",
+                "repair_activated",
+                "recheck_decision",
+                "recheck_finding_counts",
+                "treatment_disposition",
+                "failure_stage",
+                "failure_code",
+                "outcome_reason",
+            ]
     {
         return Err("delivery verification instrumentation authority is invalid".into());
     }
@@ -823,11 +1077,17 @@ fn validate_design(design: &FrozenDesign) -> Result<(), String> {
         || design.minimum_evidence_items_per_case != 2
         || design.case_order != "manifest_order"
         || design.matched_arms != ["control", "treatment"]
-        || !design.shared_owner_draft
-        || design.control_output != "exact_shared_owner_draft"
+        || !design.seeded_control
+        || design.seeded_defect_strata != DEFECT_STRATA
+        || design.clean_sentinel_stratum != DeliveryVerificationStratum::Preservation
+        || design.calibration_seeded_defects != 6
+        || design.calibration_clean_sentinels != 2
+        || design.holdout_seeded_defects != 18
+        || design.holdout_clean_sentinels != 6
+        || design.control_output != "exact_frozen_seeded_candidate"
         || design.treatment_workflow
             != [
-                "shared_owner_draft",
+                "frozen_seeded_candidate",
                 "initial_verifier",
                 "optional_single_owner_repair",
                 "verifier_recheck_after_repair",
@@ -835,8 +1095,9 @@ fn validate_design(design: &FrozenDesign) -> Result<(), String> {
         || design.max_owner_repairs_per_case != 1
         || design.max_verifier_rechecks_per_case != 1
         || !design.owner_and_verifier_models_must_differ
-        || design.oracle_predicate != "required_groups_and_forbidden_and_exact_json"
-        || design.oracle_visibility != "evaluator_only_model_hidden"
+        || design.oracle_predicate != "unique_json_and_hidden_exact_semantic_value"
+        || design.oracle_visibility != "values_evaluator_only_model_hidden"
+        || design.output_contract_visibility != "keys_types_requiredness_model_visible"
         || design.tool_calls_allowed
     {
         return Err("delivery verification matched design is invalid".into());
@@ -845,9 +1106,9 @@ fn validate_design(design: &FrozenDesign) -> Result<(), String> {
 }
 
 fn validate_budget(budget: &ProtocolBudget) -> Result<(), String> {
-    if budget.max_logical_model_calls_per_case != 4
-        || budget.max_logical_model_calls_total != 128
-        || budget.max_physical_model_attempts_total != 128
+    if budget.max_logical_model_calls_per_case != 3
+        || budget.max_logical_model_calls_total != 96
+        || budget.max_physical_model_attempts_total != 96
         || budget.transport_retries != 0
         || budget.max_bound_context_bytes != MAX_DELIVERY_VERIFICATION_BOUND_CONTEXT_BYTES
         || budget.max_owner_output_tokens != 4096
@@ -865,8 +1126,9 @@ fn validate_budget(budget: &ProtocolBudget) -> Result<(), String> {
 
 fn validate_calibration_gate(gate: &CalibrationGate) -> Result<(), String> {
     if gate.complete_cases != CALIBRATION_CASE_COUNT
-        || gate.minimum_control_failures != 2
-        || gate.minimum_treatment_only_wins != 1
+        || gate.expected_control_failures != 6
+        || gate.minimum_treatment_only_wins != 4
+        || gate.minimum_wins_per_defect_stratum != 1
         || gate.maximum_control_only_losses != 0
         || gate.maximum_structural_failures != 0
         || gate.maximum_treatment_execution_failures != 0
@@ -881,16 +1143,19 @@ fn validate_calibration_gate(gate: &CalibrationGate) -> Result<(), String> {
 
 fn validate_holdout_decision(decision: &HoldoutDecision) -> Result<(), String> {
     if decision.complete_cases != HOLDOUT_CASE_COUNT
-        || decision.minimum_treatment_only_wins != 5
+        || decision.expected_control_failures != 18
+        || decision.minimum_treatment_only_wins != 13
+        || decision.minimum_wins_per_defect_stratum != 4
         || decision.maximum_control_only_losses != 0
         || decision.maximum_structural_failures != 0
         || decision.maximum_treatment_execution_failures != 0
-        || decision.primary_test != "one_sided_exact_mcnemar"
+        || decision.primary_metric != "seeded_defect_joint_repair_success"
+        || decision.reference_null_success_rate_millionths != 500_000
         || decision.alpha_millionths != 50_000
-        || decision.five_zero_p_millionths != 31_250
+        || decision.thirteen_of_eighteen_p_millionths != 48_126
         || !decision.calibration_results_excluded
         || decision.incomplete_pairs != "inconclusive"
-        || !decision.no_regression_required
+        || !decision.finite_frozen_suite_only
     {
         return Err("delivery verification holdout decision rule is invalid".into());
     }
@@ -901,8 +1166,8 @@ fn validate_stop_contract(stop: &StopContract) -> Result<(), String> {
     if stop.calibration_gate_failure != "terminal_futility"
         || stop.any_structural_failure != "inconclusive"
         || stop.any_treatment_execution_failure != "inconclusive"
-        || stop.any_holdout_control_only_loss != "regression"
-        || stop.insufficient_holdout_wins != "no_evidence"
+        || stop.any_holdout_clean_sentinel_loss != "preservation_regression"
+        || stop.insufficient_holdout_repairs != "not_effective"
         || stop.budget_exhaustion != "inconclusive"
         || stop.case_replacement != "invalidate_protocol"
         || stop.frozen_attempt_rerun != "forbidden"
@@ -976,6 +1241,90 @@ fn hidden_oracle_digest(suite: &DeliveryVerificationSuite) -> Result<String, Str
         HIDDEN_ORACLE_DIGEST_DOMAIN,
         &entries,
         "delivery verification model-hidden oracle",
+    )
+}
+
+#[derive(Serialize)]
+struct SeededCandidateDigestEntry<'a> {
+    case_id: &'a str,
+    candidate_sha256: String,
+    candidate_bytes: u64,
+}
+
+fn seeded_candidates_digest(suite: &DeliveryVerificationSuite) -> Result<String, String> {
+    let entries = suite
+        .cases
+        .iter()
+        .map(|case| SeededCandidateDigestEntry {
+            case_id: &case.id,
+            candidate_sha256: sha256_hex(case.seed.candidate.as_bytes()),
+            candidate_bytes: u64::try_from(case.seed.candidate.len()).unwrap_or(u64::MAX),
+        })
+        .collect::<Vec<_>>();
+    domain_hash_json(
+        SEEDED_CANDIDATES_DIGEST_DOMAIN,
+        &entries,
+        "delivery verification seeded candidates",
+    )
+}
+
+#[derive(Serialize)]
+struct ModelInputDigestEntry<'a> {
+    case_id: &'a str,
+    case_sha256: &'a str,
+    model_input_sha256: String,
+}
+
+fn model_inputs_digest(
+    suite: &DeliveryVerificationSuite,
+    case_sha256s: &[String],
+) -> Result<String, String> {
+    let entries = suite
+        .cases
+        .iter()
+        .zip(case_sha256s)
+        .map(|(case, case_sha256)| {
+            let bytes = serde_json::to_vec(&ModelInput {
+                objective: &case.objective,
+                output_contract: &case.output_contract,
+                obligations: &case.obligations,
+                evidence: &case.evidence,
+                seeded_candidate: &case.seed.candidate,
+            })
+            .map_err(|error| format!("could not encode model-facing case input: {error}"))?;
+            Ok(ModelInputDigestEntry {
+                case_id: &case.id,
+                case_sha256,
+                model_input_sha256: sha256_hex(&bytes),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    domain_hash_json(
+        MODEL_INPUTS_DIGEST_DOMAIN,
+        &entries,
+        "delivery verification model inputs",
+    )
+}
+
+#[derive(Serialize)]
+struct OutputContractDigestEntry<'a> {
+    case_id: &'a str,
+    output_contract: &'a DeliveryVerificationOutputContract,
+}
+
+fn output_contracts_digest(suite: &DeliveryVerificationSuite) -> Result<String, String> {
+    let entries = suite
+        .cases
+        .iter()
+        .map(|case| OutputContractDigestEntry {
+            case_id: &case.id,
+            output_contract: &case.output_contract,
+        })
+        .collect::<Vec<_>>();
+    domain_hash_json(
+        OUTPUT_CONTRACTS_DIGEST_DOMAIN,
+        &entries,
+        "delivery verification output contracts",
     )
 }
 
@@ -1077,6 +1426,16 @@ fn is_lower_kebab(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         && !value.contains("--")
+}
+
+fn is_lower_snake(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('_')
+        && !value.ends_with('_')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && !value.contains("__")
 }
 
 #[cfg(test)]

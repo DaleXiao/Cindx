@@ -3,8 +3,12 @@ use crate::agent_realworld_eval::delivery_verification_preflight::{
     build_receipt, DeliveryVerificationSourceBindingReceipt,
 };
 use crate::agent_realworld_eval::delivery_verification_requests::{
-    prepare_owner_draft_request, DeliveryOwnerDraftRequestInput, DeliveryVerificationRequestBudget,
+    prepare_verifier_request, DeliveryVerificationRequestBudget, DeliveryVerificationRequestInput,
     MAX_DELIVERY_VERIFICATION_REQUEST_BYTES,
+};
+use agent_runtime::{
+    DeliveryVerificationSubjectV1, GroundedCompletionBasis, GroundedCompletionReceipt,
+    GROUNDED_COMPLETION_SCHEMA,
 };
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
@@ -48,11 +52,11 @@ fn protocol() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-protocol-v2.json"
+            "/../../../benchmarks/agent/delivery-verification-protocol-v3.json"
         )),
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-v1.json"
+            "/../../../benchmarks/agent/delivery-verification-v3.json"
         )),
     )
     .unwrap()
@@ -158,28 +162,62 @@ fn create_journal(
     (temp, output_root, journal)
 }
 
-fn owner_call(protocol: &ValidatedProtocol<'_>) -> PreparedDeliveryCall {
+fn initial_verifier_call(protocol: &ValidatedProtocol<'_>) -> PreparedDeliveryCall {
     let case = protocol.calibration_cases().next().unwrap();
-    let prepared = prepare_owner_draft_request(DeliveryOwnerDraftRequestInput {
+    let seeded_candidate = case.seeded_candidate();
+    let owner_receipt = GroundedCompletionReceipt {
+        schema: GROUNDED_COMPLETION_SCHEMA.to_string(),
+        steer_epoch: 0,
+        contract_epoch: 0,
+        model_turn: 0,
+        content_sha256: sha256_hex(seeded_candidate.as_bytes()),
+        content_bytes: u64::try_from(seeded_candidate.len()).unwrap(),
+        obligation_digest: sha256_hex(&case.model_input_bytes().unwrap()),
+        covered_obligation_ids: case
+            .obligations()
+            .iter()
+            .map(|item| item.obligation_ref.clone())
+            .collect(),
+        visible_evidence_sequences: case
+            .evidence()
+            .iter()
+            .map(|item| item.evidence_ref)
+            .collect(),
+        constraint_codes: Vec::new(),
+        basis: GroundedCompletionBasis::EvidenceVisible,
+    };
+    let subject = DeliveryVerificationSubjectV1::bind(
+        case.objective(),
+        seeded_candidate,
+        &owner_receipt,
+        case.obligations(),
+        case.evidence(),
+    )
+    .unwrap();
+    let prepared = prepare_verifier_request(DeliveryVerificationRequestInput {
+        subject: &subject,
         objective: case.objective(),
+        output_contract: case.output_contract(),
         obligations: case.obligations(),
         evidence: case.evidence(),
+        owner_draft: seeded_candidate,
         owner_model: OWNER_MODEL,
+        verifier_model: VERIFIER_MODEL,
         budget: DeliveryVerificationRequestBudget {
             max_request_bytes: MAX_DELIVERY_VERIFICATION_REQUEST_BYTES,
-            max_output_tokens: protocol.budget().max_owner_output_tokens,
+            max_output_tokens: protocol.budget().max_verifier_output_tokens,
         },
     })
     .unwrap();
     let binding = prepared.binding().clone();
     PreparedDeliveryCall {
         case_ordinal: case.ordinal(),
-        stage: DeliveryVerificationCallStageV1::OwnerDraft,
-        role: ModelRole::Executor,
-        configured_model: OWNER_MODEL.into(),
+        stage: DeliveryVerificationCallStageV1::VerifierInitial,
+        role: ModelRole::Reviewer,
+        configured_model: VERIFIER_MODEL.into(),
         canonical_request_sha256: binding.canonical_request_sha256,
         canonical_request_bytes: binding.canonical_request_bytes,
-        max_output_tokens: protocol.budget().max_owner_output_tokens,
+        max_output_tokens: protocol.budget().max_verifier_output_tokens,
         request: prepared.into_request(),
     }
 }
@@ -309,7 +347,8 @@ fn run_loopback(served_model: &str, record_structural_case: bool) -> LoopbackRun
     let protocol = protocol();
     let config = provider_config(base_url);
     let (_temp, output_root, mut journal) = create_journal(&protocol, &config);
-    let call = owner_call(&protocol);
+    let case = protocol.calibration_cases().next().unwrap();
+    let call = initial_verifier_call(&protocol);
     let semantic_request_sha256 = call.canonical_request_sha256.clone();
     let semantic_request_bytes = call.canonical_request_bytes;
     let prepared_provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
@@ -341,13 +380,22 @@ fn run_loopback(served_model: &str, record_structural_case: bool) -> LoopbackRun
         };
         runtime.record_case(&CaseOutcome {
             ordinal: 1,
+            stratum: case.stratum(),
             status: CaseStatus::StructuralFailure,
-            owner_draft_sha256: None,
-            owner_draft_bytes: None,
-            control_output_sha256: None,
+            seeded_candidate_sha256: Some(case.seeded_candidate_sha256()),
+            seeded_candidate_bytes: Some(case.seeded_candidate_bytes()),
+            control_output_sha256: Some(case.seeded_candidate_sha256()),
             treatment_output_sha256: None,
             control_passed: None,
             treatment_passed: None,
+            initial_verifier_decision: None,
+            initial_finding_counts: Default::default(),
+            repair_activated: false,
+            recheck_decision: None,
+            recheck_finding_counts: Default::default(),
+            treatment_disposition: None,
+            failure_stage: None,
+            failure_code: None,
             observation_sha256: sha256_hex(b"loopback structural observation"),
             reason,
         })
@@ -391,21 +439,21 @@ fn assert_exact_reserved_wire(run: &LoopbackRun) {
     assert_ne!(run.semantic_request_sha256, run.prepared_wire_sha256);
     assert_eq!(
         serde_json::from_slice::<Value>(&run.accepted.body).unwrap()["model"],
-        OWNER_MODEL
+        VERIFIER_MODEL
     );
 }
 
 #[test]
 fn agent_delivery_verification_execution_contract_loopback_dispatches_exact_prepared_wire_after_durable_reservation(
 ) {
-    let run = run_loopback(OWNER_MODEL, false);
+    let run = run_loopback(VERIFIER_MODEL, false);
     assert_exact_reserved_wire(&run);
     match run.outcome {
         CallOutcome::Completed(completed) => {
             assert_eq!(completed.content, RESPONSE_CONTENT);
             assert_eq!(
                 completed.served_model_sha256,
-                sha256_hex(OWNER_MODEL.as_bytes())
+                sha256_hex(VERIFIER_MODEL.as_bytes())
             );
         }
         other => panic!("expected completed loopback call, got {other:?}"),

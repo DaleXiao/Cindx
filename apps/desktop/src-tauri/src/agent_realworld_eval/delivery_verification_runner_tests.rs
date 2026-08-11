@@ -12,13 +12,13 @@ const VERIFIER_MODEL: &str = "verifier-configured";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScriptMode {
-    CalibrationOpenNoEvidence,
+    CalibrationOpenNotEffective,
     CalibrationFutility,
-    HoldoutUplift,
-    HoldoutRegression,
+    HoldoutSeededRepairEffective,
+    HoldoutPreservationRegression,
     InvalidVerifier,
-    OwnerFailure,
-    VerifierTimeout,
+    InitialModelFailure(DeliveryVerificationModelFailure),
+    RepairModelFailure(DeliveryVerificationModelFailure),
     SameServedModel,
 }
 
@@ -47,10 +47,22 @@ impl ScriptedRuntime {
 
     fn should_revise(&self, ordinal: usize) -> bool {
         match self.mode {
-            ScriptMode::CalibrationFutility | ScriptMode::OwnerFailure => false,
-            ScriptMode::HoldoutUplift => ordinal <= 2 || (9..=13).contains(&ordinal),
-            ScriptMode::HoldoutRegression => ordinal <= 2 || ordinal == 9,
-            _ => ordinal <= 2,
+            ScriptMode::CalibrationFutility => false,
+            ScriptMode::CalibrationOpenNotEffective => matches!(
+                ordinal,
+                1 | 2 | 3 | 5 | 9 | 10 | 11 | 13 | 14 | 15 | 17 | 18 | 19 | 21 | 22 | 23
+            ),
+            ScriptMode::HoldoutSeededRepairEffective => matches!(
+                ordinal,
+                1 | 2 | 3 | 5 | 9 | 10 | 11 | 13 | 14 | 15 | 17 | 18 | 19 | 21 | 22 | 23 | 25
+            ),
+            ScriptMode::HoldoutPreservationRegression => {
+                matches!(ordinal, 1 | 2 | 3 | 5 | 12)
+            }
+            ScriptMode::InvalidVerifier
+            | ScriptMode::InitialModelFailure(_)
+            | ScriptMode::RepairModelFailure(_)
+            | ScriptMode::SameServedModel => ordinal == 1,
         }
     }
 
@@ -95,29 +107,25 @@ impl DeliveryVerificationRuntime for ScriptedRuntime {
         assert!(payload.get("oracle").is_none());
         self.stages.push((call.case_ordinal, call.stage));
 
-        if self.mode == ScriptMode::OwnerFailure
-            && call.stage == DeliveryVerificationCallStageV1::OwnerDraft
-        {
-            return CallOutcome::ModelFailure(
-                DeliveryVerificationModelFailure::ProviderUnavailable,
+        if call.stage == DeliveryVerificationCallStageV1::VerifierInitial {
+            assert_eq!(
+                payload["ownerDraft"].as_str(),
+                Some(seeded_candidate(call.case_ordinal))
             );
         }
-        if self.mode == ScriptMode::VerifierTimeout
-            && call.stage == DeliveryVerificationCallStageV1::VerifierInitial
-        {
-            return CallOutcome::ModelFailure(DeliveryVerificationModelFailure::Timeout);
+        match (self.mode, call.stage) {
+            (
+                ScriptMode::InitialModelFailure(failure),
+                DeliveryVerificationCallStageV1::VerifierInitial,
+            )
+            | (
+                ScriptMode::RepairModelFailure(failure),
+                DeliveryVerificationCallStageV1::OwnerRepair,
+            ) => return CallOutcome::ModelFailure(failure),
+            _ => {}
         }
 
         let content = match call.stage {
-            DeliveryVerificationCallStageV1::OwnerDraft => {
-                if self.mode == ScriptMode::HoldoutRegression && call.case_ordinal == 9 {
-                    oracle_output(call.case_ordinal)
-                } else if self.should_revise(call.case_ordinal) {
-                    "{}".to_string()
-                } else {
-                    oracle_output(call.case_ordinal)
-                }
-            }
             DeliveryVerificationCallStageV1::VerifierInitial => {
                 if self.mode == ScriptMode::InvalidVerifier {
                     "not-json".to_string()
@@ -126,7 +134,8 @@ impl DeliveryVerificationRuntime for ScriptedRuntime {
                 }
             }
             DeliveryVerificationCallStageV1::OwnerRepair => {
-                if self.mode == ScriptMode::HoldoutRegression && call.case_ordinal == 9 {
+                if self.mode == ScriptMode::HoldoutPreservationRegression && call.case_ordinal == 12
+                {
                     r#"{"regressed":true}"#.to_string()
                 } else {
                     oracle_output(call.case_ordinal)
@@ -183,11 +192,11 @@ fn protocol() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-protocol-v2.json"
+            "/../../../benchmarks/agent/delivery-verification-protocol-v3.json"
         )),
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-v1.json"
+            "/../../../benchmarks/agent/delivery-verification-v3.json"
         )),
     )
     .unwrap()
@@ -198,7 +207,7 @@ fn suite() -> &'static Value {
     SUITE.get_or_init(|| {
         serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-v1.json"
+            "/../../../benchmarks/agent/delivery-verification-v3.json"
         )))
         .unwrap()
     })
@@ -206,6 +215,12 @@ fn suite() -> &'static Value {
 
 fn oracle_output(ordinal: usize) -> String {
     serde_json::to_string(&suite()["cases"][ordinal - 1]["oracle"]["exactJson"]).unwrap()
+}
+
+fn seeded_candidate(ordinal: usize) -> &'static str {
+    suite()["cases"][ordinal - 1]["seed"]["candidate"]
+        .as_str()
+        .unwrap()
 }
 
 fn verifier_verdict(payload: &Value, needs_revision: bool) -> String {
@@ -280,26 +295,52 @@ fn agent_delivery_verification_execution_contract_requires_explicit_authorize_co
     assert!(require_authorize_arguments([
         OsString::from("authorize"),
         OsString::from(AUTHORIZE_FLAG),
+        OsString::from(CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID),
+    ])
+    .is_err());
+    assert!(require_authorize_arguments([
+        OsString::from("authorize"),
+        OsString::from(AUTHORIZE_FLAG),
         OsString::from("wrong-protocol"),
     ])
     .is_err());
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_consumed_v1_cannot_authorize_or_execute() {
-    let error = reject_consumed_delivery_protocol(CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID)
-        .unwrap_err();
-    assert!(error.contains("is consumed"));
-    assert!(error.contains("successor protocol"));
-    assert!(reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID).is_ok());
-    for retired in [
-        crate::agent_realworld_eval::run_delivery_verification_preflight(),
-        crate::agent_realworld_eval::run_delivery_verification_authorize(),
-        crate::agent_realworld_eval::run_delivery_verification_execute(),
+fn agent_delivery_verification_execution_contract_consumed_v1_and_v2_entrypoints_fail_closed() {
+    for protocol_id in [
+        CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+        CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
     ] {
-        let error = retired.unwrap_err();
-        assert!(error.contains(CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID));
+        let error = reject_consumed_delivery_protocol(protocol_id).unwrap_err();
+        assert!(error.contains(protocol_id));
         assert!(error.contains("is consumed"));
+        assert!(error.contains("successor protocol"));
+    }
+    assert!(reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID).is_ok());
+    for (protocol_id, retired) in [
+        (
+            CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+            [
+                crate::agent_realworld_eval::run_delivery_verification_preflight(),
+                crate::agent_realworld_eval::run_delivery_verification_authorize(),
+                crate::agent_realworld_eval::run_delivery_verification_execute(),
+            ],
+        ),
+        (
+            CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
+            [
+                crate::agent_realworld_eval::run_delivery_verification_v2_preflight(),
+                crate::agent_realworld_eval::run_delivery_verification_v2_authorize(),
+                crate::agent_realworld_eval::run_delivery_verification_v2_execute(),
+            ],
+        ),
+    ] {
+        for result in retired {
+            let error = result.unwrap_err();
+            assert!(error.contains(protocol_id));
+            assert!(error.contains("is consumed"));
+        }
     }
 }
 
@@ -342,22 +383,28 @@ fn agent_delivery_verification_execution_contract_rejects_tools_and_incomplete_o
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_pass_preserves_one_shared_owner_draft() {
+fn agent_delivery_verification_execution_contract_pass_preserves_exact_seed_in_one_call() {
     let protocol = protocol();
-    let case = protocol.cases().nth(2).unwrap();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::CalibrationOpenNoEvidence);
+    let case = protocol.cases().nth(3).unwrap();
+    let seed = case.seeded_candidate();
+    let seed_sha256 = sha256_hex(seed.as_bytes());
+    let mut runtime = ScriptedRuntime::new(ScriptMode::CalibrationOpenNotEffective);
     let outcome = execute_case(case, protocol.budget(), &mut runtime);
     assert_eq!(outcome.status, CaseStatus::Complete);
+    assert_eq!(outcome.seeded_candidate_sha256, Some(seed_sha256.clone()));
+    assert_eq!(outcome.seeded_candidate_bytes, Some(seed.len() as u64));
+    assert_eq!(outcome.control_output_sha256, Some(seed_sha256.clone()));
+    assert_eq!(outcome.treatment_output_sha256, Some(seed_sha256));
+    assert_eq!(outcome.control_passed, Some(true));
+    assert_eq!(outcome.treatment_passed, Some(true));
+    assert!(!outcome.repair_activated);
     assert_eq!(
-        outcome.control_output_sha256,
-        outcome.treatment_output_sha256
+        outcome.treatment_disposition.as_deref(),
+        Some("passed_unchanged")
     );
     assert_eq!(
         runtime.stages,
-        vec![
-            (3, DeliveryVerificationCallStageV1::OwnerDraft),
-            (3, DeliveryVerificationCallStageV1::VerifierInitial),
-        ]
+        vec![(4, DeliveryVerificationCallStageV1::VerifierInitial)]
     );
 }
 
@@ -365,15 +412,19 @@ fn agent_delivery_verification_execution_contract_pass_preserves_one_shared_owne
 fn agent_delivery_verification_execution_contract_revision_is_exactly_one_repair_and_recheck() {
     let protocol = protocol();
     let case = protocol.cases().next().unwrap();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::CalibrationOpenNoEvidence);
+    let mut runtime = ScriptedRuntime::new(ScriptMode::CalibrationOpenNotEffective);
     let outcome = execute_case(case, protocol.budget(), &mut runtime);
     assert_eq!(outcome.status, CaseStatus::Complete);
     assert_eq!(outcome.control_passed, Some(false));
     assert_eq!(outcome.treatment_passed, Some(true));
+    assert!(outcome.repair_activated);
+    assert_eq!(
+        outcome.treatment_disposition.as_deref(),
+        Some("passed_after_repair")
+    );
     assert_eq!(
         runtime.stages,
         vec![
-            (1, DeliveryVerificationCallStageV1::OwnerDraft),
             (1, DeliveryVerificationCallStageV1::VerifierInitial),
             (1, DeliveryVerificationCallStageV1::OwnerRepair),
             (1, DeliveryVerificationCallStageV1::VerifierRecheck),
@@ -382,44 +433,126 @@ fn agent_delivery_verification_execution_contract_revision_is_exactly_one_repair
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_invalid_verifier_has_no_retry() {
+fn agent_delivery_verification_execution_contract_invalid_verdict_is_itt_loss_without_retry() {
     let protocol = protocol();
     let case = protocol.cases().next().unwrap();
     let mut runtime = ScriptedRuntime::new(ScriptMode::InvalidVerifier);
     let outcome = execute_case(case, protocol.budget(), &mut runtime);
-    assert_eq!(outcome.status, CaseStatus::TreatmentExecutionFailure);
-    assert_eq!(runtime.stages.len(), 2);
+    assert_eq!(outcome.status, CaseStatus::Complete);
+    assert_eq!(outcome.control_passed, Some(false));
+    assert_eq!(outcome.treatment_passed, Some(false));
+    assert_eq!(outcome.initial_verifier_decision, None);
+    assert!(!outcome.repair_activated);
+    assert_eq!(
+        outcome.treatment_disposition.as_deref(),
+        Some("treatment_failure")
+    );
+    assert_eq!(
+        outcome.failure_stage.as_deref(),
+        Some("initial_verification")
+    );
+    assert_eq!(
+        outcome.failure_code.as_deref(),
+        Some("invalid_verifier_response")
+    );
+    assert_eq!(
+        runtime.stages,
+        vec![(1, DeliveryVerificationCallStageV1::VerifierInitial)]
+    );
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_provider_timeout_has_no_retry() {
+fn agent_delivery_verification_execution_contract_provider_failures_are_itt_losses_but_budget_is_structural(
+) {
     let protocol = protocol();
-    let case = protocol.cases().next().unwrap();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::VerifierTimeout);
-    let outcome = execute_case(case, protocol.budget(), &mut runtime);
-    assert_eq!(outcome.status, CaseStatus::TreatmentExecutionFailure);
-    assert_eq!(runtime.stages.len(), 2);
-}
+    for (failure, expected_code) in [
+        (
+            DeliveryVerificationModelFailure::ProviderUnavailable,
+            "provider_unavailable",
+        ),
+        (DeliveryVerificationModelFailure::Timeout, "timeout"),
+    ] {
+        let case = protocol.cases().next().unwrap();
+        let mut runtime = ScriptedRuntime::new(ScriptMode::InitialModelFailure(failure));
+        let outcome = execute_case(case, protocol.budget(), &mut runtime);
+        assert_eq!(outcome.status, CaseStatus::Complete);
+        assert_eq!(outcome.control_passed, Some(false));
+        assert_eq!(outcome.treatment_passed, Some(false));
+        assert!(!outcome.repair_activated);
+        assert_eq!(
+            outcome.treatment_disposition.as_deref(),
+            Some("treatment_failure")
+        );
+        assert_eq!(
+            outcome.failure_stage.as_deref(),
+            Some("initial_verification")
+        );
+        assert_eq!(outcome.failure_code.as_deref(), Some(expected_code));
+        assert_eq!(
+            runtime.stages,
+            vec![(1, DeliveryVerificationCallStageV1::VerifierInitial)]
+        );
+    }
 
-#[test]
-fn agent_delivery_verification_execution_contract_owner_failure_is_unmatched_and_terminal() {
-    let protocol = protocol();
     let case = protocol.cases().next().unwrap();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::OwnerFailure);
+    let mut runtime = ScriptedRuntime::new(ScriptMode::InitialModelFailure(
+        DeliveryVerificationModelFailure::BudgetExhausted,
+    ));
     let outcome = execute_case(case, protocol.budget(), &mut runtime);
     assert_eq!(outcome.status, CaseStatus::StructuralFailure);
-    assert!(outcome.owner_draft_sha256.is_none());
-    assert_eq!(runtime.stages.len(), 1);
+    assert_eq!(outcome.reason, "budget_exhausted");
+    assert_eq!(outcome.treatment_passed, None);
+    assert_eq!(outcome.treatment_disposition, None);
+    assert_eq!(
+        runtime.stages,
+        vec![(1, DeliveryVerificationCallStageV1::VerifierInitial)]
+    );
+}
+
+#[test]
+fn agent_delivery_verification_execution_contract_repair_model_failure_is_itt_loss_without_retry() {
+    let protocol = protocol();
+    let case = protocol.cases().next().unwrap();
+    let mut runtime = ScriptedRuntime::new(ScriptMode::RepairModelFailure(
+        DeliveryVerificationModelFailure::ProviderUnavailable,
+    ));
+    let outcome = execute_case(case, protocol.budget(), &mut runtime);
+    assert_eq!(outcome.status, CaseStatus::Complete);
+    assert_eq!(outcome.control_passed, Some(false));
+    assert_eq!(outcome.treatment_passed, Some(false));
+    assert!(outcome.repair_activated);
+    assert_eq!(
+        outcome.treatment_disposition.as_deref(),
+        Some("treatment_failure")
+    );
+    assert_eq!(outcome.failure_stage.as_deref(), Some("owner_repair"));
+    assert_eq!(
+        outcome.failure_code.as_deref(),
+        Some("provider_unavailable")
+    );
+    assert_eq!(
+        runtime.stages,
+        vec![
+            (1, DeliveryVerificationCallStageV1::VerifierInitial),
+            (1, DeliveryVerificationCallStageV1::OwnerRepair),
+        ]
+    );
 }
 
 #[test]
 fn agent_delivery_verification_execution_contract_served_models_must_be_independent() {
     let protocol = protocol();
-    let case = protocol.cases().nth(2).unwrap();
+    let case = protocol.cases().next().unwrap();
     let mut runtime = ScriptedRuntime::new(ScriptMode::SameServedModel);
     let outcome = execute_case(case, protocol.budget(), &mut runtime);
     assert_eq!(outcome.status, CaseStatus::StructuralFailure);
-    assert_eq!(runtime.stages.len(), 2);
+    assert_eq!(
+        runtime.stages,
+        vec![
+            (1, DeliveryVerificationCallStageV1::VerifierInitial),
+            (1, DeliveryVerificationCallStageV1::OwnerRepair),
+        ]
+    );
 }
 
 #[test]
@@ -440,13 +573,13 @@ fn agent_delivery_verification_execution_contract_served_models_cannot_drift_bet
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_calibration_opens_before_exact_holdout() {
+fn agent_delivery_verification_execution_contract_calibration_opens_to_not_effective_holdout() {
     let protocol = protocol();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::CalibrationOpenNoEvidence);
+    let mut runtime = ScriptedRuntime::new(ScriptMode::CalibrationOpenNotEffective);
     let disposition = execute_fixed_campaign(&protocol, &mut runtime).unwrap();
     assert_eq!(
         disposition,
-        DeliveryVerificationCampaignDispositionV1::NoEvidence
+        DeliveryVerificationCampaignDispositionV1::NotEffective
     );
     assert_eq!(
         runtime.calibration.map(|value| value.0),
@@ -454,10 +587,20 @@ fn agent_delivery_verification_execution_contract_calibration_opens_before_exact
     );
     assert_eq!(
         runtime.holdout.map(|value| value.0),
-        Some(HoldoutDecisionResult::NoEvidence)
+        Some(HoldoutDecisionResult::NotEffective)
     );
     assert_eq!(runtime.begun_cases, (1..=32).collect::<Vec<_>>());
-    assert_eq!(runtime.stages.len(), 68);
+    assert_eq!(runtime.stages.len(), 64);
+    let (_, calibration_counts) = runtime.calibration.unwrap();
+    assert_eq!(calibration_counts.treatment_only_wins, 4);
+    assert_eq!(calibration_counts.unsupported_claim_wins, 2);
+    assert_eq!(calibration_counts.omitted_obligation_wins, 1);
+    assert_eq!(calibration_counts.contradiction_wins, 1);
+    let (_, holdout_counts) = runtime.holdout.unwrap();
+    assert_eq!(holdout_counts.treatment_only_wins, 12);
+    assert_eq!(holdout_counts.unsupported_claim_wins, 4);
+    assert_eq!(holdout_counts.omitted_obligation_wins, 4);
+    assert_eq!(holdout_counts.contradiction_wins, 4);
 }
 
 #[test]
@@ -471,49 +614,68 @@ fn agent_delivery_verification_execution_contract_calibration_futility_never_ope
     );
     assert_eq!(runtime.begun_cases, (1..=8).collect::<Vec<_>>());
     assert!(runtime.holdout.is_none());
-    assert_eq!(runtime.stages.len(), 16);
+    assert_eq!(runtime.stages.len(), 8);
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_five_zero_holdout_is_uplift() {
+fn agent_delivery_verification_execution_contract_thirteen_zero_holdout_is_seeded_repair_effective()
+{
     let protocol = protocol();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::HoldoutUplift);
+    let mut runtime = ScriptedRuntime::new(ScriptMode::HoldoutSeededRepairEffective);
     let disposition = execute_fixed_campaign(&protocol, &mut runtime).unwrap();
     assert_eq!(
         disposition,
-        DeliveryVerificationCampaignDispositionV1::EvidenceOfUplift
+        DeliveryVerificationCampaignDispositionV1::SeededRepairEffective
     );
-    let (_, counts) = runtime.holdout.unwrap();
-    assert_eq!(counts.treatment_only_wins, 5);
+    let (decision, counts) = runtime.holdout.unwrap();
+    assert_eq!(decision, HoldoutDecisionResult::SeededRepairEffective);
+    assert_eq!(counts.treatment_only_wins, 13);
     assert_eq!(counts.control_only_losses, 0);
+    assert_eq!(counts.unsupported_claim_wins, 5);
+    assert_eq!(counts.omitted_obligation_wins, 4);
+    assert_eq!(counts.contradiction_wins, 4);
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_control_only_loss_is_regression() {
+fn agent_delivery_verification_execution_contract_unnecessary_preservation_repair_is_regression() {
     let protocol = protocol();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::HoldoutRegression);
+    let mut runtime = ScriptedRuntime::new(ScriptMode::HoldoutPreservationRegression);
     let disposition = execute_fixed_campaign(&protocol, &mut runtime).unwrap();
     assert_eq!(
         disposition,
-        DeliveryVerificationCampaignDispositionV1::Regression
+        DeliveryVerificationCampaignDispositionV1::PreservationRegression
     );
-    let (_, counts) = runtime.holdout.unwrap();
+    let (decision, counts) = runtime.holdout.unwrap();
+    assert_eq!(decision, HoldoutDecisionResult::PreservationRegression);
     assert_eq!(counts.control_only_losses, 1);
+    assert_eq!(counts.preservation_losses, 1);
+    let preservation = runtime
+        .cases
+        .iter()
+        .find(|case| case.ordinal == 12)
+        .unwrap();
+    assert_eq!(preservation.control_passed, Some(true));
+    assert_eq!(preservation.treatment_passed, Some(false));
+    assert!(preservation.repair_activated);
+    assert_eq!(
+        preservation.treatment_disposition.as_deref(),
+        Some("passed_after_repair")
+    );
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_failure_stops_campaign_without_replacement() {
+fn agent_delivery_verification_execution_contract_itt_loss_does_not_stop_or_replace_cases() {
     let protocol = protocol();
     let mut runtime = ScriptedRuntime::new(ScriptMode::InvalidVerifier);
     let disposition = execute_fixed_campaign(&protocol, &mut runtime).unwrap();
     assert_eq!(
         disposition,
-        DeliveryVerificationCampaignDispositionV1::Inconclusive
+        DeliveryVerificationCampaignDispositionV1::TerminalFutility
     );
-    assert_eq!(runtime.begun_cases, vec![1]);
-    assert_eq!(
-        runtime.cases[0].status,
-        CaseStatus::TreatmentExecutionFailure
-    );
-    assert_eq!(runtime.stages.len(), 2);
+    assert_eq!(runtime.begun_cases, (1..=8).collect::<Vec<_>>());
+    assert!(runtime
+        .cases
+        .iter()
+        .all(|case| case.status == CaseStatus::Complete));
+    assert_eq!(runtime.stages.len(), 8);
 }

@@ -221,21 +221,17 @@ a real terminal-producer-to-outcome-projector regression test. The repair only
 corrects instrumentation classification; it does not recover the consumed run
 or establish any intelligence or performance result.
 
-A separate default-off Delivery Verification v2 authority now includes a
-frozen, provider-free one-shot control plane under `realworld-eval`. Its
-preflight binds the clean source, tracked v2 protocol, unchanged 32-case v1
-suite, ordered case digests, budgets, hidden-oracle aggregate, redacted
-Executor/Reviewer configuration, exact v2 execute-binary bytes, and new
-external paths while performing zero provider calls. It also derives the
-execute binary's full SHA-256 CodeDirectory identity from those exact bytes.
-The separate authorization must match both identities before granting a
-short-lived, private one-shot capability. Execution compares the frozen
+A separate default-off Delivery Verification authority remains isolated under
+`realworld-eval`. Its provider-free control plane binds a clean source HEAD/tree
+and version, tracked protocol/suite and aggregate case authorities, redacted
+provider and Executor/Reviewer configuration, exact execute-binary full-file
+digest/size and SHA-256 CodeDirectory identity, and new external receipt and
+output paths. Authorization must revalidate that exact binding before granting
+a short-lived private one-shot capability. Execution compares the frozen
 CodeDirectory with the kernel identity of its running process, then atomically
-creates one output-authority marker beside the output root before any provider
-work. Every authorization path for that output authority shares the marker, so
-moving or deleting the output directory cannot make the campaign reusable.
-Execution then persists the campaign and every physical-call reservation before
-transport; an interrupted started call is censored without retry.
+creates one output-authority marker beside the output root before provider work.
+Every authorization path for that authority shares the marker, so moving or
+deleting the output directory cannot make a consumed campaign reusable.
 
 The frozen Delivery Verification v1 instance was authorized and consumed once
 on source `5373e65`. It closed `CENSORED` / `INVALID-INSTRUMENTATION` during the
@@ -250,23 +246,47 @@ or cost result. This one-shot protocol is consumed and must not be rerun.
 Production finalization, routing, prompt evolution, GEPA, the installed App, and
 the published release remain unchanged.
 
-Current source repairs that instrumentation boundary without recovering or
-rerunning v1. A non-streaming request is now encoded once into immutable bytes;
-its domain-separated wire digest and size are available before dispatch. The
-v2 execution journal reserves that wire authority beside the semantic request
-authority, dispatches the same prepared bytes, and binds the terminal provider
-receipt to the reserved wire digest. Invalid terminal evidence is rejected
-before an artifact or terminal receipt is committed, and the first validation
-error is no longer masked by a later incomplete-case error. Provider-free
-loopback coverage crosses the real model-provider preparation and HTTP dispatch
-path. All three external v1 entrypoints reject the consumed protocol before
-creating or reading live control-plane state. The tracked v2 successor keeps
-the exact v1 cases, order, hidden oracle, budget, decision thresholds, and
-no-retry rules, and additionally freezes the immutable prepared non-streaming
-wire contract, distinct semantic/wire reservation digests, wire-bound terminal
-receipt, and execution-journal v2 schema. Its three independently named v2
-binaries remain feature-gated. No v2 authorization, execution, provider result,
-or intelligence evidence exists.
+The instrumentation repair was frozen into v2 without recovering or rerunning
+v1. V2 was then authorized and consumed exactly once. All eight calibration
+pairs completed in 16 calls: seven were both-pass and one was both-fail, with no
+treatment-only win or control-only loss. The sole mismatch was a case-contract
+error between the visible `controlling_revision` field and the hidden exact
+oracle's `revision` field. The fixed calibration gate therefore closed
+`terminal_futility`; all 24 holdout cases were durably skipped. This is neither
+uplift nor regression evidence, and v2 must not be rerun.
+
+Delivery Verification v3 is a new fixed seeded-defect recovery and preservation
+component test, not a natural-draft uplift experiment. Its 32 cases contain 24
+frozen seeded defects across unsupported-claim, omitted-obligation, and
+contradiction strata plus eight clean preservation sentinels, split 8/24 between
+calibration and holdout. Control is the exact frozen seed. Treatment sends that
+same seed to the Reviewer; a pass preserves it byte-for-byte, while
+`needs_revision` permits one Executor repair and one Reviewer recheck. The
+visible output contract fixes keys, types, requiredness, and additional-property
+policy, while exact oracle values remain evaluator-only. Requests are tool-free,
+non-streaming, no-retry, and capped at three calls per case / 96 total.
+Durably recorded provider timeout/unavailability or invalid Reviewer verdict JSON
+is an intention-to-treat treatment failure for that case; internal time-budget,
+binding, or authority failure is structural and closes the campaign inconclusive.
+
+Calibration requires all eight cases, exactly six control failures, at least
+four treatment-only wins with at least one in each defect stratum, and no loss
+or structural/treatment-execution failure. Failure closes
+`terminal_futility`. Holdout requires all 24 cases, exactly 18 control failures,
+at least 13 treatment-only wins with at least four in each defect stratum, and
+no clean-sentinel loss or structural/treatment-execution failure for
+`seeded_repair_effective`; a sentinel loss is `preservation_regression`, and an
+otherwise valid sub-threshold result is `not_effective`.
+
+The v3 journal durably reserves the semantic request and immutable prepared wire
+payload digests/sizes before dispatch, sends exactly those non-streaming bytes,
+and binds terminal request metadata to the reserved wire authority. Case
+receipts retain initial decision/finding counts, repair activation, recheck
+decision/counts, treatment disposition, failure stage/code, and outcome reason.
+All v1 and v2 preflight, authorization, and execute entrypoints now reject their
+consumed authorities before live state access. V3 currently has provider-free
+implementation and tests only; no v3 online authorization, execution, provider
+result, or intelligence evidence exists.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
