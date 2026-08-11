@@ -31,6 +31,7 @@ Passing a lower level does not imply a higher-level result.
 | Workflow GEPA V7 | `bc37fa9`, `0.2.26` | `VALID_TARGETED_EVIDENCE`, `NO_GO_TRAINING`. Three candidates completed six training pairs with full task quality, but all pairs tied, all routes remained Direct, and no candidate passed the Pareto resource gate. |
 | Workflow GEPA V12 | `ff8c238`, recorded in `0.2.30` | `INVALID_EVIDENCE`. The Direct arm retained route evidence but failed terminal completion; the Workflow arm stopped before strategy-event persistence. There is no matched pair, GO/NO-GO, candidate, snapshot, promotion, or capability conclusion. |
 | Collaboration successor V1 / Goal 3E | `12a3ea2`, `0.2.32` | `INVALID_EVIDENCE`, `CENSORED`. The one-shot capability was consumed and the first baseline Direct arm was reserved, but the product run ended before selection with zero selected decisions. The terminal producer correctly persisted explicit `not_selected`; no treatment or Owner execution occurred. The selected-only projector misclassified that legal state as a malformed receipt, so zero runs were admitted, no matched pair exists, and Workflow, candidate, and holdout did not run. The protocol cannot be retried and supports no uplift, cost, latency, or capability conclusion. |
+| Delivery Verification v3 | frozen v3 authority, `0.2.34` | `INVALID_EVIDENCE`, `CENSORED`. Its first calibration Reviewer call made one provider attempt and returned empty content. Journal validation rejected the bound zero-byte response artifact before accepting a terminal call receipt, so no case completed, holdout never opened, and no matched pair or scientific conclusion exists. The protocol is consumed and cannot be retried. |
 | GPQA matched diagnostic | `0.1.78` | On 12 frozen GPQA-Diamond questions, Direct scored `10/12`; Auto and Pro each scored `8/12`. This predates current code and is a reasoning diagnostic, not a current product baseline. |
 
 Earlier Real-World versions, memory V1, GPQA/Core pilots, Fugu pilots, and
@@ -92,13 +93,15 @@ not changed by V5, V7, or V12.
 
 ## Delivery Verification Experiment
 
-The current tracked v3 authority is a fixed seeded-defect recovery and
-preservation component test under the default-off `realworld-eval` feature. It
-does not compare treatment with naturally generated Owner drafts. The 32-case
-suite freezes 24 defective candidates across unsupported-claim,
-omitted-obligation, and contradiction strata plus eight clean preservation
-sentinels. Calibration contains six defects and two sentinels; model-hidden
-holdout contains 18 defects and six sentinels.
+The current tracked v4 authority is a provider-free successor over the exact
+same v3 seeded-defect recovery and preservation suite under the default-off
+`realworld-eval` feature. It does not compare treatment with naturally generated
+Owner drafts. The 32-case suite freezes 24 defective candidates across
+unsupported-claim, omitted-obligation, and contradiction strata plus eight clean
+preservation sentinels. Calibration contains six defects and two sentinels;
+model-hidden holdout contains 18 defects and six sentinels. V4 preserves the
+case bytes, order, hidden oracle, seeded candidates, model inputs, output
+contracts, budgets, decision thresholds, and no-retry policy from v3.
 
 Control is the exact frozen seeded candidate. Treatment sends that same seed to
 a model-distinct Reviewer. A `passed` verdict preserves it exactly;
@@ -110,9 +113,11 @@ remain in the evaluator-only oracle.
 
 Durably recorded provider timeout/unavailability and completed calls whose
 Reviewer verdict JSON is invalid count as intention-to-treat treatment failures
-for their fixed cases; they are never retried or replaced. Internal time-budget,
-binding, or authority failures are structural and make the campaign
-inconclusive.
+for their fixed cases; they are never retried or replaced. V4 additionally
+records the exact response artifact digest and byte count when content is empty,
+then classifies empty Reviewer content as `invalid_verifier_response` without a
+retry. Internal time-budget, binding, or authority failures are structural and
+make the campaign inconclusive.
 
 Calibration opens holdout only when all eight cases complete with exactly six
 control failures, at least four treatment-only wins, at least one win in each
@@ -128,13 +133,13 @@ one-sided reference-null tail
 valid sub-threshold result is `not_effective`. These labels describe only this
 finite seeded component test.
 
-V3 fixes tool-free non-streaming requests, zero transport retries, one or three
+V4 retains tool-free non-streaming requests, zero transport retries, one or three
 calls per case, at most 96 logical calls / physical attempts, 64,000 tokens per
-case, 2,048,000 campaign tokens, and a six-hour campaign ceiling. The tracked
-manifest and suite authorities are:
+case, 2,048,000 campaign tokens, and a six-hour campaign ceiling. Because v4
+references the same immutable suite, its retained experimental authorities are:
 
-- manifest SHA-256
-  `8da322b9336ec69d9f37bf12ce8d7698af55572d8d4173eddc45e6c2080cc8e8`;
+- v4 protocol manifest SHA-256
+  `2f56a1dc2425cc7a930e45eb05a3c109f93a156ec54ddf999fc3b3e493016c5c`;
 - suite SHA-256
   `5bd95ed736641f0120ceab038a01249ee246b4394e403fa5386ebe0e5de88bc7`;
 - case-order and hidden-oracle aggregates
@@ -147,14 +152,14 @@ manifest and suite authorities are:
 - budget aggregate
   `eb3ae14a6e0cd452b106f8c5bd85ad2575e204b0aee08ce1ce23b4a7ef007e11`.
 
-The provider-free v3 preflight is the boundary between tracked design and an
+The provider-free v4 preflight is the boundary between tracked design and an
 executable frozen instance. It must bind a clean source HEAD/tree and version;
 all protocol, suite, case, seed, model-input, output-contract, budget, and oracle
 authorities; redacted provider/model authority; the exact execute full-file
 digest/size and verified SHA-256 CodeDirectory; and new canonical external
 paths. A receipt is valid only with zero provider calls,
-`online_runner_frozen=true`, and `execution_authorized=false`. No v3 preflight
-receipt currently grants execution, and no v3 authorization or online execution
+`online_runner_frozen=true`, and `execution_authorized=false`. No v4 preflight
+receipt currently grants execution, and no v4 authorization or online execution
 has occurred.
 
 ### Consumed v1 result
@@ -245,23 +250,43 @@ facts, not quality evidence. The case-definition mismatch, seven both-pass
 pairs, and one both-fail pair establish neither treatment uplift nor regression.
 V2 is consumed and must not be rerun or reinterpreted.
 
-### Current v3 boundary
+### Consumed v3 result
 
-Current v3 implementation, tests, and journal contracts are provider-free. The
+The v3 authority retained the tracked manifest SHA-256
+`8da322b9336ec69d9f37bf12ce8d7698af55572d8d4173eddc45e6c2080cc8e8`
+and the suite and aggregate authorities listed above. It was authorized and
+consumed exactly once. Its first calibration Reviewer call was durably reserved,
+and exactly one physical provider attempt returned an observed response whose
+content was zero bytes.
+
+The v3 terminal path constructed a response-artifact receipt with the digest of
+the exact empty bytes and a byte count of zero. Journal validation treated that
+valid zero length as an inconsistent artifact before writing the artifact or
+committing the terminal call receipt. The execute path therefore froze the
+campaign `CENSORED`. No case receipt, calibration decision, holdout call, or
+valid matched pair exists. The attempt supports no answer-quality, uplift,
+regression, latency, usage, cost, or provider-capability conclusion. V3 is
+consumed and must not be rerun or reinterpreted.
+
+### Current v4 boundary
+
+Current v4 implementation, tests, and journal contracts are provider-free. The
 journal reserves separate semantic-request and immutable prepared wire-payload
 digests/sizes before dispatch, sends exactly the prepared non-streaming bytes,
-and requires terminal request metadata to match the reserved wire authority.
-Per-case evidence retains verifier decisions and finding counts, repair
-activation, recheck telemetry, treatment disposition, failure stage/code, and
-outcome reason. Started calls cannot be resumed or retried.
+and requires terminal request metadata to match the reserved wire authority. It
+accepts an exact zero-byte response artifact as present, persists its digest and
+zero length, and projects empty Reviewer content to
+`invalid_verifier_response`. That is an intention-to-treat failure for the fixed
+case and is never retried or replaced. Per-case evidence otherwise retains the
+same decisions, finding counts, repair activation, recheck telemetry,
+disposition, failure stage/code, and outcome reason as v3.
 
-All six v1/v2 preflight, authorization, and execute entrypoints reject their
-consumed protocols before live state access. A v3 preflight may be generated
-provider-free only from a clean merged source and exact feature-gated binaries;
-it does not authorize execution. There is currently no v3 one-shot
-authorization, instantiated campaign journal, provider result, or
-uplift/regression result.
-Any online attempt requires a later explicit authorization bound to that exact
+All nine v1-v3 preflight, authorization, and execute entrypoints reject their
+consumed protocols before live state access. A v4 preflight may be generated
+provider-free only from clean merged source and the exact three v4 binaries; it
+does not authorize execution. There is currently no v4 one-shot authorization,
+instantiated campaign journal, provider result, or uplift/regression result. Any
+online attempt requires a later explicit authorization bound to that exact
 preflight, source, runner full-file/CodeDirectory identities, provider/model
 authority, credential fingerprint, and new output authority. GEPA and production
 serving remain out of scope.

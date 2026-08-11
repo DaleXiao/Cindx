@@ -17,6 +17,7 @@ enum ScriptMode {
     HoldoutSeededRepairEffective,
     HoldoutPreservationRegression,
     InvalidVerifier,
+    EmptyVerifier,
     InitialModelFailure(DeliveryVerificationModelFailure),
     RepairModelFailure(DeliveryVerificationModelFailure),
     SameServedModel,
@@ -60,6 +61,7 @@ impl ScriptedRuntime {
                 matches!(ordinal, 1 | 2 | 3 | 5 | 12)
             }
             ScriptMode::InvalidVerifier
+            | ScriptMode::EmptyVerifier
             | ScriptMode::InitialModelFailure(_)
             | ScriptMode::RepairModelFailure(_)
             | ScriptMode::SameServedModel => ordinal == 1,
@@ -129,6 +131,8 @@ impl DeliveryVerificationRuntime for ScriptedRuntime {
             DeliveryVerificationCallStageV1::VerifierInitial => {
                 if self.mode == ScriptMode::InvalidVerifier {
                     "not-json".to_string()
+                } else if self.mode == ScriptMode::EmptyVerifier {
+                    String::new()
                 } else {
                     verifier_verdict(&payload, self.should_revise(call.case_ordinal))
                 }
@@ -192,7 +196,7 @@ fn protocol() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-protocol-v3.json"
+            "/../../../benchmarks/agent/delivery-verification-protocol-v4.json"
         )),
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -301,16 +305,23 @@ fn agent_delivery_verification_execution_contract_requires_explicit_authorize_co
     assert!(require_authorize_arguments([
         OsString::from("authorize"),
         OsString::from(AUTHORIZE_FLAG),
+        OsString::from(CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID),
+    ])
+    .is_err());
+    assert!(require_authorize_arguments([
+        OsString::from("authorize"),
+        OsString::from(AUTHORIZE_FLAG),
         OsString::from("wrong-protocol"),
     ])
     .is_err());
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_consumed_v1_and_v2_entrypoints_fail_closed() {
+fn agent_delivery_verification_execution_contract_consumed_v1_v2_and_v3_entrypoints_fail_closed() {
     for protocol_id in [
         CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
         CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
+        CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
     ] {
         let error = reject_consumed_delivery_protocol(protocol_id).unwrap_err();
         assert!(error.contains(protocol_id));
@@ -335,6 +346,14 @@ fn agent_delivery_verification_execution_contract_consumed_v1_and_v2_entrypoints
                 crate::agent_realworld_eval::run_delivery_verification_v2_execute(),
             ],
         ),
+        (
+            CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
+            [
+                crate::agent_realworld_eval::run_delivery_verification_v3_preflight(),
+                crate::agent_realworld_eval::run_delivery_verification_v3_authorize(),
+                crate::agent_realworld_eval::run_delivery_verification_v3_execute(),
+            ],
+        ),
     ] {
         for result in retired {
             let error = result.unwrap_err();
@@ -349,6 +368,12 @@ fn agent_delivery_verification_execution_contract_accepts_only_exact_provider_re
     let response = exact_response();
     assert_eq!(
         validate_model_response(&response).unwrap(),
+        sha256_hex(b"served-verifier")
+    );
+    let mut empty = response.clone();
+    empty.message.content.clear();
+    assert_eq!(
+        validate_model_response(&empty).unwrap(),
         sha256_hex(b"served-verifier")
     );
     let mut estimated = response.clone();
@@ -435,30 +460,32 @@ fn agent_delivery_verification_execution_contract_revision_is_exactly_one_repair
 #[test]
 fn agent_delivery_verification_execution_contract_invalid_verdict_is_itt_loss_without_retry() {
     let protocol = protocol();
-    let case = protocol.cases().next().unwrap();
-    let mut runtime = ScriptedRuntime::new(ScriptMode::InvalidVerifier);
-    let outcome = execute_case(case, protocol.budget(), &mut runtime);
-    assert_eq!(outcome.status, CaseStatus::Complete);
-    assert_eq!(outcome.control_passed, Some(false));
-    assert_eq!(outcome.treatment_passed, Some(false));
-    assert_eq!(outcome.initial_verifier_decision, None);
-    assert!(!outcome.repair_activated);
-    assert_eq!(
-        outcome.treatment_disposition.as_deref(),
-        Some("treatment_failure")
-    );
-    assert_eq!(
-        outcome.failure_stage.as_deref(),
-        Some("initial_verification")
-    );
-    assert_eq!(
-        outcome.failure_code.as_deref(),
-        Some("invalid_verifier_response")
-    );
-    assert_eq!(
-        runtime.stages,
-        vec![(1, DeliveryVerificationCallStageV1::VerifierInitial)]
-    );
+    for mode in [ScriptMode::InvalidVerifier, ScriptMode::EmptyVerifier] {
+        let case = protocol.cases().next().unwrap();
+        let mut runtime = ScriptedRuntime::new(mode);
+        let outcome = execute_case(case, protocol.budget(), &mut runtime);
+        assert_eq!(outcome.status, CaseStatus::Complete);
+        assert_eq!(outcome.control_passed, Some(false));
+        assert_eq!(outcome.treatment_passed, Some(false));
+        assert_eq!(outcome.initial_verifier_decision, None);
+        assert!(!outcome.repair_activated);
+        assert_eq!(
+            outcome.treatment_disposition.as_deref(),
+            Some("treatment_failure")
+        );
+        assert_eq!(
+            outcome.failure_stage.as_deref(),
+            Some("initial_verification")
+        );
+        assert_eq!(
+            outcome.failure_code.as_deref(),
+            Some("invalid_verifier_response")
+        );
+        assert_eq!(
+            runtime.stages,
+            vec![(1, DeliveryVerificationCallStageV1::VerifierInitial)]
+        );
+    }
 }
 
 #[test]

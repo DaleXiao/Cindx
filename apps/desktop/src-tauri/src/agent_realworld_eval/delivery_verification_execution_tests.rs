@@ -35,7 +35,7 @@ const CONSUMED_AT_MS: u64 = 20_000;
 const CAMPAIGN_AT_MS: u64 = 30_000;
 const RUNNER_BYTES: &[u8] = b"provider-free exact delivery execute fixture";
 #[cfg(target_os = "macos")]
-const RUNNER_SWAP_CHILD_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_RUNNER_SWAP_TEST";
+const RUNNER_SWAP_CHILD_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V4_RUNNER_SWAP_TEST";
 
 const STAGES: [DeliveryVerificationCallStageV1; 3] = [
     DeliveryVerificationCallStageV1::VerifierInitial,
@@ -56,6 +56,13 @@ struct Fixture {
 
 fn digest(value: impl AsRef<[u8]>) -> String {
     sha256_hex(value.as_ref())
+}
+
+fn consumed_marker_path(output_root: &Path, protocol_version: &str) -> PathBuf {
+    output_root.parent().unwrap().join(format!(
+        ".cindx-delivery-verification-{protocol_version}-consumed-{}.json",
+        digest(output_root.as_os_str().as_encoded_bytes())
+    ))
 }
 
 fn runner(bytes: &[u8]) -> DeliveryVerificationRunnerBinary {
@@ -335,16 +342,41 @@ fn complete_stage(
     stage: DeliveryVerificationCallStageV1,
     total_tokens: u64,
 ) -> DeliveryVerificationResponseArtifactV1 {
+    complete_stage_with_response(
+        journal,
+        authorization,
+        case_ordinal,
+        stage,
+        total_tokens,
+        None,
+    )
+}
+
+fn complete_stage_with_response(
+    journal: &mut DeliveryVerificationExecutionJournal,
+    authorization: &DeliveryVerificationAuthorizationV1,
+    case_ordinal: usize,
+    stage: DeliveryVerificationCallStageV1,
+    total_tokens: u64,
+    response: Option<&[u8]>,
+) -> DeliveryVerificationResponseArtifactV1 {
     let input = reservation_input(authorization, case_ordinal, stage);
     let request_payload_sha256 = input.wire_payload_sha256.clone();
     let configured_model_sha256 = input.configured_model_sha256.clone();
     let reserved_at_ms = input.reserved_at_ms;
     let permit = journal.reserve_call(input).unwrap();
-    let response = format!(
-        "response case={} call={}",
-        case_ordinal,
-        permit.global_call_ordinal()
-    );
+    let generated_response;
+    let response = match response {
+        Some(response) => response,
+        None => {
+            generated_response = format!(
+                "response case={} call={}",
+                case_ordinal,
+                permit.global_call_ordinal()
+            );
+            generated_response.as_bytes()
+        }
+    };
     journal
         .record_call_terminal(
             DeliveryVerificationCallTerminalInputV1 {
@@ -355,7 +387,7 @@ fn complete_stage(
                 provider_status_code: Some(200),
                 latency_ms: 7,
                 request_payload_sha256: Some(request_payload_sha256),
-                response_semantic_sha256: Some(digest(response.as_bytes())),
+                response_semantic_sha256: Some(digest(response)),
                 provider_response_id_sha256: Some(digest(format!(
                     "response-id-{case_ordinal}-{stage:?}"
                 ))),
@@ -371,7 +403,7 @@ fn complete_stage(
                 }),
                 terminal_at_ms: reserved_at_ms + 1,
             },
-            Some(response.as_bytes()),
+            Some(response),
         )
         .unwrap()
         .expect("completed call should retain its response artifact")
@@ -520,8 +552,44 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
             DELIVERY_AUTHORIZATION_SCHEMA, DELIVERY_EXECUTION_JOURNAL_SCHEMA
         );
         fixture.authorization.validate_static().unwrap();
+        assert_eq!(
+            fixture.authorization.schema,
+            "cindx.agent-eval.delivery-verification-authorization.v4"
+        );
+        assert_eq!(
+            fixture.authorization.preflight_schema,
+            "cindx.agent-eval.delivery-verification-preflight.v4"
+        );
+        assert_eq!(
+            DELIVERY_EXECUTION_JOURNAL_SCHEMA,
+            "cindx.agent-eval.delivery-verification-execution-journal.v4"
+        );
+        assert_eq!(
+            DELIVERY_EXECUTION_RECOVERY_SCHEMA,
+            "cindx.agent-eval.delivery-verification-execution-recovery.v4"
+        );
         assert_eq!(fixture.authorization.cases.len(), 32);
         assert_eq!(fixture.authorization.protocol_id, protocol.protocol_id());
+        assert_eq!(
+            fixture.authorization.protocol_id,
+            "cindx-delivery-verification-protocol-v4"
+        );
+        assert_eq!(
+            fixture.authorization.suite_id,
+            "cindx-delivery-verification-v3"
+        );
+        assert_eq!(
+            DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH,
+            "benchmarks/agent/delivery-verification-protocol-v4.json"
+        );
+        assert_eq!(
+            DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
+            "benchmarks/agent/delivery-verification-v3.json"
+        );
+        assert_eq!(
+            super::delivery_verification_requests::DELIVERY_VERIFICATION_REQUEST_SCHEMA,
+            "cindx.agent-eval.delivery-verification-request.v3"
+        );
         assert_eq!(
             fixture.authorization.case_order_sha256,
             protocol.case_order_sha256()
@@ -575,6 +643,7 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
         for consumed_protocol_id in [
             super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
             super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
         ] {
             let mut consumed = fixture.authorization.clone();
             consumed.protocol_id = consumed_protocol_id.into();
@@ -582,10 +651,23 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
             assert!(consumed.validate_static().is_err());
         }
 
+        let mut consumed_schema = fixture.authorization.clone();
+        consumed_schema.schema = "cindx.agent-eval.delivery-verification-authorization.v3".into();
+        consumed_schema.authorization_sha256 = authorization_digest(&consumed_schema).unwrap();
+        assert!(consumed_schema.validate_static().is_err());
+
+        let mut consumed_preflight_schema = fixture.authorization.clone();
+        consumed_preflight_schema.preflight_schema =
+            "cindx.agent-eval.delivery-verification-preflight.v3".into();
+        consumed_preflight_schema.authorization_sha256 =
+            authorization_digest(&consumed_preflight_schema).unwrap();
+        assert!(consumed_preflight_schema.validate_static().is_err());
+
         let (_, tombstone, _) = new_journal(protocol, &fixture);
         for consumed_protocol_id in [
             super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
             super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
         ] {
             let mut consumed = tombstone.clone();
             consumed.authorization.protocol_id = consumed_protocol_id.into();
@@ -595,6 +677,14 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
             consumed.tombstone_sha256 = tombstone_digest(&consumed).unwrap();
             assert!(consumed.validate_for(&consumed.authorization).is_err());
         }
+
+        let mut consumed_schema = tombstone.clone();
+        consumed_schema.schema =
+            "cindx.agent-eval.delivery-verification-authorization-consumed.v3".into();
+        consumed_schema.tombstone_sha256 = tombstone_digest(&consumed_schema).unwrap();
+        assert!(consumed_schema
+            .validate_for(&consumed_schema.authorization)
+            .is_err());
     });
 }
 
@@ -740,6 +830,68 @@ fn agent_delivery_verification_execution_contract_authorization_is_private_canon
                 CONSUMED_AT_MS,
             )
             .is_err());
+        }
+    });
+}
+
+#[test]
+fn agent_delivery_verification_execution_contract_v1_v2_v3_and_v4_markers_block_all_authority_paths(
+) {
+    with_fixture(|protocol, fixture| {
+        let validated = validate_authorization(
+            protocol,
+            &fixture,
+            &runner(RUNNER_BYTES),
+            &fixture.config.api_key,
+            CONSUMED_AT_MS,
+        )
+        .unwrap();
+
+        for protocol_version in ["v1", "v2", "v3", "v4"] {
+            let marker = consumed_marker_path(&fixture.output_root, protocol_version);
+            if protocol_version == "v4" {
+                assert_eq!(
+                    marker,
+                    consumed_authority_path(&fixture.output_root).unwrap()
+                );
+            }
+            write_new_private_file(&marker, b"consumed", "test consumed authority marker").unwrap();
+
+            let blocked_authorization_path = fixture
+                ._temp
+                .path()
+                .join(format!("blocked-{protocol_version}-authorization.json"));
+            assert!(issue_delivery_verification_authorization(
+                DeliveryVerificationAuthorizationIssue {
+                    protocol,
+                    preflight: &fixture.preflight,
+                    repo_root: &fixture.repo_root,
+                    preflight_path: &fixture.preflight_path,
+                    authorization_path: &blocked_authorization_path,
+                    output_root: &fixture.output_root,
+                    runner: &runner(RUNNER_BYTES),
+                    issued_at_ms: ISSUED_AT_MS,
+                    expires_at_ms: EXPIRES_AT_MS,
+                    nonce: &digest(format!("{protocol_version} marker nonce")),
+                    credential: &fixture.config.api_key,
+                }
+            )
+            .is_err());
+            assert!(validate_authorization(
+                protocol,
+                &fixture,
+                &runner(RUNNER_BYTES),
+                &fixture.config.api_key,
+                CONSUMED_AT_MS,
+            )
+            .is_err());
+            assert!(
+                consume_delivery_verification_authorization_once(&validated, CONSUMED_AT_MS)
+                    .is_err()
+            );
+            assert!(!fixture.output_root.exists());
+
+            fs::remove_file(marker).unwrap();
         }
     });
 }
@@ -922,7 +1074,7 @@ fn agent_delivery_verification_execution_contract_call_reservation_charges_befor
         let value = journal_json(&fixture.output_root);
         assert_eq!(
             value["schema"],
-            "cindx.agent-eval.delivery-verification-execution-journal.v3"
+            "cindx.agent-eval.delivery-verification-execution-journal.v4"
         );
         assert_eq!(value["charged"]["physical_model_attempts"], 1);
         assert_eq!(value["cases"][0]["calls"][0]["state"]["state"], "reserved");
@@ -986,7 +1138,7 @@ fn agent_delivery_verification_execution_contract_call_reservation_rejects_wrong
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_completed_call_retains_exact_artifact_usage_and_latency(
+fn agent_delivery_verification_execution_contract_completed_call_retains_exact_nonempty_and_zero_length_artifacts(
 ) {
     with_fixture(|protocol, fixture| {
         let (validated, _, mut journal) = new_journal(protocol, &fixture);
@@ -1015,8 +1167,47 @@ fn agent_delivery_verification_execution_contract_completed_call_retains_exact_a
         assert!(!fs::read(&artifact.path).unwrap().is_empty());
         #[cfg(unix)]
         assert_eq!(
-            fs::metadata(artifact.path).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&artifact.path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+
+        let empty_artifact = complete_stage_with_response(
+            &mut journal,
+            &validated.authorization,
+            1,
+            STAGES[1],
+            11,
+            Some(b""),
+        );
+        assert_eq!(empty_artifact.sha256, digest(b""));
+        assert_eq!(empty_artifact.bytes, 0);
+        assert!(fs::read(&empty_artifact.path).unwrap().is_empty());
+        let value = journal_json(&fixture.output_root);
+        let empty_receipt = &value["cases"][0]["calls"][1]["state"]["receipt"];
+        assert_eq!(empty_receipt["response_artifact_sha256"], digest(b""));
+        assert_eq!(empty_receipt["response_artifact_bytes"], 0);
+        assert_eq!(empty_receipt["response_semantic_sha256"], digest(b""));
+        assert_eq!(journal.observed().terminal_model_calls, 2);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&empty_artifact.path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        drop(journal);
+        assert_eq!(
+            DeliveryVerificationExecutionJournal::recover(
+                &fixture.output_root,
+                CAMPAIGN_AT_MS + 1_000,
+            )
+            .unwrap(),
+            DeliveryVerificationRecoveryV1::RecoveryTerminal(
+                DeliveryVerificationCampaignDispositionV1::Censored
+            )
         );
     });
 }
@@ -1407,7 +1598,8 @@ fn agent_delivery_verification_execution_contract_recovery_terminalizes_tombston
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_recovery_rejects_legacy_v1_journal_shape() {
+fn agent_delivery_verification_execution_contract_recovery_rejects_legacy_v1_and_consumed_v3_journal_shapes(
+) {
     with_fixture(|protocol, fixture| {
         let (validated, _, mut journal) = new_journal(protocol, &fixture);
         journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
@@ -1434,6 +1626,40 @@ fn agent_delivery_verification_execution_contract_recovery_rejects_legacy_v1_jou
                 .join(DELIVERY_EXECUTION_JOURNAL_FILE_NAME),
             &canonical_json(&legacy, "legacy delivery execution journal").unwrap(),
             "legacy delivery execution journal",
+        )
+        .unwrap();
+        drop(journal);
+
+        assert_eq!(
+            DeliveryVerificationExecutionJournal::recover(
+                &fixture.output_root,
+                CAMPAIGN_AT_MS + 1_000,
+            )
+            .unwrap(),
+            DeliveryVerificationRecoveryV1::RecoveryTerminal(
+                DeliveryVerificationCampaignDispositionV1::Invalid
+            )
+        );
+    });
+
+    with_fixture(|protocol, fixture| {
+        let (validated, _, mut journal) = new_journal(protocol, &fixture);
+        journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
+        journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
+        journal
+            .reserve_call(reservation_input(&validated.authorization, 1, STAGES[0]))
+            .unwrap();
+
+        let mut consumed = journal_json(&fixture.output_root);
+        consumed["schema"] =
+            Value::String("cindx.agent-eval.delivery-verification-execution-journal.v3".into());
+        consumed["journal_sha256"] = Value::String(digest("consumed v3 journal"));
+        replace_private_file(
+            &fixture
+                .output_root
+                .join(DELIVERY_EXECUTION_JOURNAL_FILE_NAME),
+            &canonical_json(&consumed, "consumed delivery execution journal").unwrap(),
+            "consumed delivery execution journal",
         )
         .unwrap();
         drop(journal);

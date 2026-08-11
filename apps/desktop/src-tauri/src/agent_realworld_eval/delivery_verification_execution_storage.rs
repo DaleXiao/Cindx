@@ -344,9 +344,7 @@ pub(super) fn validate_call_terminal(
     {
         require_sha256(value, "delivery call receipt digest")?;
     }
-    if receipt.response_artifact_sha256.is_some() != receipt.response_artifact_bytes.is_some()
-        || receipt.response_artifact_bytes == Some(0)
-    {
+    if receipt.response_artifact_sha256.is_some() != receipt.response_artifact_bytes.is_some() {
         return Err("delivery response artifact receipt is inconsistent".into());
     }
     if let Some(usage) = &receipt.usage {
