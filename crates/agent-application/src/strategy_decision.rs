@@ -23,6 +23,62 @@ pub struct AgentStrategyDecisionReceipt {
     plan_sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentStrategyReceiptState {
+    Selected(AgentStrategyDecisionReceipt),
+    NotSelected,
+    Absent,
+}
+
+impl AgentStrategyReceiptState {
+    pub fn from_metadata(metadata: &Metadata) -> Result<Self, AgentStrategyReceiptError> {
+        let schema = metadata.get(AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY);
+        let status = metadata.get(AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY);
+        let key = metadata.get(AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY);
+        let epoch = metadata.get(AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY);
+        let plan = metadata.get(AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY);
+        if schema.is_none()
+            && status.is_none()
+            && key.is_none()
+            && epoch.is_none()
+            && plan.is_none()
+        {
+            return Ok(Self::Absent);
+        }
+        if schema.map(String::as_str) != Some(AGENT_STRATEGY_RECEIPT_SCHEMA) {
+            return Err(AgentStrategyReceiptError::MalformedReceipt);
+        }
+        if status.map(String::as_str) == Some(AGENT_STRATEGY_RECEIPT_NOT_SELECTED) {
+            if key.is_some()
+                || plan.is_some()
+                || epoch.and_then(|value| value.parse::<u64>().ok()).is_none()
+            {
+                return Err(AgentStrategyReceiptError::MalformedReceipt);
+            }
+            return Ok(Self::NotSelected);
+        }
+        if status.map(String::as_str) != Some(AGENT_STRATEGY_RECEIPT_SELECTED) {
+            return Err(AgentStrategyReceiptError::MalformedReceipt);
+        }
+        let key = required_non_empty(key)?;
+        validate_sha256(key)?;
+        let agent_run_id = agent_run_id(metadata)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(AgentStrategyReceiptError::MissingRunId)?;
+        let steer_epoch = epoch
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(AgentStrategyReceiptError::MissingSteerEpoch)?;
+        let plan_sha256 = required_non_empty(plan)?;
+        validate_sha256(plan_sha256)?;
+        Ok(Self::Selected(AgentStrategyDecisionReceipt {
+            key: key.to_string(),
+            agent_run_id: agent_run_id.to_string(),
+            steer_epoch,
+            plan_sha256: plan_sha256.to_string(),
+        }))
+    }
+}
+
 impl AgentStrategyDecisionReceipt {
     pub fn new(
         task_id: &TaskId,
@@ -59,40 +115,13 @@ impl AgentStrategyDecisionReceipt {
     }
 
     pub fn from_metadata(metadata: &Metadata) -> Result<Option<Self>, AgentStrategyReceiptError> {
-        let schema = metadata.get(AGENT_STRATEGY_RECEIPT_SCHEMA_METADATA_KEY);
-        let status = metadata.get(AGENT_STRATEGY_RECEIPT_STATUS_METADATA_KEY);
-        let key = metadata.get(AGENT_STRATEGY_RECEIPT_KEY_METADATA_KEY);
-        let epoch = metadata.get(AGENT_STRATEGY_RECEIPT_EPOCH_METADATA_KEY);
-        let plan = metadata.get(AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY);
-        if schema.is_none()
-            && status.is_none()
-            && key.is_none()
-            && epoch.is_none()
-            && plan.is_none()
-        {
-            return Ok(None);
+        match AgentStrategyReceiptState::from_metadata(metadata)? {
+            AgentStrategyReceiptState::Selected(receipt) => Ok(Some(receipt)),
+            AgentStrategyReceiptState::Absent => Ok(None),
+            AgentStrategyReceiptState::NotSelected => {
+                Err(AgentStrategyReceiptError::MalformedReceipt)
+            }
         }
-        if schema.map(String::as_str) != Some(AGENT_STRATEGY_RECEIPT_SCHEMA)
-            || status.map(String::as_str) != Some(AGENT_STRATEGY_RECEIPT_SELECTED)
-        {
-            return Err(AgentStrategyReceiptError::MalformedReceipt);
-        }
-        let key = required_non_empty(key)?;
-        validate_sha256(key)?;
-        let agent_run_id = agent_run_id(metadata)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or(AgentStrategyReceiptError::MissingRunId)?;
-        let steer_epoch = epoch
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or(AgentStrategyReceiptError::MissingSteerEpoch)?;
-        let plan_sha256 = required_non_empty(plan)?;
-        validate_sha256(plan_sha256)?;
-        Ok(Some(Self {
-            key: key.to_string(),
-            agent_run_id: agent_run_id.to_string(),
-            steer_epoch,
-            plan_sha256: plan_sha256.to_string(),
-        }))
     }
 
     pub fn from_decision_event(event: &Event) -> Result<Self, AgentStrategyReceiptError> {
@@ -378,5 +407,42 @@ mod tests {
             receipt.insert_into(&mut conflicting),
             Err(AgentStrategyReceiptError::ReservedMetadataConflict(_))
         ));
+    }
+
+    #[test]
+    fn typed_receipt_state_distinguishes_selected_not_selected_and_absent() {
+        assert_eq!(
+            AgentStrategyReceiptState::from_metadata(&Metadata::new()).unwrap(),
+            AgentStrategyReceiptState::Absent
+        );
+
+        let receipt = AgentStrategyDecisionReceipt::new(
+            &TaskId("agent".to_string()),
+            &context(),
+            &"d".repeat(64),
+        )
+        .unwrap();
+        let mut selected = context();
+        receipt.insert_into(&mut selected).unwrap();
+        assert_eq!(
+            AgentStrategyReceiptState::from_metadata(&selected).unwrap(),
+            AgentStrategyReceiptState::Selected(receipt)
+        );
+
+        let mut not_selected = context();
+        insert_strategy_not_selected(&mut not_selected, 2).unwrap();
+        assert_eq!(
+            AgentStrategyReceiptState::from_metadata(&not_selected).unwrap(),
+            AgentStrategyReceiptState::NotSelected
+        );
+
+        not_selected.insert(
+            AGENT_STRATEGY_RECEIPT_PLAN_METADATA_KEY.to_string(),
+            "e".repeat(64),
+        );
+        assert_eq!(
+            AgentStrategyReceiptState::from_metadata(&not_selected),
+            Err(AgentStrategyReceiptError::MalformedReceipt)
+        );
     }
 }

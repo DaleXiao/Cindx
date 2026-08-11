@@ -176,6 +176,8 @@ pub(crate) fn persist_retained_strategy_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_session_persistence::metadata_with_context;
+    use agent_application::{AgentOutcomeLifecycleBindingV1, AgentTerminalCommitIdentity};
 
     #[test]
     fn noop_steer_rebinds_the_retained_plan_to_its_new_epoch_once() {
@@ -222,5 +224,46 @@ mod tests {
             .expect("decisions should load");
         assert_eq!(events.len(), 2);
         assert!(rebound.matches_decision_event(&events[1]));
+    }
+
+    #[test]
+    fn agent_strategy_lifecycle_contract_predecision_terminal_projects_as_censor() {
+        let task_id = TaskId("agent-predecision-censor".to_string());
+        let context = Metadata::from([
+            ("session_id".to_string(), "session-predecision".to_string()),
+            ("agent_run_id".to_string(), "run-predecision".to_string()),
+            ("steer_epoch".to_string(), "0".to_string()),
+        ]);
+        let mut strategy_metadata = Metadata::new();
+        bind_strategy_receipt_from_events(&[], &context, &mut strategy_metadata)
+            .expect("pre-decision terminal should bind an explicit not-selected receipt");
+        assert!(strategy_receipt_is_explicitly_not_selected(
+            &strategy_metadata
+        ));
+
+        let terminal_context = metadata_with_context(strategy_metadata, &context);
+        let identity = AgentTerminalCommitIdentity::new(&task_id, &terminal_context, 0)
+            .expect("not-selected terminal identity should be valid");
+        let terminal_metadata = metadata_with_context(identity.metadata(), &terminal_context);
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        append_event(
+            &mut store,
+            &task_id,
+            EventKind::Error,
+            "Agent task failed",
+            terminal_metadata,
+        )
+        .expect("pre-decision terminal should persist");
+
+        let events = store
+            .list_by_task(&task_id)
+            .expect("terminal event should load");
+        let error = AgentOutcomeLifecycleBindingV1::from_events(&events)
+            .expect_err("pre-decision terminal must not become a valid outcome")
+            .to_string();
+        assert_eq!(
+            error,
+            "externally verified outcome is censored before strategy decision because no strategy was selected"
+        );
     }
 }
