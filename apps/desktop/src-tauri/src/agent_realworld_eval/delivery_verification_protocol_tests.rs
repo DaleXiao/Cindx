@@ -1,6 +1,8 @@
 use super::*;
 
 const TRACKED_PROTOCOL: &[u8] =
+    include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v2.json");
+const CONSUMED_V1_PROTOCOL: &[u8] =
     include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v1.json");
 const TRACKED_SUITE: &[u8] =
     include_bytes!("../../../../../benchmarks/agent/delivery-verification-v1.json");
@@ -57,11 +59,54 @@ fn agent_delivery_verification_protocol_contract_tracked_authority_is_exact_and_
     assert!(!protocol.execution_authorized());
     assert_eq!(
         protocol.manifest_sha256(),
-        "080229aa24f05aa7ac816773aa5b2eb1bba2d00f3d1ca6b757b617ab9e27f19f"
+        "3b1b758330403410486c28650f012b278859f680b55de23bc7aad0e09f6c4982"
     );
     assert_eq!(
         protocol.suite_sha256(),
         "b9672f7075d896e3c48673607c622604c0f8d6fb2b6df4499281b0741124fbcd"
+    );
+    assert_eq!(
+        protocol.manifest.instrumentation.request_mode,
+        "non_streaming"
+    );
+    assert_eq!(
+        protocol
+            .manifest
+            .instrumentation
+            .reservation_digest_authorities,
+        ["semantic_request_sha256", "wire_payload_sha256"]
+    );
+    assert_eq!(
+        protocol.manifest.instrumentation.execution_journal_schema,
+        crate::agent_realworld_eval::delivery_verification_execution_journal::DELIVERY_EXECUTION_JOURNAL_SCHEMA
+    );
+
+    let v1: Value = serde_json::from_slice(CONSUMED_V1_PROTOCOL).unwrap();
+    let v2: Value = serde_json::from_slice(TRACKED_PROTOCOL).unwrap();
+    for key in [
+        "suite",
+        "design",
+        "budget",
+        "calibration_gate",
+        "holdout_decision",
+        "stop_contract",
+    ] {
+        assert_eq!(v2[key], v1[key], "successor changed frozen {key}");
+    }
+    let mut v1_execution = v1["execution"].clone();
+    let mut v2_execution = v2["execution"].clone();
+    v1_execution
+        .as_object_mut()
+        .unwrap()
+        .remove("runner_binary");
+    v2_execution
+        .as_object_mut()
+        .unwrap()
+        .remove("runner_binary");
+    assert_eq!(v2_execution, v1_execution);
+    assert_eq!(
+        sha256_hex(CONSUMED_V1_PROTOCOL),
+        "080229aa24f05aa7ac816773aa5b2eb1bba2d00f3d1ca6b757b617ab9e27f19f"
     );
     eprintln!("{DELIVERY_VERIFICATION_PROTOCOL_SCHEMA}");
 }
@@ -317,6 +362,11 @@ fn agent_delivery_verification_protocol_contract_budget_topology_and_freeze_are_
 
     let mut changed = protocol_value();
     changed["budget"]["transport_retries"] = Value::from(1);
+    assert!(parse_and_validate_protocol(&encoded(changed), TRACKED_SUITE).is_err());
+
+    let mut changed = protocol_value();
+    changed["instrumentation"]["terminal_request_payload_binding"] =
+        Value::String("semantic_digest_incorrectly_equals_wire_digest".into());
     assert!(parse_and_validate_protocol(&encoded(changed), TRACKED_SUITE).is_err());
 }
 

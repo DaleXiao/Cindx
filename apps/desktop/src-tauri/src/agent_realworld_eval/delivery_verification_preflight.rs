@@ -3,8 +3,11 @@ use super::collaboration_successor_protocol::{
     write_new_private_file_atomically,
 };
 use super::delivery_verification_protocol::{
-    parse_and_validate_protocol, ValidatedProtocol, DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH,
-    DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
+    parse_and_validate_protocol, ValidatedProtocol, DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME,
+    DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH, DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
+};
+use super::delivery_verification_runner_binary::{
+    read_delivery_execute_sibling, DeliveryVerificationRunnerBinary, MAX_RUNNER_BYTES,
 };
 use crate::configuration_models::ProviderConfig;
 use agent_core::ModelRole;
@@ -13,10 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_OUTPUT_ROOT";
-const RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_PREFLIGHT_RECEIPT";
-pub(super) const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v1";
-const RECEIPT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v1\0";
+const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_OUTPUT_ROOT";
+const RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_PREFLIGHT_RECEIPT";
+pub(super) const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v2";
+const RECEIPT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v2\0";
 const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v1\0";
 const PROVIDER_CONFIG_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-config.v1\0";
 const PROVIDER_IDENTITY_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-identity.v1\0";
@@ -74,6 +77,10 @@ pub(super) struct DeliveryVerificationPreflightReceipt {
     pub(super) budget_sha256: String,
     pub(super) hidden_oracle_sha256: String,
     pub(super) provider: DeliveryVerificationProviderBindingReceipt,
+    pub(super) runner_binary: String,
+    pub(super) runner_sha256: String,
+    pub(super) runner_bytes: u64,
+    pub(super) runner_code_directory_sha256: String,
     pub(super) output_root_sha256: String,
     pub(super) provider_calls_performed: u64,
     pub(super) online_runner_frozen: bool,
@@ -100,12 +107,14 @@ pub(super) fn run_preflight() -> Result<(), String> {
         .map_err(|error| format!("failed to read {}: {error}", suite_path.display()))?;
     let protocol = parse_and_validate_protocol(&manifest_bytes, &suite_bytes)?;
     let protocol_snapshot = protocol_snapshot(&protocol);
+    let runner = read_delivery_execute_sibling()?;
     let (output_root, receipt_path) = preflight_paths(&repo_root)?;
     let provider = provider_binding(&crate::configuration_persistence::load_provider_config())?;
     let receipt = build_receipt(
         &protocol_snapshot,
         DeliveryVerificationSourceBindingReceipt { head, tree },
         provider,
+        &runner,
         &output_root,
         now_millis()?,
     )?;
@@ -117,11 +126,16 @@ pub(super) fn run_preflight() -> Result<(), String> {
     if current_manifest != manifest_bytes || current_suite != suite_bytes {
         return Err("delivery verification protocol changed during preflight".into());
     }
+    let current_runner = read_delivery_execute_sibling()?;
+    if current_runner != runner {
+        return Err("delivery verification execute binary changed during preflight".into());
+    }
     validate_current_authority(
         &protocol_snapshot,
         &receipt,
         &repo_root,
         &crate::configuration_persistence::load_provider_config(),
+        &current_runner,
         &output_root,
     )?;
     let revalidated_receipt_path =
@@ -131,9 +145,10 @@ pub(super) fn run_preflight() -> Result<(), String> {
     }
     write_receipt(&revalidated_receipt_path, &receipt)?;
     eprintln!(
-        "[delivery-verification-preflight] receipt={} digest={} provider_calls=0 online_runner_frozen=true execution_authorized=false",
+        "[delivery-verification-preflight] receipt={} digest={} runner={} provider_calls=0 online_runner_frozen=true execution_authorized=false",
         receipt_path.display(),
         receipt.receipt_sha256,
+        receipt.runner_sha256,
     );
     Ok(())
 }
@@ -225,12 +240,14 @@ pub(super) fn build_receipt(
     protocol: &DeliveryVerificationProtocolSnapshot,
     source: DeliveryVerificationSourceBindingReceipt,
     provider: DeliveryVerificationProviderBindingReceipt,
+    runner: &DeliveryVerificationRunnerBinary,
     output_root: &Path,
     created_at_ms: u64,
 ) -> Result<DeliveryVerificationPreflightReceipt, String> {
     validate_protocol_snapshot(protocol)?;
     validate_source(&source)?;
     validate_provider_receipt(&provider)?;
+    validate_runner(runner)?;
     if created_at_ms == 0 {
         return Err("delivery verification preflight timestamp must be non-zero".into());
     }
@@ -250,6 +267,10 @@ pub(super) fn build_receipt(
         budget_sha256: protocol.budget_sha256.clone(),
         hidden_oracle_sha256: protocol.hidden_oracle_sha256.clone(),
         provider,
+        runner_binary: DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME.into(),
+        runner_sha256: sha256_hex(&runner.bytes),
+        runner_bytes: u64::try_from(runner.bytes.len()).unwrap_or(u64::MAX),
+        runner_code_directory_sha256: runner.code_directory_sha256.clone(),
         output_root_sha256: path_sha256(output_root),
         provider_calls_performed: 0,
         online_runner_frozen: true,
@@ -282,6 +303,11 @@ pub(super) fn validate_receipt(
         || receipt.cases_sha256 != cases_digest(&protocol.case_sha256)?
         || receipt.budget_sha256 != protocol.budget_sha256
         || receipt.hidden_oracle_sha256 != protocol.hidden_oracle_sha256
+        || receipt.runner_binary != DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME
+        || !is_sha256(&receipt.runner_sha256)
+        || receipt.runner_bytes == 0
+        || receipt.runner_bytes > MAX_RUNNER_BYTES
+        || !is_sha256(&receipt.runner_code_directory_sha256)
         || !is_sha256(&receipt.output_root_sha256)
         || receipt.provider_calls_performed != 0
         || !receipt.online_runner_frozen
@@ -301,6 +327,7 @@ pub(super) fn parse_and_validate_receipt(
     bytes: &[u8],
     source: &DeliveryVerificationSourceBindingReceipt,
     provider: &DeliveryVerificationProviderBindingReceipt,
+    runner: &DeliveryVerificationRunnerBinary,
     output_root: &Path,
 ) -> Result<DeliveryVerificationPreflightReceipt, String> {
     let receipt: DeliveryVerificationPreflightReceipt = serde_json::from_slice(bytes)
@@ -308,7 +335,7 @@ pub(super) fn parse_and_validate_receipt(
     if encode_receipt(&receipt)? != bytes {
         return Err("delivery verification preflight is not canonical JSON".into());
     }
-    validate_snapshot(protocol, &receipt, source, provider, output_root)?;
+    validate_snapshot(protocol, &receipt, source, provider, runner, output_root)?;
     Ok(receipt)
 }
 
@@ -317,6 +344,7 @@ pub(super) fn validate_current_authority(
     receipt: &DeliveryVerificationPreflightReceipt,
     repo_root: &Path,
     config: &ProviderConfig,
+    runner: &DeliveryVerificationRunnerBinary,
     output_root: &Path,
 ) -> Result<(), String> {
     let (head, tree) = clean_source_head_tree(repo_root)?;
@@ -326,6 +354,7 @@ pub(super) fn validate_current_authority(
         receipt,
         &DeliveryVerificationSourceBindingReceipt { head, tree },
         &provider_binding(config)?,
+        runner,
         &output_root,
     )
 }
@@ -335,13 +364,18 @@ pub(super) fn validate_snapshot(
     receipt: &DeliveryVerificationPreflightReceipt,
     source: &DeliveryVerificationSourceBindingReceipt,
     provider: &DeliveryVerificationProviderBindingReceipt,
+    runner: &DeliveryVerificationRunnerBinary,
     output_root: &Path,
 ) -> Result<(), String> {
     validate_receipt(protocol, receipt)?;
     validate_source(source)?;
     validate_provider_receipt(provider)?;
+    validate_runner(runner)?;
     if &receipt.source != source
         || &receipt.provider != provider
+        || receipt.runner_sha256 != sha256_hex(&runner.bytes)
+        || receipt.runner_bytes != u64::try_from(runner.bytes.len()).unwrap_or(u64::MAX)
+        || receipt.runner_code_directory_sha256 != runner.code_directory_sha256
         || receipt.output_root_sha256 != path_sha256(output_root)
     {
         return Err("delivery verification preflight no longer matches current authority".into());
@@ -416,6 +450,16 @@ fn validate_provider_receipt(
         .any(|value| !is_sha256(value))
     {
         return Err("delivery verification provider binding is invalid".into());
+    }
+    Ok(())
+}
+
+fn validate_runner(runner: &DeliveryVerificationRunnerBinary) -> Result<(), String> {
+    if runner.bytes.is_empty()
+        || u64::try_from(runner.bytes.len()).unwrap_or(u64::MAX) > MAX_RUNNER_BYTES
+        || !is_sha256(&runner.code_directory_sha256)
+    {
+        return Err("delivery verification execute binary size is outside its bound".into());
     }
     Ok(())
 }

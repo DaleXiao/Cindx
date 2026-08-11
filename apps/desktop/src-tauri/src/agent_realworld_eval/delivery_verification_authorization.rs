@@ -4,35 +4,39 @@ use super::delivery_verification_preflight::{
 };
 use super::delivery_verification_protocol::{
     ProtocolBudget, ValidatedProtocol, DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME,
+    DELIVERY_VERIFICATION_PROTOCOL_ID, DELIVERY_VERIFICATION_SUITE_ID,
+};
+use super::delivery_verification_runner_binary::{
+    DeliveryVerificationRunnerBinary, MAX_RUNNER_BYTES,
 };
 use orchestrator::sha256_hex;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 pub(super) const DELIVERY_AUTHORIZATION_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-authorization.v1";
+    "cindx.agent-eval.delivery-verification-authorization.v2";
 pub(super) const DELIVERY_CONSUMED_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-authorization-consumed.v1";
+    "cindx.agent-eval.delivery-verification-authorization-consumed.v2";
 pub(super) const DELIVERY_TOMBSTONE_FILE_NAME: &str =
     "delivery-verification-authorization-consumed.json";
 pub(super) const DELIVERY_AUTHORIZATION_TTL_MS: u64 = 15 * 60 * 1_000;
 
-const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v1";
+const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v2";
 const AUTHORIZATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-authorization.v1\0";
+    b"cindx.agent-eval.delivery-verification-authorization.v2\0";
 const TOMBSTONE_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-authorization-consumed.v1\0";
-const PREFLIGHT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v1\0";
+    b"cindx.agent-eval.delivery-verification-authorization-consumed.v2\0";
+const PREFLIGHT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v2\0";
 const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v1\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-credential-fingerprint.v1\0";
+    b"cindx.agent-eval.delivery-verification-credential-fingerprint.v2\0";
 const MAX_PRIVATE_FILE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_RUNNER_BYTES: u64 = 512 * 1024 * 1024;
 const CASE_COUNT: usize = 32;
+const CONSUMED_AUTHORITY_FILE_PREFIX: &str = ".cindx-delivery-verification-v2-consumed-";
 
 pub(super) struct DeliveryVerificationAuthorizationIssue<'a, 'protocol> {
     pub(super) protocol: &'a ValidatedProtocol<'protocol>,
@@ -41,7 +45,7 @@ pub(super) struct DeliveryVerificationAuthorizationIssue<'a, 'protocol> {
     pub(super) preflight_path: &'a Path,
     pub(super) authorization_path: &'a Path,
     pub(super) output_root: &'a Path,
-    pub(super) runner_bytes: &'a [u8],
+    pub(super) runner: &'a DeliveryVerificationRunnerBinary,
     pub(super) issued_at_ms: u64,
     pub(super) expires_at_ms: u64,
     pub(super) nonce: &'a str,
@@ -55,7 +59,7 @@ pub(super) struct DeliveryVerificationAuthorizationValidation<'a, 'protocol> {
     pub(super) preflight_path: &'a Path,
     pub(super) authorization_path: &'a Path,
     pub(super) output_root: &'a Path,
-    pub(super) runner_bytes: &'a [u8],
+    pub(super) runner: &'a DeliveryVerificationRunnerBinary,
     pub(super) credential: &'a str,
     pub(super) now_ms: u64,
 }
@@ -65,6 +69,7 @@ pub(super) struct ValidatedDeliveryVerificationAuthorizationV1 {
     pub(super) authorization: DeliveryVerificationAuthorizationV1,
     pub(super) repo_root: PathBuf,
     pub(super) output_root: PathBuf,
+    pub(super) consumed_authority_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +111,7 @@ pub(super) struct DeliveryVerificationAuthorizationV1 {
     pub(super) output_root_sha256: String,
     pub(super) runner_sha256: String,
     pub(super) runner_bytes: u64,
+    pub(super) runner_code_directory_sha256: String,
     pub(super) credential_fingerprint_sha256: String,
     pub(super) authorization_sha256: String,
 }
@@ -119,6 +125,8 @@ pub(super) struct ConsumedDeliveryVerificationAuthorizationV1 {
     pub(super) authorization_path_sha256: String,
     pub(super) output_root_sha256: String,
     pub(super) runner_sha256: String,
+    pub(super) runner_code_directory_sha256: String,
+    pub(super) consumed_authority_path_sha256: String,
     pub(super) consumed_at_ms: u64,
     pub(super) tombstone_sha256: String,
 }
@@ -141,7 +149,7 @@ pub(super) fn issue_delivery_verification_authorization(
         input.protocol,
         input.preflight,
         &paths,
-        input.runner_bytes,
+        input.runner,
         input.issued_at_ms,
         input.expires_at_ms,
         input.nonce,
@@ -194,7 +202,7 @@ pub(super) fn load_and_validate_delivery_verification_authorization(
         input.protocol,
         input.preflight,
         &paths,
-        input.runner_bytes,
+        input.runner,
         authorization.issued_at_ms,
         authorization.expires_at_ms,
         &authorization.nonce,
@@ -207,6 +215,7 @@ pub(super) fn load_and_validate_delivery_verification_authorization(
         authorization,
         repo_root: paths.repo_root,
         output_root: paths.output_root,
+        consumed_authority_path: paths.consumed_authority,
     })
 }
 
@@ -219,8 +228,11 @@ pub(super) fn consume_delivery_verification_authorization_once(
     {
         return Err("delivery authorization cannot be consumed outside its validity window".into());
     }
-    if validated.output_root.exists() {
+    if path_entry_exists(&validated.output_root, "delivery output root")? {
         return Err("delivery output root has already been consumed".into());
+    }
+    if validated.consumed_authority_path != consumed_authority_path(&validated.output_root)? {
+        return Err("delivery consumed authority marker path is invalid".into());
     }
     let mut tombstone = ConsumedDeliveryVerificationAuthorizationV1 {
         schema: DELIVERY_CONSUMED_SCHEMA.into(),
@@ -229,10 +241,18 @@ pub(super) fn consume_delivery_verification_authorization_once(
         authorization_path_sha256: validated.authorization.authorization_path_sha256.clone(),
         output_root_sha256: validated.authorization.output_root_sha256.clone(),
         runner_sha256: validated.authorization.runner_sha256.clone(),
+        runner_code_directory_sha256: validated.authorization.runner_code_directory_sha256.clone(),
+        consumed_authority_path_sha256: path_sha256(&validated.consumed_authority_path),
         consumed_at_ms,
         tombstone_sha256: String::new(),
     };
     tombstone.tombstone_sha256 = tombstone_digest(&tombstone)?;
+    let tombstone_bytes = canonical_json(&tombstone, "delivery consumed tombstone")?;
+    write_new_private_file(
+        &validated.consumed_authority_path,
+        &tombstone_bytes,
+        "delivery consumed authority marker",
+    )?;
 
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -243,7 +263,7 @@ pub(super) fn consume_delivery_verification_authorization_once(
     require_private_directory(&validated.output_root, "delivery output root")?;
     write_new_private_file(
         &validated.output_root.join(DELIVERY_TOMBSTONE_FILE_NAME),
-        &canonical_json(&tombstone, "delivery consumed tombstone")?,
+        &tombstone_bytes,
         "delivery consumed tombstone",
     )?;
     Ok(tombstone)
@@ -254,6 +274,8 @@ impl DeliveryVerificationAuthorizationV1 {
         if self.schema != DELIVERY_AUTHORIZATION_SCHEMA
             || self.preflight_schema != PREFLIGHT_SCHEMA
             || self.app_version != env!("CARGO_PKG_VERSION")
+            || self.protocol_id != DELIVERY_VERIFICATION_PROTOCOL_ID
+            || self.suite_id != DELIVERY_VERIFICATION_SUITE_ID
             || self.cases.len() != CASE_COUNT
             || self.issued_at_ms == 0
             || self.issued_at_ms.checked_add(DELIVERY_AUTHORIZATION_TTL_MS)
@@ -285,6 +307,7 @@ impl DeliveryVerificationAuthorizationV1 {
             ("budget", &self.budget_sha256),
             ("output root", &self.output_root_sha256),
             ("runner", &self.runner_sha256),
+            ("runner code directory", &self.runner_code_directory_sha256),
             (
                 "credential fingerprint",
                 &self.credential_fingerprint_sha256,
@@ -321,12 +344,15 @@ impl ConsumedDeliveryVerificationAuthorizationV1 {
         &self,
         authorization: &DeliveryVerificationAuthorizationV1,
     ) -> Result<(), String> {
+        authorization.validate_static()?;
         if self.schema != DELIVERY_CONSUMED_SCHEMA
             || &self.authorization != authorization
             || self.authorization_sha256 != authorization.authorization_sha256
             || self.authorization_path_sha256 != authorization.authorization_path_sha256
             || self.output_root_sha256 != authorization.output_root_sha256
             || self.runner_sha256 != authorization.runner_sha256
+            || self.runner_code_directory_sha256 != authorization.runner_code_directory_sha256
+            || !is_sha256(&self.consumed_authority_path_sha256)
             || self.consumed_at_ms < authorization.issued_at_ms
             || self.consumed_at_ms >= authorization.expires_at_ms
             || self.tombstone_sha256 != tombstone_digest(self)?
@@ -342,6 +368,7 @@ struct ControlPaths {
     preflight: PathBuf,
     authorization: PathBuf,
     output_root: PathBuf,
+    consumed_authority: PathBuf,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -349,13 +376,13 @@ fn build_authorization(
     protocol: &ValidatedProtocol<'_>,
     preflight: &DeliveryVerificationPreflightReceipt,
     paths: &ControlPaths,
-    runner_bytes: &[u8],
+    runner: &DeliveryVerificationRunnerBinary,
     issued_at_ms: u64,
     expires_at_ms: u64,
     nonce: &str,
     credential: &str,
 ) -> Result<DeliveryVerificationAuthorizationV1, String> {
-    validate_frozen_preflight(protocol, preflight, &paths.output_root)?;
+    validate_frozen_preflight(protocol, preflight, runner, &paths.output_root)?;
     if issued_at_ms < preflight.created_at_ms
         || issued_at_ms == 0
         || issued_at_ms.checked_add(DELIVERY_AUTHORIZATION_TTL_MS) != Some(expires_at_ms)
@@ -366,8 +393,9 @@ fn build_authorization(
     if credential.trim().is_empty() {
         return Err("delivery authorization requires the exact provider credential".into());
     }
-    if runner_bytes.is_empty()
-        || u64::try_from(runner_bytes.len()).unwrap_or(u64::MAX) > MAX_RUNNER_BYTES
+    if runner.bytes.is_empty()
+        || u64::try_from(runner.bytes.len()).unwrap_or(u64::MAX) > MAX_RUNNER_BYTES
+        || !is_sha256(&runner.code_directory_sha256)
     {
         return Err("delivery execute binary size is outside its bound".into());
     }
@@ -408,8 +436,9 @@ fn build_authorization(
         budget_sha256: preflight.budget_sha256.clone(),
         cases,
         output_root_sha256: path_sha256(&paths.output_root),
-        runner_sha256: sha256_hex(runner_bytes),
-        runner_bytes: u64::try_from(runner_bytes.len()).unwrap_or(u64::MAX),
+        runner_sha256: sha256_hex(&runner.bytes),
+        runner_bytes: u64::try_from(runner.bytes.len()).unwrap_or(u64::MAX),
+        runner_code_directory_sha256: runner.code_directory_sha256.clone(),
         credential_fingerprint_sha256: credential_fingerprint(nonce, credential),
         authorization_sha256: String::new(),
     };
@@ -421,6 +450,7 @@ fn build_authorization(
 fn validate_frozen_preflight(
     protocol: &ValidatedProtocol<'_>,
     preflight: &DeliveryVerificationPreflightReceipt,
+    runner: &DeliveryVerificationRunnerBinary,
     output_root: &Path,
 ) -> Result<(), String> {
     let snapshot = DeliveryVerificationProtocolSnapshot {
@@ -445,6 +475,10 @@ fn validate_frozen_preflight(
         || preflight.cases_sha256 != cases_digest(&snapshot.case_sha256)?
         || preflight.budget_sha256 != snapshot.budget_sha256
         || preflight.hidden_oracle_sha256 != snapshot.hidden_oracle_sha256
+        || preflight.runner_binary != DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME
+        || preflight.runner_sha256 != sha256_hex(&runner.bytes)
+        || preflight.runner_bytes != u64::try_from(runner.bytes.len()).unwrap_or(u64::MAX)
+        || preflight.runner_code_directory_sha256 != runner.code_directory_sha256
         || preflight.output_root_sha256 != path_sha256(output_root)
         || preflight.provider_calls_performed != 0
         || !preflight.online_runner_frozen
@@ -517,9 +551,15 @@ fn validate_issue_paths(
     if output_root.exists() {
         return Err("delivery output root must be new".into());
     }
+    let consumed_authority = consumed_authority_path(&output_root)?;
+    if path_entry_exists(&consumed_authority, "delivery consumed authority marker")? {
+        return Err("delivery output authority has already been consumed".into());
+    }
     if preflight == authorization
         || preflight == output_root
         || authorization == output_root
+        || preflight == consumed_authority
+        || authorization == consumed_authority
         || preflight.starts_with(&output_root)
         || authorization.starts_with(&output_root)
     {
@@ -530,50 +570,18 @@ fn validate_issue_paths(
         preflight,
         authorization,
         output_root,
+        consumed_authority,
     })
 }
 
-pub(super) fn read_delivery_execute_sibling_bytes() -> Result<Vec<u8>, String> {
-    let authorize = std::env::current_exe()
-        .map_err(|error| format!("failed to locate delivery authorize binary: {error}"))?;
-    let directory = authorize
+pub(super) fn consumed_authority_path(output_root: &Path) -> Result<PathBuf, String> {
+    let parent = output_root
         .parent()
-        .ok_or_else(|| "delivery authorize binary has no parent directory".to_string())?;
-    read_exact_binary(
-        &directory.join(format!(
-            "{}{}",
-            DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME,
-            std::env::consts::EXE_SUFFIX
-        )),
-        DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME,
-    )
-}
-
-pub(super) fn read_current_delivery_execute_bytes() -> Result<Vec<u8>, String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("failed to locate delivery execute binary: {error}"))?;
-    read_exact_binary(&executable, DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME)
-}
-
-fn read_exact_binary(path: &Path, expected_stem: &str) -> Result<Vec<u8>, String> {
-    let expected_name = format!("{}{}", expected_stem, std::env::consts::EXE_SUFFIX);
-    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
-        return Err("delivery execute binary has an unexpected fixed name".into());
-    }
-    let mut file = open_regular_file(path, false, "delivery execute binary")?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("failed to stat delivery execute binary: {error}"))?;
-    if metadata.len() == 0 || metadata.len() > MAX_RUNNER_BYTES {
-        return Err("delivery execute binary size is outside its bound".into());
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("failed to read delivery execute binary: {error}"))?;
-    if u64::try_from(bytes.len()).ok() != Some(metadata.len()) {
-        return Err("delivery execute binary changed while it was read".into());
-    }
-    Ok(bytes)
+        .ok_or_else(|| "delivery output root has no parent".to_string())?;
+    Ok(parent.join(format!(
+        "{CONSUMED_AUTHORITY_FILE_PREFIX}{}.json",
+        path_sha256(output_root)
+    )))
 }
 
 pub(super) fn read_consumed_delivery_authorization(
@@ -583,13 +591,30 @@ pub(super) fn read_consumed_delivery_authorization(
         &root.join(DELIVERY_TOMBSTONE_FILE_NAME),
         "delivery consumed tombstone",
     )?;
+    let consumed_authority = consumed_authority_path(root)?;
+    let authority_bytes =
+        read_private_file(&consumed_authority, "delivery consumed authority marker")?;
+    if authority_bytes != bytes {
+        return Err("delivery consumed authority marker differs from its tombstone".into());
+    }
     let tombstone: ConsumedDeliveryVerificationAuthorizationV1 = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid delivery consumed tombstone JSON: {error}"))?;
     if canonical_json(&tombstone, "delivery consumed tombstone")? != bytes {
         return Err("delivery consumed tombstone is not canonical JSON".into());
     }
     tombstone.validate_for(&tombstone.authorization.clone())?;
+    if tombstone.consumed_authority_path_sha256 != path_sha256(&consumed_authority) {
+        return Err("delivery consumed authority marker path differs from its binding".into());
+    }
     Ok(tombstone)
+}
+
+fn path_entry_exists(path: &Path, label: &str) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("failed to inspect {label}: {error}")),
+    }
 }
 
 pub(super) fn canonical_external_path(
@@ -800,7 +825,9 @@ pub(super) fn frozen_preflight_digest(
     domain_digest(PREFLIGHT_HASH_DOMAIN, &payload, "delivery preflight")
 }
 
-fn authorization_digest(value: &DeliveryVerificationAuthorizationV1) -> Result<String, String> {
+pub(super) fn authorization_digest(
+    value: &DeliveryVerificationAuthorizationV1,
+) -> Result<String, String> {
     let mut payload = value.clone();
     payload.authorization_sha256.clear();
     domain_digest(
@@ -810,7 +837,9 @@ fn authorization_digest(value: &DeliveryVerificationAuthorizationV1) -> Result<S
     )
 }
 
-fn tombstone_digest(value: &ConsumedDeliveryVerificationAuthorizationV1) -> Result<String, String> {
+pub(super) fn tombstone_digest(
+    value: &ConsumedDeliveryVerificationAuthorizationV1,
+) -> Result<String, String> {
     let mut payload = value.clone();
     payload.tombstone_sha256.clear();
     domain_digest(

@@ -21,6 +21,13 @@ const RUNNER_BYTES: &[u8] = b"provider-free delivery loopback runner fixture";
 const RESPONSE_CONTENT: &str = "loopback response";
 const REQUEST_PAYLOAD_DOMAIN: &[u8] = b"cindx.model-provider.request-payload.v1\0";
 
+fn runner() -> DeliveryVerificationRunnerBinary {
+    DeliveryVerificationRunnerBinary {
+        bytes: RUNNER_BYTES.to_vec(),
+        code_directory_sha256: sha256_hex(b"loopback runner code directory"),
+    }
+}
+
 struct LoopbackAcceptedRequest {
     body: Vec<u8>,
     journal_at_accept: Value,
@@ -41,7 +48,7 @@ fn protocol() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-protocol-v1.json"
+            "/../../../benchmarks/agent/delivery-verification-protocol-v2.json"
         )),
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -99,6 +106,7 @@ fn create_journal(
         &protocol_snapshot(protocol),
         source(),
         provider_binding(config).unwrap(),
+        &runner(),
         &output_root,
         issued_at_ms,
     )
@@ -117,7 +125,7 @@ fn create_journal(
             preflight_path: &preflight_path,
             authorization_path: &authorization_path,
             output_root: &output_root,
-            runner_bytes: RUNNER_BYTES,
+            runner: &runner(),
             issued_at_ms,
             expires_at_ms: issued_at_ms + DELIVERY_AUTHORIZATION_TTL_MS,
             nonce: &sha256_hex(b"delivery loopback authorization nonce"),
@@ -135,7 +143,7 @@ fn create_journal(
             preflight_path: &preflight_path,
             authorization_path: &authorization_path,
             output_root: &output_root,
-            runner_bytes: RUNNER_BYTES,
+            runner: &runner(),
             credential: &config.api_key,
             now_ms: consumed_at_ms,
         },

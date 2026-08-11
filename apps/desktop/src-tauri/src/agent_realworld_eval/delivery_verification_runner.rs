@@ -12,8 +12,12 @@ use super::delivery_verification_preflight::{
 };
 use super::delivery_verification_protocol::{
     parse_and_validate_protocol, CalibrationDecision, HoldoutDecisionResult, MatchedPairCounts,
-    ProtocolBudget, ValidatedProtocol, DELIVERY_VERIFICATION_PROTOCOL_ID,
-    DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH, DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
+    ProtocolBudget, ValidatedProtocol, CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+    DELIVERY_VERIFICATION_PROTOCOL_ID, DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH,
+    DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
+};
+use super::delivery_verification_runner_binary::{
+    read_current_delivery_execute, read_delivery_execute_sibling, DeliveryVerificationRunnerBinary,
 };
 use crate::configuration_models::ProviderConfig;
 use agent_core::{
@@ -27,18 +31,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const PREFLIGHT_RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_PREFLIGHT_RECEIPT";
-const AUTHORIZATION_ENV: &str = "CINDX_DELIVERY_VERIFICATION_AUTHORIZATION";
-const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_OUTPUT_ROOT";
+const PREFLIGHT_RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_PREFLIGHT_RECEIPT";
+const AUTHORIZATION_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_AUTHORIZATION";
+const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_OUTPUT_ROOT";
 const AUTHORIZE_FLAG: &str = "--authorize-once";
 
 pub(in super::super) fn run_authorize() -> Result<(), String> {
     require_authorize_arguments(std::env::args_os())?;
     reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID)?;
-    let runner_bytes = read_delivery_execute_sibling_bytes()?;
-    let inputs = StaticInputs::load(true)?;
+    let runner = read_delivery_execute_sibling()?;
+    let inputs = StaticInputs::load(true, &runner)?;
     let provider = crate::configuration_persistence::load_provider_config();
-    inputs.validate_current_authority(&provider)?;
+    inputs.validate_current_authority(&provider, &runner)?;
     let issued_at_ms = now_millis()?;
     let expires_at_ms = issued_at_ms
         .checked_add(DELIVERY_AUTHORIZATION_TTL_MS)
@@ -47,7 +51,7 @@ pub(in super::super) fn run_authorize() -> Result<(), String> {
         issued_at_ms,
         &inputs.authorization_path,
         &inputs.output_root,
-        &runner_bytes,
+        &runner,
     );
     let authorization =
         issue_delivery_verification_authorization(DeliveryVerificationAuthorizationIssue {
@@ -57,13 +61,13 @@ pub(in super::super) fn run_authorize() -> Result<(), String> {
             preflight_path: &inputs.preflight_path,
             authorization_path: &inputs.authorization_path,
             output_root: &inputs.output_root,
-            runner_bytes: &runner_bytes,
+            runner: &runner,
             issued_at_ms,
             expires_at_ms,
             nonce: &nonce,
             credential: &provider.api_key,
         })?;
-    inputs.validate_current_authority(&provider)?;
+    inputs.validate_current_authority(&provider, &runner)?;
     write_delivery_verification_authorization_new(
         &inputs.repo_root,
         &inputs.authorization_path,
@@ -84,7 +88,7 @@ pub(in super::super) fn run_execute() -> Result<(), String> {
         return Err("delivery verification execute accepts no command-line arguments".into());
     }
     reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID)?;
-    let runner_bytes = read_current_delivery_execute_bytes()?;
+    let runner = read_current_delivery_execute()?;
     let repo_root = repository_root()?;
     let raw_output_root = required_path(OUTPUT_ROOT_ENV)?;
     if raw_output_root.exists() {
@@ -96,9 +100,9 @@ pub(in super::super) fn run_execute() -> Result<(), String> {
         ));
     }
 
-    let inputs = StaticInputs::load(false)?;
+    let inputs = StaticInputs::load(false, &runner)?;
     let provider = crate::configuration_persistence::load_provider_config();
-    inputs.validate_current_authority(&provider)?;
+    inputs.validate_current_authority(&provider, &runner)?;
     let validated = load_and_validate_delivery_verification_authorization(
         DeliveryVerificationAuthorizationValidation {
             protocol: &inputs.protocol(),
@@ -107,15 +111,17 @@ pub(in super::super) fn run_execute() -> Result<(), String> {
             preflight_path: &inputs.preflight_path,
             authorization_path: &inputs.authorization_path,
             output_root: &inputs.output_root,
-            runner_bytes: &runner_bytes,
+            runner: &runner,
             credential: &provider.api_key,
             now_ms: now_millis()?,
         },
     )?;
-    if sha256_hex(&runner_bytes) != validated.authorization.runner_sha256 {
+    if sha256_hex(&runner.bytes) != validated.authorization.runner_sha256
+        || runner.code_directory_sha256 != validated.authorization.runner_code_directory_sha256
+    {
         return Err("delivery execute binary differs from its authorization".into());
     }
-    inputs.validate_current_authority(&provider)?;
+    inputs.validate_current_authority(&provider, &runner)?;
     let tombstone = consume_delivery_verification_authorization_once(&validated, now_millis()?)?;
     let mut journal = DeliveryVerificationExecutionJournal::create_new(
         &inputs.output_root,
@@ -145,34 +151,42 @@ pub(super) fn require_authorize_arguments(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<(), String> {
     let args = args.into_iter().collect::<Vec<_>>();
-    if args.len() == 3
-        && args[1] == OsStr::new(AUTHORIZE_FLAG)
-        && args[2] == OsStr::new(DELIVERY_VERIFICATION_PROTOCOL_ID)
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "delivery authorization requires exactly `{AUTHORIZE_FLAG} {DELIVERY_VERIFICATION_PROTOCOL_ID}`"
-        ))
+    if args.len() == 3 && args[1] == OsStr::new(AUTHORIZE_FLAG) {
+        let protocol_id = args[2]
+            .to_str()
+            .ok_or_else(|| "delivery authorization protocol id is not UTF-8".to_string())?;
+        reject_consumed_delivery_protocol(protocol_id)?;
+        if protocol_id == DELIVERY_VERIFICATION_PROTOCOL_ID {
+            return Ok(());
+        }
     }
+    Err(format!(
+        "delivery authorization requires exactly `{AUTHORIZE_FLAG} {DELIVERY_VERIFICATION_PROTOCOL_ID}`"
+    ))
 }
 
 pub(super) fn reject_consumed_delivery_protocol(protocol_id: &str) -> Result<(), String> {
-    if protocol_id == DELIVERY_VERIFICATION_PROTOCOL_ID {
+    if protocol_id == CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID {
         return Err(format!(
-            "delivery verification protocol `{protocol_id}` is consumed and cannot be authorized or executed again; a separately frozen successor protocol is required"
+            "delivery verification protocol `{protocol_id}` is consumed and cannot be preflighted, authorized, or executed again; use the separately frozen successor protocol"
         ));
     }
     Ok(())
 }
 
-fn authorization_nonce(now_ms: u64, authorization: &Path, output: &Path, runner: &[u8]) -> String {
+fn authorization_nonce(
+    now_ms: u64,
+    authorization: &Path,
+    output: &Path,
+    runner: &DeliveryVerificationRunnerBinary,
+) -> String {
     sha256_hex(
         format!(
-            "cindx.delivery-verification-authorization-nonce.v1\0{now_ms}\0{}\0{}\0{}",
+            "cindx.delivery-verification-authorization-nonce.v2\0{now_ms}\0{}\0{}\0{}\0{}",
             authorization.display(),
             output.display(),
-            sha256_hex(runner),
+            sha256_hex(&runner.bytes),
+            runner.code_directory_sha256,
         )
         .as_bytes(),
     )
@@ -189,7 +203,10 @@ struct StaticInputs {
 }
 
 impl StaticInputs {
-    fn load(authorization_must_be_new: bool) -> Result<Self, String> {
+    fn load(
+        authorization_must_be_new: bool,
+        runner: &DeliveryVerificationRunnerBinary,
+    ) -> Result<Self, String> {
         let repo_root = repository_root()?;
         let manifest_bytes = fs::read(repo_root.join(DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH))
             .map_err(|error| format!("failed to read delivery protocol: {error}"))?;
@@ -233,6 +250,7 @@ impl StaticInputs {
             &preflight_bytes,
             &DeliveryVerificationSourceBindingReceipt { head, tree },
             &provider_binding(&config)?,
+            runner,
             &output_root,
         )?;
         Ok(Self {
@@ -251,12 +269,17 @@ impl StaticInputs {
             .expect("validated delivery protocol remains valid")
     }
 
-    fn validate_current_authority(&self, provider: &ProviderConfig) -> Result<(), String> {
+    fn validate_current_authority(
+        &self,
+        provider: &ProviderConfig,
+        runner: &DeliveryVerificationRunnerBinary,
+    ) -> Result<(), String> {
         validate_current_authority(
             &protocol_snapshot(&self.protocol()),
             &self.preflight,
             &self.repo_root,
             provider,
+            runner,
             &self.output_root,
         )
     }

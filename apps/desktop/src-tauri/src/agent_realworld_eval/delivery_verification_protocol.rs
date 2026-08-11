@@ -12,18 +12,22 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-protocol.v1";
+    "cindx.agent-eval.delivery-verification-protocol.v2";
 pub(super) const DELIVERY_VERIFICATION_SUITE_SCHEMA: &str =
     "cindx.agent-eval.delivery-verification-suite.v1";
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_ID: &str =
+    "cindx-delivery-verification-protocol-v2";
+pub(super) const CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID: &str =
     "cindx-delivery-verification-protocol-v1";
 pub(super) const DELIVERY_VERIFICATION_SUITE_ID: &str = "cindx-delivery-verification-v1";
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH: &str =
-    "benchmarks/agent/delivery-verification-protocol-v1.json";
+    "benchmarks/agent/delivery-verification-protocol-v2.json";
 pub(super) const DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH: &str =
     "benchmarks/agent/delivery-verification-v1.json";
 pub(super) const DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME: &str =
-    "cindx-delivery-verification-execute";
+    "cindx-delivery-verification-v2-execute";
+pub(super) const DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA: &str =
+    "cindx.agent-eval.delivery-verification-execution-journal.v2";
 
 const CASE_COUNT: usize = 32;
 const CALIBRATION_CASE_COUNT: usize = 8;
@@ -47,6 +51,7 @@ struct ProtocolManifest {
     suite: FrozenSuite,
     design: FrozenDesign,
     budget: ProtocolBudget,
+    instrumentation: FrozenInstrumentation,
     calibration_gate: CalibrationGate,
     holdout_decision: HoldoutDecision,
     stop_contract: StopContract,
@@ -86,6 +91,16 @@ struct FrozenDesign {
     oracle_predicate: String,
     oracle_visibility: String,
     tool_calls_allowed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrozenInstrumentation {
+    request_mode: String,
+    prepared_wire_payload: String,
+    reservation_digest_authorities: Vec<String>,
+    terminal_request_payload_binding: String,
+    execution_journal_schema: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -763,7 +778,7 @@ fn validate_manifest(
 ) -> Result<(), String> {
     if manifest.schema != DELIVERY_VERIFICATION_PROTOCOL_SCHEMA
         || manifest.id != DELIVERY_VERIFICATION_PROTOCOL_ID
-        || manifest.version != 1
+        || manifest.version != 2
         || manifest.suite.path != DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH
         || manifest.suite.sha256 != suite_sha256
         || manifest.suite.schema != suite.schema
@@ -776,10 +791,26 @@ fn validate_manifest(
     }
     validate_design(&manifest.design)?;
     validate_budget(&manifest.budget)?;
+    validate_instrumentation(&manifest.instrumentation)?;
     validate_calibration_gate(&manifest.calibration_gate)?;
     validate_holdout_decision(&manifest.holdout_decision)?;
     validate_stop_contract(&manifest.stop_contract)?;
     validate_execution(&manifest.execution)
+}
+
+fn validate_instrumentation(instrumentation: &FrozenInstrumentation) -> Result<(), String> {
+    if instrumentation.request_mode != "non_streaming"
+        || instrumentation.prepared_wire_payload != "immutable_prepared_bytes_dispatched_exactly"
+        || instrumentation.reservation_digest_authorities
+            != ["semantic_request_sha256", "wire_payload_sha256"]
+        || instrumentation.terminal_request_payload_binding
+            != "request_payload_sha256_equals_reserved_wire_payload_sha256"
+        || instrumentation.execution_journal_schema
+            != DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA
+    {
+        return Err("delivery verification instrumentation authority is invalid".into());
+    }
+    Ok(())
 }
 
 fn validate_design(design: &FrozenDesign) -> Result<(), String> {

@@ -8,6 +8,10 @@ use super::delivery_verification_protocol::{
     parse_and_validate_protocol, ValidatedProtocol, DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH,
     DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
 };
+use super::delivery_verification_runner_binary::{
+    code_directory_sha256_for_bytes, read_current_delivery_execute, running_code_directory_sha256,
+    DeliveryVerificationRunnerBinary,
+};
 use crate::configuration_models::ProviderConfig;
 use agent_core::ModelRole;
 use orchestrator::sha256_hex;
@@ -16,7 +20,11 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const PREFLIGHT_AT_MS: u64 = 1_000;
@@ -25,6 +33,8 @@ const EXPIRES_AT_MS: u64 = ISSUED_AT_MS + DELIVERY_AUTHORIZATION_TTL_MS;
 const CONSUMED_AT_MS: u64 = 20_000;
 const CAMPAIGN_AT_MS: u64 = 30_000;
 const RUNNER_BYTES: &[u8] = b"provider-free exact delivery execute fixture";
+#[cfg(target_os = "macos")]
+const RUNNER_SWAP_CHILD_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_RUNNER_SWAP_TEST";
 
 const STAGES: [DeliveryVerificationCallStageV1; 4] = [
     DeliveryVerificationCallStageV1::OwnerDraft,
@@ -46,6 +56,91 @@ struct Fixture {
 
 fn digest(value: impl AsRef<[u8]>) -> String {
     sha256_hex(value.as_ref())
+}
+
+fn runner(bytes: &[u8]) -> DeliveryVerificationRunnerBinary {
+    DeliveryVerificationRunnerBinary {
+        bytes: bytes.to_vec(),
+        code_directory_sha256: digest("runner code directory"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_runner_swap_child_if_requested() -> bool {
+    let Some(root) = std::env::var_os(RUNNER_SWAP_CHILD_ENV).map(PathBuf::from) else {
+        return false;
+    };
+    fs::write(root.join("ready"), b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !root.join("continue").exists() {
+        assert!(Instant::now() < deadline, "runner swap child timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let error = read_current_delivery_execute().unwrap_err();
+    assert!(error.contains("running delivery execute image differs"));
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn assert_running_image_rejects_execute_path_swap() {
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join(format!(
+        "{}{}",
+        super::delivery_verification_protocol::DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME,
+        std::env::consts::EXE_SUFFIX
+    ));
+    let current_executable = std::env::current_exe().unwrap();
+    fs::copy(&current_executable, &executable).unwrap();
+    let replacement = temp.path().join("replacement");
+    fs::copy(&current_executable, &replacement).unwrap();
+    assert!(Command::new("/usr/bin/codesign")
+        .args([
+            "--force",
+            "--sign",
+            "-",
+            "--identifier",
+            "cindx.delivery-verification.runner-swap",
+            "--timestamp=none",
+        ])
+        .arg(&replacement)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success());
+    let current_identity =
+        code_directory_sha256_for_bytes(&fs::read(&current_executable).unwrap()).unwrap();
+    let replacement_identity =
+        code_directory_sha256_for_bytes(&fs::read(&replacement).unwrap()).unwrap();
+    assert_ne!(current_identity, replacement_identity);
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let mut child = Command::new(&executable)
+        .arg("agent_delivery_verification_execution_contract_authorization_binds_exact_frozen_authority")
+        .arg("--nocapture")
+        .env(RUNNER_SWAP_CHILD_ENV, temp.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !temp.path().join("ready").exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("runner swap child exited before its barrier: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("runner swap child did not reach its barrier");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::rename(&replacement, &executable).unwrap();
+    fs::write(temp.path().join("continue"), b"continue").unwrap();
+    assert!(child.wait().unwrap().success());
 }
 
 fn source() -> DeliveryVerificationSourceBindingReceipt {
@@ -96,6 +191,7 @@ fn with_fixture<R>(test: impl FnOnce(&ValidatedProtocol<'_>, Fixture) -> R) -> R
         &protocol_snapshot(&protocol),
         source(),
         provider_binding(&config).unwrap(),
+        &runner(RUNNER_BYTES),
         &output_root,
         PREFLIGHT_AT_MS,
     )
@@ -114,7 +210,7 @@ fn with_fixture<R>(test: impl FnOnce(&ValidatedProtocol<'_>, Fixture) -> R) -> R
             preflight_path: &preflight_path,
             authorization_path: &authorization_path,
             output_root: &output_root,
-            runner_bytes: RUNNER_BYTES,
+            runner: &runner(RUNNER_BYTES),
             issued_at_ms: ISSUED_AT_MS,
             expires_at_ms: EXPIRES_AT_MS,
             nonce: &digest("authorization nonce"),
@@ -141,7 +237,7 @@ fn with_fixture<R>(test: impl FnOnce(&ValidatedProtocol<'_>, Fixture) -> R) -> R
 fn validate_authorization(
     protocol: &ValidatedProtocol<'_>,
     fixture: &Fixture,
-    runner_bytes: &[u8],
+    runner: &DeliveryVerificationRunnerBinary,
     credential: &str,
     now_ms: u64,
 ) -> Result<ValidatedDeliveryVerificationAuthorizationV1, String> {
@@ -153,7 +249,7 @@ fn validate_authorization(
             preflight_path: &fixture.preflight_path,
             authorization_path: &fixture.authorization_path,
             output_root: &fixture.output_root,
-            runner_bytes,
+            runner,
             credential,
             now_ms,
         },
@@ -171,7 +267,7 @@ fn new_journal(
     let validated = validate_authorization(
         protocol,
         fixture,
-        RUNNER_BYTES,
+        &runner(RUNNER_BYTES),
         &fixture.config.api_key,
         CONSUMED_AT_MS,
     )
@@ -340,6 +436,18 @@ fn terminal_structural_case(
 
 #[test]
 fn agent_delivery_verification_execution_contract_authorization_binds_exact_frozen_authority() {
+    #[cfg(target_os = "macos")]
+    {
+        if run_runner_swap_child_if_requested() {
+            return;
+        }
+        let current_bytes = fs::read(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(
+            code_directory_sha256_for_bytes(&current_bytes).unwrap(),
+            running_code_directory_sha256().unwrap()
+        );
+        assert_running_image_rejects_execute_path_swap();
+    }
     with_fixture(|protocol, fixture| {
         println!(
             "{}\n{}",
@@ -354,6 +462,10 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
             RUNNER_BYTES.len() as u64
         );
         assert_eq!(
+            fixture.authorization.runner_code_directory_sha256,
+            runner(RUNNER_BYTES).code_directory_sha256
+        );
+        assert_eq!(
             fixture.authorization.expires_at_ms - fixture.authorization.issued_at_ms,
             DELIVERY_AUTHORIZATION_TTL_MS
         );
@@ -366,7 +478,24 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
         ] {
             assert!(!encoded.contains(secret));
         }
-        assert!(read_current_delivery_execute_bytes().is_err());
+        assert!(read_current_delivery_execute().is_err());
+
+        let mut consumed_v1 = fixture.authorization.clone();
+        consumed_v1.protocol_id =
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID
+                .into();
+        consumed_v1.authorization_sha256 = authorization_digest(&consumed_v1).unwrap();
+        assert!(consumed_v1.validate_static().is_err());
+
+        let (_, mut tombstone, _) = new_journal(protocol, &fixture);
+        tombstone.authorization.protocol_id =
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID
+                .into();
+        tombstone.authorization.authorization_sha256 =
+            authorization_digest(&tombstone.authorization).unwrap();
+        tombstone.authorization_sha256 = tombstone.authorization.authorization_sha256.clone();
+        tombstone.tombstone_sha256 = tombstone_digest(&tombstone).unwrap();
+        assert!(tombstone.validate_for(&tombstone.authorization).is_err());
     });
 }
 
@@ -387,7 +516,7 @@ fn agent_delivery_verification_execution_contract_authorization_requires_exact_f
                     preflight_path: &fixture.preflight_path,
                     authorization_path: &path,
                     output_root: &fixture.output_root,
-                    runner_bytes: RUNNER_BYTES,
+                    runner: &runner(RUNNER_BYTES),
                     issued_at_ms: ISSUED_AT_MS,
                     expires_at_ms,
                     nonce: &digest("bad ttl nonce"),
@@ -399,7 +528,7 @@ fn agent_delivery_verification_execution_contract_authorization_requires_exact_f
         assert!(validate_authorization(
             protocol,
             &fixture,
-            RUNNER_BYTES,
+            &runner(RUNNER_BYTES),
             &fixture.config.api_key,
             ISSUED_AT_MS - 1,
         )
@@ -407,7 +536,7 @@ fn agent_delivery_verification_execution_contract_authorization_requires_exact_f
         assert!(validate_authorization(
             protocol,
             &fixture,
-            RUNNER_BYTES,
+            &runner(RUNNER_BYTES),
             &fixture.config.api_key,
             EXPIRES_AT_MS,
         )
@@ -422,7 +551,7 @@ fn agent_delivery_verification_execution_contract_authorization_rejects_drift_an
         assert!(validate_authorization(
             protocol,
             &fixture,
-            b"changed runner bytes",
+            &runner(b"changed runner bytes"),
             &fixture.config.api_key,
             CONSUMED_AT_MS,
         )
@@ -430,7 +559,7 @@ fn agent_delivery_verification_execution_contract_authorization_rejects_drift_an
         assert!(validate_authorization(
             protocol,
             &fixture,
-            RUNNER_BYTES,
+            &runner(RUNNER_BYTES),
             "changed credential",
             CONSUMED_AT_MS,
         )
@@ -454,7 +583,7 @@ fn agent_delivery_verification_execution_contract_authorization_rejects_drift_an
                 preflight_path: &preflight_path,
                 authorization_path: &fixture._temp.path().join("tampered-authorization.json"),
                 output_root: &fixture.output_root,
-                runner_bytes: RUNNER_BYTES,
+                runner: &runner(RUNNER_BYTES),
                 issued_at_ms: ISSUED_AT_MS,
                 expires_at_ms: EXPIRES_AT_MS,
                 nonce: &digest("tampered preflight nonce"),
@@ -497,7 +626,7 @@ fn agent_delivery_verification_execution_contract_authorization_is_private_canon
             assert!(validate_authorization(
                 protocol,
                 &fixture,
-                RUNNER_BYTES,
+                &runner(RUNNER_BYTES),
                 &fixture.config.api_key,
                 CONSUMED_AT_MS,
             )
@@ -507,7 +636,7 @@ fn agent_delivery_verification_execution_contract_authorization_is_private_canon
             assert!(validate_authorization(
                 protocol,
                 &fixture,
-                RUNNER_BYTES,
+                &runner(RUNNER_BYTES),
                 &fixture.config.api_key,
                 CONSUMED_AT_MS,
             )
@@ -519,11 +648,47 @@ fn agent_delivery_verification_execution_contract_authorization_is_private_canon
 #[test]
 fn agent_delivery_verification_execution_contract_authorization_consumes_once_atomically() {
     with_fixture(|protocol, fixture| {
+        let second_authorization_path = fixture._temp.path().join("authorization-second.json");
+        let second_authorization =
+            issue_delivery_verification_authorization(DeliveryVerificationAuthorizationIssue {
+                protocol,
+                preflight: &fixture.preflight,
+                repo_root: &fixture.repo_root,
+                preflight_path: &fixture.preflight_path,
+                authorization_path: &second_authorization_path,
+                output_root: &fixture.output_root,
+                runner: &runner(RUNNER_BYTES),
+                issued_at_ms: ISSUED_AT_MS,
+                expires_at_ms: EXPIRES_AT_MS,
+                nonce: &digest("second authorization nonce"),
+                credential: &fixture.config.api_key,
+            })
+            .unwrap();
+        write_delivery_verification_authorization_new(
+            &fixture.repo_root,
+            &second_authorization_path,
+            &second_authorization,
+        )
+        .unwrap();
+        let second_validated = load_and_validate_delivery_verification_authorization(
+            DeliveryVerificationAuthorizationValidation {
+                protocol,
+                preflight: &fixture.preflight,
+                repo_root: &fixture.repo_root,
+                preflight_path: &fixture.preflight_path,
+                authorization_path: &second_authorization_path,
+                output_root: &fixture.output_root,
+                runner: &runner(RUNNER_BYTES),
+                credential: &fixture.config.api_key,
+                now_ms: CONSUMED_AT_MS,
+            },
+        )
+        .unwrap();
         let validated = Arc::new(
             validate_authorization(
                 protocol,
                 &fixture,
-                RUNNER_BYTES,
+                &runner(RUNNER_BYTES),
                 &fixture.config.api_key,
                 CONSUMED_AT_MS,
             )
@@ -546,10 +711,36 @@ fn agent_delivery_verification_execution_contract_authorization_consumes_once_at
         assert_eq!(attempts.iter().filter(|attempt| attempt.is_ok()).count(), 1);
         let tombstone = attempts.into_iter().find_map(Result::ok).unwrap();
         tombstone.validate_for(&fixture.authorization).unwrap();
+        let consumed_authority = consumed_authority_path(&fixture.output_root).unwrap();
+        assert_eq!(
+            fs::read(&consumed_authority).unwrap(),
+            canonical_json(&tombstone, "test consumed authority marker").unwrap()
+        );
+        let relocated_output = fixture._temp.path().join("relocated-execution");
+        fs::rename(&fixture.output_root, &relocated_output).unwrap();
+        assert!(load_and_validate_delivery_verification_authorization(
+            DeliveryVerificationAuthorizationValidation {
+                protocol,
+                preflight: &fixture.preflight,
+                repo_root: &fixture.repo_root,
+                preflight_path: &fixture.preflight_path,
+                authorization_path: &second_authorization_path,
+                output_root: &fixture.output_root,
+                runner: &runner(RUNNER_BYTES),
+                credential: &fixture.config.api_key,
+                now_ms: CONSUMED_AT_MS,
+            },
+        )
+        .is_err());
+        assert!(consume_delivery_verification_authorization_once(
+            &second_validated,
+            CONSUMED_AT_MS,
+        )
+        .is_err());
         #[cfg(unix)]
         {
             assert_eq!(
-                fs::metadata(&fixture.output_root)
+                fs::metadata(&relocated_output)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -557,7 +748,15 @@ fn agent_delivery_verification_execution_contract_authorization_consumes_once_at
                 0o700
             );
             assert_eq!(
-                fs::metadata(fixture.output_root.join(DELIVERY_TOMBSTONE_FILE_NAME))
+                fs::metadata(relocated_output.join(DELIVERY_TOMBSTONE_FILE_NAME))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(consumed_authority)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -1053,7 +1252,7 @@ fn agent_delivery_verification_execution_contract_recovery_terminalizes_tombston
         let validated = validate_authorization(
             protocol,
             &fixture,
-            RUNNER_BYTES,
+            &runner(RUNNER_BYTES),
             &fixture.config.api_key,
             CONSUMED_AT_MS,
         )

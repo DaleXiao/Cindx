@@ -118,15 +118,37 @@ physical calls per case, 128 calls total, 64,000 tokens per case, 2,048,000
 tokens for the campaign, and a six-hour campaign ceiling. Its preflight only
 validates the clean source, tracked bytes, case order, budgets, hidden-oracle
 aggregate, redacted configured Executor/Reviewer identities, and new external
-paths before writing a new private receipt. That receipt states `provider_calls=0`,
+paths before writing a new private receipt. The v2 preflight also hashes the
+exact sibling v2 execute binary and records its fixed name and byte count. That
+receipt also binds the full SHA-256 CodeDirectory derived from a verified
+private copy of those exact bytes. It states `provider_calls=0`,
 `online_runner_frozen=true`, and `execution_authorized=false`.
 
 The source contains provider-free authorization, one-shot execution, durable
 campaign/call reservation, accounting, and fail-closed recovery contracts. The
-authorization stage, not preflight, binds exact execute-binary bytes together
-with canonical preflight, current source/provider/model/credential authority,
-output root, and a short validity window. These deterministic contracts do not
-invoke an external provider.
+authorization stage must match the execute bytes already frozen by preflight
+and binds them together with canonical preflight, current
+source/provider/model/credential authority, output root, and a short validity
+window. Execution must also match the frozen CodeDirectory to the kernel-backed
+identity of its running process before it can consume state. A single
+output-authority marker, derived from the canonical output path and created
+atomically in its parent, is shared by all authorization paths and remains after
+the output root is moved or deleted. These deterministic contracts do not
+invoke an external provider. The marker is local fail-closed state, not an
+external anti-rollback guarantee against deletion or restoration of every
+private file by the same user identity.
+
+The successor manifest
+`benchmarks/agent/delivery-verification-protocol-v2.json` has raw SHA-256
+`3b1b758330403410486c28650f012b278859f680b55de23bc7aad0e09f6c4982`.
+It references the unchanged v1 suite bytes
+`b9672f7075d896e3c48673607c622604c0f8d6fb2b6df4499281b0741124fbcd`;
+the ordered cases, hidden oracle, and budget remain respectively
+`8d4ab335142e655dd53d93511bf6b4da0bb559fb99ca87cb66aef0c47b872913`,
+`af47cdf41554956882e5fc42bd432a5c8dabff49573f2ce8f7181878e69d2b2d`,
+and `4b72b261ce347f7ec0ab80328f6ed57050a04260bf81c6f0930d9c08f5c710fe`.
+The invalid v1 result did not change any case, order, oracle, budget, threshold,
+or retry rule.
 
 ### Consumed v1 result
 
@@ -177,12 +199,14 @@ failure. Provider-free local-loopback coverage crosses the real model-provider
 prepare, reserve, HTTP dispatch, receipt, and terminal path; it does not
 substitute one digest for both identities.
 
-The v1 preflight, authorization, and execute entrypoints now reject the consumed
-protocol before live state is accessed. This repair is deterministic evidence
-about instrumentation only. There is no successor manifest, authorization, or
-provider result. A future provider attempt requires a separately reviewed and
-frozen successor protocol and a new explicit one-shot authorization. GEPA and
-production serving remain out of scope.
+The v1 preflight, authorization, and execute entrypoints reject the consumed
+protocol before live state is accessed. The separately named v2 preflight,
+authorization, and execute entrypoints bind the successor authority, but only
+provider-free preflight is permitted at this stage. There is no v2
+authorization, execution, or provider result. Any provider attempt requires a
+new explicit one-shot authorization for the exact merged-source preflight and
+execute full-file and CodeDirectory digests. GEPA and production serving remain
+out of scope.
 
 Do not rerun Workflow GEPA V12. The current source now links atomic strategy
 selection and terminal transitions in one observable lifecycle for both

@@ -1,13 +1,22 @@
 use super::*;
 use std::fs;
 
+const RUNNER_BYTES: &[u8] = b"provider-free exact delivery execute fixture";
+
 fn digest(label: &str) -> String {
     sha256_hex(label.as_bytes())
 }
 
+fn runner_binding() -> DeliveryVerificationRunnerBinary {
+    DeliveryVerificationRunnerBinary {
+        bytes: RUNNER_BYTES.to_vec(),
+        code_directory_sha256: digest("runner code directory"),
+    }
+}
+
 fn protocol() -> DeliveryVerificationProtocolSnapshot {
     DeliveryVerificationProtocolSnapshot {
-        protocol_id: "cindx-delivery-verification-protocol-v1".into(),
+        protocol_id: "cindx-delivery-verification-protocol-v2".into(),
         suite_id: "cindx-delivery-verification-v1".into(),
         manifest_sha256: digest("manifest"),
         suite_sha256: digest("suite"),
@@ -43,6 +52,7 @@ fn receipt() -> DeliveryVerificationPreflightReceipt {
         &protocol(),
         source(),
         provider_binding(&provider_config()).unwrap(),
+        &runner_binding(),
         Path::new("/private/tmp/cindx-delivery-output"),
         1_800_000_000_000,
     )
@@ -66,6 +76,16 @@ fn agent_delivery_verification_protocol_contract_preflight_is_provider_free_and_
     assert!(receipt.online_execution_requires_explicit_authorization);
     assert_eq!(receipt.case_sha256, protocol.case_sha256);
     assert_eq!(receipt.hidden_oracle_sha256, protocol.hidden_oracle_sha256);
+    assert_eq!(
+        receipt.runner_binary,
+        DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME
+    );
+    assert_eq!(receipt.runner_sha256, sha256_hex(RUNNER_BYTES));
+    assert_eq!(receipt.runner_bytes, RUNNER_BYTES.len() as u64);
+    assert_eq!(
+        receipt.runner_code_directory_sha256,
+        runner_binding().code_directory_sha256
+    );
     eprintln!("{PREFLIGHT_SCHEMA}");
 }
 
@@ -156,6 +176,32 @@ fn agent_delivery_verification_protocol_contract_preflight_rejects_authority_tam
     rehash(&mut runner);
     assert!(validate_receipt(&protocol, &runner).is_err());
 
+    let mut runner_digest = receipt();
+    runner_digest.runner_sha256 = digest("changed-runner");
+    rehash(&mut runner_digest);
+    assert!(validate_snapshot(
+        &protocol,
+        &runner_digest,
+        &source(),
+        &provider_binding(&provider_config()).unwrap(),
+        &runner_binding(),
+        Path::new("/private/tmp/cindx-delivery-output"),
+    )
+    .is_err());
+
+    let mut runner_code_directory = receipt();
+    runner_code_directory.runner_code_directory_sha256 = digest("changed code directory");
+    rehash(&mut runner_code_directory);
+    assert!(validate_snapshot(
+        &protocol,
+        &runner_code_directory,
+        &source(),
+        &provider_binding(&provider_config()).unwrap(),
+        &runner_binding(),
+        Path::new("/private/tmp/cindx-delivery-output"),
+    )
+    .is_err());
+
     let mut authorization = receipt();
     authorization.execution_authorized = true;
     rehash(&mut authorization);
@@ -180,6 +226,7 @@ fn agent_delivery_verification_protocol_contract_preflight_rejects_protocol_and_
         &authorizing,
         source(),
         provider_binding(&provider_config()).unwrap(),
+        &runner_binding(),
         Path::new("/private/tmp/cindx-delivery-output"),
         1_800_000_000_000,
     )
@@ -207,13 +254,26 @@ fn agent_delivery_verification_protocol_contract_preflight_encoding_is_canonical
     let output_root = Path::new("/private/tmp/cindx-delivery-output");
     let encoded = encode_receipt(&receipt).unwrap();
     assert_eq!(encoded.last(), Some(&b'\n'));
-    let decoded =
-        parse_and_validate_receipt(&protocol(), &encoded, &source, &provider, output_root).unwrap();
+    let decoded = parse_and_validate_receipt(
+        &protocol(),
+        &encoded,
+        &source,
+        &provider,
+        &runner_binding(),
+        output_root,
+    )
+    .unwrap();
     assert_eq!(decoded, receipt);
     let compact = serde_json::to_vec(&receipt).unwrap();
-    assert!(
-        parse_and_validate_receipt(&protocol(), &compact, &source, &provider, output_root).is_err()
-    );
+    assert!(parse_and_validate_receipt(
+        &protocol(),
+        &compact,
+        &source,
+        &provider,
+        &runner_binding(),
+        output_root,
+    )
+    .is_err());
     let text = String::from_utf8(encoded).unwrap();
     assert!(!text.contains("fixture-secret-never-serialized"));
     assert!(!text.contains("owner-model"));
@@ -232,6 +292,7 @@ fn agent_delivery_verification_protocol_contract_preflight_snapshot_rejects_prov
         &receipt,
         &source(),
         &provider,
+        &runner_binding(),
         Path::new("/private/tmp/cindx-delivery-output"),
     )
     .unwrap();
@@ -243,6 +304,7 @@ fn agent_delivery_verification_protocol_contract_preflight_snapshot_rejects_prov
         &receipt,
         &source(),
         &provider_binding(&changed_config).unwrap(),
+        &runner_binding(),
         Path::new("/private/tmp/cindx-delivery-output"),
     )
     .is_err());
@@ -251,6 +313,7 @@ fn agent_delivery_verification_protocol_contract_preflight_snapshot_rejects_prov
         &receipt,
         &source(),
         &provider,
+        &runner_binding(),
         Path::new("/private/tmp/replaced-output"),
     )
     .is_err());
