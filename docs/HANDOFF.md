@@ -5,17 +5,17 @@ in place; do not create versioned handoff files.
 
 ## Release Identity
 
-Current release version: `0.2.33`
+Current release version: `0.2.34`
 
 | Item | Verified value |
 | --- | --- |
-| Local build source commit | `45bf2ec458c6ad92a44e0ab7ee3cf532512ce6ee` |
+| Local build source commit | `e0f8b8bed2b479aefd8bf4bc6760382af0ba1b0a` |
 | Tag | Not tagged; latest published tag remains `v0.2.30` |
 | GitHub release | Not published; latest published release remains <https://github.com/DaleXiao/Cindx/releases/tag/v0.2.30> |
-| Local asset | `dist/Cindx-0.2.33-macOS-arm64.zip` |
-| Local asset size | `53,780,147` bytes |
-| Local asset SHA-256 | `aacd0a4def1aadfb61df0acbb5a650b855f53519d565e695b9173db381c9c704` |
-| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.33` |
+| Local asset | `dist/Cindx-0.2.34-macOS-arm64.zip` |
+| Local asset size | `53,796,291` bytes |
+| Local asset SHA-256 | `a251a995aeac6c227a77404bdca5f119966280ed91781428a7d4da369259ff35` |
+| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.34` |
 | Installed signature | `codesign --verify --deep --strict` passed |
 
 This is an ad-hoc-signed local validation build, not a tagged, notarized, or
@@ -28,7 +28,7 @@ above; the subsequent version/evidence commit does not change the binary.
 - Integration branch: `origin/main`
 - The local continuation branch may have a different name. Compare it to
   `origin/main`; do not infer divergence from the branch name.
-- The installed `0.2.33` local build embeds `45bf2ec`; the latest published
+- The installed `0.2.34` local build embeds `e0f8b8b`; the latest published
   `v0.2.30` release embeds `f2ce3b7`. Read later source state from Git rather
   than copying it into this file as a second log.
 - The current document set is intentionally limited to `README.md`, `AGENTS.md`,
@@ -217,11 +217,13 @@ Current source now distinguishes the legal pre-decision state before selected-
 outcome projection and covers the real terminal-producer-to-projector seam.
 This corrects classification only; it does not recover or reinterpret the run.
 
-The bounded classifier repair passed the outcome contract (`9/9`), strategy
-lifecycle contract (`7/7`), and full deterministic profile (`57/57` gates).
-The single formal `0.2.33` arm64 build from `45bf2ec` then passed strict
-signature, clean-start, and fail-closed persistent-state probes before
-installation.
+The current Settings and runtime model-slot alignment passed the focused
+frontend and routing contracts, the full deterministic profile (`57/57`
+gates), and the preserved Goal 3 contracts. The single formal `0.2.34` arm64
+build from `e0f8b8b` then passed strict signature, clean-start, and fail-closed
+persistent-state probes before installation. No provider evaluation was run,
+so this validates configuration semantics and compatibility rather than an
+intelligence uplift.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
