@@ -2,7 +2,7 @@ use super::delivery_verification_authorization::*;
 use agent_core::ModelRole;
 use orchestrator::sha256_hex;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 #[path = "delivery_verification_execution_storage.rs"]
@@ -10,7 +10,7 @@ mod storage;
 use self::storage::*;
 
 pub(super) const DELIVERY_EXECUTION_JOURNAL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-execution-journal.v1";
+    "cindx.agent-eval.delivery-verification-execution-journal.v2";
 pub(super) const DELIVERY_EXECUTION_RECOVERY_SCHEMA: &str =
     "cindx.agent-eval.delivery-verification-execution-recovery.v1";
 pub(super) const DELIVERY_EXECUTION_JOURNAL_FILE_NAME: &str =
@@ -19,11 +19,11 @@ pub(super) const DELIVERY_EXECUTION_RECOVERY_FILE_NAME: &str =
     "delivery-verification-execution-recovery.json";
 pub(super) const DELIVERY_EXECUTION_LOCK_FILE_NAME: &str = "delivery-verification-execution.lock";
 
-const JOURNAL_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-execution-journal.v1\0";
+const JOURNAL_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-execution-journal.v2\0";
 const CAMPAIGN_RESERVATION_HASH_DOMAIN: &[u8] =
     b"cindx.agent-eval.delivery-verification-campaign-reservation.v1\0";
 const CALL_RESERVATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-call-reservation.v1\0";
+    b"cindx.agent-eval.delivery-verification-call-reservation.v2\0";
 const CALL_TERMINAL_HASH_DOMAIN: &[u8] =
     b"cindx.agent-eval.delivery-verification-call-receipt.v1\0";
 const CASE_TERMINAL_HASH_DOMAIN: &[u8] =
@@ -33,7 +33,8 @@ const TERMINAL_HASH_DOMAIN: &[u8] =
     b"cindx.agent-eval.delivery-verification-campaign-terminal.v1\0";
 const RECOVERY_HASH_DOMAIN: &[u8] =
     b"cindx.agent-eval.delivery-verification-execution-recovery.v1\0";
-const MAX_CANONICAL_REQUEST_BYTES: u64 = 512 * 1024;
+const MAX_SEMANTIC_REQUEST_BYTES: u64 = 512 * 1024;
+const MAX_WIRE_PAYLOAD_BYTES: u64 = 512 * 1024;
 const CASE_COUNT: usize = 32;
 const CALIBRATION_CASES: usize = 8;
 
@@ -118,8 +119,10 @@ pub(super) struct DeliveryVerificationCallReservationInputV1 {
     pub(super) stage: DeliveryVerificationCallStageV1,
     pub(super) role: ModelRole,
     pub(super) configured_model_sha256: String,
-    pub(super) canonical_request_sha256: String,
-    pub(super) canonical_request_bytes: u64,
+    pub(super) semantic_request_sha256: String,
+    pub(super) semantic_request_bytes: u64,
+    pub(super) wire_payload_sha256: String,
+    pub(super) wire_payload_bytes: u64,
     pub(super) max_output_tokens: u64,
     pub(super) reserved_at_ms: u64,
 }
@@ -147,8 +150,6 @@ pub(super) struct DeliveryVerificationCallTerminalInputV1 {
     pub(super) retryable: Option<bool>,
     pub(super) provider_status_code: Option<u16>,
     pub(super) latency_ms: u64,
-    pub(super) response_artifact_sha256: Option<String>,
-    pub(super) response_artifact_bytes: Option<u64>,
     pub(super) request_payload_sha256: Option<String>,
     pub(super) response_semantic_sha256: Option<String>,
     pub(super) provider_response_id_sha256: Option<String>,
@@ -255,8 +256,10 @@ struct CallReservationReceiptV1 {
     stage: DeliveryVerificationCallStageV1,
     role: String,
     configured_model_sha256: String,
-    canonical_request_sha256: String,
-    canonical_request_bytes: u64,
+    semantic_request_sha256: String,
+    semantic_request_bytes: u64,
+    wire_payload_sha256: String,
+    wire_payload_bytes: u64,
     max_output_tokens: u64,
     reserved_at_ms: u64,
     reservation_sha256: String,
@@ -500,6 +503,7 @@ impl DeliveryVerificationExecutionJournal {
                 return Err("delivery execution journal is not canonical JSON".into());
             }
             document.validate()?;
+            validate_journal_response_artifacts(&root, &document)?;
             tombstone.validate_for(&document.authorization)?;
             if tombstone.tombstone_sha256 != document.tombstone_sha256
                 || path_sha256(&root) != document.authorization.output_root_sha256
@@ -638,8 +642,10 @@ impl DeliveryVerificationExecutionJournal {
             stage: input.stage,
             role,
             configured_model_sha256: input.configured_model_sha256,
-            canonical_request_sha256: input.canonical_request_sha256,
-            canonical_request_bytes: input.canonical_request_bytes,
+            semantic_request_sha256: input.semantic_request_sha256,
+            semantic_request_bytes: input.semantic_request_bytes,
+            wire_payload_sha256: input.wire_payload_sha256,
+            wire_payload_bytes: input.wire_payload_bytes,
             max_output_tokens: input.max_output_tokens,
             reserved_at_ms: input.reserved_at_ms,
             reservation_sha256: String::new(),
@@ -708,40 +714,28 @@ impl DeliveryVerificationExecutionJournal {
         Ok(permit)
     }
 
-    pub(super) fn persist_response_artifact(
-        &self,
-        permit: &DeliveryVerificationCallPermitV1,
-        bytes: &[u8],
-    ) -> Result<DeliveryVerificationResponseArtifactV1, String> {
-        if bytes.is_empty() {
-            return Err("delivery response artifact is empty".into());
-        }
-        let reservation = self.reservation_for_permit(permit)?;
-        let path = self.root.join(format!(
-            "case-{:02}-call-{:03}-response.bin",
-            reservation.case_ordinal, reservation.global_call_ordinal
-        ));
-        write_new_private_file(&path, bytes, "delivery response artifact")?;
-        Ok(DeliveryVerificationResponseArtifactV1 {
-            sha256: sha256_hex(bytes),
-            bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            path,
-        })
-    }
-
     pub(super) fn record_call_terminal(
         &mut self,
         input: DeliveryVerificationCallTerminalInputV1,
-    ) -> Result<(), String> {
+        response_artifact: Option<&[u8]>,
+    ) -> Result<Option<DeliveryVerificationResponseArtifactV1>, String> {
         let reservation = self.reservation_for_permit(&input.permit)?.clone();
+        let artifact = response_artifact.map(|bytes| DeliveryVerificationResponseArtifactV1 {
+            sha256: sha256_hex(bytes),
+            bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            path: self.root.join(format!(
+                "case-{:02}-call-{:03}-response.bin",
+                reservation.case_ordinal, reservation.global_call_ordinal
+            )),
+        });
         let mut receipt = CallTerminalReceiptV1 {
             status: input.status,
             failure_class: input.failure_class,
             retryable: input.retryable,
             provider_status_code: input.provider_status_code,
             latency_ms: input.latency_ms,
-            response_artifact_sha256: input.response_artifact_sha256,
-            response_artifact_bytes: input.response_artifact_bytes,
+            response_artifact_sha256: artifact.as_ref().map(|value| value.sha256.clone()),
+            response_artifact_bytes: artifact.as_ref().map(|value| value.bytes),
             request_payload_sha256: input.request_payload_sha256,
             response_semantic_sha256: input.response_semantic_sha256,
             provider_response_id_sha256: input.provider_response_id_sha256,
@@ -753,13 +747,15 @@ impl DeliveryVerificationExecutionJournal {
             terminal_sha256: String::new(),
         };
         validate_call_terminal(&reservation, &receipt)?;
-        validate_response_artifact(&self.root, &reservation, &receipt)?;
         receipt.terminal_sha256 = call_terminal_digest(&receipt)?;
         let case_index = reservation.case_ordinal - 1;
         let call_index = stage_index(reservation.stage);
-        self.transition(|document| {
+        let terminal_at_ms = input.terminal_at_ms;
+        let stored_reservation = reservation.clone();
+        let stored_receipt = receipt.clone();
+        let next = self.prepare_transition(|document| {
             require_live(document)?;
-            let campaign_timed_out = input.terminal_at_ms > campaign_deadline(document)?;
+            let campaign_timed_out = terminal_at_ms > campaign_deadline(document)?;
             let current = &document.cases[case_index].calls[call_index].state;
             if !matches!(
                 current,
@@ -795,8 +791,8 @@ impl DeliveryVerificationExecutionJournal {
                     .ok_or_else(|| "delivery token accounting overflowed".to_string())?;
             }
             document.cases[case_index].calls[call_index].state = JournalCallStateV1::Terminal {
-                reservation,
-                receipt: Box::new(receipt),
+                reservation: stored_reservation,
+                receipt: Box::new(stored_receipt),
             };
             let case_tokens = case_resources(&document.cases[case_index])?.total_tokens;
             let resource_limit_exceeded = case_tokens
@@ -812,7 +808,7 @@ impl DeliveryVerificationExecutionJournal {
                     DeliveryVerificationCampaignDispositionV1::Inconclusive,
                     "campaign_timeout_exceeded",
                     campaign_timeout_evidence_sha256(),
-                    input.terminal_at_ms,
+                    terminal_at_ms,
                 )?;
             } else if resource_limit_exceeded {
                 terminalize(
@@ -820,11 +816,25 @@ impl DeliveryVerificationExecutionJournal {
                     DeliveryVerificationCampaignDispositionV1::Inconclusive,
                     "resource_budget_exceeded",
                     sha256_hex(b"resource_budget_exceeded"),
-                    input.terminal_at_ms,
+                    terminal_at_ms,
                 )?;
             }
             Ok(())
-        })
+        })?;
+        if let (Some(artifact), Some(bytes)) = (&artifact, response_artifact) {
+            write_new_private_file(&artifact.path, bytes, "delivery response artifact")?;
+            if let Err(error) = validate_response_artifact(&self.root, &reservation, &receipt) {
+                let _ = fs::remove_file(&artifact.path);
+                return Err(error);
+            }
+        }
+        if let Err(error) = self.commit_transition(next) {
+            if let Some(artifact) = &artifact {
+                let _ = fs::remove_file(&artifact.path);
+            }
+            return Err(error);
+        }
+        Ok(artifact)
     }
 
     pub(super) fn record_case_terminal(
@@ -1039,6 +1049,14 @@ impl DeliveryVerificationExecutionJournal {
         &mut self,
         apply: impl FnOnce(&mut JournalDocumentV1) -> Result<(), String>,
     ) -> Result<(), String> {
+        let next = self.prepare_transition(apply)?;
+        self.commit_transition(next)
+    }
+
+    fn prepare_transition(
+        &self,
+        apply: impl FnOnce(&mut JournalDocumentV1) -> Result<(), String>,
+    ) -> Result<JournalDocumentV1, String> {
         if self.document.terminal.is_some() {
             return Err("delivery execution journal is terminal".into());
         }
@@ -1051,6 +1069,11 @@ impl DeliveryVerificationExecutionJournal {
             .ok_or_else(|| "delivery journal revision overflowed".to_string())?;
         next.reseal()?;
         next.validate()?;
+        Ok(next)
+    }
+
+    fn commit_transition(&mut self, next: JournalDocumentV1) -> Result<(), String> {
+        require_private_directory(&self.root, "delivery output root")?;
         replace_private_file(
             &self.root.join(DELIVERY_EXECUTION_JOURNAL_FILE_NAME),
             &canonical_json(&next, "delivery execution journal")?,

@@ -280,6 +280,14 @@ fn agent_delivery_verification_execution_contract_requires_explicit_authorize_co
 }
 
 #[test]
+fn agent_delivery_verification_execution_contract_consumed_v1_cannot_authorize_or_execute() {
+    let error = reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID).unwrap_err();
+    assert!(error.contains("is consumed"));
+    assert!(error.contains("successor protocol"));
+    assert!(reject_consumed_delivery_protocol("cindx-delivery-verification-protocol-v2").is_ok());
+}
+
+#[test]
 fn agent_delivery_verification_execution_contract_accepts_only_exact_provider_receipts() {
     let response = exact_response();
     assert_eq!(

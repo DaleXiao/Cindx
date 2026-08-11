@@ -560,6 +560,9 @@ pub fn run_collaboration_successor_execute() -> Result<(), String> {
 }
 
 pub fn run_delivery_verification_preflight() -> Result<(), String> {
+    delivery_verification_runner::reject_consumed_delivery_protocol(
+        delivery_verification_protocol::DELIVERY_VERIFICATION_PROTOCOL_ID,
+    )?;
     delivery_verification_preflight::run_preflight()
 }
 

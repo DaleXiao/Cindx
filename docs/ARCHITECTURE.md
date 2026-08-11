@@ -247,8 +247,15 @@ dispatch. Ambiguous or interrupted started calls become terminal
 inconclusive/censored state and are never resumed or retried. The consumed v1
 attempt failed closed before any terminal provider receipt because its journal
 incorrectly equated the semantic request digest with the independently
-domain-separated wire-payload digest. There is no Delivery serving, learning,
-promotion, production-finalizer, or GEPA dependency.
+domain-separated wire-payload digest. The repaired provider boundary prepares
+one immutable non-streaming body before reservation, exposes only its digest
+and size, stores semantic and wire authorities separately in the v2 journal,
+and dispatches those same prepared bytes. Terminal validation compares the
+provider receipt only with the reserved wire authority; artifact persistence
+and the journal transition follow successful structural validation. The
+consumed v1 preflight, authorization, and execute entrypoints are explicitly
+retired. There is no successor online authority and no Delivery serving,
+learning, promotion, production-finalizer, or GEPA dependency.
 
 The same crate owns the portable collaboration-learning contracts, separate
 from production prompt evolution. A structured policy keeps the Goal 2 graph
