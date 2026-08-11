@@ -263,13 +263,24 @@ or GEPA:
     projection, and 19 protocol/preflight tests, this proves the frozen control
     plane only.
 
-The updated preflight binds exact runner bytes, profile and features and records
-zero provider calls, `online_runner_frozen=true`, and
-`execution_authorized=false`. No live receipt or authorization was minted, and
-there is no provider result. The production finalizer, Workflow, Settings,
-prompt evolution, GEPA, routing, permissions, serving, installed App, and
-published release remain unchanged; no quality or intelligence uplift is
-claimed.
+The preflight binds source, protocol, case, budget, oracle, redacted model, and
+external-path authority while recording zero provider calls,
+`online_runner_frozen=true`, and `execution_authorized=false`. Exact execute
+bytes are bound later by the separate authorization, not by preflight.
+
+Delivery Verification v1 was then authorized and consumed once on source
+`5373e65`. It closed `CENSORED` / `INVALID-INSTRUMENTATION` during the first
+calibration Owner call. The reservation stored a canonical semantic-request
+digest, while uncommitted provider result metadata supplied a separately
+domain-separated wire-payload digest; journal terminal validation incorrectly
+required them to be equal.
+The journal charged one logical and one physical reservation but accepted zero
+terminal model-call receipts and no case receipt. Calibration never completed,
+holdout never opened, and no matched pair exists. An unbound response artifact
+is excluded from evidence. This is not an uplift, no-evidence, regression,
+quality, latency, usage, or cost result, and v1 must not be rerun. The production
+finalizer, Workflow, Settings, prompt evolution, GEPA, routing, permissions,
+serving, installed App, and published release remain unchanged.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -305,16 +316,17 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-The narrow one-shot Delivery runner and durable attempt/resource journal are now
-implemented. Merge them only after the provider-free gates pass. At the clean
-merge revision, build the exact feature-gated preflight, authorization, and
-execute binaries, generate a fresh provider-free preflight in new external
-paths, inspect its source, runner, provider/model, 32-case, budget, oracle, and
-no-retry bindings, then stop and request explicit authorization. Do not mint an
-authorization or run the provider as part of merge delivery. Do not change
-production serving or GEPA until an independently reviewable provider result
-exists, and do not create an App build, version tag, or GitHub release for this
-evaluation-only control-plane change.
+Do not rerun Delivery Verification v1. The next bounded goal is a successor
+instrumentation repair only: prepare the exact immutable non-streaming wire
+request before dispatch; reserve separate semantic-request and wire-payload
+digests; dispatch those exact prepared bytes; retain the primary terminal
+validation failure instead of masking it with a later pending-case error; and
+exercise the real model-provider prepare-to-reserve-to-dispatch-to-terminal
+boundary in a provider-free local-loopback contract test. Only after those
+deterministic gates pass may a new protocol version, new frozen revision, new cases and
+authority, and a separately authorized one-shot run be considered. Do not
+change production serving or GEPA, and do not create an App build, version tag,
+or GitHub release for this evidence-only update.
 
 ## Structural Risks
 

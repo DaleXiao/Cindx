@@ -117,25 +117,67 @@ The protocol fixes tool-free requests, no transport retries, at most four
 physical calls per case, 128 calls total, 64,000 tokens per case, 2,048,000
 tokens for the campaign, and a six-hour campaign ceiling. Its preflight only
 validates the clean source, tracked bytes, case order, budgets, hidden-oracle
-aggregate, redacted configured Executor/Reviewer identities, exact execute
-binary, build profile and features, and new external paths before writing a new
-private receipt. That receipt states `provider_calls=0`,
+aggregate, redacted configured Executor/Reviewer identities, and new external
+paths before writing a new private receipt. That receipt states `provider_calls=0`,
 `online_runner_frozen=true`, and `execution_authorized=false`.
 
 The source now contains the frozen provider-free authorization, one-shot
 execution, durable campaign/call reservation, accounting, and fail-closed
 recovery control plane. Its 32 deterministic execution tests do not invoke a
-provider. No live preflight receipt or authorization was minted, and no provider
-result exists. Production finalization, Workflow, Settings, serving, learning,
-promotion, GEPA, the installed App, and the published release remain unchanged.
-These gates establish the experiment boundary only; they do not establish
-answer quality, latency, cost, or intelligence uplift. After the runner is
-merged, build its exact feature-gated binaries at the clean merge revision,
-generate one fresh provider-free preflight, inspect its bindings, and stop for
-a separate explicit authorization decision. Any later source or runner change
-requires another fresh preflight.
+provider. The authorization stage, not preflight, binds the exact execute-binary
+bytes together with the canonical preflight, current source/provider/model/
+credential authority, output root, and short validity window.
+
+### Consumed v1 result
+
+The frozen v1 instance was authorized and consumed exactly once at source
+`5373e654bd4ab0e5334a62ff199157f6b4daaf47`. Its retained public authorities
+are:
+
+- preflight receipt digest
+  `47d9407465877994fe6994ed549456e334d011eb385dc5604e7dcd3947cf438e`;
+- exact execute-binary digest
+  `b6917770e39257dab4907e4202069b948c1a488da44075a958cdf961459722e8`;
+- one-shot authorization digest
+  `bca1c994e5c41eaee8c9c936c598315a8caf24dcaa316e07000bff091d375242`;
+- terminal journal digest
+  `67192fb14ad824d2967f20c54020060a498abacc7c6ee99a84b5c1e75a136070`;
+- terminal receipt digest
+  `df95c6a6913773d42de021271c1cbf499672042c510d728f551f74e3c8ccc414`;
+- terminal evidence digest
+  `ba2c9a6e6582c33a6eb542c5f4320c5debda66319a061ed9ffd97cb4927ebb00`.
+
+The journal closed `CENSORED` / `INVALID-INSTRUMENTATION` during the first
+calibration Owner call. The request reservation bound a canonical semantic
+request digest, while the uncommitted provider result metadata supplied the
+actual HTTP request-body digest under the separate
+`cindx.model-provider.request-payload.v1` domain. Terminal validation
+incorrectly required those two distinct digests to be equal. The provider-free
+tests missed this because their fixture copied one synthetic digest into both
+fields instead of crossing the real preparation boundary.
+
+The journal charged one logical call, one physical attempt, and one 4,096-token
+output reservation, but accepted zero terminal model-call receipts and no
+usage, latency, provider identity, or case receipt. A response artifact was
+written before terminal validation but is not bound by an accepted receipt and
+is therefore excluded. No calibration decision or holdout call occurred, and
+there are zero valid matched pairs. This result supports neither uplift nor
+no-evidence, regression, answer quality, latency, usage, or cost claims. The
+frozen v1 protocol is consumed and will not be rerun. Production finalization,
+Workflow, Settings, serving, learning, promotion, GEPA, the installed App, and
+the published release remain unchanged.
 
 ## Required Next Evidence
+
+Do not rerun Delivery Verification v1. Before any successor provider protocol,
+the request boundary must prepare one immutable non-streaming wire body before
+dispatch, reserve its semantic-request and domain-separated wire-payload
+digests as distinct authorities, dispatch those exact bytes, and retain the
+primary terminal validation failure. A provider-free local-loopback contract
+must exercise the real model-provider prepare, reserve, dispatch, receipt, and
+terminal path; fixtures may not substitute one digest for both identities. Only
+then may a new frozen protocol version and separate one-shot authorization be
+proposed. GEPA and production serving remain out of scope.
 
 Do not rerun Workflow GEPA V12. The current source now links atomic strategy
 selection and terminal transitions in one observable lifecycle for both
