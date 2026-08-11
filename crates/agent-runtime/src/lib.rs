@@ -18,6 +18,7 @@ mod context_projection;
 mod context_token_ledger;
 mod control;
 mod control_steer;
+mod delivery_verification;
 mod effect_instruction_segments;
 mod evidence_target;
 mod execution;
@@ -73,6 +74,7 @@ pub use control::{
     RunSteerRequestCommit, RunStopReason, RunTerminalCommit, RunToolCallBatchStart,
     RunToolCallStart,
 };
+pub use delivery_verification::*;
 pub use evidence_target::{
     evidence_input_matches_anchors, evidence_target_anchors, evidence_target_witness,
     EvidenceTargetAnchor,

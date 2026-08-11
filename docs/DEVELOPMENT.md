@@ -121,6 +121,27 @@ outcomes, accounting limits, and crash/tamper/concurrency recovery without a
 provider retry. Both successor gates are in `ci-contract`, `control-plane`, and
 `full`, but not `quick`; they perform no provider call and prove no uplift.
 
+`agent-delivery-verification-core-contract` runs 12 portable receipt and state
+tests. `agent-delivery-verification-contract` enables only `realworld-eval`
+with default desktop features disabled and runs 20 exact request and attempt
+projection tests. Together they bind one shared exact Owner draft and its
+ordered obligation/evidence content, preserve exact control bytes on pass,
+allow at most one Owner repair from a later model turn and one recheck, and
+fail closed on binding, request, reference, attempt-slot, or stopping
+violations. Both are included in `ci-contract`, `control-plane`, and `full`,
+but not `quick`; neither exercises the production finalizer or GEPA or proves
+quality uplift.
+
+```sh
+cargo test --locked -p agent-runtime \
+  delivery_verification_contract_ -- --nocapture
+
+cargo test --locked \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --no-default-features --features realworld-eval \
+  agent_delivery_verification_contract_ --lib -- --nocapture
+```
+
 ```sh
 node scripts/run-quality-gates.mjs \
   --profile control-plane \
