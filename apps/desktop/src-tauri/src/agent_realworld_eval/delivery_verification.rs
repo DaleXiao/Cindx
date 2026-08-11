@@ -1,12 +1,13 @@
 use agent_runtime::{
-    DeliveryVerificationDecision, DeliveryVerificationEvidence, DeliveryVerificationObligation,
-    DeliveryVerificationStateV1, DeliveryVerificationStatus, DeliveryVerificationSubjectV1,
-    DeliveryVerificationVerdictV1, GroundedCompletionReceipt,
+    DeliveryVerificationDecision, DeliveryVerificationEvidence, DeliveryVerificationFindingKind,
+    DeliveryVerificationObligation, DeliveryVerificationStateV1, DeliveryVerificationStatus,
+    DeliveryVerificationSubjectV1, DeliveryVerificationVerdictV1, GroundedCompletionReceipt,
 };
 use orchestrator::sha256_hex;
+use serde::{Deserialize, Serialize};
 
 pub(super) const DELIVERY_VERIFICATION_EVAL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-observation.v1";
+    "cindx.agent-eval.delivery-verification-observation.v3";
 
 #[derive(Debug, Clone)]
 pub(super) struct DeliveryVerificationEvalInput {
@@ -127,6 +128,28 @@ pub(super) struct DeliveryVerificationEvalObservation {
     pub(super) recheck_calls: usize,
     pub(super) failure_stage: Option<DeliveryVerificationEvalStage>,
     pub(super) failure_code: Option<DeliveryVerificationTreatmentFailureCode>,
+    pub(super) initial_verifier_decision: Option<DeliveryVerificationDecision>,
+    pub(super) initial_finding_counts: DeliveryVerificationFindingCounts,
+    pub(super) repair_activated: bool,
+    pub(super) recheck_decision: Option<DeliveryVerificationDecision>,
+    pub(super) recheck_finding_counts: DeliveryVerificationFindingCounts,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeliveryVerificationFindingCounts {
+    pub(super) unsupported_claim: usize,
+    pub(super) omitted_obligation: usize,
+    pub(super) contradiction: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EvaluationTelemetry {
+    initial_verifier_decision: Option<DeliveryVerificationDecision>,
+    initial_finding_counts: DeliveryVerificationFindingCounts,
+    repair_activated: bool,
+    recheck_decision: Option<DeliveryVerificationDecision>,
+    recheck_finding_counts: DeliveryVerificationFindingCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +195,7 @@ pub(super) fn project_delivery_verification_evaluation(
     let mut state = DeliveryVerificationStateV1::new(initial_subject)
         .map_err(|_| DeliveryVerificationEvalCensor::InvalidOwnerSubject)?;
     let mut cursor = 0usize;
+    let mut telemetry = EvaluationTelemetry::default();
 
     let initial = take_attempt(
         attempts,
@@ -196,6 +220,7 @@ pub(super) fn project_delivery_verification_evaluation(
                 0,
                 DeliveryVerificationEvalStage::InitialVerification,
                 (*kind).into(),
+                &telemetry,
             ));
         }
         DeliveryVerificationEvalAttemptResult::Cancelled => {
@@ -226,10 +251,13 @@ pub(super) fn project_delivery_verification_evaluation(
                     0,
                     DeliveryVerificationEvalStage::InitialVerification,
                     DeliveryVerificationTreatmentFailureCode::InvalidVerifierResponse,
+                    &telemetry,
                 ));
             }
         };
     let initial_decision = initial_verdict.decision;
+    telemetry.initial_verifier_decision = Some(initial_decision);
+    telemetry.initial_finding_counts = finding_counts(&initial_verdict);
     state
         .record_initial_verdict(initial_verdict)
         .map_err(|_| DeliveryVerificationEvalCensor::InvalidStateTransition)?;
@@ -252,9 +280,15 @@ pub(super) fn project_delivery_verification_evaluation(
             recheck_calls: 0,
             failure_stage: None,
             failure_code: None,
+            initial_verifier_decision: telemetry.initial_verifier_decision,
+            initial_finding_counts: telemetry.initial_finding_counts,
+            repair_activated: telemetry.repair_activated,
+            recheck_decision: telemetry.recheck_decision,
+            recheck_finding_counts: telemetry.recheck_finding_counts,
         });
     }
 
+    telemetry.repair_activated = true;
     let repair = take_attempt(
         attempts,
         &mut cursor,
@@ -280,6 +314,7 @@ pub(super) fn project_delivery_verification_evaluation(
                 0,
                 DeliveryVerificationEvalStage::OwnerRepair,
                 (*kind).into(),
+                &telemetry,
             ));
         }
         DeliveryVerificationEvalAttemptResult::Cancelled => {
@@ -327,6 +362,7 @@ pub(super) fn project_delivery_verification_evaluation(
                 1,
                 DeliveryVerificationEvalStage::Recheck,
                 (*kind).into(),
+                &telemetry,
             ));
         }
         DeliveryVerificationEvalAttemptResult::Cancelled => {
@@ -357,10 +393,13 @@ pub(super) fn project_delivery_verification_evaluation(
                     1,
                     DeliveryVerificationEvalStage::Recheck,
                     DeliveryVerificationTreatmentFailureCode::InvalidVerifierResponse,
+                    &telemetry,
                 ));
             }
         };
     let recheck_decision = recheck_verdict.decision;
+    telemetry.recheck_decision = Some(recheck_decision);
+    telemetry.recheck_finding_counts = finding_counts(&recheck_verdict);
     state
         .record_recheck(recheck_verdict)
         .map_err(|_| DeliveryVerificationEvalCensor::InvalidStateTransition)?;
@@ -383,6 +422,11 @@ pub(super) fn project_delivery_verification_evaluation(
             recheck_calls: 1,
             failure_stage: None,
             failure_code: None,
+            initial_verifier_decision: telemetry.initial_verifier_decision,
+            initial_finding_counts: telemetry.initial_finding_counts,
+            repair_activated: telemetry.repair_activated,
+            recheck_decision: telemetry.recheck_decision,
+            recheck_finding_counts: telemetry.recheck_finding_counts,
         })
     } else {
         Ok(failed_observation(
@@ -395,6 +439,7 @@ pub(super) fn project_delivery_verification_evaluation(
             1,
             DeliveryVerificationEvalStage::Recheck,
             DeliveryVerificationTreatmentFailureCode::VerificationNotSatisfied,
+            &telemetry,
         ))
     }
 }
@@ -443,6 +488,7 @@ fn failed_observation(
     recheck_calls: usize,
     failure_stage: DeliveryVerificationEvalStage,
     failure_code: DeliveryVerificationTreatmentFailureCode,
+    telemetry: &EvaluationTelemetry,
 ) -> DeliveryVerificationEvalObservation {
     DeliveryVerificationEvalObservation {
         schema: DELIVERY_VERIFICATION_EVAL_SCHEMA,
@@ -460,5 +506,22 @@ fn failed_observation(
         recheck_calls,
         failure_stage: Some(failure_stage),
         failure_code: Some(failure_code),
+        initial_verifier_decision: telemetry.initial_verifier_decision,
+        initial_finding_counts: telemetry.initial_finding_counts,
+        repair_activated: telemetry.repair_activated,
+        recheck_decision: telemetry.recheck_decision,
+        recheck_finding_counts: telemetry.recheck_finding_counts,
     }
+}
+
+fn finding_counts(verdict: &DeliveryVerificationVerdictV1) -> DeliveryVerificationFindingCounts {
+    let mut counts = DeliveryVerificationFindingCounts::default();
+    for finding in &verdict.findings {
+        match finding.kind {
+            DeliveryVerificationFindingKind::UnsupportedClaim => counts.unsupported_claim += 1,
+            DeliveryVerificationFindingKind::OmittedObligation => counts.omitted_obligation += 1,
+            DeliveryVerificationFindingKind::Contradiction => counts.contradiction += 1,
+        }
+    }
+    counts
 }

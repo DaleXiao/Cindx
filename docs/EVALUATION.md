@@ -92,63 +92,70 @@ not changed by V5, V7, or V12.
 
 ## Delivery Verification Experiment
 
-The current source adds default-off, `realworld-eval`-only construction,
-projection, and a tracked provider-protocol authority for a final-draft
-treatment. Control preserves the exact bytes of one shared Owner draft. The
-treatment binds that draft and its ordered obligation/evidence context to a
-model-distinct Independent Verifier. A pass preserves the Owner bytes; a
-revision permits exactly one same-Owner repair and one Verifier recheck.
+The current tracked v3 authority is a fixed seeded-defect recovery and
+preservation component test under the default-off `realworld-eval` feature. It
+does not compare treatment with naturally generated Owner drafts. The 32-case
+suite freezes 24 defective candidates across unsupported-claim,
+omitted-obligation, and contradiction strata plus eight clean preservation
+sentinels. Calibration contains six defects and two sentinels; model-hidden
+holdout contains 18 defects and six sentinels.
 
-The frozen suite contains eight calibration cases and 24 model-hidden holdout
-cases, balanced across unsupported claims, omitted obligations, contradictory
-authorities, and preservation of exact `false`, `null`, and zero values. Cases
-require deterministic multi-evidence calculation or rule selection. The
-primary oracle is exact external JSON plus required/forbidden predicates; it is
-bound into case and suite digests but omitted from model-facing input. The
-calibration gate opens holdout only after all eight pairs complete with at
-least two control failures, at least one treatment-only win, and no loss,
-structural failure, or treatment execution failure. Calibration cannot tune
-the prompt, models, or threshold. The 24-case holdout reports evidence of
-uplift only for all-valid `W >= 5, L = 0`; the boundary case `5/0` has a
-one-sided exact paired p-value of `1/32 = 0.03125`. Anything weaker is
-no-evidence, regression, incomplete, or invalid rather than a positive claim.
+Control is the exact frozen seeded candidate. Treatment sends that same seed to
+a model-distinct Reviewer. A `passed` verdict preserves it exactly;
+`needs_revision` permits one Executor repair and one Reviewer recheck. There is
+no initial drafting call, additional repair loop, transport retry, or case
+replacement. The model-visible output contract specifies property names, JSON
+types, requiredness, and the additional-properties rule. Exact semantic values
+remain in the evaluator-only oracle.
 
-The protocol fixes tool-free requests, no transport retries, at most four
-physical calls per case, 128 calls total, 64,000 tokens per case, 2,048,000
-tokens for the campaign, and a six-hour campaign ceiling. Its preflight only
-validates the clean source, tracked bytes, case order, budgets, hidden-oracle
-aggregate, redacted configured Executor/Reviewer identities, and new external
-paths before writing a new private receipt. The v2 preflight also hashes the
-exact sibling v2 execute binary and records its fixed name and byte count. That
-receipt also binds the full SHA-256 CodeDirectory derived from a verified
-private copy of those exact bytes. It states `provider_calls=0`,
-`online_runner_frozen=true`, and `execution_authorized=false`.
+Durably recorded provider timeout/unavailability and completed calls whose
+Reviewer verdict JSON is invalid count as intention-to-treat treatment failures
+for their fixed cases; they are never retried or replaced. Internal time-budget,
+binding, or authority failures are structural and make the campaign
+inconclusive.
 
-The source contains provider-free authorization, one-shot execution, durable
-campaign/call reservation, accounting, and fail-closed recovery contracts. The
-authorization stage must match the execute bytes already frozen by preflight
-and binds them together with canonical preflight, current
-source/provider/model/credential authority, output root, and a short validity
-window. Execution must also match the frozen CodeDirectory to the kernel-backed
-identity of its running process before it can consume state. A single
-output-authority marker, derived from the canonical output path and created
-atomically in its parent, is shared by all authorization paths and remains after
-the output root is moved or deleted. These deterministic contracts do not
-invoke an external provider. The marker is local fail-closed state, not an
-external anti-rollback guarantee against deletion or restoration of every
-private file by the same user identity.
+Calibration opens holdout only when all eight cases complete with exactly six
+control failures, at least four treatment-only wins, at least one win in each
+defect stratum, and no control-only loss or structural failure. Otherwise it
+closes `terminal_futility`. Treatment-execution failure is likewise excluded.
+The holdout result is
+`seeded_repair_effective` only when all 24 cases complete with exactly 18
+control failures, at least 13 treatment-only wins, at least four wins in each
+defect stratum, zero control-only loss, and no structural/treatment-execution
+failure. Thirteen successes among the 18 frozen defects has the protocol's
+one-sided reference-null tail
+`p=0.048126`. Any clean-sentinel loss is `preservation_regression`; an otherwise
+valid sub-threshold result is `not_effective`. These labels describe only this
+finite seeded component test.
 
-The successor manifest
-`benchmarks/agent/delivery-verification-protocol-v2.json` has raw SHA-256
-`3b1b758330403410486c28650f012b278859f680b55de23bc7aad0e09f6c4982`.
-It references the unchanged v1 suite bytes
-`b9672f7075d896e3c48673607c622604c0f8d6fb2b6df4499281b0741124fbcd`;
-the ordered cases, hidden oracle, and budget remain respectively
-`8d4ab335142e655dd53d93511bf6b4da0bb559fb99ca87cb66aef0c47b872913`,
-`af47cdf41554956882e5fc42bd432a5c8dabff49573f2ce8f7181878e69d2b2d`,
-and `4b72b261ce347f7ec0ab80328f6ed57050a04260bf81c6f0930d9c08f5c710fe`.
-The invalid v1 result did not change any case, order, oracle, budget, threshold,
-or retry rule.
+V3 fixes tool-free non-streaming requests, zero transport retries, one or three
+calls per case, at most 96 logical calls / physical attempts, 64,000 tokens per
+case, 2,048,000 campaign tokens, and a six-hour campaign ceiling. The tracked
+manifest and suite authorities are:
+
+- manifest SHA-256
+  `8da322b9336ec69d9f37bf12ce8d7698af55572d8d4173eddc45e6c2080cc8e8`;
+- suite SHA-256
+  `5bd95ed736641f0120ceab038a01249ee246b4394e403fa5386ebe0e5de88bc7`;
+- case-order and hidden-oracle aggregates
+  `e2073c98fd878e5e50fda7d076b743b132dee705e40ea6ce26de8d7b31bb8bdc`
+  and `1993e95ea7227d9ce65cd1c920d2f7698545341910b6f50d50070094220ec449`;
+- seeded-candidate, model-input, and output-contract aggregates
+  `55c5d576ffe2fd06d504c186e4227998b9695b28ab58c546c566e61ce1b954df`,
+  `6c0b7692fa283c056ef5cabe93c3fd116fbffde3ec33a84b10e76539d75d53ed`,
+  and `991d14b5f0d9b6c5e1269f8ad1c8001688769eba4040125eaf4f1b0eae24eb92`;
+- budget aggregate
+  `eb3ae14a6e0cd452b106f8c5bd85ad2575e204b0aee08ce1ce23b4a7ef007e11`.
+
+The provider-free v3 preflight is the boundary between tracked design and an
+executable frozen instance. It must bind a clean source HEAD/tree and version;
+all protocol, suite, case, seed, model-input, output-contract, budget, and oracle
+authorities; redacted provider/model authority; the exact execute full-file
+digest/size and verified SHA-256 CodeDirectory; and new canonical external
+paths. A receipt is valid only with zero provider calls,
+`online_runner_frozen=true`, and `execution_authorized=false`. No v3 preflight
+receipt currently grants execution, and no v3 authorization or online execution
+has occurred.
 
 ### Consumed v1 result
 
@@ -189,24 +196,77 @@ frozen v1 protocol is consumed and will not be rerun. Production finalization,
 Workflow, Settings, serving, learning, promotion, GEPA, the installed App, and
 the published release remain unchanged.
 
+### Consumed v2 result
+
+The frozen v2 instance was authorized and consumed exactly once at app version
+`0.2.34`, source
+`275d79b883192bf4148f13123e0d0de788aa346d`, and tree
+`94cd9f3893cb752025fac6d3da9aef51821ba9ca`, with source-commit binding
+`010885f207c6a68948b4192d7c748709b9b92dd83e9c09d6167c66cbadb4dc3b`.
+Its retained public authorities are:
+
+- manifest, suite, ordered-cases, hidden-oracle, and budget digests
+  `3b1b758330403410486c28650f012b278859f680b55de23bc7aad0e09f6c4982`,
+  `b9672f7075d896e3c48673607c622604c0f8d6fb2b6df4499281b0741124fbcd`,
+  `8d4ab335142e655dd53d93511bf6b4da0bb559fb99ca87cb66aef0c47b872913`,
+  `af47cdf41554956882e5fc42bd432a5c8dabff49573f2ce8f7181878e69d2b2d`,
+  and `4b72b261ce347f7ec0ab80328f6ed57050a04260bf81c6f0930d9c08f5c710fe`;
+- preflight receipt
+  `caa4712d8faba84ce7532e830380f6ab4b8b20ad19f74b9c0d8c17c4189fab2b`;
+- execute name/size, full-file digest, and CodeDirectory identity
+  `cindx-delivery-verification-v2-execute` / `4,491,600` bytes,
+  `eb405f2ae611a6b3eac42e2d75036feab44b51f369be697923cb42f9d0788663`
+  and `f7e0f0b163c6647fc0490ac86d7502efe4ceacad9cf48e20a98024d72ecc0cbb`;
+- output-authority, one-shot authorization, and consumed-marker/tombstone
+  digests
+  `c6c95cd8314fd6dd53dcea4526f2c9a21a8a3d7662401d6c7f446a5523fc8a77`,
+  `c129a4d2a3dda43b350a2054d9887ae772353ceadd5b3068018fe43c3b945230`
+  and `9d1f0fd8c134638881475e1acc6236e55f0474ac6f58f03c4d1f43bf73bf6b0e`;
+- terminal journal
+  `e7e4044f7c387059d146c1982dd8b7a1ead5705a6ba20cff563c16475efd71be`;
+- calibration decision, terminal evidence, and terminal receipt digests
+  `5e2376ba8f4903bdd7f8456754057776bcd8349113edf31721409c9ace829a18`,
+  `cd67cef9e9e63e277e462c331c0acf261487078dac4e9eee627ae326c20c37a9`,
+  and `45d6d953318dfb7248b820751ac5411ffd160b423cb9ebe39ba368e473f0d355`.
+
+All eight calibration pairs completed. Seven were both-pass and calibration
+ordinal 3 was both-fail; there were zero treatment-only wins and zero
+control-only losses. The sole mismatch was in the frozen case definition: the
+model-visible objective led to `controlling_revision`, while the hidden exact
+JSON required the key `revision` (with revision 8). Both arms therefore failed
+the same exact oracle even though the retained output followed the visible
+contract. The frozen gate correctly recorded `terminal_futility`; all 24
+holdout cases were skipped.
+
+The journal retained 16 logical calls, 16 physical attempts, 16 terminal call
+receipts, 49,152 reserved output tokens, and exact observed usage of 9,468
+prompt + 8,865 completion = 18,333 total tokens. Those are execution-accounting
+facts, not quality evidence. The case-definition mismatch, seven both-pass
+pairs, and one both-fail pair establish neither treatment uplift nor regression.
+V2 is consumed and must not be rerun or reinterpreted.
+
+### Current v3 boundary
+
+Current v3 implementation, tests, and journal contracts are provider-free. The
+journal reserves separate semantic-request and immutable prepared wire-payload
+digests/sizes before dispatch, sends exactly the prepared non-streaming bytes,
+and requires terminal request metadata to match the reserved wire authority.
+Per-case evidence retains verifier decisions and finding counts, repair
+activation, recheck telemetry, treatment disposition, failure stage/code, and
+outcome reason. Started calls cannot be resumed or retried.
+
+All six v1/v2 preflight, authorization, and execute entrypoints reject their
+consumed protocols before live state access. A v3 preflight may be generated
+provider-free only from a clean merged source and exact feature-gated binaries;
+it does not authorize execution. There is currently no v3 one-shot
+authorization, instantiated campaign journal, provider result, or
+uplift/regression result.
+Any online attempt requires a later explicit authorization bound to that exact
+preflight, source, runner full-file/CodeDirectory identities, provider/model
+authority, credential fingerprint, and new output authority. GEPA and production
+serving remain out of scope.
+
 ## Required Next Evidence
-
-Do not rerun Delivery Verification v1. Current source now prepares one immutable
-non-streaming wire body before dispatch, reserves semantic-request and
-domain-separated wire-payload digests as distinct authorities in a v2 journal,
-dispatches those exact bytes, and retains the primary terminal validation
-failure. Provider-free local-loopback coverage crosses the real model-provider
-prepare, reserve, HTTP dispatch, receipt, and terminal path; it does not
-substitute one digest for both identities.
-
-The v1 preflight, authorization, and execute entrypoints reject the consumed
-protocol before live state is accessed. The separately named v2 preflight,
-authorization, and execute entrypoints bind the successor authority, but only
-provider-free preflight is permitted at this stage. There is no v2
-authorization, execution, or provider result. Any provider attempt requires a
-new explicit one-shot authorization for the exact merged-source preflight and
-execute full-file and CodeDirectory digests. GEPA and production serving remain
-out of scope.
 
 Do not rerun Workflow GEPA V12. The current source now links atomic strategy
 selection and terminal transitions in one observable lifecycle for both

@@ -124,40 +124,46 @@ provider retry. Both successor gates are in `ci-contract`, `control-plane`, and
 `agent-delivery-verification-core-contract` runs 12 portable receipt and state
 tests. `agent-delivery-verification-contract` enables only `realworld-eval`
 with default desktop features disabled and runs 22 exact request and attempt
-projection tests. Together they bind one shared exact Owner draft and its
-ordered obligation/evidence content, preserve exact control bytes on pass,
-allow at most one Owner repair from a later model turn and one recheck, and
-fail closed on binding, request, reference, attempt-slot, or stopping
-violations. Both are included in `ci-contract`, `control-plane`, and `full`,
-but not `quick`; neither exercises the production finalizer or GEPA or proves
-quality uplift.
+projection tests. Together they bind the exact frozen seeded candidate as the
+matched control, preserve its bytes, and constrain treatment to three model
+stages: one initial Reviewer decision, at most one Owner repair when activated,
+and one Reviewer recheck after repair. They fail closed on model-visible output
+contract, objective, evidence, request, reference, attempt-slot, or stopping
+violations while keeping the exact oracle values model-hidden. Both are
+included in `ci-contract`, `control-plane`, and `full`, but not `quick`;
+neither exercises the production finalizer or GEPA or proves natural quality
+uplift.
 
 `agent-delivery-verification-protocol-contract` runs 19 additional
 provider-free tests over the tracked eight-case calibration / 24-case holdout
-suite, exact case/oracle/order/budget digests, matched decision table, redacted
-model-distinct provider binding, clean-source authority, canonical private
-preflight receipt, and zero-call/non-authorizing boundary. It is included in
-`ci-contract`, `control-plane`, and `full`, but not `quick`. The updated
-preflight binds the clean source, protocol, cases, budgets, oracle aggregate,
-redacted model authority, exact v2 execute name/digest/size/full SHA-256
-CodeDirectory, and new external paths and records `provider_calls=0`,
-`online_runner_frozen=true`, and `execution_authorized=false`. The
-CodeDirectory is derived from a verified private copy of the exact bytes. The
-separate authorization must match both runner identities already frozen by
-preflight.
+suite, four balanced seeded-defect/preservation strata, exact case/oracle/order/
+budget digests, seeded-candidate/model-input/output-contract aggregates,
+matched decision table, redacted model-distinct provider binding, clean-source
+authority, canonical private preflight receipt, and zero-call/non-authorizing
+boundary. It is included in `ci-contract`, `control-plane`, and `full`, but not
+`quick`. The v3 preflight binds the clean source, protocol, cases, all four
+aggregates, budgets, hidden-oracle aggregate, redacted model authority, exact
+v3 execute name/digest/size/full SHA-256 CodeDirectory, and new external paths,
+and records `provider_calls=0`, `online_runner_frozen=true`, and
+`execution_authorized=false`. The CodeDirectory is derived from a verified
+private copy of the exact bytes. The separate authorization must match both
+runner identities and every aggregate already frozen by preflight.
 
 `agent-delivery-verification-execution-contract` runs 38 provider-free tests
 for canonical short-lived authorization, exact preflight/source/provider/model/
-credential/runner/output binding, private one-shot consumption, campaign and
-physical-call reservations before transport, complete resource accounting,
-crash/tamper/concurrency recovery without retry, exact shared-Owner control and
-treatment execution, calibration-before-holdout ordering, and separate semantic
-and immutable wire-payload authority through a real local-loopback HTTP path. It
-also covers running-image/path replacement rejection through macOS's
+credential/runner/output binding, per-case seeded candidate SHA-256/byte
+binding, private one-shot consumption, campaign and physical-call reservations
+before transport, complete resource accounting, and crash/tamper/concurrency
+recovery without retry. It exercises the seeded control and three-stage
+treatment flow, calibration-before-holdout ordering, a maximum of 96 logical
+calls and 96 physical attempts, zero transport retries, and separate semantic
+and immutable wire-payload authority through a real local-loopback HTTP path.
+It also covers running-image/path replacement rejection through macOS's
 kernel-backed CodeDirectory identity and output-root relocation after competing
 authorization files through one parent-level no-clobber consumed marker. It
-compiles the three permanently fail-closed v1 binaries and the three
-separately named v2 binaries without invoking their entrypoints.
+compiles the three permanently fail-closed v1 binaries, the three permanently
+fail-closed v2 binaries, and the three separately named v3 binaries without
+invoking their entrypoints.
 It is included in `ci-contract`, `control-plane`, and `full`, but not `quick`,
 `performance`, or `shipping-performance`. It proves no provider outcome or
 intelligence uplift.
@@ -186,6 +192,9 @@ cargo test --locked \
   --bin cindx-delivery-verification-v2-preflight \
   --bin cindx-delivery-verification-v2-authorize \
   --bin cindx-delivery-verification-v2-execute \
+  --bin cindx-delivery-verification-v3-preflight \
+  --bin cindx-delivery-verification-v3-authorize \
+  --bin cindx-delivery-verification-v3-execute \
   agent_delivery_verification_execution_contract_ -- --nocapture
 ```
 
@@ -269,24 +278,26 @@ deterministic green gates do not establish uplift.
 Delivery Verification retains separate feature-gated v1
 `cindx-delivery-verification-preflight`,
 `cindx-delivery-verification-authorize`, and
-`cindx-delivery-verification-execute` binaries. They are retired and reject the
-consumed protocol before reading arguments, environment, paths, configuration,
-or live state. The v2 successor uses independently named
-`cindx-delivery-verification-v2-preflight`,
-`cindx-delivery-verification-v2-authorize`, and
-`cindx-delivery-verification-v2-execute` binaries plus
-`CINDX_DELIVERY_VERIFICATION_V2_*` paths. All six binaries require
+`cindx-delivery-verification-execute` binaries and the separately named v2
+triple. Both old triples are retired and permanently reject their consumed
+protocol before reading arguments, environment, paths, configuration, or live
+state. The active v3 successor uses
+`cindx-delivery-verification-v3-preflight`,
+`cindx-delivery-verification-v3-authorize`, and
+`cindx-delivery-verification-v3-execute` plus
+`CINDX_DELIVERY_VERIFICATION_V3_*` paths. All nine binaries require
 `realworld-eval` and are compiled by the provider-free contract gate.
 
-Build the three v2 binaries together from clean merged source into one new
+Build the three v3 binaries together from clean merged source into one new
 private target root outside the repository. Run only the preflight binary; it
 requires its exact sibling execute binary and writes a private receipt binding
-source, runner full-file and CodeDirectory identities, provider, cases, oracle,
+source, runner full-file and CodeDirectory identities, provider, cases, case
+order, seeded candidates, model inputs, output contracts, hidden oracle,
 budget, and new output path while reporting zero provider calls and
-`execution_authorized=false`. Verify the receipt CodeDirectory against
-`CandidateCDHashFull sha256=` from the exact copied execute binary. Do not run
-the authorize or execute binaries without a later explicit one-shot
-authorization.
+`execution_authorized=false`. This preflight is provider-free. Verify the
+receipt CodeDirectory against `CandidateCDHashFull sha256=` from the exact
+copied execute binary. Do not run the authorize or execute binaries without a
+later explicit one-shot authorization.
 Private receipts, tombstones, journals, requests, responses, model identities,
 secrets, and raw outputs stay outside Git. This successor does not change the
 installed App, version, tag, or GitHub release.
@@ -300,16 +311,17 @@ root cannot reopen it. This is a local-filesystem guarantee for normal crashes,
 concurrency, and relocation, not an external anti-rollback service against a
 same-user actor able to delete or restore every private control-plane file.
 
-Delivery Verification protocol v1 has already consumed its one authorized
-attempt and closed `CENSORED` / `INVALID-INSTRUMENTATION` because journal
-validation equated its semantic-request digest with the separately
-domain-separated wire-payload digest. Never use the commands above to mint or
-execute another v1 authority. A successor must first reserve both identities
-from one immutable prepared request, dispatch those exact bytes, preserve the
-primary terminal error, and pass a real preparation-boundary loopback contract.
-Current source implements those provider-free instrumentation requirements in
-the v2 protocol and journal, explicitly rejects all v1 CLI stages, and keeps v2
-preflight non-authorizing. A provider-backed execute still requires a new
+Delivery Verification protocol v1 consumed its one authorized attempt and
+closed `CENSORED` / `INVALID-INSTRUMENTATION` because journal validation equated
+its semantic-request digest with the separately domain-separated wire-payload
+digest. Protocol v2 separately consumed its one authorized attempt and closed
+`terminal_futility` after calibration. Never mint or execute another v1 or v2
+authority; every old CLI stage now rejects permanently. The v3 protocol is a
+separate seeded-defect repair-efficacy experiment, not a claim of natural
+uplift. It reserves semantic and wire identities from one immutable prepared
+request, dispatches those exact bytes, preserves terminal failures, caps the
+campaign at 96 calls/attempts with no retry, and keeps its provider-free
+preflight non-authorizing. A provider-backed v3 execute still requires a new
 explicit one-shot authorization.
 
 ## Browser and Computer Sidecars

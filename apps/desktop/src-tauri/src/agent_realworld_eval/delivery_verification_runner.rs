@@ -13,8 +13,8 @@ use super::delivery_verification_preflight::{
 use super::delivery_verification_protocol::{
     parse_and_validate_protocol, CalibrationDecision, HoldoutDecisionResult, MatchedPairCounts,
     ProtocolBudget, ValidatedProtocol, CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
-    DELIVERY_VERIFICATION_PROTOCOL_ID, DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH,
-    DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
+    CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID, DELIVERY_VERIFICATION_PROTOCOL_ID,
+    DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH, DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
 };
 use super::delivery_verification_runner_binary::{
     read_current_delivery_execute, read_delivery_execute_sibling, DeliveryVerificationRunnerBinary,
@@ -31,9 +31,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const PREFLIGHT_RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_PREFLIGHT_RECEIPT";
-const AUTHORIZATION_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_AUTHORIZATION";
-const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_OUTPUT_ROOT";
+const PREFLIGHT_RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_PREFLIGHT_RECEIPT";
+const AUTHORIZATION_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_AUTHORIZATION";
+const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_OUTPUT_ROOT";
 const AUTHORIZE_FLAG: &str = "--authorize-once";
 
 pub(in super::super) fn run_authorize() -> Result<(), String> {
@@ -166,12 +166,16 @@ pub(super) fn require_authorize_arguments(
 }
 
 pub(super) fn reject_consumed_delivery_protocol(protocol_id: &str) -> Result<(), String> {
-    if protocol_id == CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID {
-        return Err(format!(
+    match protocol_id {
+        CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID
+        | CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID => Err(format!(
             "delivery verification protocol `{protocol_id}` is consumed and cannot be preflighted, authorized, or executed again; use the separately frozen successor protocol"
-        ));
+        )),
+        DELIVERY_VERIFICATION_PROTOCOL_ID => Ok(()),
+        _ => Err(format!(
+            "delivery verification protocol `{protocol_id}` is not the active frozen authority `{DELIVERY_VERIFICATION_PROTOCOL_ID}`"
+        )),
     }
-    Ok(())
 }
 
 fn authorization_nonce(
@@ -182,7 +186,7 @@ fn authorization_nonce(
 ) -> String {
     sha256_hex(
         format!(
-            "cindx.delivery-verification-authorization-nonce.v2\0{now_ms}\0{}\0{}\0{}\0{}",
+            "cindx.delivery-verification-authorization-nonce.v3\0{now_ms}\0{}\0{}\0{}\0{}",
             authorization.display(),
             output.display(),
             sha256_hex(&runner.bytes),
@@ -453,7 +457,7 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
 
     fn dispatch(&mut self, call: PreparedDeliveryCall) -> CallOutcome {
         if self.time_budget_exhausted() {
-            return CallOutcome::ModelFailure(DeliveryVerificationModelFailure::BudgetExhausted);
+            return CallOutcome::StructuralFailure("time_budget_exhausted".into());
         }
         let call_role = call.role.clone();
         let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
@@ -515,9 +519,7 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
                     return CallOutcome::StructuralFailure(error);
                 }
                 if self.time_budget_exhausted() {
-                    return CallOutcome::ModelFailure(
-                        DeliveryVerificationModelFailure::BudgetExhausted,
-                    );
+                    return CallOutcome::StructuralFailure("time_budget_exhausted".into());
                 }
                 outcome
             }
@@ -562,17 +564,23 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
                     CaseStatus::StructuralFailure => {
                         DeliveryVerificationCaseTerminalStatusV1::StructuralFailure
                     }
-                    CaseStatus::TreatmentExecutionFailure => {
-                        DeliveryVerificationCaseTerminalStatusV1::TreatmentExecutionFailure
-                    }
                     CaseStatus::Censored => DeliveryVerificationCaseTerminalStatusV1::Censored,
                 },
                 control_passed: outcome.control_passed,
                 treatment_passed: outcome.treatment_passed,
-                owner_draft_sha256: outcome.owner_draft_sha256.clone(),
-                owner_draft_bytes: outcome.owner_draft_bytes,
+                seeded_candidate_sha256: outcome.seeded_candidate_sha256.clone(),
+                seeded_candidate_bytes: outcome.seeded_candidate_bytes,
                 control_output_sha256: outcome.control_output_sha256.clone(),
                 treatment_output_sha256: outcome.treatment_output_sha256.clone(),
+                initial_verifier_decision: outcome.initial_verifier_decision.clone(),
+                initial_finding_counts: outcome.initial_finding_counts,
+                repair_activated: outcome.repair_activated,
+                recheck_decision: outcome.recheck_decision.clone(),
+                recheck_finding_counts: outcome.recheck_finding_counts,
+                treatment_disposition: outcome.treatment_disposition.clone(),
+                failure_stage: outcome.failure_stage.clone(),
+                failure_code: outcome.failure_code.clone(),
+                outcome_reason: outcome.reason.clone(),
                 observation_sha256: outcome.observation_sha256.clone(),
                 completed_at_ms: now_millis()?,
             })

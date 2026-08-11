@@ -2,20 +2,21 @@ use super::delivery_verification::{
     project_delivery_verification_evaluation, DeliveryVerificationEvalAttempt,
     DeliveryVerificationEvalAttemptResult, DeliveryVerificationEvalCensor,
     DeliveryVerificationEvalInput, DeliveryVerificationEvalObservation,
-    DeliveryVerificationEvalStage, DeliveryVerificationModelFailure,
-    DeliveryVerificationTreatmentDisposition,
+    DeliveryVerificationEvalStage, DeliveryVerificationFindingCounts,
+    DeliveryVerificationModelFailure, DeliveryVerificationTreatmentDisposition,
 };
 use super::delivery_verification_execution_journal::{
     DeliveryVerificationCallStageV1, DeliveryVerificationCampaignDispositionV1,
 };
 use super::delivery_verification_protocol::{
-    calibration_decision, holdout_decision, CalibrationDecision, HoldoutDecisionResult,
-    MatchedPairCounts, OracleEvaluation, ProtocolBudget, ValidatedCase, ValidatedProtocol,
+    calibration_decision, holdout_decision, CalibrationDecision, DeliveryVerificationStratum,
+    HoldoutDecisionResult, MatchedPairCounts, OracleEvaluation, ProtocolBudget, ValidatedCase,
+    ValidatedProtocol,
 };
 use super::delivery_verification_requests::{
-    prepare_owner_draft_request, prepare_owner_repair_request, prepare_verifier_request,
-    DeliveryOwnerDraftRequestInput, DeliveryRepairRequestInput, DeliveryVerificationRequestBudget,
-    DeliveryVerificationRequestInput, MAX_DELIVERY_VERIFICATION_REQUEST_BYTES,
+    prepare_owner_repair_request, prepare_verifier_request, DeliveryRepairRequestInput,
+    DeliveryVerificationRequestBudget, DeliveryVerificationRequestInput,
+    MAX_DELIVERY_VERIFICATION_REQUEST_BYTES,
 };
 use agent_core::{ModelRequest, ModelRole};
 use agent_runtime::{
@@ -78,20 +79,28 @@ pub(super) trait DeliveryVerificationRuntime {
 pub(super) enum CaseStatus {
     Complete,
     StructuralFailure,
-    TreatmentExecutionFailure,
     Censored,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct CaseOutcome {
     pub(super) ordinal: usize,
+    pub(super) stratum: DeliveryVerificationStratum,
     pub(super) status: CaseStatus,
-    pub(super) owner_draft_sha256: Option<String>,
-    pub(super) owner_draft_bytes: Option<u64>,
+    pub(super) seeded_candidate_sha256: Option<String>,
+    pub(super) seeded_candidate_bytes: Option<u64>,
     pub(super) control_output_sha256: Option<String>,
     pub(super) treatment_output_sha256: Option<String>,
     pub(super) control_passed: Option<bool>,
     pub(super) treatment_passed: Option<bool>,
+    pub(super) initial_verifier_decision: Option<String>,
+    pub(super) initial_finding_counts: DeliveryVerificationFindingCounts,
+    pub(super) repair_activated: bool,
+    pub(super) recheck_decision: Option<String>,
+    pub(super) recheck_finding_counts: DeliveryVerificationFindingCounts,
+    pub(super) treatment_disposition: Option<String>,
+    pub(super) failure_stage: Option<String>,
+    pub(super) failure_code: Option<String>,
     pub(super) observation_sha256: String,
     pub(super) reason: String,
 }
@@ -107,12 +116,27 @@ impl CaseOutcome {
                 counts.control_failures = usize::from(!control);
                 counts.treatment_only_wins = usize::from(!control && treatment);
                 counts.control_only_losses = usize::from(control && !treatment);
+                if !control && treatment {
+                    match self.stratum {
+                        DeliveryVerificationStratum::UnsupportedClaim => {
+                            counts.unsupported_claim_wins = 1
+                        }
+                        DeliveryVerificationStratum::OmittedObligation => {
+                            counts.omitted_obligation_wins = 1
+                        }
+                        DeliveryVerificationStratum::Contradiction => counts.contradiction_wins = 1,
+                        DeliveryVerificationStratum::Preservation => {}
+                    }
+                }
+                if control
+                    && !treatment
+                    && self.stratum == DeliveryVerificationStratum::Preservation
+                {
+                    counts.preservation_losses = 1;
+                }
             }
             CaseStatus::StructuralFailure | CaseStatus::Censored => {
                 counts.structural_failures = 1;
-            }
-            CaseStatus::TreatmentExecutionFailure => {
-                counts.treatment_execution_failures = 1;
             }
         }
         counts
@@ -173,11 +197,15 @@ pub(super) fn execute_fixed_campaign(
     let holdout_result = holdout_decision(holdout);
     runtime.record_holdout(holdout_result, holdout)?;
     let disposition = match holdout_result {
-        HoldoutDecisionResult::EvidenceOfUplift => {
-            DeliveryVerificationCampaignDispositionV1::EvidenceOfUplift
+        HoldoutDecisionResult::SeededRepairEffective => {
+            DeliveryVerificationCampaignDispositionV1::SeededRepairEffective
         }
-        HoldoutDecisionResult::NoEvidence => DeliveryVerificationCampaignDispositionV1::NoEvidence,
-        HoldoutDecisionResult::Regression => DeliveryVerificationCampaignDispositionV1::Regression,
+        HoldoutDecisionResult::NotEffective => {
+            DeliveryVerificationCampaignDispositionV1::NotEffective
+        }
+        HoldoutDecisionResult::PreservationRegression => {
+            DeliveryVerificationCampaignDispositionV1::PreservationRegression
+        }
         HoldoutDecisionResult::Inconclusive => {
             DeliveryVerificationCampaignDispositionV1::Inconclusive
         }
@@ -197,9 +225,7 @@ fn freeze_for_case_failure(
 ) -> Result<DeliveryVerificationCampaignDispositionV1, String> {
     let disposition = match outcome.status {
         CaseStatus::Censored => DeliveryVerificationCampaignDispositionV1::Censored,
-        CaseStatus::StructuralFailure | CaseStatus::TreatmentExecutionFailure => {
-            DeliveryVerificationCampaignDispositionV1::Inconclusive
-        }
+        CaseStatus::StructuralFailure => DeliveryVerificationCampaignDispositionV1::Inconclusive,
         CaseStatus::Complete => return Err("complete case cannot freeze the campaign".into()),
     };
     runtime.finish(
@@ -217,30 +243,17 @@ pub(super) fn execute_case(
 ) -> CaseOutcome {
     let owner_model = runtime.configured_model(&ModelRole::Executor).to_string();
     let verifier_model = runtime.configured_model(&ModelRole::Reviewer).to_string();
-    let owner_call = match owner_draft_call(case, budget, &owner_model) {
-        Ok(call) => call,
-        Err(error) => return structural_case(case.ordinal(), None, &error),
-    };
-    let owner = match runtime.dispatch(owner_call) {
-        CallOutcome::Completed(output) => output,
-        CallOutcome::Censored(reason) => return censored_case(case.ordinal(), None, &reason),
-        CallOutcome::ModelFailure(failure) => {
-            return structural_case(case.ordinal(), None, model_failure_label(failure))
-        }
-        CallOutcome::StructuralFailure(reason) => {
-            return structural_case(case.ordinal(), None, &reason)
-        }
-    };
-    let owner_receipt = grounded_receipt(case, &owner.content, 1);
+    let seeded_candidate = case.seeded_candidate().to_string();
+    let owner_receipt = grounded_receipt(case, &seeded_candidate, 0);
     let subject = match DeliveryVerificationSubjectV1::bind(
         case.objective(),
-        &owner.content,
+        &seeded_candidate,
         &owner_receipt,
         case.obligations(),
         case.evidence(),
     ) {
         Ok(subject) => subject,
-        Err(_) => return structural_case(case.ordinal(), Some(&owner.content), "owner_binding"),
+        Err(_) => return structural_case(case, Some(&seeded_candidate), "seed_binding"),
     };
     let mut attempts = Vec::with_capacity(3);
     let initial_verifier_call = match verifier_call(
@@ -249,11 +262,11 @@ pub(super) fn execute_case(
         &owner_model,
         &verifier_model,
         &subject,
-        &owner.content,
+        &seeded_candidate,
         DeliveryVerificationCallStageV1::VerifierInitial,
     ) {
         Ok(call) => call,
-        Err(error) => return structural_case(case.ordinal(), Some(&owner.content), &error),
+        Err(error) => return structural_case(case, Some(&seeded_candidate), &error),
     };
     let initial = match runtime.dispatch(initial_verifier_call) {
         CallOutcome::Completed(output) => output,
@@ -262,20 +275,13 @@ pub(super) fn execute_case(
                 case,
                 &owner_model,
                 &verifier_model,
-                owner,
+                seeded_candidate,
                 attempts,
                 DeliveryVerificationEvalStage::InitialVerification,
                 other,
             )
         }
     };
-    if initial.served_model_sha256 == owner.served_model_sha256 {
-        return structural_case(
-            case.ordinal(),
-            Some(&owner.content),
-            "served_models_not_independent",
-        );
-    }
     attempts.push(DeliveryVerificationEvalAttempt {
         stage: DeliveryVerificationEvalStage::InitialVerification,
         configured_model: verifier_model.clone(),
@@ -284,10 +290,24 @@ pub(super) fn execute_case(
     });
     let verdict = match DeliveryVerificationVerdictV1::from_json(&subject, &initial.content) {
         Ok(verdict) => verdict,
-        Err(_) => return project_case(case, &owner_model, &verifier_model, owner, attempts),
+        Err(_) => {
+            return project_case(
+                case,
+                &owner_model,
+                &verifier_model,
+                seeded_candidate,
+                attempts,
+            )
+        }
     };
     if verdict.decision == DeliveryVerificationDecision::Passed {
-        return project_case(case, &owner_model, &verifier_model, owner, attempts);
+        return project_case(
+            case,
+            &owner_model,
+            &verifier_model,
+            seeded_candidate,
+            attempts,
+        );
     }
 
     let repair_call = match repair_call(
@@ -296,11 +316,11 @@ pub(super) fn execute_case(
         &owner_model,
         &verifier_model,
         &subject,
-        &owner.content,
+        &seeded_candidate,
         &verdict,
     ) {
         Ok(call) => call,
-        Err(error) => return structural_case(case.ordinal(), Some(&owner.content), &error),
+        Err(error) => return structural_case(case, Some(&seeded_candidate), &error),
     };
     let repaired = match runtime.dispatch(repair_call) {
         CallOutcome::Completed(output) => output,
@@ -309,21 +329,21 @@ pub(super) fn execute_case(
                 case,
                 &owner_model,
                 &verifier_model,
-                owner,
+                seeded_candidate,
                 attempts,
                 DeliveryVerificationEvalStage::OwnerRepair,
                 other,
             )
         }
     };
-    if repaired.served_model_sha256 != owner.served_model_sha256 {
+    if repaired.served_model_sha256 == initial.served_model_sha256 {
         return structural_case(
-            case.ordinal(),
-            Some(&owner.content),
-            "owner_served_model_changed",
+            case,
+            Some(&seeded_candidate),
+            "served_models_not_independent",
         );
     }
-    let repaired_receipt = grounded_receipt(case, &repaired.content, 2);
+    let repaired_receipt = grounded_receipt(case, &repaired.content, 1);
     let repaired_subject = match DeliveryVerificationSubjectV1::bind(
         case.objective(),
         &repaired.content,
@@ -332,7 +352,7 @@ pub(super) fn execute_case(
         case.evidence(),
     ) {
         Ok(subject) => subject,
-        Err(_) => return structural_case(case.ordinal(), Some(&owner.content), "repair_binding"),
+        Err(_) => return structural_case(case, Some(&seeded_candidate), "repair_binding"),
     };
     attempts.push(DeliveryVerificationEvalAttempt {
         stage: DeliveryVerificationEvalStage::OwnerRepair,
@@ -353,7 +373,7 @@ pub(super) fn execute_case(
         DeliveryVerificationCallStageV1::VerifierRecheck,
     ) {
         Ok(call) => call,
-        Err(error) => return structural_case(case.ordinal(), Some(&owner.content), &error),
+        Err(error) => return structural_case(case, Some(&seeded_candidate), &error),
     };
     let recheck = match runtime.dispatch(recheck_call) {
         CallOutcome::Completed(output) => output,
@@ -362,7 +382,7 @@ pub(super) fn execute_case(
                 case,
                 &owner_model,
                 &verifier_model,
-                owner,
+                seeded_candidate,
                 attempts,
                 DeliveryVerificationEvalStage::Recheck,
                 other,
@@ -371,8 +391,8 @@ pub(super) fn execute_case(
     };
     if recheck.served_model_sha256 != initial.served_model_sha256 {
         return structural_case(
-            case.ordinal(),
-            Some(&owner.content),
+            case,
+            Some(&seeded_candidate),
             "verifier_served_model_changed",
         );
     }
@@ -382,32 +402,13 @@ pub(super) fn execute_case(
         tool_count: 0,
         result: DeliveryVerificationEvalAttemptResult::VerifierResponse(recheck.content),
     });
-    project_case(case, &owner_model, &verifier_model, owner, attempts)
-}
-
-fn owner_draft_call(
-    case: ValidatedCase<'_>,
-    budget: &ProtocolBudget,
-    owner_model: &str,
-) -> Result<PreparedDeliveryCall, String> {
-    let prepared = prepare_owner_draft_request(DeliveryOwnerDraftRequestInput {
-        objective: case.objective(),
-        obligations: case.obligations(),
-        evidence: case.evidence(),
-        owner_model,
-        budget: request_budget(budget.max_owner_output_tokens),
-    })?;
-    let binding = prepared.binding().clone();
-    Ok(PreparedDeliveryCall {
-        case_ordinal: case.ordinal(),
-        stage: DeliveryVerificationCallStageV1::OwnerDraft,
-        role: ModelRole::Executor,
-        configured_model: owner_model.to_string(),
-        canonical_request_sha256: binding.canonical_request_sha256,
-        canonical_request_bytes: binding.canonical_request_bytes,
-        max_output_tokens: budget.max_owner_output_tokens,
-        request: prepared.into_request(),
-    })
+    project_case(
+        case,
+        &owner_model,
+        &verifier_model,
+        seeded_candidate,
+        attempts,
+    )
 }
 
 fn verifier_call(
@@ -422,6 +423,7 @@ fn verifier_call(
     let prepared = prepare_verifier_request(DeliveryVerificationRequestInput {
         subject,
         objective: case.objective(),
+        output_contract: case.output_contract(),
         obligations: case.obligations(),
         evidence: case.evidence(),
         owner_draft: draft,
@@ -455,6 +457,7 @@ fn repair_call(
     let prepared = prepare_owner_repair_request(DeliveryRepairRequestInput {
         subject,
         objective: case.objective(),
+        output_contract: case.output_contract(),
         obligations: case.obligations(),
         evidence: case.evidence(),
         owner_draft: draft,
@@ -517,12 +520,15 @@ fn attempt_failure_case(
     case: ValidatedCase<'_>,
     owner_model: &str,
     verifier_model: &str,
-    owner: CompletedCall,
+    seeded_candidate: String,
     mut attempts: Vec<DeliveryVerificationEvalAttempt>,
     stage: DeliveryVerificationEvalStage,
     outcome: CallOutcome,
 ) -> CaseOutcome {
     match outcome {
+        CallOutcome::ModelFailure(DeliveryVerificationModelFailure::BudgetExhausted) => {
+            structural_case(case, Some(&seeded_candidate), "budget_exhausted")
+        }
         CallOutcome::ModelFailure(kind) => {
             attempts.push(DeliveryVerificationEvalAttempt {
                 stage,
@@ -533,19 +539,21 @@ fn attempt_failure_case(
                 tool_count: 0,
                 result: DeliveryVerificationEvalAttemptResult::ModelFailure { kind },
             });
-            project_case(case, owner_model, verifier_model, owner, attempts)
+            project_case(
+                case,
+                owner_model,
+                verifier_model,
+                seeded_candidate,
+                attempts,
+            )
         }
-        CallOutcome::Censored(reason) => {
-            censored_case(case.ordinal(), Some(&owner.content), &reason)
-        }
+        CallOutcome::Censored(reason) => censored_case(case, Some(&seeded_candidate), &reason),
         CallOutcome::StructuralFailure(reason) => {
-            structural_case(case.ordinal(), Some(&owner.content), &reason)
+            structural_case(case, Some(&seeded_candidate), &reason)
         }
-        CallOutcome::Completed(_) => structural_case(
-            case.ordinal(),
-            Some(&owner.content),
-            "invalid_dispatch_transition",
-        ),
+        CallOutcome::Completed(_) => {
+            structural_case(case, Some(&seeded_candidate), "invalid_dispatch_transition")
+        }
     }
 }
 
@@ -553,7 +561,7 @@ fn project_case(
     case: ValidatedCase<'_>,
     owner_model: &str,
     verifier_model: &str,
-    owner: CompletedCall,
+    seeded_candidate: String,
     attempts: Vec<DeliveryVerificationEvalAttempt>,
 ) -> CaseOutcome {
     match project_delivery_verification_evaluation(
@@ -562,19 +570,15 @@ fn project_case(
             objective: case.objective().to_string(),
             obligations: case.obligations().to_vec(),
             evidence: case.evidence().to_vec(),
-            owner_draft: owner.content.clone(),
-            owner_receipt: grounded_receipt(case, &owner.content, 1),
+            owner_draft: seeded_candidate.clone(),
+            owner_receipt: grounded_receipt(case, &seeded_candidate, 0),
             owner_model: owner_model.to_string(),
             verifier_model: verifier_model.to_string(),
         },
         &attempts,
     ) {
         Ok(observation) => completed_or_treatment_failure(case, observation),
-        Err(censor) => structural_case(
-            case.ordinal(),
-            Some(&owner.content),
-            eval_censor_label(censor),
-        ),
+        Err(censor) => structural_case(case, Some(&seeded_candidate), eval_censor_label(censor)),
     }
 }
 
@@ -586,69 +590,132 @@ fn completed_or_treatment_failure(
     let treatment = observation.treatment.output.as_deref();
     let owner_sha = owner.map(|value| sha256_hex(value.as_bytes()));
     let treatment_sha = treatment.map(|value| sha256_hex(value.as_bytes()));
-    let status =
-        if observation.disposition == DeliveryVerificationTreatmentDisposition::TreatmentFailure {
-            CaseStatus::TreatmentExecutionFailure
-        } else {
-            CaseStatus::Complete
-        };
+    let status = CaseStatus::Complete;
     let control_passed = owner.map(|value| case.evaluate_output(value) == OracleEvaluation::Passed);
-    let treatment_passed =
-        treatment.map(|value| case.evaluate_output(value) == OracleEvaluation::Passed);
-    let reason = observation
+    let oracle_treatment_passed = treatment
+        .map(|value| case.evaluate_output(value) == OracleEvaluation::Passed)
+        .unwrap_or(false);
+    let treatment_passed = Some(match case.stratum() {
+        DeliveryVerificationStratum::Preservation => {
+            observation.disposition == DeliveryVerificationTreatmentDisposition::PassedUnchanged
+                && oracle_treatment_passed
+                && treatment_sha == owner_sha
+        }
+        _ => {
+            observation.disposition == DeliveryVerificationTreatmentDisposition::PassedAfterRepair
+                && oracle_treatment_passed
+        }
+    });
+    let treatment_disposition = disposition_label(observation.disposition).to_string();
+    let failure_stage = observation
+        .failure_stage
+        .map(failure_stage_label)
+        .map(str::to_string);
+    let failure_code = observation
         .failure_code
-        .map(|value| format!("treatment_failure:{value:?}").to_ascii_lowercase())
-        .unwrap_or_else(|| "complete".into());
+        .map(failure_code_label)
+        .map(str::to_string);
+    let reason = failure_code
+        .as_ref()
+        .map(|value| format!("component_failure:{value}"))
+        .unwrap_or_else(|| match observation.disposition {
+            DeliveryVerificationTreatmentDisposition::PassedUnchanged => {
+                "verifier_passed_unchanged".into()
+            }
+            DeliveryVerificationTreatmentDisposition::PassedAfterRepair => "repair_accepted".into(),
+            DeliveryVerificationTreatmentDisposition::TreatmentFailure => {
+                "component_failure".into()
+            }
+        });
+    let initial_verifier_decision = observation
+        .initial_verifier_decision
+        .map(decision_label)
+        .map(str::to_string);
+    let recheck_decision = observation
+        .recheck_decision
+        .map(decision_label)
+        .map(str::to_string);
     let observation_sha256 = sha256_hex(
         format!(
-            "cindx.delivery-verification-case-observation.v1\0{}\0{status:?}\0{}\0{}\0{control_passed:?}\0{treatment_passed:?}\0{reason}",
+            "cindx.delivery-verification-case-observation.v3\0{}\0{status:?}\0{}\0{}\0{control_passed:?}\0{treatment_passed:?}\0{initial_verifier_decision:?}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{recheck_decision:?}\0{treatment_disposition}\0{failure_stage:?}\0{failure_code:?}\0{}\0{}\0{}\0{reason}",
             case.id(),
             owner_sha.as_deref().unwrap_or("none"),
             treatment_sha.as_deref().unwrap_or("none"),
+            observation.initial_finding_counts.unsupported_claim,
+            observation.initial_finding_counts.omitted_obligation,
+            observation.initial_finding_counts.contradiction,
+            observation.repair_activated,
+            observation.recheck_finding_counts.unsupported_claim,
+            observation.recheck_finding_counts.omitted_obligation,
+            observation.recheck_finding_counts.contradiction,
+            observation.initial_verifier_calls,
+            observation.owner_repair_calls,
+            observation.recheck_calls,
         )
         .as_bytes(),
     );
     CaseOutcome {
         ordinal: case.ordinal(),
+        stratum: case.stratum(),
         status,
-        owner_draft_sha256: owner_sha.clone(),
-        owner_draft_bytes: owner.map(|value| value.len() as u64),
+        seeded_candidate_sha256: owner_sha.clone(),
+        seeded_candidate_bytes: owner.map(|value| value.len() as u64),
         control_output_sha256: owner_sha,
         treatment_output_sha256: treatment_sha,
         control_passed,
         treatment_passed,
+        initial_verifier_decision,
+        initial_finding_counts: observation.initial_finding_counts,
+        repair_activated: observation.repair_activated,
+        recheck_decision,
+        recheck_finding_counts: observation.recheck_finding_counts,
+        treatment_disposition: Some(treatment_disposition),
+        failure_stage,
+        failure_code,
         observation_sha256,
         reason,
     }
 }
 
-fn structural_case(ordinal: usize, owner: Option<&str>, reason: &str) -> CaseOutcome {
-    failed_case(ordinal, owner, CaseStatus::StructuralFailure, reason)
+fn structural_case(case: ValidatedCase<'_>, seed: Option<&str>, reason: &str) -> CaseOutcome {
+    failed_case(case, seed, CaseStatus::StructuralFailure, reason)
 }
 
-fn censored_case(ordinal: usize, owner: Option<&str>, reason: &str) -> CaseOutcome {
-    failed_case(ordinal, owner, CaseStatus::Censored, reason)
+fn censored_case(case: ValidatedCase<'_>, seed: Option<&str>, reason: &str) -> CaseOutcome {
+    failed_case(case, seed, CaseStatus::Censored, reason)
 }
 
 fn failed_case(
-    ordinal: usize,
-    owner: Option<&str>,
+    case: ValidatedCase<'_>,
+    seed: Option<&str>,
     status: CaseStatus,
     reason: &str,
 ) -> CaseOutcome {
-    let owner_sha = owner.map(|value| sha256_hex(value.as_bytes()));
+    let seed_sha = seed.map(|value| sha256_hex(value.as_bytes()));
     CaseOutcome {
-        ordinal,
+        ordinal: case.ordinal(),
+        stratum: case.stratum(),
         status,
-        owner_draft_sha256: owner_sha.clone(),
-        owner_draft_bytes: owner.map(|value| value.len() as u64),
-        control_output_sha256: owner_sha,
+        seeded_candidate_sha256: seed_sha.clone(),
+        seeded_candidate_bytes: seed.map(|value| value.len() as u64),
+        control_output_sha256: seed_sha,
         treatment_output_sha256: None,
         control_passed: None,
         treatment_passed: None,
+        initial_verifier_decision: None,
+        initial_finding_counts: DeliveryVerificationFindingCounts::default(),
+        repair_activated: false,
+        recheck_decision: None,
+        recheck_finding_counts: DeliveryVerificationFindingCounts::default(),
+        treatment_disposition: None,
+        failure_stage: None,
+        failure_code: None,
         observation_sha256: sha256_hex(
-            format!("cindx.delivery-verification-case-failure.v1\0{ordinal}\0{status:?}\0{reason}")
-                .as_bytes(),
+            format!(
+                "cindx.delivery-verification-case-failure.v3\0{}\0{status:?}\0{reason}",
+                case.ordinal()
+            )
+            .as_bytes(),
         ),
         reason: reason.to_string(),
     }
@@ -662,6 +729,10 @@ fn zero_counts() -> MatchedPairCounts {
         control_only_losses: 0,
         structural_failures: 0,
         treatment_execution_failures: 0,
+        unsupported_claim_wins: 0,
+        omitted_obligation_wins: 0,
+        contradiction_wins: 0,
+        preservation_losses: 0,
     }
 }
 
@@ -679,19 +750,28 @@ fn add_counts(total: &mut MatchedPairCounts, one: MatchedPairCounts) -> Result<(
         total.treatment_execution_failures,
         one.treatment_execution_failures,
     )?;
+    total.unsupported_claim_wins = add(total.unsupported_claim_wins, one.unsupported_claim_wins)?;
+    total.omitted_obligation_wins =
+        add(total.omitted_obligation_wins, one.omitted_obligation_wins)?;
+    total.contradiction_wins = add(total.contradiction_wins, one.contradiction_wins)?;
+    total.preservation_losses = add(total.preservation_losses, one.preservation_losses)?;
     Ok(())
 }
 
 pub(super) fn counts_digest(stage: &str, counts: MatchedPairCounts) -> String {
     sha256_hex(
         format!(
-            "cindx.delivery-verification-counts.v1\0{stage}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "cindx.delivery-verification-counts.v3\0{stage}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             counts.complete_cases,
             counts.control_failures,
             counts.treatment_only_wins,
             counts.control_only_losses,
             counts.structural_failures,
             counts.treatment_execution_failures,
+            counts.unsupported_claim_wins,
+            counts.omitted_obligation_wins,
+            counts.contradiction_wins,
+            counts.preservation_losses,
         )
         .as_bytes(),
     )
@@ -708,19 +788,47 @@ pub(super) fn calibration_label(value: CalibrationDecision) -> &'static str {
 
 pub(super) fn holdout_label(value: HoldoutDecisionResult) -> &'static str {
     match value {
-        HoldoutDecisionResult::EvidenceOfUplift => "evidence_of_uplift",
-        HoldoutDecisionResult::NoEvidence => "no_evidence",
-        HoldoutDecisionResult::Regression => "regression",
+        HoldoutDecisionResult::SeededRepairEffective => "seeded_repair_effective",
+        HoldoutDecisionResult::NotEffective => "not_effective",
+        HoldoutDecisionResult::PreservationRegression => "preservation_regression",
         HoldoutDecisionResult::Inconclusive => "inconclusive",
         HoldoutDecisionResult::Invalid => "invalid",
     }
 }
 
-fn model_failure_label(value: DeliveryVerificationModelFailure) -> &'static str {
+fn decision_label(value: DeliveryVerificationDecision) -> &'static str {
     match value {
-        DeliveryVerificationModelFailure::ProviderUnavailable => "owner_provider_unavailable",
-        DeliveryVerificationModelFailure::Timeout => "owner_timeout",
-        DeliveryVerificationModelFailure::BudgetExhausted => "owner_budget_exhausted",
+        DeliveryVerificationDecision::Passed => "passed",
+        DeliveryVerificationDecision::NeedsRevision => "needs_revision",
+    }
+}
+
+fn disposition_label(value: DeliveryVerificationTreatmentDisposition) -> &'static str {
+    match value {
+        DeliveryVerificationTreatmentDisposition::PassedUnchanged => "passed_unchanged",
+        DeliveryVerificationTreatmentDisposition::PassedAfterRepair => "passed_after_repair",
+        DeliveryVerificationTreatmentDisposition::TreatmentFailure => "treatment_failure",
+    }
+}
+
+fn failure_stage_label(value: DeliveryVerificationEvalStage) -> &'static str {
+    match value {
+        DeliveryVerificationEvalStage::InitialVerification => "initial_verification",
+        DeliveryVerificationEvalStage::OwnerRepair => "owner_repair",
+        DeliveryVerificationEvalStage::Recheck => "recheck",
+    }
+}
+
+fn failure_code_label(
+    value: super::delivery_verification::DeliveryVerificationTreatmentFailureCode,
+) -> &'static str {
+    use super::delivery_verification::DeliveryVerificationTreatmentFailureCode as Failure;
+    match value {
+        Failure::ProviderUnavailable => "provider_unavailable",
+        Failure::Timeout => "timeout",
+        Failure::BudgetExhausted => "budget_exhausted",
+        Failure::InvalidVerifierResponse => "invalid_verifier_response",
+        Failure::VerificationNotSatisfied => "verification_not_satisfied",
     }
 }
 

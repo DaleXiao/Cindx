@@ -222,53 +222,67 @@ preservation-breaking outcomes remain zero-score evidence. The receipt is
 shadow-only and has no production routing, prompt, memory, permission, or
 serving consumer.
 
-Delivery Verification remains a separate `realworld-eval` authority. Its
-tracked suite and protocol bind one shared exact Owner draft to two projections:
-the control preserves those bytes, while the treatment permits one
-model-distinct Reviewer verdict, at most one same-Owner repair, and one
-Reviewer recheck. Model-facing case input contains only the objective and
-ordered obligation/evidence bodies; the deterministic exact-output oracle is
-sealed into the tracked case digest but omitted from every model request. The
-runner receives only the bounded model input and evaluates an output against
-the hidden oracle after the response; raw suite bytes and debug formatting are
-not model-facing access paths.
+Delivery Verification remains a separate `realworld-eval` authority. V1 and v2
+are consumed lineages: each of their preflight, authorization, and execute
+entrypoints returns a consumed-protocol error before reading or creating live
+control-plane state. V1 exposed the semantic/wire digest instrumentation defect.
+V2 fixed that defect, completed all eight calibration pairs once, and closed
+`terminal_futility`; it cannot be resumed, relocated, or rerun.
 
-The adjacent preflight binds a clean source tree, protocol/suite/case/budget and
-hidden-oracle aggregate hashes, redacted configured Owner/Reviewer identities,
-exact v2 execute-binary name, digest, and size, and new external paths into a
-private receipt. The runner authority also contains the full SHA-256
-CodeDirectory identity derived by verifying a private copy of those exact
-bytes. It performs zero provider calls and records
-`online_runner_frozen=true` and `execution_authorized=false`. A separate
-provider-free authorization binary revalidates that canonical receipt, current
-source/provider/model/credential authority, the same exact execute binary, a
-new one-shot output root, and a short validity window. Before consuming any
-state, the execute binary compares the frozen CodeDirectory with macOS's
-kernel-backed identity for its running process; a same-path binary replacement
-therefore fails closed even if the replacement bytes match the receipt. It then
-atomically creates a no-clobber marker in the output root's parent, at a name
-derived from the canonical output-path digest. All authorization files for that
-campaign share this marker, and the output-root tombstone must byte-match it,
-so relocating or deleting the output directory does not reopen the authority.
-Only then may execute persist the campaign and each exact physical-call
-reservation before dispatch. Ambiguous or interrupted started calls become terminal
-inconclusive/censored state and are never resumed or retried.
+V3 is a distinct seeded-defect recovery and preservation component test. The
+tracked suite contains 24 seeded defects and eight clean preservation sentinels,
+with 8 calibration / 24 holdout cases and equal representation of unsupported
+claims, omitted obligations, contradictions, and preservation. Every case owns
+a frozen seed, a model-visible objective, ordered obligations/evidence, and an
+output contract that exposes property names, JSON types, requiredness, and the
+additional-properties rule. Exact semantic values remain in the hidden oracle
+and never enter a model request.
 
-The consumed v1 attempt failed closed before any terminal provider receipt
-because its journal incorrectly equated the semantic request digest with the
-independently domain-separated wire-payload digest. The v2 protocol is a new
-authority that references the byte-identical v1 suite and freezes the same 32
-cases, order, hidden oracle, budgets, thresholds, and no-retry contract. Its
-instrumentation block additionally requires one immutable prepared
-non-streaming body, separate semantic and wire reservation authorities,
-terminal binding to the reserved wire digest, and execution journal v2. The
-provider boundary prepares once before reservation and dispatches those same
-bytes; artifact persistence and the journal transition follow successful
-terminal validation. The three consumed v1 entrypoints are permanently
-fail-closed before live state access, while separately named v2 preflight,
-authorize, and execute binaries own the successor path. No v2 online execution
-is authorized, and there is no Delivery serving, learning, promotion,
-production-finalizer, or GEPA dependency.
+The control arm is the exact frozen seed. Treatment starts with a model-distinct
+Reviewer over that same seed. `passed` returns the unchanged seed; only
+`needs_revision` activates one Executor repair followed by one Reviewer
+recheck. There is no initial Executor drafting call, second repair, retry, or
+case replacement. A preservation seed passes treatment only when it remains
+unchanged; an unnecessary repair is therefore a control-only loss even if the
+Reviewer accepts it. This topology measures joint defect detection and repair
+plus clean-input preservation. It does not estimate uplift over naturally
+generated drafts.
+
+A durably terminal provider timeout/unavailability or completed but invalid
+Reviewer verdict JSON remains an intention-to-treat treatment failure for that
+fixed case, with no retry or replacement. Internal time-budget, request-binding,
+or authority failure is structural and closes the campaign inconclusive.
+
+V3 preflight is provider-free. It binds the clean source HEAD/tree and app
+version; protocol, suite, per-case and aggregate case digests; case order;
+seeded-candidate, model-input, output-contract, budget, and hidden-oracle
+aggregates; redacted provider/model authority; exact execute name, full-file
+digest, size, and SHA-256 CodeDirectory identity; and canonical external output
+authority. A valid receipt records zero provider calls,
+`online_runner_frozen=true`, and `execution_authorized=false`. Authorization is
+a separate provider-free step that must revalidate the canonical preflight,
+current source/provider/model/credential binding, exact runner identities, new
+output root, and short validity window.
+
+Before provider construction, execute compares the frozen CodeDirectory with
+macOS's kernel-backed identity for the running process and atomically creates a
+no-clobber marker in the output root's parent. All authorization paths for that
+canonical output authority share the marker; the output-root tombstone must
+byte-match it, so relocating or deleting the output directory does not reopen
+consumption. The v3 journal persists campaign and case reservation before work.
+Each call then reserves stage/role/model, semantic request digest/size,
+immutable prepared wire-payload digest/size, and output budget before dispatch;
+the provider receives exactly the prepared non-streaming bytes, and terminal
+request metadata must match the reserved wire digest.
+
+Call receipts retain provider-failure classification, retryability, status,
+latency, hashed provider identities, exact usage, and response-artifact binding.
+Case receipts retain seed/control/treatment authorities, arm outcomes, initial
+verdict and finding counts, repair activation, recheck verdict/counts, treatment
+disposition, failure stage/code, and outcome reason. Interrupted started calls
+are terminal and never resumed or retried. V3 has no current online
+authorization or execution, and there is no Delivery serving, learning,
+promotion, production-finalizer, or GEPA dependency.
 
 The consumed marker is an intentionally local authority, not an external
 anti-rollback ledger. Normal crashes, concurrent consumers, alternate
