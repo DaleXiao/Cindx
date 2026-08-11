@@ -50,9 +50,17 @@ Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is
 plan, evidence, act, verify, or finalize; and the model profile is Primary,
 Reasoning, Verifier, or Utility. The Conductor and background learning utilities
-are recorded as services, not Actors. Existing role, stage, model,
-configuration, and UI fields remain unchanged, so this projection does not
-change routing or model calls.
+are recorded as services, not Actors.
+
+Settings presents the persisted model allocation as configuration slots rather
+than permanent Agent roles. The compatibility model is preferred by Fast and
+remains an execution fallback; Primary and Reasoning are execution-eligible
+profiles; Verifier is reserved for the independent verification lane; Utility
+is limited to support work; and Conductor is a planning-service override.
+Changing the compatibility model does not silently overwrite those profiles;
+copying it to every profile is an explicit action. The legacy configuration and
+wire keys remain unchanged for saved-provider compatibility, and Actor and
+Stage attribution is still selected at each call site.
 
 ## Run Lifecycle
 

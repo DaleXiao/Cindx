@@ -1198,7 +1198,7 @@ pub fn classify_task(prompt: &str) -> TaskClass {
 
 fn preferred_model_role(context: &RoutingContext) -> ModelRole {
     if context.high_stakes {
-        return ModelRole::Reviewer;
+        return ModelRole::Planner;
     }
     match context.task_class {
         TaskClass::Research | TaskClass::Retrieval => ModelRole::Planner,

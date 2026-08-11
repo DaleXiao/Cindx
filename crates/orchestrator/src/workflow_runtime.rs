@@ -287,6 +287,15 @@ impl WorkflowPlanIr {
         }
     }
 
+    pub fn physical_model_count(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|step| step.contract.output_kind != WorkflowOutputKind::Synthesis)
+            .map(|step| step.model.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
     pub fn validate(&self, allowed_models: &[String]) -> Result<(), String> {
         if self.schema != WORKFLOW_IR_SCHEMA {
             return Err(format!("unsupported workflow schema: {}", self.schema));
@@ -316,12 +325,7 @@ impl WorkflowPlanIr {
         if self.steps.len() > self.budget.max_steps {
             return Err("workflow exceeds its declared step budget".to_string());
         }
-        let selected_models = self
-            .steps
-            .iter()
-            .map(|step| step.model.as_str())
-            .collect::<BTreeSet<_>>();
-        if selected_models.len() > self.budget.max_models {
+        if self.physical_model_count() > self.budget.max_models {
             return Err("workflow exceeds its declared model budget".to_string());
         }
         if self.steps.iter().any(|step| {
@@ -352,7 +356,7 @@ impl WorkflowPlanIr {
         {
             return Err("workflow must end with a synthesis output contract".to_string());
         }
-        validate_adaptive_workflow(&self.adaptive_workflow(), allowed_models)
+        validate_typed_workflow_structure(&self.adaptive_workflow(), allowed_models)
     }
 
     pub fn validate_owner_execution_graph(

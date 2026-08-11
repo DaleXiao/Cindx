@@ -95,6 +95,7 @@ pub(super) fn plan_adaptive_workflow(
         if let Err(error) = checkpoint
             .plan
             .validate_owner_execution_graph(execution_contract.verification_required)
+            .and_then(|()| validate_runtime_workflow_model_profiles(config, &checkpoint.plan))
         {
             record_conductor_rejection(
                 state,
@@ -158,6 +159,9 @@ pub(super) fn plan_adaptive_workflow(
     };
     let (proposal_steps, proposal_models) = route_workflow_capacity(proposal);
 
+    let validation_models = crate::agent_conductor_runtime::unique_configured_models(
+        &crate::workflow_routing_runtime::model_candidates_for_config(config),
+    );
     let harness = ConductorHarness::new(ConductorRequest {
         workflow_id: collaboration_id.to_string(),
         objective: prompt.to_string(),
@@ -170,7 +174,7 @@ pub(super) fn plan_adaptive_workflow(
             .filter(|model| models.contains(model))
             .cloned()
             .unwrap_or_else(|| role_hints.executor.clone()),
-        worker_models: models.to_vec(),
+        worker_models: validation_models,
         role_hints: role_hints.clone(),
         budget: WorkflowBudget {
             max_steps: proposal_steps,
@@ -189,6 +193,7 @@ pub(super) fn plan_adaptive_workflow(
         .and_then(|workflow_plan| {
             workflow_plan
                 .validate_owner_execution_graph(execution_contract.verification_required)
+                .and_then(|()| validate_runtime_workflow_model_profiles(config, &workflow_plan))
                 .map(|()| workflow_plan)
         }) {
         Ok(workflow_plan) => Ok(AdaptiveConductorOutcome::Plan {
@@ -210,10 +215,27 @@ pub(super) fn plan_adaptive_workflow(
     }
 }
 
+fn validate_runtime_workflow_model_profiles(
+    config: &ProviderConfig,
+    workflow_plan: &WorkflowPlanIr,
+) -> Result<(), String> {
+    let candidates = crate::workflow_routing_runtime::model_candidates_for_config(config);
+    for step in &workflow_plan.steps {
+        orchestrator::validate_workflow_step_model_profile(
+            &step.id,
+            &step.model,
+            &step.contract.output_kind,
+            &candidates,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn route_workflow_capacity(proposal: &WorkflowPlanProposal) -> (usize, usize) {
     let model_count = proposal
         .steps
         .iter()
+        .filter(|step| step.output_kind != WorkflowOutputKind::Synthesis)
         .map(|step| step.model.trim())
         .filter(|model| !model.is_empty())
         .collect::<BTreeSet<_>>()

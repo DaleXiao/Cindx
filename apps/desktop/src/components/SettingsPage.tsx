@@ -118,7 +118,7 @@ export type SettingsPageProps = {
   browserText: string;
   browserUrl: string;
   busySessionIds: Set<string>;
-  collaborationModelCount: number;
+  modelProfileCount: number;
   contextBusy: boolean;
   contextCheckpoint: ContextCheckpointView | null;
   debugAlwaysVisible: boolean;
@@ -272,7 +272,7 @@ export function SettingsPage(props: SettingsPageProps) {
     browserText,
     browserUrl,
     busySessionIds,
-    collaborationModelCount,
+    modelProfileCount,
     contextBusy,
     contextCheckpoint,
     debugAlwaysVisible,
@@ -671,7 +671,7 @@ export function SettingsPage(props: SettingsPageProps) {
                 {settingsCategory === "models" && (
                   <SettingsModelsPanel
                     canUseConfiguredKey={canUseConfiguredKey}
-                    collaborationModelCount={collaborationModelCount}
+                    modelProfileCount={modelProfileCount}
                     handleLoadProviderModels={handleLoadProviderModels}
                     handleReloadProviderState={handleReloadProviderState}
                     handlePromptEvolutionToggle={handlePromptEvolutionToggle}

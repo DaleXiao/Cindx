@@ -942,6 +942,7 @@ impl AgentRunDecisionHarness {
                 "Treat the strongest configured single-model direct answer as the baseline. Choose workflow only when independent work, verification, or decomposition is likely to improve correctness enough to justify coordination latency and correlated-error risk. Pro prioritizes correctness but is not automatically multi-model. Auto balances correctness and latency.\n",
                 "Choose retrieval from semantic, file_search, graph_direct, graph_walk only when the answer needs workspace evidence not already present. Choose memory only when prior user/project decisions are materially relevant. Memory and workspace retrieval are blocking foreground work: select them only when missing evidence can materially change answer quality. Greetings, capability questions, and self-contained requests should use neither. Do not retrieve merely because the prompt is long, mentions code, or asks a question.\n",
                 "Graph walk must have semantic, file_search, or graph_direct as a seed channel. Keep focused retrieval and memory queries under {query_limit} characters. Use only exact configured model strings.\n",
+                "Configured roles are capability boundaries: primary_model and Specialist work must use a planner or executor role; an Independent Verifier must use a reviewer role. A summarizer role is utility-only and cannot act in the execution graph. The final synthesis compatibility node is a deterministic non-model Owner handoff, so its model field is not dispatched.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. A workflow uses max_parallelism=1, min_successful_branches=1, and distinct_contributions=1: one bounded Specialist, optionally followed by one Independent Verifier using a different configured model. Without a verifier use verification=none, estimated_steps=2, and stop_policy=exhaustive. With a genuinely model-distinct verifier use verification=independent and estimated_steps=3; if no second suitable configured model exists, do not manufacture independence.\n",
                 "A workflow decision is valid only when you can name that executable graph now. Include workflow_plan with one Specialist root, the optional Verifier depending only on that root, and a final tool-free synthesis compatibility node depending on the Specialist or Verifier. The runtime materializes that final node as a deterministic handoff to the foreground Owner; it is not another model actor. Use output_kind=analysis|evidence for the Specialist, verification for the optional Verifier, synthesis for the final handoff, and tool_policy=none|read_only_evidence|read_only_exploration. Isolated workers may inspect supplied or read-only evidence and advise the foreground Owner even when only the Owner can perform writes or final delivery. If this bounded graph is unlikely to beat Direct, choose direct and set workflow_plan to null.\n",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
@@ -1017,6 +1018,7 @@ impl AgentRunDecisionHarness {
         self.request
             .route_requirements
             .validate_decision(&decision, &self.request.model_candidates)?;
+        validate_primary_model_profile(&decision, &self.request.model_candidates)?;
         let workflow_plan = payload
             .get("workflow_plan")
             .filter(|value| !value.is_null())
@@ -1028,10 +1030,14 @@ impl AgentRunDecisionHarness {
             AgentExecutionMode::Direct if workflow_plan.is_some() => {
                 return Err("direct execution must set workflow_plan to null".to_string())
             }
-            AgentExecutionMode::Workflow => workflow_plan
-                .as_ref()
-                .ok_or_else(|| "workflow execution requires workflow_plan".to_string())?
-                .validate_owner_execution_graph(&decision, &self.request.allowed_models)?,
+            AgentExecutionMode::Workflow => {
+                let workflow_plan = workflow_plan
+                    .as_ref()
+                    .ok_or_else(|| "workflow execution requires workflow_plan".to_string())?;
+                workflow_plan
+                    .validate_owner_execution_graph(&decision, &self.request.allowed_models)?;
+                validate_workflow_model_profiles(workflow_plan, &self.request.model_candidates)?;
+            }
             AgentExecutionMode::Direct => {}
         }
         let snapshot = RouteFeatureSnapshotV2::from_decision_request(
@@ -1076,6 +1082,75 @@ impl AgentRunDecisionHarness {
     }
 }
 
+fn model_has_profile(
+    model: &str,
+    candidates: &[ModelCandidate],
+    eligible: impl Fn(&ModelRole) -> bool,
+) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| candidate.name.trim() == model.trim() && eligible(&candidate.role))
+}
+
+fn execution_profile(role: &ModelRole) -> bool {
+    matches!(role, ModelRole::Planner | ModelRole::Executor)
+}
+
+pub fn validate_primary_model_profile(
+    decision: &AgentRunDecision,
+    candidates: &[ModelCandidate],
+) -> Result<(), String> {
+    if model_has_profile(&decision.primary_model, candidates, execution_profile) {
+        Ok(())
+    } else {
+        Err(
+            "run decision primary_model must use a configured Primary or Reasoning profile"
+                .to_string(),
+        )
+    }
+}
+
+pub fn validate_workflow_model_profiles(
+    workflow_plan: &WorkflowPlanProposal,
+    candidates: &[ModelCandidate],
+) -> Result<(), String> {
+    for step in &workflow_plan.steps {
+        validate_workflow_step_model_profile(&step.id, &step.model, &step.output_kind, candidates)?;
+    }
+    Ok(())
+}
+
+pub fn validate_workflow_step_model_profile(
+    step_id: &str,
+    model: &str,
+    output_kind: &WorkflowOutputKind,
+    candidates: &[ModelCandidate],
+) -> Result<(), String> {
+    if *output_kind == WorkflowOutputKind::Synthesis {
+        return Ok(());
+    }
+    let valid = match output_kind {
+        WorkflowOutputKind::Verification => model_has_profile(model, candidates, |role| {
+            matches!(role, ModelRole::Reviewer)
+        }),
+        WorkflowOutputKind::Analysis | WorkflowOutputKind::Evidence => {
+            model_has_profile(model, candidates, execution_profile)
+        }
+        WorkflowOutputKind::Synthesis => unreachable!("synthesis handled above"),
+    };
+    if valid {
+        return Ok(());
+    }
+    let required_profile = match output_kind {
+        WorkflowOutputKind::Verification => "Verifier",
+        WorkflowOutputKind::Analysis | WorkflowOutputKind::Evidence => "Primary or Reasoning",
+        WorkflowOutputKind::Synthesis => unreachable!("synthesis handled above"),
+    };
+    Err(format!(
+        "workflow step {step_id} model must use a configured {required_profile} profile"
+    ))
+}
+
 fn bounded_chars(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
     let bounded = chars.by_ref().take(limit).collect::<String>();
@@ -1104,7 +1179,11 @@ mod tests {
                 .into_iter()
                 .map(|name| ModelCandidate {
                     name: name.to_string(),
-                    role: ModelRole::Executor,
+                    role: if name == "reviewer" {
+                        ModelRole::Reviewer
+                    } else {
+                        ModelRole::Executor
+                    },
                     supports_tools: true,
                     supports_vision: true,
                     tools_capability_source: crate::ModelCapabilitySource::Configured,
@@ -1177,6 +1256,109 @@ mod tests {
                 .min_distinct_contributions,
             1
         );
+    }
+
+    #[test]
+    fn verifier_only_profile_cannot_be_selected_as_primary() {
+        let harness = AgentRunDecisionHarness::new(request());
+        let payload =
+            serde_json::to_string(&AgentRunDecision::direct("reviewer")).expect("direct decision");
+
+        let error = harness
+            .parse_draft(&payload)
+            .expect_err("a Verifier-only model cannot own direct execution");
+
+        assert!(error.contains("Primary or Reasoning profile"));
+    }
+
+    #[test]
+    fn utility_only_profile_cannot_be_selected_as_primary() {
+        let mut request = request();
+        request.allowed_models.push("utility".to_string());
+        request.model_candidates.push(ModelCandidate {
+            name: "utility".to_string(),
+            role: ModelRole::Summarizer,
+            supports_tools: true,
+            supports_vision: true,
+            tools_capability_source: crate::ModelCapabilitySource::Configured,
+            vision_capability_source: crate::ModelCapabilitySource::Configured,
+            cost_tier: 1,
+            latency_tier: 1,
+        });
+        let harness = AgentRunDecisionHarness::new(request);
+        let payload =
+            serde_json::to_string(&AgentRunDecision::direct("utility")).expect("direct decision");
+
+        let error = harness
+            .parse_draft(&payload)
+            .expect_err("a Utility-only model cannot own direct execution");
+
+        assert!(error.contains("Primary or Reasoning profile"));
+    }
+
+    #[test]
+    fn verifier_only_profile_cannot_be_used_as_a_specialist() {
+        let harness = AgentRunDecisionHarness::new(request());
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.execution = AgentExecutionMode::Workflow;
+        decision.verification = AgentVerificationPolicy::None;
+        decision.max_parallelism = 1;
+        decision.min_successful_branches = 1;
+        decision.distinct_contributions = 1;
+        decision.estimated_steps = 2;
+        decision.stop_policy = ConductorStopPolicy::Exhaustive;
+        let payload = workflow_payload(
+            &decision,
+            serde_json::json!([
+                {
+                    "id":"specialist",
+                    "role":"domain_specialist",
+                    "model":"reviewer",
+                    "subtask":"derive the solution",
+                    "access":[],
+                    "output_kind":"analysis",
+                    "tool_policy":"none"
+                },
+                {
+                    "id":"owner_handoff",
+                    "role":"synthesizer",
+                    "model":"executor",
+                    "subtask":"hand the result to the Owner",
+                    "access":["specialist"],
+                    "output_kind":"synthesis",
+                    "tool_policy":"none"
+                }
+            ]),
+        );
+
+        let error = harness
+            .parse_draft(&payload)
+            .expect_err("a Verifier-only model cannot act as Specialist");
+
+        assert!(error.contains("workflow step specialist"), "{error}");
+        assert!(error.contains("Primary or Reasoning"), "{error}");
+    }
+
+    #[test]
+    fn shared_concrete_model_keeps_each_independently_configured_profile() {
+        let mut request = request();
+        request.model_candidates.push(ModelCandidate {
+            name: "reviewer".to_string(),
+            role: ModelRole::Executor,
+            supports_tools: true,
+            supports_vision: true,
+            tools_capability_source: crate::ModelCapabilitySource::Configured,
+            vision_capability_source: crate::ModelCapabilitySource::Configured,
+            cost_tier: 1,
+            latency_tier: 1,
+        });
+        let harness = AgentRunDecisionHarness::new(request);
+        let payload =
+            serde_json::to_string(&AgentRunDecision::direct("reviewer")).expect("direct decision");
+
+        harness
+            .parse_draft(&payload)
+            .expect("the Executor binding independently authorizes the shared model");
     }
 
     #[test]

@@ -15,6 +15,7 @@ import {
 
 type ProviderModelInputProps = {
   label: string;
+  description?: string;
   value: string;
   options: string[];
   emptyLabel?: string;
@@ -29,6 +30,7 @@ type ProviderModelInputProps = {
 
 export function ProviderModelInput({
   label,
+  description,
   value,
   options,
   emptyLabel,
@@ -37,6 +39,7 @@ export function ProviderModelInput({
   onChange
 }: ProviderModelInputProps) {
   const inputId = useId();
+  const descriptionId = useId();
   const listId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -126,11 +129,17 @@ export function ProviderModelInput({
       <label htmlFor={inputId}>
         <span>{label}</span>
       </label>
+      {description && (
+        <small className="settings-section-copy" id={descriptionId}>
+          {description}
+        </small>
+      )}
       <div className={`provider-model-control-row${status ? " has-status" : ""}`}>
         <div className="provider-model-combobox" ref={rootRef} onBlur={handleBlur}>
           <input
             ref={inputRef}
             id={inputId}
+            aria-describedby={description ? descriptionId : undefined}
             role="combobox"
             aria-autocomplete="list"
             aria-controls={listId}
