@@ -615,8 +615,8 @@
       ],
       "required_output": [
         "test result: ok. 19 passed; 0 failed",
-        "cindx.agent-eval.delivery-verification-protocol.v1",
-        "cindx.agent-eval.delivery-verification-preflight.v1"
+        "cindx.agent-eval.delivery-verification-protocol.v2",
+        "cindx.agent-eval.delivery-verification-preflight.v2"
       ]
     },
     {
@@ -638,13 +638,19 @@
         "cindx-delivery-verification-authorize",
         "--bin",
         "cindx-delivery-verification-execute",
+        "--bin",
+        "cindx-delivery-verification-v2-preflight",
+        "--bin",
+        "cindx-delivery-verification-v2-authorize",
+        "--bin",
+        "cindx-delivery-verification-v2-execute",
         "agent_delivery_verification_execution_contract_",
         "--",
         "--nocapture"
       ],
       "required_output": [
         "test result: ok. 38 passed; 0 failed",
-        "cindx.agent-eval.delivery-verification-authorization.v1",
+        "cindx.agent-eval.delivery-verification-authorization.v2",
         "cindx.agent-eval.delivery-verification-execution-journal.v2"
       ]
     },

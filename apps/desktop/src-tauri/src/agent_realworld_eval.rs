@@ -25,6 +25,7 @@ mod delivery_verification_protocol;
 #[allow(dead_code)]
 mod delivery_verification_requests;
 mod delivery_verification_runner;
+mod delivery_verification_runner_binary;
 #[cfg(test)]
 mod delivery_verification_tests;
 mod direct_finalizer;
@@ -561,16 +562,34 @@ pub fn run_collaboration_successor_execute() -> Result<(), String> {
 
 pub fn run_delivery_verification_preflight() -> Result<(), String> {
     delivery_verification_runner::reject_consumed_delivery_protocol(
+        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+    )
+}
+
+pub fn run_delivery_verification_authorize() -> Result<(), String> {
+    delivery_verification_runner::reject_consumed_delivery_protocol(
+        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+    )
+}
+
+pub fn run_delivery_verification_execute() -> Result<(), String> {
+    delivery_verification_runner::reject_consumed_delivery_protocol(
+        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+    )
+}
+
+pub fn run_delivery_verification_v2_preflight() -> Result<(), String> {
+    delivery_verification_runner::reject_consumed_delivery_protocol(
         delivery_verification_protocol::DELIVERY_VERIFICATION_PROTOCOL_ID,
     )?;
     delivery_verification_preflight::run_preflight()
 }
 
-pub fn run_delivery_verification_authorize() -> Result<(), String> {
+pub fn run_delivery_verification_v2_authorize() -> Result<(), String> {
     delivery_verification_runner::run_authorize()
 }
 
-pub fn run_delivery_verification_execute() -> Result<(), String> {
+pub fn run_delivery_verification_v2_execute() -> Result<(), String> {
     delivery_verification_runner::run_execute()
 }
 

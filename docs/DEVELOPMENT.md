@@ -139,9 +139,12 @@ model-distinct provider binding, clean-source authority, canonical private
 preflight receipt, and zero-call/non-authorizing boundary. It is included in
 `ci-contract`, `control-plane`, and `full`, but not `quick`. The updated
 preflight binds the clean source, protocol, cases, budgets, oracle aggregate,
-redacted model authority, and new external paths and records `provider_calls=0`,
-`online_runner_frozen=true`, and `execution_authorized=false`. The separate
-authorization binds exact execute-binary bytes; preflight does not.
+redacted model authority, exact v2 execute name/digest/size/full SHA-256
+CodeDirectory, and new external paths and records `provider_calls=0`,
+`online_runner_frozen=true`, and `execution_authorized=false`. The
+CodeDirectory is derived from a verified private copy of the exact bytes. The
+separate authorization must match both runner identities already frozen by
+preflight.
 
 `agent-delivery-verification-execution-contract` runs 38 provider-free tests
 for canonical short-lived authorization, exact preflight/source/provider/model/
@@ -150,8 +153,11 @@ physical-call reservations before transport, complete resource accounting,
 crash/tamper/concurrency recovery without retry, exact shared-Owner control and
 treatment execution, calibration-before-holdout ordering, and separate semantic
 and immutable wire-payload authority through a real local-loopback HTTP path. It
-also compiles the three feature-gated Delivery binaries without invoking their
-entrypoints.
+also covers running-image/path replacement rejection through macOS's
+kernel-backed CodeDirectory identity and output-root relocation after competing
+authorization files through one parent-level no-clobber consumed marker. It
+compiles the three permanently fail-closed v1 binaries and the three
+separately named v2 binaries without invoking their entrypoints.
 It is included in `ci-contract`, `control-plane`, and `full`, but not `quick`,
 `performance`, or `shipping-performance`. It proves no provider outcome or
 intelligence uplift.
@@ -177,6 +183,9 @@ cargo test --locked \
   --bin cindx-delivery-verification-preflight \
   --bin cindx-delivery-verification-authorize \
   --bin cindx-delivery-verification-execute \
+  --bin cindx-delivery-verification-v2-preflight \
+  --bin cindx-delivery-verification-v2-authorize \
+  --bin cindx-delivery-verification-v2-execute \
   agent_delivery_verification_execution_contract_ -- --nocapture
 ```
 
@@ -257,22 +266,39 @@ terminal producer-to-projector seam in `agent-strategy-lifecycle-contract`.
 This is a classifier repair only: no Goal 3F or provider run is authorized, and
 deterministic green gates do not establish uplift.
 
-Delivery Verification defines separate feature-gated
+Delivery Verification retains separate feature-gated v1
 `cindx-delivery-verification-preflight`,
 `cindx-delivery-verification-authorize`, and
-`cindx-delivery-verification-execute` binaries. Their current v1 entrypoints are
-retired and reject the consumed protocol before reading or creating live
-preflight, authorization, or execution state. The binaries are compiled by the
-provider-free contract gate only; do not run them for v1.
+`cindx-delivery-verification-execute` binaries. They are retired and reject the
+consumed protocol before reading arguments, environment, paths, configuration,
+or live state. The v2 successor uses independently named
+`cindx-delivery-verification-v2-preflight`,
+`cindx-delivery-verification-v2-authorize`, and
+`cindx-delivery-verification-v2-execute` binaries plus
+`CINDX_DELIVERY_VERIFICATION_V2_*` paths. All six binaries require
+`realworld-eval` and are compiled by the provider-free contract gate.
 
-A future online attempt must introduce a separately reviewed successor protocol
-identifier and authority. Its preflight must still report zero provider calls
-and `execution_authorized=false`; authorization must bind exact execute bytes,
-credential authority, and a short validity window; execute remains billable and
-provider-backed. Private receipts, tombstones, journals, requests, responses,
-model identities, secrets, and raw outputs stay outside Git. This
-instrumentation repair does not change the installed App, version, tag, or
-GitHub release.
+Build the three v2 binaries together from clean merged source into one new
+private target root outside the repository. Run only the preflight binary; it
+requires its exact sibling execute binary and writes a private receipt binding
+source, runner full-file and CodeDirectory identities, provider, cases, oracle,
+budget, and new output path while reporting zero provider calls and
+`execution_authorized=false`. Verify the receipt CodeDirectory against
+`CandidateCDHashFull sha256=` from the exact copied execute binary. Do not run
+the authorize or execute binaries without a later explicit one-shot
+authorization.
+Private receipts, tombstones, journals, requests, responses, model identities,
+secrets, and raw outputs stay outside Git. This successor does not change the
+installed App, version, tag, or GitHub release.
+
+If a later one-shot authorization is explicitly granted, execute first checks
+the frozen CodeDirectory against the kernel identity of its running process,
+then atomically creates a consumed marker in the output root's parent. Its name
+is derived from the canonical output-path digest, so all authorization paths
+for that campaign compete for the same marker; moving or deleting the output
+root cannot reopen it. This is a local-filesystem guarantee for normal crashes,
+concurrency, and relocation, not an external anti-rollback service against a
+same-user actor able to delete or restore every private control-plane file.
 
 Delivery Verification protocol v1 has already consumed its one authorized
 attempt and closed `CENSORED` / `INVALID-INSTRUMENTATION` because journal
@@ -282,8 +308,9 @@ execute another v1 authority. A successor must first reserve both identities
 from one immutable prepared request, dispatch those exact bytes, preserve the
 primary terminal error, and pass a real preparation-boundary loopback contract.
 Current source implements those provider-free instrumentation requirements in
-the v2 journal and explicitly rejects all v1 CLI stages, but it does not create
-or authorize a successor protocol.
+the v2 protocol and journal, explicitly rejects all v1 CLI stages, and keeps v2
+preflight non-authorizing. A provider-backed execute still requires a new
+explicit one-shot authorization.
 
 ## Browser and Computer Sidecars
 

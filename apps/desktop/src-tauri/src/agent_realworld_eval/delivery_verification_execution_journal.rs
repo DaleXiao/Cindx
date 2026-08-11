@@ -1,8 +1,9 @@
 use super::delivery_verification_authorization::*;
+use super::delivery_verification_protocol::DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA;
 use agent_core::ModelRole;
 use orchestrator::sha256_hex;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[path = "delivery_verification_execution_storage.rs"]
@@ -10,7 +11,7 @@ mod storage;
 use self::storage::*;
 
 pub(super) const DELIVERY_EXECUTION_JOURNAL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-execution-journal.v2";
+    DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA;
 pub(super) const DELIVERY_EXECUTION_RECOVERY_SCHEMA: &str =
     "cindx.agent-eval.delivery-verification-execution-recovery.v1";
 pub(super) const DELIVERY_EXECUTION_JOURNAL_FILE_NAME: &str =
@@ -357,13 +358,7 @@ struct RecoveryReceiptV1 {
 pub(super) struct DeliveryVerificationExecutionJournal {
     root: PathBuf,
     document: JournalDocumentV1,
-    lock: File,
-}
-
-impl Drop for DeliveryVerificationExecutionJournal {
-    fn drop(&mut self) {
-        let _ = File::unlock(&self.lock);
-    }
+    _lock: DeliveryVerificationExecutionLock,
 }
 
 impl DeliveryVerificationExecutionJournal {
@@ -432,7 +427,7 @@ impl DeliveryVerificationExecutionJournal {
         Ok(Self {
             root,
             document,
-            lock,
+            _lock: lock,
         })
     }
 
@@ -548,7 +543,7 @@ impl DeliveryVerificationExecutionJournal {
         let mut journal = Self {
             root,
             document,
-            lock,
+            _lock: lock,
         };
         let recovery_reason = if recovered_at_ms > campaign_deadline(&journal.document)? {
             "campaign_timeout_exceeded"

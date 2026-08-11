@@ -235,27 +235,46 @@ not model-facing access paths.
 
 The adjacent preflight binds a clean source tree, protocol/suite/case/budget and
 hidden-oracle aggregate hashes, redacted configured Owner/Reviewer identities,
-and new external paths into a private receipt. It performs zero provider calls
-and records `online_runner_frozen=true` and `execution_authorized=false`; it does
-not itself hash the execute binary. A separate provider-free authorization
-binary binds that canonical receipt, current source/provider/model/credential
-authority, the exact execute binary, a new one-shot output root, and a short
-validity window. The execute binary must
-atomically consume that capability, persist the campaign before constructing
-provider transport, and persist each exact physical-call reservation before
-dispatch. Ambiguous or interrupted started calls become terminal
-inconclusive/censored state and are never resumed or retried. The consumed v1
-attempt failed closed before any terminal provider receipt because its journal
-incorrectly equated the semantic request digest with the independently
-domain-separated wire-payload digest. The repaired provider boundary prepares
-one immutable non-streaming body before reservation, exposes only its digest
-and size, stores semantic and wire authorities separately in the v2 journal,
-and dispatches those same prepared bytes. Terminal validation compares the
-provider receipt only with the reserved wire authority; artifact persistence
-and the journal transition follow successful structural validation. The
-consumed v1 preflight, authorization, and execute entrypoints are explicitly
-retired. There is no successor online authority and no Delivery serving,
-learning, promotion, production-finalizer, or GEPA dependency.
+exact v2 execute-binary name, digest, and size, and new external paths into a
+private receipt. The runner authority also contains the full SHA-256
+CodeDirectory identity derived by verifying a private copy of those exact
+bytes. It performs zero provider calls and records
+`online_runner_frozen=true` and `execution_authorized=false`. A separate
+provider-free authorization binary revalidates that canonical receipt, current
+source/provider/model/credential authority, the same exact execute binary, a
+new one-shot output root, and a short validity window. Before consuming any
+state, the execute binary compares the frozen CodeDirectory with macOS's
+kernel-backed identity for its running process; a same-path binary replacement
+therefore fails closed even if the replacement bytes match the receipt. It then
+atomically creates a no-clobber marker in the output root's parent, at a name
+derived from the canonical output-path digest. All authorization files for that
+campaign share this marker, and the output-root tombstone must byte-match it,
+so relocating or deleting the output directory does not reopen the authority.
+Only then may execute persist the campaign and each exact physical-call
+reservation before dispatch. Ambiguous or interrupted started calls become terminal
+inconclusive/censored state and are never resumed or retried.
+
+The consumed v1 attempt failed closed before any terminal provider receipt
+because its journal incorrectly equated the semantic request digest with the
+independently domain-separated wire-payload digest. The v2 protocol is a new
+authority that references the byte-identical v1 suite and freezes the same 32
+cases, order, hidden oracle, budgets, thresholds, and no-retry contract. Its
+instrumentation block additionally requires one immutable prepared
+non-streaming body, separate semantic and wire reservation authorities,
+terminal binding to the reserved wire digest, and execution journal v2. The
+provider boundary prepares once before reservation and dispatches those same
+bytes; artifact persistence and the journal transition follow successful
+terminal validation. The three consumed v1 entrypoints are permanently
+fail-closed before live state access, while separately named v2 preflight,
+authorize, and execute binaries own the successor path. No v2 online execution
+is authorized, and there is no Delivery serving, learning, promotion,
+production-finalizer, or GEPA dependency.
+
+The consumed marker is an intentionally local authority, not an external
+anti-rollback ledger. Normal crashes, concurrent consumers, alternate
+authorization paths, and output-root relocation fail closed. An actor with the
+same user identity who can delete or restore all private control-plane files is
+outside that local-filesystem threat boundary.
 
 The same crate owns the portable collaboration-learning contracts, separate
 from production prompt evolution. A structured policy keeps the Goal 2 graph
