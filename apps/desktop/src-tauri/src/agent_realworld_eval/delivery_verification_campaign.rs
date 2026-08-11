@@ -637,7 +637,7 @@ fn completed_or_treatment_failure(
         .map(str::to_string);
     let observation_sha256 = sha256_hex(
         format!(
-            "cindx.delivery-verification-case-observation.v3\0{}\0{status:?}\0{}\0{}\0{control_passed:?}\0{treatment_passed:?}\0{initial_verifier_decision:?}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{recheck_decision:?}\0{treatment_disposition}\0{failure_stage:?}\0{failure_code:?}\0{}\0{}\0{}\0{reason}",
+            "cindx.delivery-verification-case-observation.v4\0{}\0{status:?}\0{}\0{}\0{control_passed:?}\0{treatment_passed:?}\0{initial_verifier_decision:?}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{recheck_decision:?}\0{treatment_disposition}\0{failure_stage:?}\0{failure_code:?}\0{}\0{}\0{}\0{reason}",
             case.id(),
             owner_sha.as_deref().unwrap_or("none"),
             treatment_sha.as_deref().unwrap_or("none"),
@@ -712,7 +712,7 @@ fn failed_case(
         failure_code: None,
         observation_sha256: sha256_hex(
             format!(
-                "cindx.delivery-verification-case-failure.v3\0{}\0{status:?}\0{reason}",
+                "cindx.delivery-verification-case-failure.v4\0{}\0{status:?}\0{reason}",
                 case.ordinal()
             )
             .as_bytes(),
@@ -761,7 +761,7 @@ fn add_counts(total: &mut MatchedPairCounts, one: MatchedPairCounts) -> Result<(
 pub(super) fn counts_digest(stage: &str, counts: MatchedPairCounts) -> String {
     sha256_hex(
         format!(
-            "cindx.delivery-verification-counts.v3\0{stage}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "cindx.delivery-verification-counts.v4\0{stage}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             counts.complete_cases,
             counts.control_failures,
             counts.treatment_only_wins,

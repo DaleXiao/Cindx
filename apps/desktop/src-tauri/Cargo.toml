@@ -93,6 +93,21 @@ name = "cindx-delivery-verification-v3-execute"
 path = "src/bin/delivery_verification_v3_execute.rs"
 required-features = ["realworld-eval"]
 
+[[bin]]
+name = "cindx-delivery-verification-v4-preflight"
+path = "src/bin/delivery_verification_v4_preflight.rs"
+required-features = ["realworld-eval"]
+
+[[bin]]
+name = "cindx-delivery-verification-v4-authorize"
+path = "src/bin/delivery_verification_v4_authorize.rs"
+required-features = ["realworld-eval"]
+
+[[bin]]
+name = "cindx-delivery-verification-v4-execute"
+path = "src/bin/delivery_verification_v4_execute.rs"
+required-features = ["realworld-eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

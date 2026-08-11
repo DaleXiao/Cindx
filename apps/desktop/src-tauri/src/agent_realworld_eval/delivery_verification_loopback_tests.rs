@@ -13,6 +13,8 @@ use agent_runtime::{
 use serde_json::{json, Value};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -38,6 +40,8 @@ struct LoopbackAcceptedRequest {
 }
 
 struct LoopbackRun {
+    _temp: TempDir,
+    output_root: PathBuf,
     outcome: CallOutcome,
     record_case_result: Option<Result<(), String>>,
     accepted: LoopbackAcceptedRequest,
@@ -52,7 +56,7 @@ fn protocol() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-protocol-v3.json"
+            "/../../../benchmarks/agent/delivery-verification-protocol-v4.json"
         )),
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -306,6 +310,7 @@ fn spawn_loopback_server(
     listener: TcpListener,
     output_root: PathBuf,
     served_model: String,
+    response_content: String,
 ) -> JoinHandle<Result<LoopbackAcceptedRequest, String>> {
     thread::spawn(move || {
         let mut stream = accept_with_deadline(&listener)?;
@@ -317,7 +322,7 @@ fn spawn_loopback_server(
             "system_fingerprint": "loopback-fingerprint",
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": RESPONSE_CONTENT},
+                "message": {"role": "assistant", "content": response_content},
                 "finish_reason": "stop"
             }],
             "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}
@@ -341,12 +346,16 @@ fn spawn_loopback_server(
     })
 }
 
-fn run_loopback(served_model: &str, record_structural_case: bool) -> LoopbackRun {
+fn run_loopback(
+    served_model: &str,
+    response_content: &str,
+    record_structural_case: bool,
+) -> LoopbackRun {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let protocol = protocol();
     let config = provider_config(base_url);
-    let (_temp, output_root, mut journal) = create_journal(&protocol, &config);
+    let (temp, output_root, mut journal) = create_journal(&protocol, &config);
     let case = protocol.calibration_cases().next().unwrap();
     let call = initial_verifier_call(&protocol);
     let semantic_request_sha256 = call.canonical_request_sha256.clone();
@@ -368,7 +377,12 @@ fn run_loopback(served_model: &str, record_structural_case: bool) -> LoopbackRun
     let (prepared_wire_sha256, prepared_wire_bytes) = prepared.payload_receipt();
     let prepared_wire_sha256 = prepared_wire_sha256.to_string();
     let prepared_wire_bytes = u64::try_from(prepared_wire_bytes).unwrap();
-    let server = spawn_loopback_server(listener, output_root.clone(), served_model.into());
+    let server = spawn_loopback_server(
+        listener,
+        output_root.clone(),
+        served_model.into(),
+        response_content.into(),
+    );
 
     let mut runtime = JournalRuntime::new(&mut journal, config, protocol.budget().clone());
     runtime.begin_case(1).unwrap();
@@ -404,6 +418,8 @@ fn run_loopback(served_model: &str, record_structural_case: bool) -> LoopbackRun
     let accepted = server.join().unwrap().unwrap();
     let final_journal = journal_json(&output_root).unwrap();
     LoopbackRun {
+        _temp: temp,
+        output_root,
         outcome,
         record_case_result,
         accepted,
@@ -446,7 +462,7 @@ fn assert_exact_reserved_wire(run: &LoopbackRun) {
 #[test]
 fn agent_delivery_verification_execution_contract_loopback_dispatches_exact_prepared_wire_after_durable_reservation(
 ) {
-    let run = run_loopback(VERIFIER_MODEL, false);
+    let run = run_loopback(VERIFIER_MODEL, RESPONSE_CONTENT, false);
     assert_exact_reserved_wire(&run);
     match run.outcome {
         CallOutcome::Completed(completed) => {
@@ -473,9 +489,83 @@ fn agent_delivery_verification_execution_contract_loopback_dispatches_exact_prep
 }
 
 #[test]
+fn agent_delivery_verification_execution_contract_loopback_retains_zero_byte_normalized_content_without_retry(
+) {
+    let run = run_loopback(VERIFIER_MODEL, "", false);
+    assert_exact_reserved_wire(&run);
+    match &run.outcome {
+        CallOutcome::Completed(completed) => {
+            assert!(completed.content.is_empty());
+            assert_eq!(
+                completed.served_model_sha256,
+                sha256_hex(VERIFIER_MODEL.as_bytes())
+            );
+        }
+        other => panic!("expected completed empty loopback call, got {other:?}"),
+    }
+
+    let state = first_call_state(&run.final_journal);
+    let receipt = &state["receipt"];
+    assert_eq!(state["state"], "terminal");
+    assert_eq!(receipt["status"], "completed");
+    assert_eq!(receipt["response_artifact_sha256"], sha256_hex(b""));
+    assert_eq!(receipt["response_artifact_bytes"], 0);
+    assert_eq!(receipt["request_payload_sha256"], run.prepared_wire_sha256);
+    assert_eq!(
+        state["reservation"]["wire_payload_sha256"],
+        run.prepared_wire_sha256
+    );
+    assert_eq!(
+        receipt["provider_response_id_sha256"],
+        sha256_hex(b"loopback-response-1")
+    );
+    assert_eq!(
+        receipt["provider_response_model_sha256"],
+        sha256_hex(VERIFIER_MODEL.as_bytes())
+    );
+    assert_eq!(
+        receipt["provider_system_fingerprint_sha256"],
+        sha256_hex(b"loopback-fingerprint")
+    );
+    assert_eq!(receipt["provider_receipt_status"], "observed");
+    assert_eq!(receipt["usage"]["prompt_tokens"], 7);
+    assert_eq!(receipt["usage"]["completion_tokens"], 2);
+    assert_eq!(receipt["usage"]["total_tokens"], 9);
+    assert_eq!(receipt["usage"]["usage_source"], "provider");
+    assert_eq!(receipt["usage"]["usage_estimated"], false);
+    let response_semantic_sha256 = receipt["response_semantic_sha256"].as_str().unwrap();
+    assert_eq!(response_semantic_sha256.len(), 64);
+    assert!(response_semantic_sha256
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert_eq!(
+        run.final_journal["observed"]["latency_ms"],
+        receipt["latency_ms"]
+    );
+    assert_eq!(run.final_journal["charged"]["logical_model_calls"], 1);
+    assert_eq!(run.final_journal["charged"]["physical_model_attempts"], 1);
+    assert_eq!(run.final_journal["observed"]["terminal_model_calls"], 1);
+    assert_eq!(
+        run.final_journal["cases"][0]["calls"][1]["state"]["state"],
+        "planned"
+    );
+    assert_eq!(
+        run.final_journal["cases"][0]["calls"][2]["state"]["state"],
+        "planned"
+    );
+
+    let artifact_path = run.output_root.join("case-01-call-001-response.bin");
+    assert!(std::fs::read(&artifact_path).unwrap().is_empty());
+    let artifact_metadata = std::fs::metadata(&artifact_path).unwrap();
+    assert_eq!(artifact_metadata.len(), 0);
+    #[cfg(unix)]
+    assert_eq!(artifact_metadata.permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
 fn agent_delivery_verification_execution_contract_loopback_preserves_primary_terminal_digest_error()
 {
-    let run = run_loopback(WRONG_SERVED_MODEL, true);
+    let run = run_loopback(WRONG_SERVED_MODEL, RESPONSE_CONTENT, true);
     assert_exact_reserved_wire(&run);
     let primary = match &run.outcome {
         CallOutcome::StructuralFailure(error) => error,

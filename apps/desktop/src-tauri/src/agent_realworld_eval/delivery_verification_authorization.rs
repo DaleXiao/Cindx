@@ -18,27 +18,28 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 pub(super) const DELIVERY_AUTHORIZATION_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-authorization.v3";
+    "cindx.agent-eval.delivery-verification-authorization.v4";
 pub(super) const DELIVERY_CONSUMED_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-authorization-consumed.v3";
+    "cindx.agent-eval.delivery-verification-authorization-consumed.v4";
 pub(super) const DELIVERY_TOMBSTONE_FILE_NAME: &str =
     "delivery-verification-authorization-consumed.json";
 pub(super) const DELIVERY_AUTHORIZATION_TTL_MS: u64 = 15 * 60 * 1_000;
 
-const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v3";
+const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v4";
 const AUTHORIZATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-authorization.v3\0";
+    b"cindx.agent-eval.delivery-verification-authorization.v4\0";
 const TOMBSTONE_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-authorization-consumed.v3\0";
-const PREFLIGHT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v3\0";
-const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v3\0";
+    b"cindx.agent-eval.delivery-verification-authorization-consumed.v4\0";
+const PREFLIGHT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v4\0";
+const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v4\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-credential-fingerprint.v3\0";
+    b"cindx.agent-eval.delivery-verification-credential-fingerprint.v4\0";
 const MAX_PRIVATE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const CASE_COUNT: usize = 32;
 const CONSUMED_AUTHORITY_FILE_PREFIX_V1: &str = ".cindx-delivery-verification-v1-consumed-";
 const CONSUMED_AUTHORITY_FILE_PREFIX_V2: &str = ".cindx-delivery-verification-v2-consumed-";
-const CONSUMED_AUTHORITY_FILE_PREFIX: &str = ".cindx-delivery-verification-v3-consumed-";
+const CONSUMED_AUTHORITY_FILE_PREFIX_V3: &str = ".cindx-delivery-verification-v3-consumed-";
+const CONSUMED_AUTHORITY_FILE_PREFIX: &str = ".cindx-delivery-verification-v4-consumed-";
 
 pub(super) struct DeliveryVerificationAuthorizationIssue<'a, 'protocol> {
     pub(super) protocol: &'a ValidatedProtocol<'protocol>,
@@ -617,10 +618,11 @@ pub(super) fn consumed_authority_path(output_root: &Path) -> Result<PathBuf, Str
     consumed_authority_path_with_prefix(output_root, CONSUMED_AUTHORITY_FILE_PREFIX)
 }
 
-fn consumed_authority_guard_paths(output_root: &Path) -> Result<[PathBuf; 3], String> {
+fn consumed_authority_guard_paths(output_root: &Path) -> Result<[PathBuf; 4], String> {
     Ok([
         consumed_authority_path_with_prefix(output_root, CONSUMED_AUTHORITY_FILE_PREFIX_V1)?,
         consumed_authority_path_with_prefix(output_root, CONSUMED_AUTHORITY_FILE_PREFIX_V2)?,
+        consumed_authority_path_with_prefix(output_root, CONSUMED_AUTHORITY_FILE_PREFIX_V3)?,
         consumed_authority_path(output_root)?,
     ])
 }

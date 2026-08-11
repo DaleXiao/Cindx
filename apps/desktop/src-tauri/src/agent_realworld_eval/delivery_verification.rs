@@ -7,7 +7,7 @@ use orchestrator::sha256_hex;
 use serde::{Deserialize, Serialize};
 
 pub(super) const DELIVERY_VERIFICATION_EVAL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-observation.v3";
+    "cindx.agent-eval.delivery-verification-observation.v4";
 
 #[derive(Debug, Clone)]
 pub(super) struct DeliveryVerificationEvalInput {
