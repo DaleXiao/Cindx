@@ -143,13 +143,15 @@ redacted model authority, and new external paths and records `provider_calls=0`,
 `online_runner_frozen=true`, and `execution_authorized=false`. The separate
 authorization binds exact execute-binary bytes; preflight does not.
 
-`agent-delivery-verification-execution-contract` runs 32 provider-free tests
+`agent-delivery-verification-execution-contract` runs 38 provider-free tests
 for canonical short-lived authorization, exact preflight/source/provider/model/
 credential/runner/output binding, private one-shot consumption, campaign and
 physical-call reservations before transport, complete resource accounting,
 crash/tamper/concurrency recovery without retry, exact shared-Owner control and
-treatment execution, and calibration-before-holdout ordering. It also compiles
-the three feature-gated Delivery binaries without invoking their entrypoints.
+treatment execution, calibration-before-holdout ordering, and separate semantic
+and immutable wire-payload authority through a real local-loopback HTTP path. It
+also compiles the three feature-gated Delivery binaries without invoking their
+entrypoints.
 It is included in `ci-contract`, `control-plane`, and `full`, but not `quick`,
 `performance`, or `shipping-performance`. It proves no provider outcome or
 intelligence uplift.
@@ -255,41 +257,22 @@ terminal producer-to-projector seam in `agent-strategy-lifecycle-contract`.
 This is a classifier repair only: no Goal 3F or provider run is authorized, and
 deterministic green gates do not establish uplift.
 
-Delivery Verification uses separate feature-gated
+Delivery Verification defines separate feature-gated
 `cindx-delivery-verification-preflight`,
 `cindx-delivery-verification-authorize`, and
-`cindx-delivery-verification-execute` binaries. After the runner change is
-merged and the checkout is clean, build those exact binaries without building
-or releasing the production App:
+`cindx-delivery-verification-execute` binaries. Their current v1 entrypoints are
+retired and reject the consumed protocol before reading or creating live
+preflight, authorization, or execution state. The binaries are compiled by the
+provider-free contract gate only; do not run them for v1.
 
-```sh
-cargo build --locked --release \
-  --manifest-path apps/desktop/src-tauri/Cargo.toml \
-  --no-default-features --features realworld-eval \
-  --bin cindx-delivery-verification-preflight \
-  --bin cindx-delivery-verification-authorize \
-  --bin cindx-delivery-verification-execute
-```
-
-Then run only the provider-free preflight with new private paths outside the
-repository:
-
-```sh
-CINDX_DELIVERY_VERIFICATION_OUTPUT_ROOT=/private/path/new-output-root \
-CINDX_DELIVERY_VERIFICATION_PREFLIGHT_RECEIPT=/private/path/new-preflight.json \
-./apps/desktop/src-tauri/target/release/cindx-delivery-verification-preflight
-```
-
-The preflight must report zero provider calls and
-`execution_authorized=false`. Inspect its clean-source, provider/model,
-32-case/order, budget, hidden-oracle aggregate, and external-path bindings, then
-stop and request explicit authorization. The authorization step is where exact
-execute-binary bytes, credential authority, and the short validity window are
-bound. Authorization remains provider-free but grants a one-shot capability;
-execute is billable and provider-backed. Private receipts, tombstones,
-journals, requests, responses, model identities, secrets, and raw outputs stay
-outside Git. This evaluator-binary build does not change the installed App,
-version, tag, or GitHub release.
+A future online attempt must introduce a separately reviewed successor protocol
+identifier and authority. Its preflight must still report zero provider calls
+and `execution_authorized=false`; authorization must bind exact execute bytes,
+credential authority, and a short validity window; execute remains billable and
+provider-backed. Private receipts, tombstones, journals, requests, responses,
+model identities, secrets, and raw outputs stay outside Git. This
+instrumentation repair does not change the installed App, version, tag, or
+GitHub release.
 
 Delivery Verification protocol v1 has already consumed its one authorized
 attempt and closed `CENSORED` / `INVALID-INSTRUMENTATION` because journal
@@ -298,6 +281,9 @@ domain-separated wire-payload digest. Never use the commands above to mint or
 execute another v1 authority. A successor must first reserve both identities
 from one immutable prepared request, dispatch those exact bytes, preserve the
 primary terminal error, and pass a real preparation-boundary loopback contract.
+Current source implements those provider-free instrumentation requirements in
+the v2 journal and explicitly rejects all v1 CLI stages, but it does not create
+or authorize a successor protocol.
 
 ## Browser and Computer Sidecars
 

@@ -230,8 +230,10 @@ pub(super) fn validate_call_binding(
         .ok_or_else(|| "delivery call case is outside the frozen suite".to_string())?;
     if case.binding.ordinal != input.case_ordinal
         || input.reserved_at_ms == 0
-        || input.canonical_request_bytes == 0
-        || input.canonical_request_bytes > MAX_CANONICAL_REQUEST_BYTES
+        || input.semantic_request_bytes == 0
+        || input.semantic_request_bytes > MAX_SEMANTIC_REQUEST_BYTES
+        || input.wire_payload_bytes == 0
+        || input.wire_payload_bytes > MAX_WIRE_PAYLOAD_BYTES
         || document
             .campaign_reservation
             .as_ref()
@@ -246,10 +248,8 @@ pub(super) fn validate_call_binding(
         return Err("delivery call reservation input is invalid".into());
     }
     require_sha256(&input.configured_model_sha256, "delivery configured model")?;
-    require_sha256(
-        &input.canonical_request_sha256,
-        "delivery canonical request",
-    )?;
+    require_sha256(&input.semantic_request_sha256, "delivery semantic request")?;
+    require_sha256(&input.wire_payload_sha256, "delivery wire payload")?;
     let (expected_role, expected_model, expected_output) = match input.stage {
         DeliveryVerificationCallStageV1::OwnerDraft
         | DeliveryVerificationCallStageV1::OwnerRepair => (
@@ -281,8 +281,10 @@ pub(super) fn validate_stored_reservation(
         || reservation.case_ordinal > authorization.cases.len()
         || reservation.global_call_ordinal == 0
         || reservation.reserved_at_ms == 0
-        || reservation.canonical_request_bytes == 0
-        || reservation.canonical_request_bytes > MAX_CANONICAL_REQUEST_BYTES
+        || reservation.semantic_request_bytes == 0
+        || reservation.semantic_request_bytes > MAX_SEMANTIC_REQUEST_BYTES
+        || reservation.wire_payload_bytes == 0
+        || reservation.wire_payload_bytes > MAX_WIRE_PAYLOAD_BYTES
         || reservation.reservation_sha256 != call_reservation_digest(reservation)?
     {
         return Err("delivery stored call reservation is invalid".into());
@@ -292,9 +294,10 @@ pub(super) fn validate_stored_reservation(
         "delivery configured model",
     )?;
     require_sha256(
-        &reservation.canonical_request_sha256,
-        "delivery canonical request",
+        &reservation.semantic_request_sha256,
+        "delivery semantic request",
     )?;
+    require_sha256(&reservation.wire_payload_sha256, "delivery wire payload")?;
     let (role, model, output) = match reservation.stage {
         DeliveryVerificationCallStageV1::OwnerDraft
         | DeliveryVerificationCallStageV1::OwnerRepair => (
@@ -364,8 +367,7 @@ pub(super) fn validate_call_terminal(
                 || receipt.retryable.is_some()
                 || receipt.response_artifact_sha256.is_none()
                 || receipt.request_payload_sha256.is_none()
-                || receipt.request_payload_sha256.as_ref()
-                    != Some(&reservation.canonical_request_sha256)
+                || receipt.request_payload_sha256.as_ref() != Some(&reservation.wire_payload_sha256)
                 || receipt.response_semantic_sha256.is_none()
                 || receipt.provider_response_id_sha256.is_none()
                 || receipt.provider_response_model_sha256.is_none()
@@ -414,6 +416,24 @@ pub(super) fn validate_response_artifact(
         || u64::try_from(bytes.len()).unwrap_or(u64::MAX) != expected_bytes
     {
         return Err("delivery response artifact differs from its terminal receipt".into());
+    }
+    Ok(())
+}
+
+pub(super) fn validate_journal_response_artifacts(
+    root: &Path,
+    document: &JournalDocumentV1,
+) -> Result<(), String> {
+    for case in &document.cases {
+        for call in &case.calls {
+            if let JournalCallStateV1::Terminal {
+                reservation,
+                receipt,
+            } = &call.state
+            {
+                validate_response_artifact(root, reservation, receipt)?;
+            }
+        }
     }
     Ok(())
 }

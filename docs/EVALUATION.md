@@ -121,12 +121,12 @@ aggregate, redacted configured Executor/Reviewer identities, and new external
 paths before writing a new private receipt. That receipt states `provider_calls=0`,
 `online_runner_frozen=true`, and `execution_authorized=false`.
 
-The source now contains the frozen provider-free authorization, one-shot
-execution, durable campaign/call reservation, accounting, and fail-closed
-recovery control plane. Its 32 deterministic execution tests do not invoke a
-provider. The authorization stage, not preflight, binds the exact execute-binary
-bytes together with the canonical preflight, current source/provider/model/
-credential authority, output root, and short validity window.
+The source contains provider-free authorization, one-shot execution, durable
+campaign/call reservation, accounting, and fail-closed recovery contracts. The
+authorization stage, not preflight, binds exact execute-binary bytes together
+with canonical preflight, current source/provider/model/credential authority,
+output root, and a short validity window. These deterministic contracts do not
+invoke an external provider.
 
 ### Consumed v1 result
 
@@ -169,15 +169,20 @@ the published release remain unchanged.
 
 ## Required Next Evidence
 
-Do not rerun Delivery Verification v1. Before any successor provider protocol,
-the request boundary must prepare one immutable non-streaming wire body before
-dispatch, reserve its semantic-request and domain-separated wire-payload
-digests as distinct authorities, dispatch those exact bytes, and retain the
-primary terminal validation failure. A provider-free local-loopback contract
-must exercise the real model-provider prepare, reserve, dispatch, receipt, and
-terminal path; fixtures may not substitute one digest for both identities. Only
-then may a new frozen protocol version and separate one-shot authorization be
-proposed. GEPA and production serving remain out of scope.
+Do not rerun Delivery Verification v1. Current source now prepares one immutable
+non-streaming wire body before dispatch, reserves semantic-request and
+domain-separated wire-payload digests as distinct authorities in a v2 journal,
+dispatches those exact bytes, and retains the primary terminal validation
+failure. Provider-free local-loopback coverage crosses the real model-provider
+prepare, reserve, HTTP dispatch, receipt, and terminal path; it does not
+substitute one digest for both identities.
+
+The v1 preflight, authorization, and execute entrypoints now reject the consumed
+protocol before live state is accessed. This repair is deterministic evidence
+about instrumentation only. There is no successor manifest, authorization, or
+provider result. A future provider attempt requires a separately reviewed and
+frozen successor protocol and a new explicit one-shot authorization. GEPA and
+production serving remain out of scope.
 
 Do not rerun Workflow GEPA V12. The current source now links atomic strategy
 selection and terminal transitions in one observable lifecycle for both
