@@ -92,29 +92,42 @@ not changed by V5, V7, or V12.
 
 ## Delivery Verification Experiment
 
-The current source adds default-off, `realworld-eval`-only construction and
-projection seams for a proposed final-draft treatment. Control preserves the
-exact bytes of one shared Owner draft. The proposed treatment binds that draft,
-its grounded receipt, and the exact obligation/evidence context to a
-model-distinct Independent Verifier. A passing verdict preserves the Owner
-bytes; a revision verdict permits exactly one Owner repair followed by one
-Verifier recheck. Request construction is tool-free and role-bounded; the
-projector rejects wrong configured models, tool use, incomplete reference
-coverage, invalid receipts, and missing or extra attempt slots. Cancellation
-and steering are censored rather than counted as treatment failures.
+The current source adds default-off, `realworld-eval`-only construction,
+projection, and a tracked provider-protocol authority for a final-draft
+treatment. Control preserves the exact bytes of one shared Owner draft. The
+treatment binds that draft and its ordered obligation/evidence context to a
+model-distinct Independent Verifier. A pass preserves the Owner bytes; a
+revision permits exactly one same-Owner repair and one Verifier recheck.
 
-These seams do not include a provider runner, frozen experiment protocol, or
-durable attempt receipt, and they do not change the production finalizer,
-Workflow graph, Settings, prompt evolution, GEPA, routing, permissions, or
-serving. Their provider-free deterministic tests establish only portable
-binding, exact request construction, bounded stopping, and attempt projection.
-No provider run has tested answer quality, so there is no
-delivery-verification uplift, latency, cost, or intelligence result.
+The frozen suite contains eight calibration cases and 24 model-hidden holdout
+cases, balanced across unsupported claims, omitted obligations, contradictory
+authorities, and preservation of exact `false`, `null`, and zero values. Cases
+require deterministic multi-evidence calculation or rule selection. The
+primary oracle is exact external JSON plus required/forbidden predicates; it is
+bound into case and suite digests but omitted from model-facing input. The
+calibration gate opens holdout only after all eight pairs complete with at
+least two control failures, at least one treatment-only win, and no loss,
+structural failure, or treatment execution failure. Calibration cannot tune
+the prompt, models, or threshold. The 24-case holdout reports evidence of
+uplift only for all-valid `W >= 5, L = 0`; the boundary case `5/0` has a
+one-sided exact paired p-value of `1/32 = 0.03125`. Anything weaker is
+no-evidence, regression, incomplete, or invalid rather than a positive claim.
 
-The next evidentiary step is a separately frozen provider protocol with matched
-control and treatment cases, hidden external outcome checks, retained failures,
-complete resource receipts, and explicit authorization. GEPA should remain
-unchanged until that independent result exists.
+The protocol fixes tool-free requests, no transport retries, at most four
+physical calls per case, 128 calls total, 64,000 tokens per case, 2,048,000
+tokens for the campaign, and a six-hour campaign ceiling. Its preflight only
+validates the clean source, tracked bytes, case order, budgets, and redacted
+configured Executor/Reviewer identities before writing a new private external
+receipt. The receipt states `provider_calls=0`,
+`online_runner_frozen=false`, and `execution_authorized=false`.
+
+There is still no frozen online runner, durable attempt/resource journal,
+authorization, live preflight receipt, or provider result. Production
+finalization, Workflow, Settings, serving, learning, promotion, and GEPA remain
+unchanged. Deterministic gates establish the experiment boundary only; they do
+not establish answer-quality, latency, cost, or intelligence uplift. A future
+runner change will alter the source binding and must be followed by a new
+provider-free preflight and a separate exact authorization decision.
 
 ## Required Next Evidence
 

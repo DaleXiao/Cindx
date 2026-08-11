@@ -701,7 +701,10 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-pub(super) fn write_new_private_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(in super::super) fn write_new_private_file_atomically(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "preflight receipt path has no parent".to_string())?;
@@ -746,7 +749,7 @@ fn required_new_external_path(
     validate_new_external_path(&path, repo_root, label)
 }
 
-pub(super) fn validate_new_external_path(
+pub(in super::super) fn validate_new_external_path(
     path: &Path,
     repo_root: &Path,
     label: &str,
@@ -775,7 +778,7 @@ pub(super) fn validate_new_external_path(
     Ok(parent.join(name))
 }
 
-pub(super) fn now_millis() -> Result<u64, String> {
+pub(in super::super) fn now_millis() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)

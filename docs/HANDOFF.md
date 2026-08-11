@@ -225,8 +225,9 @@ persistent-state probes before installation. No provider evaluation was run,
 so this validates configuration semantics and compatibility rather than an
 intelligence uplift.
 
-A separate Delivery Verification experiment now has provider-free construction
-and projection seams without changing production serving or GEPA:
+A separate Delivery Verification experiment now has provider-free construction,
+projection, and a tracked frozen protocol without changing production serving
+or GEPA:
 
 1. Control and treatment start from one shared exact Owner final draft.
 2. The proposed treatment binds that draft, its grounded receipt, and the exact
@@ -237,11 +238,24 @@ and projection seams without changing production serving or GEPA:
    wrong configured models, tool use, incomplete reference coverage, invalid
    receipts, and missing or extra attempt slots. Cancellation and steering are
    censored.
+5. The tracked suite fixes eight calibration and 24 model-hidden holdout cases
+   across four strata. Hidden exact oracles are bound into case digests but are
+   excluded from model-facing input.
+6. Holdout opens only after the fixed calibration gate. Its sole positive rule
+   is all 24 valid pairs with at least five treatment-only wins and zero
+   control-only losses; calibration cannot tune prompts, models, or thresholds.
+7. The protocol caps each case at four tool-free calls with zero transport
+   retries, 128 total calls, 64,000 tokens per case, 2,048,000 campaign tokens,
+   and six hours.
 
-There is no provider runner, frozen protocol, durable attempt receipt, or
-provider result yet. The production finalizer, Workflow, Settings, prompt
-evolution, GEPA, routing, permissions, and serving remain unchanged; no quality
-or intelligence uplift is claimed.
+The new preflight is provider-free and writes only a private external receipt
+bound to clean source, tracked bytes, budgets, and redacted configured
+Executor/Reviewer identities. It records zero provider calls,
+`online_runner_frozen=false`, and `execution_authorized=false`. No live receipt
+was minted. There is no online runner, durable attempt/resource journal,
+authorization, or provider result. The production finalizer, Workflow,
+Settings, prompt evolution, GEPA, routing, permissions, and serving remain
+unchanged; no quality or intelligence uplift is claimed.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -277,13 +291,13 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-The next separate goal is to freeze a new Delivery Verification provider
-protocol around the evaluation-only treatment: matched control and treatment
-must share the exact Owner draft, use hidden external outcome checks, retain all
-failures and confounds, and bind complete call, token, latency, and cost
-receipts. Preflight it provider-free, then obtain explicit authorization before
-any provider call. Do not change production serving or GEPA until that result is
-independently reviewable.
+The next separate decision is whether the frozen protocol justifies a narrow
+one-shot Delivery runner and durable attempt/resource journal. If implemented,
+that code changes the source authority, so generate a fresh provider-free
+preflight only after the runner is merged, then request explicit authorization
+for its exact source, runner bytes, provider binding, 32 cases, budgets, and
+no-retry scope. Do not change production serving or GEPA until an independently
+reviewable provider result exists.
 
 ## Structural Risks
 
