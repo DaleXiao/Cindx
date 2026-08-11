@@ -597,14 +597,32 @@ pub fn run_delivery_verification_v2_execute() -> Result<(), String> {
 }
 
 pub fn run_delivery_verification_v3_preflight() -> Result<(), String> {
-    delivery_verification_preflight::run_preflight()
+    delivery_verification_runner::reject_consumed_delivery_protocol(
+        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
+    )
 }
 
 pub fn run_delivery_verification_v3_authorize() -> Result<(), String> {
-    delivery_verification_runner::run_authorize()
+    delivery_verification_runner::reject_consumed_delivery_protocol(
+        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
+    )
 }
 
 pub fn run_delivery_verification_v3_execute() -> Result<(), String> {
+    delivery_verification_runner::reject_consumed_delivery_protocol(
+        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
+    )
+}
+
+pub fn run_delivery_verification_v4_preflight() -> Result<(), String> {
+    delivery_verification_preflight::run_preflight()
+}
+
+pub fn run_delivery_verification_v4_authorize() -> Result<(), String> {
+    delivery_verification_runner::run_authorize()
+}
+
+pub fn run_delivery_verification_v4_execute() -> Result<(), String> {
     delivery_verification_runner::run_execute()
 }
 

@@ -163,16 +163,7 @@ use agent_loop_runtime::*;
 use agent_query_commands::*;
 use agent_read_model::*;
 #[cfg(feature = "realworld-eval")]
-pub use agent_realworld_eval::{
-    run_agent_realworld_eval, run_collaboration_successor_authorize,
-    run_collaboration_successor_execute, run_collaboration_successor_preflight,
-    run_delivery_verification_authorize, run_delivery_verification_execute,
-    run_delivery_verification_preflight, run_delivery_verification_v2_authorize,
-    run_delivery_verification_v2_execute, run_delivery_verification_v2_preflight,
-    run_delivery_verification_v3_authorize, run_delivery_verification_v3_execute,
-    run_delivery_verification_v3_preflight, run_direct_finalizer_gepa_eval,
-    run_workflow_gepa_candidate_probe, run_workflow_gepa_eval,
-};
+pub use agent_realworld_eval::*;
 use agent_recovery_service::*;
 use agent_run_engine::continue_agent_loop;
 use agent_runtime_snapshot::*;

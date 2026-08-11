@@ -14,27 +14,27 @@ use self::storage::*;
 pub(super) const DELIVERY_EXECUTION_JOURNAL_SCHEMA: &str =
     DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA;
 pub(super) const DELIVERY_EXECUTION_RECOVERY_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-execution-recovery.v3";
+    "cindx.agent-eval.delivery-verification-execution-recovery.v4";
 pub(super) const DELIVERY_EXECUTION_JOURNAL_FILE_NAME: &str =
     "delivery-verification-execution-journal.json";
 pub(super) const DELIVERY_EXECUTION_RECOVERY_FILE_NAME: &str =
     "delivery-verification-execution-recovery.json";
 pub(super) const DELIVERY_EXECUTION_LOCK_FILE_NAME: &str = "delivery-verification-execution.lock";
 
-const JOURNAL_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-execution-journal.v3\0";
+const JOURNAL_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-execution-journal.v4\0";
 const CAMPAIGN_RESERVATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-campaign-reservation.v3\0";
+    b"cindx.agent-eval.delivery-verification-campaign-reservation.v4\0";
 const CALL_RESERVATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-call-reservation.v3\0";
+    b"cindx.agent-eval.delivery-verification-call-reservation.v4\0";
 const CALL_TERMINAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-call-receipt.v3\0";
+    b"cindx.agent-eval.delivery-verification-call-receipt.v4\0";
 const CASE_TERMINAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-case-receipt.v3\0";
-const DECISION_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-decision-receipt.v3\0";
+    b"cindx.agent-eval.delivery-verification-case-receipt.v4\0";
+const DECISION_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-decision-receipt.v4\0";
 const TERMINAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-campaign-terminal.v3\0";
+    b"cindx.agent-eval.delivery-verification-campaign-terminal.v4\0";
 const RECOVERY_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-execution-recovery.v3\0";
+    b"cindx.agent-eval.delivery-verification-execution-recovery.v4\0";
 const MAX_SEMANTIC_REQUEST_BYTES: u64 = 512 * 1024;
 const MAX_WIRE_PAYLOAD_BYTES: u64 = 512 * 1024;
 const CASE_COUNT: usize = 32;
@@ -1036,7 +1036,7 @@ impl DeliveryVerificationExecutionJournal {
             return Err("delivery freeze cannot claim a completed holdout decision".into());
         }
         let evidence_sha256 =
-            sha256_hex(format!("cindx.delivery-verification-freeze.v3\0{reason}").as_bytes());
+            sha256_hex(format!("cindx.delivery-verification-freeze.v4\0{reason}").as_bytes());
         self.finish(disposition, reason, evidence_sha256, terminal_at_ms)
     }
 

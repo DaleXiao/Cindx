@@ -13,8 +13,9 @@ use super::delivery_verification_preflight::{
 use super::delivery_verification_protocol::{
     parse_and_validate_protocol, CalibrationDecision, HoldoutDecisionResult, MatchedPairCounts,
     ProtocolBudget, ValidatedProtocol, CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
-    CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID, DELIVERY_VERIFICATION_PROTOCOL_ID,
-    DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH, DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
+    CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID, CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
+    DELIVERY_VERIFICATION_PROTOCOL_ID, DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH,
+    DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH,
 };
 use super::delivery_verification_runner_binary::{
     read_current_delivery_execute, read_delivery_execute_sibling, DeliveryVerificationRunnerBinary,
@@ -31,9 +32,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const PREFLIGHT_RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_PREFLIGHT_RECEIPT";
-const AUTHORIZATION_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_AUTHORIZATION";
-const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_OUTPUT_ROOT";
+const PREFLIGHT_RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V4_PREFLIGHT_RECEIPT";
+const AUTHORIZATION_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V4_AUTHORIZATION";
+const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V4_OUTPUT_ROOT";
 const AUTHORIZE_FLAG: &str = "--authorize-once";
 
 pub(in super::super) fn run_authorize() -> Result<(), String> {
@@ -168,7 +169,8 @@ pub(super) fn require_authorize_arguments(
 pub(super) fn reject_consumed_delivery_protocol(protocol_id: &str) -> Result<(), String> {
     match protocol_id {
         CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID
-        | CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID => Err(format!(
+        | CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID
+        | CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID => Err(format!(
             "delivery verification protocol `{protocol_id}` is consumed and cannot be preflighted, authorized, or executed again; use the separately frozen successor protocol"
         )),
         DELIVERY_VERIFICATION_PROTOCOL_ID => Ok(()),
@@ -186,7 +188,7 @@ fn authorization_nonce(
 ) -> String {
     sha256_hex(
         format!(
-            "cindx.delivery-verification-authorization-nonce.v3\0{now_ms}\0{}\0{}\0{}\0{}",
+            "cindx.delivery-verification-authorization-nonce.v4\0{now_ms}\0{}\0{}\0{}\0{}",
             authorization.display(),
             output.display(),
             sha256_hex(&runner.bytes),
@@ -628,7 +630,10 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
 pub(super) fn validate_model_response(response: &ModelResponse) -> Result<String, String> {
     let assessment = response.assessment();
     if assessment.termination != ModelResponseTermination::Complete
-        || assessment.disposition != ModelResponseDisposition::Usable
+        || !matches!(
+            assessment.disposition,
+            ModelResponseDisposition::Usable | ModelResponseDisposition::Empty
+        )
         || !response.tool_calls.is_empty()
         || response.raw_tool_calls_json.is_some()
     {

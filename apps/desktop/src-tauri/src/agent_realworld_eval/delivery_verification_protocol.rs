@@ -12,24 +12,26 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-protocol.v3";
+    "cindx.agent-eval.delivery-verification-protocol.v4";
 pub(super) const DELIVERY_VERIFICATION_SUITE_SCHEMA: &str =
     "cindx.agent-eval.delivery-verification-suite.v3";
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_ID: &str =
-    "cindx-delivery-verification-protocol-v3";
+    "cindx-delivery-verification-protocol-v4";
 pub(super) const CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID: &str =
     "cindx-delivery-verification-protocol-v1";
 pub(super) const CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID: &str =
     "cindx-delivery-verification-protocol-v2";
+pub(super) const CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID: &str =
+    "cindx-delivery-verification-protocol-v3";
 pub(super) const DELIVERY_VERIFICATION_SUITE_ID: &str = "cindx-delivery-verification-v3";
 pub(super) const DELIVERY_VERIFICATION_PROTOCOL_RELATIVE_PATH: &str =
-    "benchmarks/agent/delivery-verification-protocol-v3.json";
+    "benchmarks/agent/delivery-verification-protocol-v4.json";
 pub(super) const DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH: &str =
     "benchmarks/agent/delivery-verification-v3.json";
 pub(super) const DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME: &str =
-    "cindx-delivery-verification-v3-execute";
+    "cindx-delivery-verification-v4-execute";
 pub(super) const DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-execution-journal.v3";
+    "cindx.agent-eval.delivery-verification-execution-journal.v4";
 
 const CASE_COUNT: usize = 32;
 const CALIBRATION_CASE_COUNT: usize = 8;
@@ -118,6 +120,8 @@ struct FrozenInstrumentation {
     prepared_wire_payload: String,
     reservation_digest_authorities: Vec<String>,
     terminal_request_payload_binding: String,
+    response_artifact_contract: String,
+    empty_verifier_content_classification: String,
     execution_journal_schema: String,
     case_telemetry: Vec<String>,
 }
@@ -1017,7 +1021,7 @@ fn validate_manifest(
 ) -> Result<(), String> {
     if manifest.schema != DELIVERY_VERIFICATION_PROTOCOL_SCHEMA
         || manifest.id != DELIVERY_VERIFICATION_PROTOCOL_ID
-        || manifest.version != 3
+        || manifest.version != 4
         || manifest.suite.path != DELIVERY_VERIFICATION_SUITE_RELATIVE_PATH
         || manifest.suite.sha256 != suite_sha256
         || manifest.suite.schema != suite.schema
@@ -1047,6 +1051,9 @@ fn validate_instrumentation(instrumentation: &FrozenInstrumentation) -> Result<(
             != ["semantic_request_sha256", "wire_payload_sha256"]
         || instrumentation.terminal_request_payload_binding
             != "request_payload_sha256_equals_reserved_wire_payload_sha256"
+        || instrumentation.response_artifact_contract != "exact_bytes_including_zero_length"
+        || instrumentation.empty_verifier_content_classification
+            != "invalid_verifier_response_without_retry"
         || instrumentation.execution_journal_schema
             != DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA
         || instrumentation.case_telemetry

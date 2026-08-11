@@ -2,7 +2,7 @@
 
 Current application version: `0.2.34`
 
-Last code-fact review: `2026-08-11`
+Last code-fact review: `2026-08-12`
 
 This document describes the current source tree. It is not a quality claim.
 
@@ -255,38 +255,46 @@ oracle's `revision` field. The fixed calibration gate therefore closed
 `terminal_futility`; all 24 holdout cases were durably skipped. This is neither
 uplift nor regression evidence, and v2 must not be rerun.
 
-Delivery Verification v3 is a new fixed seeded-defect recovery and preservation
-component test, not a natural-draft uplift experiment. Its 32 cases contain 24
-frozen seeded defects across unsupported-claim, omitted-obligation, and
-contradiction strata plus eight clean preservation sentinels, split 8/24 between
-calibration and holdout. Control is the exact frozen seed. Treatment sends that
-same seed to the Reviewer; a pass preserves it byte-for-byte, while
-`needs_revision` permits one Executor repair and one Reviewer recheck. The
-visible output contract fixes keys, types, requiredness, and additional-property
-policy, while exact oracle values remain evaluator-only. Requests are tool-free,
-non-streaming, no-retry, and capped at three calls per case / 96 total.
-Durably recorded provider timeout/unavailability or invalid Reviewer verdict JSON
-is an intention-to-treat treatment failure for that case; internal time-budget,
-binding, or authority failure is structural and closes the campaign inconclusive.
+Delivery Verification v3 froze a new seeded-defect recovery and preservation
+component test, not a natural-draft uplift experiment. It was authorized and
+consumed exactly once. The first calibration Reviewer call was durably reserved
+and made one provider attempt. The provider wrapper returned an empty content
+payload, but the v3 journal rejected its otherwise bound response artifact
+because its byte count was zero. No terminal call receipt or case receipt was
+accepted, calibration did not complete, holdout never opened, and the journal
+froze `CENSORED`. This is an instrumentation failure with zero valid matched
+pairs, not answer-quality, uplift, regression, latency, usage, or cost evidence.
+V3 must not be rerun.
 
-Calibration requires all eight cases, exactly six control failures, at least
-four treatment-only wins with at least one in each defect stratum, and no loss
-or structural/treatment-execution failure. Failure closes
-`terminal_futility`. Holdout requires all 24 cases, exactly 18 control failures,
-at least 13 treatment-only wins with at least four in each defect stratum, and
-no clean-sentinel loss or structural/treatment-execution failure for
-`seeded_repair_effective`; a sentinel loss is `preservation_regression`, and an
-otherwise valid sub-threshold result is `not_effective`.
+Delivery Verification v4 is the provider-free successor authority. It references
+the exact same tracked v3 suite bytes and preserves all 32 cases, order, hidden
+oracle, seeded candidates, model inputs, output contracts, budgets, decision
+thresholds, and no-retry policy. The suite still contains 24 frozen seeded
+defects and eight clean preservation sentinels split 8/24 between calibration
+and holdout. Control is the exact seed; treatment permits one Reviewer decision,
+at most one Executor repair, and one Reviewer recheck.
 
-The v3 journal durably reserves the semantic request and immutable prepared wire
-payload digests/sizes before dispatch, sends exactly those non-streaming bytes,
-and binds terminal request metadata to the reserved wire authority. Case
-receipts retain initial decision/finding counts, repair activation, recheck
-decision/counts, treatment disposition, failure stage/code, and outcome reason.
-All v1 and v2 preflight, authorization, and execute entrypoints now reject their
-consumed authorities before live state access. V3 currently has provider-free
-implementation and tests only; no v3 online authorization, execution, provider
-result, or intelligence evidence exists.
+The unchanged calibration gate requires all eight cases, exactly six control
+failures, at least four treatment-only wins with one in each defect stratum, and
+no control-only loss or structural/treatment-execution failure. Holdout requires
+all 24 cases, exactly 18 control failures, at least 13 treatment-only wins with
+four in each defect stratum, and no clean-sentinel loss or structural/treatment-
+execution failure for `seeded_repair_effective`.
+
+V4 changes only the protocol/control-plane namespace and the defective response-
+artifact instrumentation. The journal now accepts and hashes an exact zero-byte
+artifact instead of treating its length as missing. Empty Reviewer content is
+then retained as `invalid_verifier_response`, an intention-to-treat treatment
+failure for that fixed case, without retry or replacement. Semantic-request and
+immutable prepared-wire digests/sizes are still reserved before dispatch, and
+terminal request metadata must match the reserved wire authority.
+
+All nine v1-v3 preflight, authorization, and execute entrypoints reject their
+consumed authorities before reading live state. The three separately named v4
+entrypoints are the only active Delivery Verification control plane. Current v4
+implementation and verification are provider-free only; no v4 online
+authorization, campaign execution, provider result, or scientific decision
+exists.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 

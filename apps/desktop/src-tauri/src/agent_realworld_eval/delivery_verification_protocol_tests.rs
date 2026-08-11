@@ -1,6 +1,8 @@
 use super::*;
 
 const TRACKED_PROTOCOL: &[u8] =
+    include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v4.json");
+const CONSUMED_V3_PROTOCOL: &[u8] =
     include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v3.json");
 const CONSUMED_V2_PROTOCOL: &[u8] =
     include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v2.json");
@@ -13,7 +15,7 @@ const CONSUMED_V1_SUITE: &[u8] =
 
 fn tracked() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(TRACKED_PROTOCOL, TRACKED_SUITE)
-        .expect("tracked delivery verification v3 authority should validate")
+        .expect("tracked delivery verification v4 authority should validate")
 }
 
 fn encoded(mut value: Value) -> Vec<u8> {
@@ -72,7 +74,7 @@ fn agent_delivery_verification_protocol_contract_tracked_authority_is_exact_and_
     assert!(!protocol.execution_authorized());
     assert_eq!(
         protocol.manifest_sha256(),
-        "8da322b9336ec69d9f37bf12ce8d7698af55572d8d4173eddc45e6c2080cc8e8"
+        "2f56a1dc2425cc7a930e45eb05a3c109f93a156ec54ddf999fc3b3e493016c5c"
     );
     assert_eq!(
         protocol.suite_sha256(),
@@ -94,6 +96,10 @@ fn agent_delivery_verification_protocol_contract_tracked_authority_is_exact_and_
         crate::agent_realworld_eval::delivery_verification_execution_journal::DELIVERY_EXECUTION_JOURNAL_SCHEMA
     );
     assert_eq!(
+        sha256_hex(CONSUMED_V3_PROTOCOL),
+        "8da322b9336ec69d9f37bf12ce8d7698af55572d8d4173eddc45e6c2080cc8e8"
+    );
+    assert_eq!(
         sha256_hex(CONSUMED_V1_PROTOCOL),
         "080229aa24f05aa7ac816773aa5b2eb1bba2d00f3d1ca6b757b617ab9e27f19f"
     );
@@ -105,6 +111,30 @@ fn agent_delivery_verification_protocol_contract_tracked_authority_is_exact_and_
         sha256_hex(CONSUMED_V1_SUITE),
         "b9672f7075d896e3c48673607c622604c0f8d6fb2b6df4499281b0741124fbcd"
     );
+
+    let mut successor_from_v3: Value = serde_json::from_slice(CONSUMED_V3_PROTOCOL).unwrap();
+    successor_from_v3["schema"] = Value::String(DELIVERY_VERIFICATION_PROTOCOL_SCHEMA.into());
+    successor_from_v3["id"] = Value::String(DELIVERY_VERIFICATION_PROTOCOL_ID.into());
+    successor_from_v3["version"] = Value::from(4);
+    successor_from_v3["instrumentation"]["execution_journal_schema"] =
+        Value::String(DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA.into());
+    successor_from_v3["instrumentation"]
+        .as_object_mut()
+        .unwrap()
+        .insert(
+            "response_artifact_contract".into(),
+            Value::String("exact_bytes_including_zero_length".into()),
+        );
+    successor_from_v3["instrumentation"]
+        .as_object_mut()
+        .unwrap()
+        .insert(
+            "empty_verifier_content_classification".into(),
+            Value::String("invalid_verifier_response_without_retry".into()),
+        );
+    successor_from_v3["execution"]["runner_binary"] =
+        Value::String(DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME.into());
+    assert_eq!(successor_from_v3, protocol_value());
     eprintln!("{DELIVERY_VERIFICATION_PROTOCOL_SCHEMA}");
 }
 
@@ -317,6 +347,16 @@ fn agent_delivery_verification_protocol_contract_budget_topology_and_freeze_are_
 
     let mut changed = protocol_value();
     changed["instrumentation"]["case_telemetry"][0] = Value::String("omitted".into());
+    assert!(parse_and_validate_protocol(&encoded(changed), TRACKED_SUITE).is_err());
+
+    let mut changed = protocol_value();
+    changed["instrumentation"]["response_artifact_contract"] =
+        Value::String("nonempty_only".into());
+    assert!(parse_and_validate_protocol(&encoded(changed), TRACKED_SUITE).is_err());
+
+    let mut changed = protocol_value();
+    changed["instrumentation"]["empty_verifier_content_classification"] =
+        Value::String("censored".into());
     assert!(parse_and_validate_protocol(&encoded(changed), TRACKED_SUITE).is_err());
 }
 

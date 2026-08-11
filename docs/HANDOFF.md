@@ -226,9 +226,9 @@ so this validates configuration semantics and compatibility rather than an
 intelligence uplift.
 
 Delivery Verification remains default-off and separate from production serving
-and GEPA. V1 and v2 are consumed authorities. Their six public preflight,
-authorization, and execute entrypoints are permanently fail-closed before live
-state access.
+and GEPA. V1, v2, and v3 are consumed authorities. Their nine public preflight,
+authorization, and execute entrypoints are permanently fail-closed before
+arguments, environment, configuration, paths, or live-state access.
 
 Delivery Verification v1 was then authorized and consumed once on source
 `5373e65`. It closed `CENSORED` / `INVALID-INSTRUMENTATION` during the first
@@ -253,12 +253,24 @@ was a frozen case-definition mismatch between the visible
 fixed gate closed `terminal_futility`, and all 24 holdout cases were durably
 skipped. This is neither uplift nor regression evidence. V2 must not be rerun.
 
-V3 is a new fixed seeded-defect recovery and preservation component test, not a
-natural-draft uplift experiment:
+Delivery Verification v3 was then authorized and consumed once. The first
+calibration Reviewer call was durably reserved and made exactly one provider
+attempt. The provider wrapper returned empty content, but journal validation
+rejected the otherwise bound response artifact solely because its byte count was
+zero. It froze `CENSORED` before accepting a terminal call receipt or case
+receipt. Calibration did not complete, holdout never opened, and no matched pair
+exists. This is invalid instrumentation with no scientific conclusion; v3 must
+not be rerun.
 
-1. The 32-case suite freezes 24 seeded defects and eight clean preservation
-   sentinels, split 8 calibration / 24 holdout. Each of four strata has two
-   calibration and six holdout cases.
+V4 is the provider-free successor authority over the exact same tracked v3
+seeded-defect recovery and preservation suite, not a natural-draft uplift
+experiment:
+
+1. The unchanged 32-case suite freezes 24 seeded defects and eight clean
+   preservation sentinels, split 8 calibration / 24 holdout. Each of four
+   strata has two calibration and six holdout cases. Case bytes, order, hidden
+   oracle, seeds, model inputs, output contracts, budgets, decision thresholds,
+   and no-retry policy are identical to v3.
 2. Control is the exact frozen seed. Treatment starts with a model-distinct
    Reviewer; `passed` preserves the seed, while `needs_revision` permits one
    Executor repair and one Reviewer recheck. There is no initial drafting call,
@@ -290,15 +302,18 @@ natural-draft uplift experiment:
 8. Authorization remains a separate explicit one-shot step. Execute must match
    the frozen runner's full-file and kernel-backed CodeDirectory identities and
    atomically consume the shared no-clobber output marker before provider work.
-9. Journal v3 reserves campaign/case state and then stage, role, configured
+9. Journal v4 reserves campaign/case state and then stage, role, configured
    model, semantic request digest/size, immutable prepared wire digest/size, and
    output budget before every dispatch. Terminal metadata must match the
-   reserved wire authority; started calls never resume or retry.
+   reserved wire authority. Exact zero-byte response artifacts retain their
+   digest and zero length; empty Reviewer content becomes
+   `invalid_verifier_response` without retry. Started calls never resume or
+   retry.
 10. Case receipts retain seed/control/treatment digests and outcomes, verifier
     decisions/finding counts, repair activation, recheck telemetry, treatment
     disposition, failure stage/code, outcome reason, and exact accounting.
 
-Current v3 source and verification are provider-free only. There is no v3
+Current v4 source and verification are provider-free only. There is no v4
 online authorization, campaign execution, provider result, or component-test
 decision. Do not infer intelligence uplift from deterministic gates.
 
@@ -336,13 +351,17 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-Do not rerun Delivery Verification v1 or v2. Complete only the provider-free v3
-gates, merge the exact source, build the three feature-gated evaluator binaries,
-and generate a new private v3 preflight from clean merged `main`. Recheck its
-source, protocol/suite/case/seed/input/contract/budget/oracle, runner full-file
-and CodeDirectory, redacted provider/model, and external-path bindings, with
-`provider_calls=0` and `execution_authorized=false`; then stop. Any online v3
-attempt requires a later explicit one-shot authorization for that exact binding.
+Do not rerun Delivery Verification v1, v2, or v3. Complete only the provider-free
+v4 gates, merge the exact source, build the three active v4 feature-gated
+evaluator binaries, and generate a new private v4 preflight from clean merged
+`main`. Recheck its source, protocol/suite/case/seed/input/contract/budget/oracle,
+runner full-file and CodeDirectory, redacted provider/model, and external-path
+bindings, with `provider_calls=0` and `execution_authorized=false`. For this
+active task, the user has explicitly authorized one v4 attempt after that exact
+binding is independently verified; issue one bound authorization and execute it
+once without requesting another prompt. Any failure is terminal and must not be
+rerun. The nine v1-v3 binaries remain compiled only to prove their entrypoints
+permanently reject; all twelve binaries remain behind `realworld-eval`.
 Do not change production serving or GEPA, and do not create an App build,
 version tag, or GitHub release for this evidence-only update.
 

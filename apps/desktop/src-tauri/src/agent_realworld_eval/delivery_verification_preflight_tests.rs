@@ -16,7 +16,7 @@ fn runner_binding() -> DeliveryVerificationRunnerBinary {
 
 fn protocol() -> DeliveryVerificationProtocolSnapshot {
     DeliveryVerificationProtocolSnapshot {
-        protocol_id: "cindx-delivery-verification-protocol-v3".into(),
+        protocol_id: "cindx-delivery-verification-protocol-v4".into(),
         suite_id: "cindx-delivery-verification-v3".into(),
         manifest_sha256: digest("manifest"),
         suite_sha256: digest("suite"),
@@ -91,6 +91,11 @@ fn agent_delivery_verification_protocol_contract_preflight_is_provider_free_and_
     );
     assert_eq!(receipt.hidden_oracle_sha256, protocol.hidden_oracle_sha256);
     assert_eq!(
+        receipt.protocol_id,
+        "cindx-delivery-verification-protocol-v4"
+    );
+    assert_eq!(receipt.suite_id, "cindx-delivery-verification-v3");
+    assert_eq!(
         receipt.runner_binary,
         DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME
     );
@@ -102,17 +107,17 @@ fn agent_delivery_verification_protocol_contract_preflight_is_provider_free_and_
     );
     assert_eq!(
         OUTPUT_ROOT_ENV,
-        "CINDX_DELIVERY_VERIFICATION_V3_OUTPUT_ROOT"
+        "CINDX_DELIVERY_VERIFICATION_V4_OUTPUT_ROOT"
     );
     assert_eq!(
         RECEIPT_ENV,
-        "CINDX_DELIVERY_VERIFICATION_V3_PREFLIGHT_RECEIPT"
+        "CINDX_DELIVERY_VERIFICATION_V4_PREFLIGHT_RECEIPT"
     );
     assert_eq!(
         RECEIPT_HASH_DOMAIN,
-        b"cindx.agent-eval.delivery-verification-preflight.v3\0"
+        b"cindx.agent-eval.delivery-verification-preflight.v4\0"
     );
-    assert_eq!(CASES_HASH_DOMAIN, b"cindx.delivery-verification-cases.v3\0");
+    assert_eq!(CASES_HASH_DOMAIN, b"cindx.delivery-verification-cases.v4\0");
     eprintln!("{PREFLIGHT_SCHEMA}");
 }
 
@@ -188,15 +193,15 @@ fn agent_delivery_verification_protocol_contract_provider_binding_is_exact_redac
     );
     assert_eq!(
         PROVIDER_CONFIG_HASH_DOMAIN,
-        b"cindx.delivery-verification-provider-config.v3\0"
+        b"cindx.delivery-verification-provider-config.v4\0"
     );
     assert_eq!(
         PROVIDER_IDENTITY_HASH_DOMAIN,
-        b"cindx.delivery-verification-provider-identity.v3\0"
+        b"cindx.delivery-verification-provider-identity.v4\0"
     );
     assert_eq!(
         MODEL_BINDING_HASH_DOMAIN,
-        b"cindx.delivery-verification-model-binding.v3\0"
+        b"cindx.delivery-verification-model-binding.v4\0"
     );
 }
 
@@ -270,6 +275,21 @@ fn agent_delivery_verification_protocol_contract_preflight_rejects_authority_tam
     runner_required.online_execution_requires_new_frozen_runner = true;
     rehash(&mut runner_required);
     assert!(validate_receipt(&protocol, &runner_required).is_err());
+
+    let mut consumed_schema = receipt();
+    consumed_schema.schema = "cindx.agent-eval.delivery-verification-preflight.v3".into();
+    rehash(&mut consumed_schema);
+    assert!(validate_receipt(&protocol, &consumed_schema).is_err());
+
+    let mut consumed_protocol = receipt();
+    consumed_protocol.protocol_id = "cindx-delivery-verification-protocol-v3".into();
+    rehash(&mut consumed_protocol);
+    assert!(validate_receipt(&protocol, &consumed_protocol).is_err());
+
+    let mut consumed_runner = receipt();
+    consumed_runner.runner_binary = "cindx-delivery-verification-v3-execute".into();
+    rehash(&mut consumed_runner);
+    assert!(validate_receipt(&protocol, &consumed_runner).is_err());
 }
 
 #[test]

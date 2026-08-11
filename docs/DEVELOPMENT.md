@@ -141,15 +141,16 @@ budget digests, seeded-candidate/model-input/output-contract aggregates,
 matched decision table, redacted model-distinct provider binding, clean-source
 authority, canonical private preflight receipt, and zero-call/non-authorizing
 boundary. It is included in `ci-contract`, `control-plane`, and `full`, but not
-`quick`. The v3 preflight binds the clean source, protocol, cases, all four
-aggregates, budgets, hidden-oracle aggregate, redacted model authority, exact
-v3 execute name/digest/size/full SHA-256 CodeDirectory, and new external paths,
+`quick`. The v4 preflight binds the clean source, protocol, unchanged v3 suite
+cases, all four aggregates, budgets, hidden-oracle aggregate, redacted model
+authority, exact v4 execute name/digest/size/full SHA-256 CodeDirectory, and new
+external paths,
 and records `provider_calls=0`, `online_runner_frozen=true`, and
 `execution_authorized=false`. The CodeDirectory is derived from a verified
 private copy of the exact bytes. The separate authorization must match both
 runner identities and every aggregate already frozen by preflight.
 
-`agent-delivery-verification-execution-contract` runs 38 provider-free tests
+`agent-delivery-verification-execution-contract` runs 40 provider-free tests
 for canonical short-lived authorization, exact preflight/source/provider/model/
 credential/runner/output binding, per-case seeded candidate SHA-256/byte
 binding, private one-shot consumption, campaign and physical-call reservations
@@ -162,8 +163,11 @@ It also covers running-image/path replacement rejection through macOS's
 kernel-backed CodeDirectory identity and output-root relocation after competing
 authorization files through one parent-level no-clobber consumed marker. It
 compiles the three permanently fail-closed v1 binaries, the three permanently
-fail-closed v2 binaries, and the three separately named v3 binaries without
-invoking their entrypoints.
+fail-closed v2 binaries, the three permanently fail-closed v3 binaries, and the
+three active v4 binaries without invoking their entrypoints. The loopback
+coverage also proves that an exact zero-byte response artifact is retained with
+its digest and zero length, while empty Reviewer content becomes
+`invalid_verifier_response` without retry.
 It is included in `ci-contract`, `control-plane`, and `full`, but not `quick`,
 `performance`, or `shipping-performance`. It proves no provider outcome or
 intelligence uplift.
@@ -195,6 +199,9 @@ cargo test --locked \
   --bin cindx-delivery-verification-v3-preflight \
   --bin cindx-delivery-verification-v3-authorize \
   --bin cindx-delivery-verification-v3-execute \
+  --bin cindx-delivery-verification-v4-preflight \
+  --bin cindx-delivery-verification-v4-authorize \
+  --bin cindx-delivery-verification-v4-execute \
   agent_delivery_verification_execution_contract_ -- --nocapture
 ```
 
@@ -278,17 +285,17 @@ deterministic green gates do not establish uplift.
 Delivery Verification retains separate feature-gated v1
 `cindx-delivery-verification-preflight`,
 `cindx-delivery-verification-authorize`, and
-`cindx-delivery-verification-execute` binaries and the separately named v2
-triple. Both old triples are retired and permanently reject their consumed
-protocol before reading arguments, environment, paths, configuration, or live
-state. The active v3 successor uses
-`cindx-delivery-verification-v3-preflight`,
-`cindx-delivery-verification-v3-authorize`, and
-`cindx-delivery-verification-v3-execute` plus
-`CINDX_DELIVERY_VERIFICATION_V3_*` paths. All nine binaries require
+`cindx-delivery-verification-execute` binaries plus the separately named v2 and
+v3 triples. All nine old binaries are retired and permanently reject their
+consumed protocols before reading arguments, environment, paths, configuration,
+or live state. The active v4 successor uses
+`cindx-delivery-verification-v4-preflight`,
+`cindx-delivery-verification-v4-authorize`, and
+`cindx-delivery-verification-v4-execute` plus
+`CINDX_DELIVERY_VERIFICATION_V4_*` paths. All twelve binaries require
 `realworld-eval` and are compiled by the provider-free contract gate.
 
-Build the three v3 binaries together from clean merged source into one new
+Build the three v4 binaries together from clean merged source into one new
 private target root outside the repository. Run only the preflight binary; it
 requires its exact sibling execute binary and writes a private receipt binding
 source, runner full-file and CodeDirectory identities, provider, cases, case
@@ -315,14 +322,21 @@ Delivery Verification protocol v1 consumed its one authorized attempt and
 closed `CENSORED` / `INVALID-INSTRUMENTATION` because journal validation equated
 its semantic-request digest with the separately domain-separated wire-payload
 digest. Protocol v2 separately consumed its one authorized attempt and closed
-`terminal_futility` after calibration. Never mint or execute another v1 or v2
-authority; every old CLI stage now rejects permanently. The v3 protocol is a
-separate seeded-defect repair-efficacy experiment, not a claim of natural
-uplift. It reserves semantic and wire identities from one immutable prepared
-request, dispatches those exact bytes, preserves terminal failures, caps the
-campaign at 96 calls/attempts with no retry, and keeps its provider-free
-preflight non-authorizing. A provider-backed v3 execute still requires a new
-explicit one-shot authorization.
+`terminal_futility` after calibration. Protocol v3 consumed one attempt, made
+one provider call, then froze `CENSORED` because terminal validation rejected an
+otherwise bound zero-byte response artifact. Never mint or execute another v1,
+v2, or v3 authority; every old CLI stage now rejects permanently.
+
+The v4 protocol is a new authority over the byte-identical v3 suite. Cases,
+order, hidden oracle, seeds, model inputs, output contracts, budgets, thresholds,
+and no-retry behavior are unchanged. The model request envelope intentionally
+keeps its v3 compatibility schema so the instrumentation successor does not
+change model-visible semantic or wire payloads. V4 reserves both identities from
+one immutable prepared request, dispatches those exact bytes, and accepts an
+exact zero-byte response artifact with its digest and zero length. Empty Reviewer
+content is retained as `invalid_verifier_response` without retry or replacement.
+Its provider-free preflight remains non-authorizing; a
+provider-backed v4 execute still requires a new explicit one-shot authorization.
 
 ## Browser and Computer Sidecars
 
