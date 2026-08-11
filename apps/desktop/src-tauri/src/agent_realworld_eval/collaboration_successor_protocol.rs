@@ -765,7 +765,17 @@ mod preflight;
 pub(super) use preflight::run_preflight;
 #[allow(unused_imports)]
 pub(super) use preflight::validate_observed_pair;
-pub(super) use preflight::{provider_binding, ProviderBindingReceipt};
+pub(super) use preflight::{
+    now_millis, provider_binding, validate_new_external_path, write_new_private_file_atomically,
+    ProviderBindingReceipt,
+};
+
+pub(super) fn clean_source_head_tree(
+    repo_root: &std::path::Path,
+) -> Result<(String, String), String> {
+    let source = preflight::clean_source_binding(repo_root)?;
+    Ok((source.head, source.tree))
+}
 
 #[path = "collaboration_successor_execution.rs"]
 pub(super) mod execution;

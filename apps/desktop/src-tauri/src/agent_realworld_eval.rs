@@ -28,6 +28,8 @@ mod direct_finalizer_receipts_tests;
 mod direct_finalizer_tests;
 #[allow(dead_code)]
 mod delivery_verification;
+mod delivery_verification_preflight;
+mod delivery_verification_protocol;
 #[allow(dead_code)]
 mod delivery_verification_requests;
 #[cfg(test)]
@@ -549,6 +551,10 @@ pub fn run_collaboration_successor_authorize() -> Result<(), String> {
 
 pub fn run_collaboration_successor_execute() -> Result<(), String> {
     collaboration_successor_protocol::run_execute()
+}
+
+pub fn run_delivery_verification_preflight() -> Result<(), String> {
+    delivery_verification_preflight::run_preflight()
 }
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {

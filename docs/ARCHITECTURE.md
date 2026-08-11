@@ -222,6 +222,19 @@ preservation-breaking outcomes remain zero-score evidence. The receipt is
 shadow-only and has no production routing, prompt, memory, permission, or
 serving consumer.
 
+Delivery Verification remains a separate `realworld-eval` authority. Its
+tracked suite and protocol bind one shared exact Owner draft to two projections:
+the control preserves those bytes, while the treatment permits one
+model-distinct Reviewer verdict, at most one same-Owner repair, and one
+Reviewer recheck. Model-facing case input contains only the objective and
+ordered obligation/evidence bodies; the deterministic exact-output oracle is
+sealed into the tracked case digest but omitted from every model request. The
+adjacent preflight binds a clean source tree, protocol/suite/case/budget hashes,
+redacted configured Owner/Reviewer identities, and new external paths into a
+private receipt. It performs zero provider calls and records both
+`online_runner_frozen=false` and `execution_authorized=false`; there is no
+Delivery execution, serving, learning, promotion, or GEPA dependency.
+
 The same crate owns the portable collaboration-learning contracts, separate
 from production prompt evolution. A structured policy keeps the Goal 2 graph
 and Owner authority fixed while bounding context, verification, and same-lane
