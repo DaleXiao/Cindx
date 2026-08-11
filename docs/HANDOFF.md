@@ -225,6 +225,24 @@ persistent-state probes before installation. No provider evaluation was run,
 so this validates configuration semantics and compatibility rather than an
 intelligence uplift.
 
+A separate Delivery Verification experiment now has provider-free construction
+and projection seams without changing production serving or GEPA:
+
+1. Control and treatment start from one shared exact Owner final draft.
+2. The proposed treatment binds that draft, its grounded receipt, and the exact
+   obligation/evidence context to a model-distinct Independent Verifier.
+3. A pass preserves the exact Owner bytes. A revision permits exactly one Owner
+   repair and one Verifier recheck; the contract has no further repair loop.
+4. Default-off `realworld-eval` request and projector tests fail closed on
+   wrong configured models, tool use, incomplete reference coverage, invalid
+   receipts, and missing or extra attempt slots. Cancellation and steering are
+   censored.
+
+There is no provider runner, frozen protocol, durable attempt receipt, or
+provider result yet. The production finalizer, Workflow, Settings, prompt
+evolution, GEPA, routing, permissions, and serving remain unchanged; no quality
+or intelligence uplift is claimed.
+
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
 1. `ff8c238` separated route/task-graph evidence from direct-finalizer evidence
@@ -258,6 +276,14 @@ seam is covered. The deterministic gates and one formal App build are complete;
 stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
+
+The next separate goal is to freeze a new Delivery Verification provider
+protocol around the evaluation-only treatment: matched control and treatment
+must share the exact Owner draft, use hidden external outcome checks, retain all
+failures and confounds, and bind complete call, token, latency, and cost
+receipts. Preflight it provider-free, then obtain explicit authorization before
+any provider call. Do not change production serving or GEPA until that result is
+independently reviewable.
 
 ## Structural Risks
 

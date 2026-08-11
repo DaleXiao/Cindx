@@ -90,6 +90,32 @@ not outcome evidence. A candidate may be admitted only when:
 No recent workflow candidate passed those gates. Production seed behavior was
 not changed by V5, V7, or V12.
 
+## Delivery Verification Experiment
+
+The current source adds default-off, `realworld-eval`-only construction and
+projection seams for a proposed final-draft treatment. Control preserves the
+exact bytes of one shared Owner draft. The proposed treatment binds that draft,
+its grounded receipt, and the exact obligation/evidence context to a
+model-distinct Independent Verifier. A passing verdict preserves the Owner
+bytes; a revision verdict permits exactly one Owner repair followed by one
+Verifier recheck. Request construction is tool-free and role-bounded; the
+projector rejects wrong configured models, tool use, incomplete reference
+coverage, invalid receipts, and missing or extra attempt slots. Cancellation
+and steering are censored rather than counted as treatment failures.
+
+These seams do not include a provider runner, frozen experiment protocol, or
+durable attempt receipt, and they do not change the production finalizer,
+Workflow graph, Settings, prompt evolution, GEPA, routing, permissions, or
+serving. Their provider-free deterministic tests establish only portable
+binding, exact request construction, bounded stopping, and attempt projection.
+No provider run has tested answer quality, so there is no
+delivery-verification uplift, latency, cost, or intelligence result.
+
+The next evidentiary step is a separately frozen provider protocol with matched
+control and treatment cases, hidden external outcome checks, retained failures,
+complete resource receipts, and explicit authorization. GEPA should remain
+unchanged until that independent result exists.
+
 ## Required Next Evidence
 
 Do not rerun Workflow GEPA V12. The current source now links atomic strategy

@@ -26,6 +26,12 @@ mod direct_finalizer_receipts;
 mod direct_finalizer_receipts_tests;
 #[cfg(test)]
 mod direct_finalizer_tests;
+#[allow(dead_code)]
+mod delivery_verification;
+#[allow(dead_code)]
+mod delivery_verification_requests;
+#[cfg(test)]
+mod delivery_verification_tests;
 mod execution;
 mod http_fixture;
 mod memory_receipts;
