@@ -267,9 +267,9 @@ The current release is
 `Cindx-0.2.30-macOS-arm64.zip`. Do not commit application archives to the Git
 tree; publish them as GitHub Release assets.
 
-The locally installed `0.2.31` Goal 3C validation build is not a GitHub release;
-its exact source, archive digest, and signature evidence are recorded in
-[HANDOFF.md](HANDOFF.md).
+The locally installed `0.2.33` classifier-repair validation build is not a
+GitHub release; its exact source, archive digest, and signature evidence are
+recorded in [HANDOFF.md](HANDOFF.md).
 
 Developer ID signing and notarization require the matching Apple credentials in
 the release environment. An ad-hoc-signed local archive is suitable for local
