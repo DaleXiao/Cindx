@@ -232,6 +232,7 @@ pub(super) fn run_adaptive_frontier(
         frontier_round = frontier_round.saturating_add(1);
         let wave = match prepare_adaptive_wave(AdaptiveWavePlanningContext {
             state,
+            config,
             task_id,
             run_context,
             collaboration_id,

@@ -73,7 +73,7 @@ pub(super) fn settle_adaptive_step(
         &spec.model,
         &spec.request_id,
         &completion,
-        adaptive_step_attribution(&spec.output_kind, &role),
+        adaptive_step_attribution(config, &spec.output_kind, &spec.model)?,
         &metadata,
     )?;
     if completion
@@ -171,7 +171,10 @@ pub(super) fn settle_adaptive_step(
         }
 
         let recovery_attempt = attempts.saturating_add(1);
-        let distinct_models = adaptive_distinct_recovery_models(spec, workflow_checkpoint, models);
+        let eligible_models =
+            adaptive_dispatch_models_for_output(config, &spec.output_kind, models);
+        let distinct_models =
+            adaptive_distinct_recovery_models(spec, workflow_checkpoint, &eligible_models);
         let replacement_model = match adaptive_recovery_model(
             &spec.step_id,
             &completed_model,

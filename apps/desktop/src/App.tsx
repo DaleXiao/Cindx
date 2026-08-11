@@ -221,7 +221,7 @@ export function App() {
   );
   const {
     canUseConfiguredKey,
-    collaborationModelCount,
+    modelProfileCount,
     handleLoadProviderModels,
     handlePromptEvolutionToggle,
     handleSaveProviderConfig,
@@ -2190,7 +2190,7 @@ export function App() {
               browserText,
               browserUrl,
               busySessionIds,
-              collaborationModelCount,
+              modelProfileCount,
               contextBusy,
               contextCheckpoint,
               debugAlwaysVisible,

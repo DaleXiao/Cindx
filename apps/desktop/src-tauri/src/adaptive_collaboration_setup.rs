@@ -39,6 +39,9 @@ pub(super) fn prepare_adaptive_collaboration(
     let workflow_started_at_ms = current_time_millis();
     let conductor_model = config.model_for_conductor();
     let role_hints = collaboration_role_hints(config, models);
+    let validation_models = crate::agent_conductor_runtime::unique_configured_models(
+        &crate::workflow_routing_runtime::model_candidates_for_config(config),
+    );
     let effort = run_context
         .get("agent_effort")
         .cloned()
@@ -66,7 +69,7 @@ pub(super) fn prepare_adaptive_collaboration(
         prompt,
         &effort,
         &policy,
-        models,
+        &validation_models,
     )?;
     let checkpoint_resumable = loaded_checkpoint
         .as_ref()
@@ -92,8 +95,11 @@ pub(super) fn prepare_adaptive_collaboration(
     } else {
         workflow_prior_for_run(state, run_context, models, agent_budget)?
     };
-    let route_workflow_proposal =
-        route_workflow_proposal_from_context(run_context, checkpoint_loaded, models)?;
+    let route_workflow_proposal = route_workflow_proposal_from_context(
+        run_context,
+        checkpoint_loaded,
+        &validation_models,
+    )?;
     let strategy_genome = (!checkpoint_loaded)
         .then(|| run_context.get("prompt_genome"))
         .flatten()

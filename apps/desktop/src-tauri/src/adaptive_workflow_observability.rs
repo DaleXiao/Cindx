@@ -66,12 +66,7 @@ pub(super) fn record_adaptive_workflow_planned(
         })
         .collect::<Vec<_>>()
         .join(" | ");
-    let unique_models = workflow
-        .steps
-        .iter()
-        .map(|step| step.model.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
+    let unique_models = workflow_plan.physical_model_count();
     let workflow_ir = workflow_plan.to_json()?;
     {
         let mut store = state

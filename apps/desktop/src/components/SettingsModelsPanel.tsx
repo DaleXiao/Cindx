@@ -2,6 +2,10 @@ import { KeyRound, RefreshCw, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import type { Phase4State, ProviderConfigInput } from "../tauri";
 import {
+  applyFastModelToProfiles,
+  selectFastFallbackModel
+} from "../providerModelAllocation";
+import {
   isValidProviderBaseUrl,
   providerBaseUrl,
   providerCanUseConfiguredKey,
@@ -15,7 +19,7 @@ import { ProviderModelInput as ModelSelect } from "./ProviderModelInput";
 
 type SettingsModelsPanelProps = {
   canUseConfiguredKey: boolean;
-  collaborationModelCount: number;
+  modelProfileCount: number;
   handleLoadProviderModels: () => Promise<void>;
   handleReloadProviderState: () => Promise<unknown>;
   handlePromptEvolutionToggle: (enabled: boolean) => Promise<void>;
@@ -35,7 +39,7 @@ type SettingsModelsPanelProps = {
 
 export function SettingsModelsPanel({
   canUseConfiguredKey,
-  collaborationModelCount,
+  modelProfileCount,
   handleLoadProviderModels,
   handleReloadProviderState,
   handlePromptEvolutionToggle,
@@ -113,24 +117,7 @@ export function SettingsModelsPanel({
               refreshAnimationClass={refreshAnimationClass}
               setProviderDraft={setProviderDraft}
             />
-            <div className="role-grid provider-meta-grid">
-              <label>
-                <span>Default effort</span>
-                <select
-                  disabled={providerBusy}
-                  value={providerDraft.collaborationPolicy}
-                  onChange={(event) =>
-                    setProviderDraft({
-                      ...providerDraft,
-                      collaborationPolicy: event.target.value
-                    })
-                  }
-                >
-                  <option value="single">Cindx Fast</option>
-                  <option value="auto_router">Cindx Auto</option>
-                  <option value="best_of_n">Cindx Pro</option>
-                </select>
-              </label>
+            <div>
               <label>
                 <span>Context window</span>
                 <select
@@ -155,29 +142,66 @@ export function SettingsModelsPanel({
                 </select>
               </label>
             </div>
-            <ModelSelect
-              label={providerDraft.providerId === "azure_openai" ? "Default deployment" : "Default model"}
-              value={providerDraft.model}
-              options={providerModelOptions.chat}
-              disabled={providerBusy}
-              onChange={(model) =>
-                setProviderDraft({
-                  ...providerDraft,
-                  model,
-                  conductorModel: model,
-                  plannerModel: model,
-                  executorModel: model,
-                  reviewerModel: model,
-                  summarizerModel: model,
-                  contextWindowTokens:
-                    providerModelContextWindow(providerDraft.providerId, model) ??
-                    providerDraft.contextWindowTokens
-                })
-              }
-            />
-            <div className="role-grid provider-meta-grid">
+            <div className="provider-form provider-model-group">
+              <div>
+                <p className="settings-section-copy">
+                  <strong>Model profiles</strong>
+                  <br />
+                  Configuration slots used by runtime stages, not independent agents.
+                </p>
+              </div>
+              <div className="role-grid provider-meta-grid">
+                <ModelSelect
+                  label="Primary"
+                  description="Default for general execution and Owner delivery."
+                  value={providerDraft.executorModel}
+                  options={providerModelOptions.chat}
+                  disabled={providerBusy}
+                  onChange={(executorModel) =>
+                    setProviderDraft({ ...providerDraft, executorModel })
+                  }
+                />
+                <ModelSelect
+                  label="Reasoning"
+                  description="Reasoning-heavy execution and Specialist analysis."
+                  value={providerDraft.plannerModel}
+                  options={providerModelOptions.chat}
+                  disabled={providerBusy}
+                  onChange={(plannerModel) => setProviderDraft({ ...providerDraft, plannerModel })}
+                />
+                <ModelSelect
+                  label="Verifier"
+                  description="Independent verification when a distinct verifier is used."
+                  value={providerDraft.reviewerModel}
+                  options={providerModelOptions.chat}
+                  disabled={providerBusy}
+                  onChange={(reviewerModel) =>
+                    setProviderDraft({ ...providerDraft, reviewerModel })
+                  }
+                />
+                <ModelSelect
+                  label="Utility"
+                  description="Summaries and other non-decision work."
+                  value={providerDraft.summarizerModel}
+                  options={providerModelOptions.chat}
+                  disabled={providerBusy}
+                  onChange={(summarizerModel) =>
+                    setProviderDraft({ ...providerDraft, summarizerModel })
+                  }
+                />
+              </div>
+            </div>
+            <div className="provider-form provider-model-group">
+              <div>
+                <p className="settings-section-copy">
+                  <strong>Planning service override</strong>
+                  <br />
+                  Conductor plans work but does not own effects or final delivery.
+                </p>
+              </div>
               <ModelSelect
                 label="Conductor"
+                description="Dedicated model override for the planning service."
                 value={providerDraft.conductorModel}
                 options={providerModelOptions.chat}
                 disabled={providerBusy}
@@ -185,36 +209,45 @@ export function SettingsModelsPanel({
                   setProviderDraft({ ...providerDraft, conductorModel })
                 }
               />
+            </div>
+            <div className="provider-form provider-model-group">
+              <div>
+                <p className="settings-section-copy">
+                  <strong>Fast &amp; compatibility</strong>
+                  <br />
+                  Preferred by Cindx Fast and used as an Auto/Pro compatibility fallback.
+                </p>
+              </div>
               <ModelSelect
-                label="Planner"
-                value={providerDraft.plannerModel}
+                label={
+                  providerDraft.providerId === "azure_openai"
+                    ? "Fast deployment"
+                    : "Fast model"
+                }
+                description="Changing this fallback does not overwrite the profiles above."
+                value={providerDraft.model}
                 options={providerModelOptions.chat}
                 disabled={providerBusy}
-                onChange={(plannerModel) => setProviderDraft({ ...providerDraft, plannerModel })}
-              />
-              <ModelSelect
-                label="Executor"
-                value={providerDraft.executorModel}
-                options={providerModelOptions.chat}
-                disabled={providerBusy}
-                onChange={(executorModel) => setProviderDraft({ ...providerDraft, executorModel })}
-              />
-              <ModelSelect
-                label="Reviewer"
-                value={providerDraft.reviewerModel}
-                options={providerModelOptions.chat}
-                disabled={providerBusy}
-                onChange={(reviewerModel) => setProviderDraft({ ...providerDraft, reviewerModel })}
-              />
-              <ModelSelect
-                label="Summary"
-                value={providerDraft.summarizerModel}
-                options={providerModelOptions.chat}
-                disabled={providerBusy}
-                onChange={(summarizerModel) =>
-                  setProviderDraft({ ...providerDraft, summarizerModel })
+                onChange={(model) =>
+                  setProviderDraft(
+                    selectFastFallbackModel(
+                      providerDraft,
+                      model,
+                      providerModelContextWindow(providerDraft.providerId, model)
+                    )
+                  )
                 }
               />
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={providerBusy || !providerDraft.model.trim()}
+                onClick={() =>
+                  setProviderDraft(applyFastModelToProfiles(providerDraft))
+                }
+              >
+                Apply to all profiles
+              </button>
             </div>
             <ProviderModalityFields
               imageEndpointValidation={imageEndpointValidation}
@@ -240,8 +273,8 @@ export function SettingsModelsPanel({
                 <dd>{multimodalModel}</dd>
               </div>
               <div>
-                <dt>Team</dt>
-                <dd>{collaborationModelCount} unique models across 4 worker roles</dd>
+                <dt>Model allocation</dt>
+                <dd>{modelProfileCount} unique models across 4 profiles</dd>
               </div>
             </dl>
             <button

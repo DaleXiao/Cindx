@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.2.33`
+Current application version: `0.2.34`
 
 Last code-fact review: `2026-08-11`
 
@@ -50,9 +50,17 @@ Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is
 plan, evidence, act, verify, or finalize; and the model profile is Primary,
 Reasoning, Verifier, or Utility. The Conductor and background learning utilities
-are recorded as services, not Actors. Existing role, stage, model,
-configuration, and UI fields remain unchanged, so this projection does not
-change routing or model calls.
+are recorded as services, not Actors.
+
+Settings presents the persisted model allocation as configuration slots rather
+than permanent Agent roles. The compatibility model is preferred by Fast and
+remains an execution fallback; Primary and Reasoning are execution-eligible
+profiles; Verifier is reserved for the independent verification lane; Utility
+is limited to support work; and Conductor is a planning-service override.
+Changing the compatibility model does not silently overwrite those profiles;
+copying it to every profile is an explicit action. The legacy configuration and
+wire keys remain unchanged for saved-provider compatibility, and Actor and
+Stage attribution is still selected at each call site.
 
 ## Run Lifecycle
 
@@ -228,6 +236,6 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   the provider campaign surface is not fully isolated from desktop code.
 - Current evidence does not establish general Auto/Pro superiority, successful
   GEPA self-improvement, or Fugu Ultra parity.
-- The installed `0.2.33` validation build and published `v0.2.30` archive are
+- The installed `0.2.34` validation build and published `v0.2.30` archive are
   Apple Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution
   still needs the appropriate Apple signing and notarization path.

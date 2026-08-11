@@ -642,6 +642,15 @@ fn workflow_ir_round_trips_and_enforces_declared_budgets() {
         plan
     );
 
+    let mut distinct_sink = plan.clone();
+    distinct_sink.steps.last_mut().unwrap().model = "utility".to_string();
+    let mut sink_allowed_models = allowed_models.clone();
+    sink_allowed_models.push("utility".to_string());
+    assert_eq!(distinct_sink.physical_model_count(), 2);
+    distinct_sink
+        .validate(&sink_allowed_models)
+        .expect("a deterministic synthesis sink must not consume physical model capacity");
+
     let mut invalid = plan;
     invalid.budget.max_steps = 2;
     assert_eq!(
@@ -2556,7 +2565,7 @@ fn auto_router_selects_models_by_task_role() {
     );
 
     assert_eq!(RuleBasedRouter.route(&research).model, "planner-model");
-    assert_eq!(RuleBasedRouter.route(&high_stakes).model, "reviewer-model");
+    assert_eq!(RuleBasedRouter.route(&high_stakes).model, "planner-model");
 }
 
 #[test]

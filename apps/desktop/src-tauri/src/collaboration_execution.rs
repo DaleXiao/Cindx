@@ -117,12 +117,7 @@ pub(crate) fn collaboration_candidate_models(
 ) -> Vec<String> {
     let limit = candidates.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
     let mut models = Vec::new();
-    for role in [
-        ModelRole::Planner,
-        ModelRole::Executor,
-        ModelRole::Reviewer,
-        ModelRole::Summarizer,
-    ] {
+    for role in [ModelRole::Planner, ModelRole::Executor] {
         let model = config.model_for_role(&role);
         if !model.trim().is_empty() && !models.iter().any(|existing| existing == &model) {
             models.push(model);
@@ -203,45 +198,62 @@ fn collaboration_failure_completion(
     }
 }
 
-pub(crate) const fn model_profile_for_role(role: &ModelRole) -> AgentModelProfile {
-    match role {
-        ModelRole::Executor => AgentModelProfile::Primary,
-        ModelRole::Planner => AgentModelProfile::Reasoning,
-        ModelRole::Reviewer => AgentModelProfile::Verifier,
-        ModelRole::Summarizer | ModelRole::Embedder => AgentModelProfile::Utility,
-    }
-}
-
-pub(crate) const fn adaptive_step_attribution(
+pub(crate) fn adaptive_step_attribution(
+    config: &ProviderConfig,
     output_kind: &WorkflowOutputKind,
-    role: &ModelRole,
-) -> AgentModelAttribution {
-    match output_kind {
-        WorkflowOutputKind::Verification => AgentModelAttribution::actor(
-            AgentActor::IndependentVerifier,
-            AgentStage::Verify,
-            AgentModelProfile::Verifier,
-            AgentEffectAuthority::ReadOnly,
-        ),
-        WorkflowOutputKind::Synthesis => AgentModelAttribution::actor(
-            AgentActor::Specialist,
-            AgentStage::Plan,
-            model_profile_for_role(role),
-            AgentEffectAuthority::ReadOnly,
-        ),
-        WorkflowOutputKind::Analysis => AgentModelAttribution::actor(
-            AgentActor::Specialist,
-            AgentStage::Plan,
-            model_profile_for_role(role),
-            AgentEffectAuthority::ReadOnly,
-        ),
-        WorkflowOutputKind::Evidence => AgentModelAttribution::actor(
-            AgentActor::Specialist,
-            AgentStage::Evidence,
-            model_profile_for_role(role),
-            AgentEffectAuthority::ReadOnly,
-        ),
-    }
+    model: &str,
+) -> Result<AgentModelAttribution, String> {
+    let configured_for = |role| {
+        !model.trim().is_empty()
+            && config.model_for_role(role).trim() == model.trim()
+    };
+    let attribution = match output_kind {
+        WorkflowOutputKind::Verification if configured_for(&ModelRole::Reviewer) => {
+            AgentModelAttribution::actor(
+                AgentActor::IndependentVerifier,
+                AgentStage::Verify,
+                AgentModelProfile::Verifier,
+                AgentEffectAuthority::ReadOnly,
+            )
+        }
+        WorkflowOutputKind::Analysis | WorkflowOutputKind::Evidence => {
+            let planner = configured_for(&ModelRole::Planner);
+            let executor = configured_for(&ModelRole::Executor);
+            let profile = match (planner, executor, output_kind) {
+                (true, true, WorkflowOutputKind::Analysis) | (true, false, _) => {
+                    AgentModelProfile::Reasoning
+                }
+                (true, true, WorkflowOutputKind::Evidence) | (false, true, _) => {
+                    AgentModelProfile::Primary
+                }
+                _ => {
+                    return Err(format!(
+                        "adaptive {:?} step model {model} has no configured production profile",
+                        output_kind
+                    ));
+                }
+            };
+            AgentModelAttribution::actor(
+                AgentActor::Specialist,
+                if *output_kind == WorkflowOutputKind::Analysis {
+                    AgentStage::Plan
+                } else {
+                    AgentStage::Evidence
+                },
+                profile,
+                AgentEffectAuthority::ReadOnly,
+            )
+        }
+        WorkflowOutputKind::Synthesis => {
+            return Err("deterministic synthesis sink has no model attribution".to_string());
+        }
+        WorkflowOutputKind::Verification => {
+            return Err(format!(
+                "adaptive verification step model {model} has no configured Verifier profile"
+            ));
+        }
+    };
+    Ok(attribution)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -813,39 +825,54 @@ mod protocol_tests {
     }
 
     #[test]
-    fn adaptive_step_attribution_uses_structure_not_role_labels() {
-        for (kind, role, actor, stage, profile) in [
+    fn adaptive_step_attribution_uses_configured_profiles_and_excludes_synthesis() {
+        let config = ProviderConfig {
+            planner_model: "reasoning".to_string(),
+            executor_model: "primary".to_string(),
+            reviewer_model: "verifier".to_string(),
+            summarizer_model: "utility".to_string(),
+            ..ProviderConfig::default()
+        };
+        for (kind, model, actor, stage, profile) in [
             (
                 WorkflowOutputKind::Analysis,
-                ModelRole::Planner,
+                "reasoning",
                 "specialist",
                 "plan",
                 "reasoning",
             ),
             (
                 WorkflowOutputKind::Evidence,
-                ModelRole::Executor,
+                "reasoning",
+                "specialist",
+                "evidence",
+                "reasoning",
+            ),
+            (
+                WorkflowOutputKind::Analysis,
+                "primary",
+                "specialist",
+                "plan",
+                "primary",
+            ),
+            (
+                WorkflowOutputKind::Evidence,
+                "primary",
                 "specialist",
                 "evidence",
                 "primary",
             ),
             (
-                WorkflowOutputKind::Synthesis,
-                ModelRole::Summarizer,
-                "specialist",
-                "plan",
-                "utility",
-            ),
-            (
                 WorkflowOutputKind::Verification,
-                ModelRole::Executor,
+                "verifier",
                 "independent_verifier",
                 "verify",
                 "verifier",
             ),
         ] {
             let mut metadata = Metadata::new();
-            adaptive_step_attribution(&kind, &role)
+            adaptive_step_attribution(&config, &kind, model)
+                .unwrap()
                 .insert_into(&mut metadata, "shared-model", "legacy-label", "worker")
                 .unwrap();
             assert_eq!(metadata.get("agent_actor").map(String::as_str), Some(actor));
@@ -855,6 +882,39 @@ mod protocol_tests {
                 Some(profile)
             );
         }
+
+        let shared = ProviderConfig {
+            planner_model: "shared".to_string(),
+            executor_model: "shared".to_string(),
+            ..config.clone()
+        };
+        for (kind, expected) in [
+            (WorkflowOutputKind::Analysis, "reasoning"),
+            (WorkflowOutputKind::Evidence, "primary"),
+        ] {
+            let mut metadata = Metadata::new();
+            adaptive_step_attribution(&shared, &kind, "shared")
+                .unwrap()
+                .insert_into(&mut metadata, "shared", "ignored", "worker")
+                .unwrap();
+            assert_eq!(
+                metadata.get("agent_model_profile").map(String::as_str),
+                Some(expected)
+            );
+        }
+
+        assert!(adaptive_step_attribution(
+            &config,
+            &WorkflowOutputKind::Synthesis,
+            "utility"
+        )
+        .is_err());
+        assert!(adaptive_step_attribution(
+            &config,
+            &WorkflowOutputKind::Evidence,
+            "verifier"
+        )
+        .is_err());
     }
 
     fn response_with_tool_call() -> model_provider::ModelResponse {

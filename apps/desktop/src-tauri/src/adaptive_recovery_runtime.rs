@@ -3,6 +3,30 @@ use super::*;
 pub(crate) const ADAPTIVE_MODEL_DISTINCTNESS_ERROR_PREFIX: &str =
     "adaptive model distinctness blocked";
 
+pub(crate) fn adaptive_dispatch_models_for_output(
+    config: &ProviderConfig,
+    output_kind: &WorkflowOutputKind,
+    models: &[String],
+) -> Vec<String> {
+    if *output_kind == WorkflowOutputKind::Synthesis {
+        return Vec::new();
+    }
+    let candidates = model_candidates_for_config(config);
+    models
+        .iter()
+        .filter(|model| {
+            orchestrator::validate_workflow_step_model_profile(
+                "runtime-dispatch",
+                model,
+                output_kind,
+                &candidates,
+            )
+            .is_ok()
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn adaptive_recovery_model(
     step_id: &str,
     failed_model: &str,
@@ -222,10 +246,7 @@ pub(crate) fn recover_adaptive_worker(
         &adaptive_model_role(&spec.role, &spec.output_kind),
         replacement_model,
         &recovery_request_id,
-        adaptive_step_attribution(
-            &spec.output_kind,
-            &adaptive_model_role(&spec.role, &spec.output_kind),
-        ),
+        adaptive_step_attribution(config, &spec.output_kind, replacement_model)?,
         &recovery_metadata,
     )?;
     let recovered = complete_collaboration_worker_with_tools(
@@ -261,10 +282,7 @@ pub(crate) fn recover_adaptive_worker(
         replacement_model,
         &recovery_request_id,
         &recovered,
-        adaptive_step_attribution(
-            &spec.output_kind,
-            &adaptive_model_role(&spec.role, &spec.output_kind),
-        ),
+        adaptive_step_attribution(config, &spec.output_kind, replacement_model)?,
         &recovery_metadata,
     )?;
     Ok(recovered)
@@ -318,6 +336,60 @@ mod tests {
             max_tool_calls: 0,
             max_output_tokens: 1_024,
         }
+    }
+
+    #[test]
+    fn adaptive_dispatch_catalog_enforces_model_profiles() {
+        let config = ProviderConfig {
+            model: "default".to_string(),
+            planner_model: "planner".to_string(),
+            executor_model: "shared".to_string(),
+            reviewer_model: "reviewer".to_string(),
+            summarizer_model: "utility".to_string(),
+            ..ProviderConfig::default()
+        };
+        let models = vec![
+            "planner".to_string(),
+            "shared".to_string(),
+            "reviewer".to_string(),
+            "utility".to_string(),
+        ];
+
+        assert_eq!(
+            adaptive_dispatch_models_for_output(
+                &config,
+                &WorkflowOutputKind::Evidence,
+                &models
+            ),
+            vec!["planner".to_string(), "shared".to_string()]
+        );
+        assert_eq!(
+            adaptive_dispatch_models_for_output(
+                &config,
+                &WorkflowOutputKind::Verification,
+                &models
+            ),
+            vec!["reviewer".to_string()]
+        );
+        assert!(adaptive_dispatch_models_for_output(
+            &config,
+            &WorkflowOutputKind::Synthesis,
+            &models
+        )
+        .is_empty());
+
+        let shared_verifier = ProviderConfig {
+            reviewer_model: "shared".to_string(),
+            ..config
+        };
+        assert_eq!(
+            adaptive_dispatch_models_for_output(
+                &shared_verifier,
+                &WorkflowOutputKind::Verification,
+                &models
+            ),
+            vec!["shared".to_string()]
+        );
     }
 
     #[test]

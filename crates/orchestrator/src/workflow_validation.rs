@@ -22,6 +22,21 @@ pub fn validate_adaptive_workflow(
     workflow: &AdaptiveWorkflow,
     allowed_models: &[String],
 ) -> Result<(), String> {
+    validate_adaptive_workflow_inner(workflow, allowed_models, true)
+}
+
+pub(crate) fn validate_typed_workflow_structure(
+    workflow: &AdaptiveWorkflow,
+    allowed_models: &[String],
+) -> Result<(), String> {
+    validate_adaptive_workflow_inner(workflow, allowed_models, false)
+}
+
+fn validate_adaptive_workflow_inner(
+    workflow: &AdaptiveWorkflow,
+    allowed_models: &[String],
+    enforce_legacy_model_budget: bool,
+) -> Result<(), String> {
     if workflow.steps.is_empty() {
         return Err("adaptive workflow must contain at least one step".to_string());
     }
@@ -84,7 +99,7 @@ pub fn validate_adaptive_workflow(
         }
         seen_ids.insert(step.id.as_str());
     }
-    if selected_models.len() > MAX_ADAPTIVE_WORKFLOW_AGENTS {
+    if enforce_legacy_model_budget && selected_models.len() > MAX_ADAPTIVE_WORKFLOW_AGENTS {
         return Err(format!(
             "adaptive workflow exceeds the {MAX_ADAPTIVE_WORKFLOW_AGENTS}-agent budget"
         ));
