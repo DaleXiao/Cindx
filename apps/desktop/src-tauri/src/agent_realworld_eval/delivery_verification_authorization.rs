@@ -18,25 +18,27 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 pub(super) const DELIVERY_AUTHORIZATION_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-authorization.v2";
+    "cindx.agent-eval.delivery-verification-authorization.v3";
 pub(super) const DELIVERY_CONSUMED_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-authorization-consumed.v2";
+    "cindx.agent-eval.delivery-verification-authorization-consumed.v3";
 pub(super) const DELIVERY_TOMBSTONE_FILE_NAME: &str =
     "delivery-verification-authorization-consumed.json";
 pub(super) const DELIVERY_AUTHORIZATION_TTL_MS: u64 = 15 * 60 * 1_000;
 
-const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v2";
+const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v3";
 const AUTHORIZATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-authorization.v2\0";
+    b"cindx.agent-eval.delivery-verification-authorization.v3\0";
 const TOMBSTONE_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-authorization-consumed.v2\0";
-const PREFLIGHT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v2\0";
-const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v1\0";
+    b"cindx.agent-eval.delivery-verification-authorization-consumed.v3\0";
+const PREFLIGHT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v3\0";
+const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v3\0";
 const CREDENTIAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-credential-fingerprint.v2\0";
+    b"cindx.agent-eval.delivery-verification-credential-fingerprint.v3\0";
 const MAX_PRIVATE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const CASE_COUNT: usize = 32;
-const CONSUMED_AUTHORITY_FILE_PREFIX: &str = ".cindx-delivery-verification-v2-consumed-";
+const CONSUMED_AUTHORITY_FILE_PREFIX_V1: &str = ".cindx-delivery-verification-v1-consumed-";
+const CONSUMED_AUTHORITY_FILE_PREFIX_V2: &str = ".cindx-delivery-verification-v2-consumed-";
+const CONSUMED_AUTHORITY_FILE_PREFIX: &str = ".cindx-delivery-verification-v3-consumed-";
 
 pub(super) struct DeliveryVerificationAuthorizationIssue<'a, 'protocol> {
     pub(super) protocol: &'a ValidatedProtocol<'protocol>,
@@ -81,6 +83,8 @@ pub(super) struct DeliveryVerificationAuthorizationCaseV1 {
     pub(super) stratum: String,
     pub(super) case_sha256: String,
     pub(super) model_input_sha256: String,
+    pub(super) seeded_candidate_sha256: String,
+    pub(super) seeded_candidate_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +107,10 @@ pub(super) struct DeliveryVerificationAuthorizationV1 {
     pub(super) manifest_sha256: String,
     pub(super) suite_sha256: String,
     pub(super) cases_sha256: String,
+    pub(super) case_order_sha256: String,
+    pub(super) seeded_candidates_sha256: String,
+    pub(super) model_inputs_sha256: String,
+    pub(super) output_contracts_sha256: String,
     pub(super) hidden_oracle_sha256: String,
     pub(super) provider: DeliveryVerificationProviderBindingReceipt,
     pub(super) budget: ProtocolBudget,
@@ -234,6 +242,11 @@ pub(super) fn consume_delivery_verification_authorization_once(
     if validated.consumed_authority_path != consumed_authority_path(&validated.output_root)? {
         return Err("delivery consumed authority marker path is invalid".into());
     }
+    for authority in consumed_authority_guard_paths(&validated.output_root)? {
+        if path_entry_exists(&authority, "delivery consumed authority marker")? {
+            return Err("delivery output authority has already been consumed".into());
+        }
+    }
     let mut tombstone = ConsumedDeliveryVerificationAuthorizationV1 {
         schema: DELIVERY_CONSUMED_SCHEMA.into(),
         authorization: validated.authorization.clone(),
@@ -287,8 +300,8 @@ impl DeliveryVerificationAuthorizationV1 {
             || self.provider.owner_model_sha256 == self.provider.verifier_model_sha256
             || !self.provider.credential_present
             || self.budget.transport_retries != 0
-            || self.budget.max_logical_model_calls_total != 128
-            || self.budget.max_physical_model_attempts_total != 128
+            || self.budget.max_logical_model_calls_total != 96
+            || self.budget.max_physical_model_attempts_total != 96
         {
             return Err("delivery authorization shape is invalid".into());
         }
@@ -303,6 +316,10 @@ impl DeliveryVerificationAuthorizationV1 {
             ("manifest", &self.manifest_sha256),
             ("suite", &self.suite_sha256),
             ("cases", &self.cases_sha256),
+            ("case order", &self.case_order_sha256),
+            ("seeded candidates", &self.seeded_candidates_sha256),
+            ("model inputs", &self.model_inputs_sha256),
+            ("output contracts", &self.output_contracts_sha256),
             ("hidden oracle", &self.hidden_oracle_sha256),
             ("budget", &self.budget_sha256),
             ("output root", &self.output_root_sha256),
@@ -323,6 +340,10 @@ impl DeliveryVerificationAuthorizationV1 {
             }
             require_sha256(&case.case_sha256, "delivery case")?;
             require_sha256(&case.model_input_sha256, "delivery model input")?;
+            require_sha256(&case.seeded_candidate_sha256, "delivery seeded candidate")?;
+            if case.seeded_candidate_bytes == 0 {
+                return Err("delivery authorization seeded candidate is empty".into());
+            }
             if !matches!(case.split.as_str(), "calibration" | "holdout")
                 || !matches!(
                     case.stratum.as_str(),
@@ -409,6 +430,8 @@ fn build_authorization(
                 stratum: camel_debug_to_snake(&format!("{:?}", case.stratum())),
                 case_sha256: case.case_sha256().to_string(),
                 model_input_sha256: sha256_hex(&case.model_input_bytes()?),
+                seeded_candidate_sha256: case.seeded_candidate_sha256(),
+                seeded_candidate_bytes: case.seeded_candidate_bytes(),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -430,6 +453,10 @@ fn build_authorization(
         manifest_sha256: preflight.manifest_sha256.clone(),
         suite_sha256: preflight.suite_sha256.clone(),
         cases_sha256: preflight.cases_sha256.clone(),
+        case_order_sha256: preflight.case_order_sha256.clone(),
+        seeded_candidates_sha256: preflight.seeded_candidates_sha256.clone(),
+        model_inputs_sha256: preflight.model_inputs_sha256.clone(),
+        output_contracts_sha256: preflight.output_contracts_sha256.clone(),
         hidden_oracle_sha256: preflight.hidden_oracle_sha256.clone(),
         provider: preflight.provider.clone(),
         budget: protocol.budget().clone(),
@@ -459,6 +486,10 @@ fn validate_frozen_preflight(
         manifest_sha256: protocol.manifest_sha256().to_string(),
         suite_sha256: protocol.suite_sha256().to_string(),
         case_sha256: protocol.case_sha256s().to_vec(),
+        case_order_sha256: protocol.case_order_sha256().to_string(),
+        seeded_candidates_sha256: protocol.seeded_candidates_sha256().to_string(),
+        model_inputs_sha256: protocol.model_inputs_sha256().to_string(),
+        output_contracts_sha256: protocol.output_contracts_sha256().to_string(),
         budget_sha256: protocol.budget_sha256().to_string(),
         hidden_oracle_sha256: protocol.hidden_oracle_sha256().to_string(),
         execution_authorized: protocol.execution_authorized(),
@@ -473,6 +504,10 @@ fn validate_frozen_preflight(
         || preflight.suite_sha256 != snapshot.suite_sha256
         || preflight.case_sha256 != snapshot.case_sha256
         || preflight.cases_sha256 != cases_digest(&snapshot.case_sha256)?
+        || preflight.case_order_sha256 != snapshot.case_order_sha256
+        || preflight.seeded_candidates_sha256 != snapshot.seeded_candidates_sha256
+        || preflight.model_inputs_sha256 != snapshot.model_inputs_sha256
+        || preflight.output_contracts_sha256 != snapshot.output_contracts_sha256
         || preflight.budget_sha256 != snapshot.budget_sha256
         || preflight.hidden_oracle_sha256 != snapshot.hidden_oracle_sha256
         || preflight.runner_binary != DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME
@@ -552,14 +587,18 @@ fn validate_issue_paths(
         return Err("delivery output root must be new".into());
     }
     let consumed_authority = consumed_authority_path(&output_root)?;
-    if path_entry_exists(&consumed_authority, "delivery consumed authority marker")? {
-        return Err("delivery output authority has already been consumed".into());
+    let consumed_authority_guards = consumed_authority_guard_paths(&output_root)?;
+    for authority in &consumed_authority_guards {
+        if path_entry_exists(authority, "delivery consumed authority marker")? {
+            return Err("delivery output authority has already been consumed".into());
+        }
     }
     if preflight == authorization
         || preflight == output_root
         || authorization == output_root
-        || preflight == consumed_authority
-        || authorization == consumed_authority
+        || consumed_authority_guards
+            .iter()
+            .any(|authority| preflight == *authority || authorization == *authority)
         || preflight.starts_with(&output_root)
         || authorization.starts_with(&output_root)
     {
@@ -575,13 +614,25 @@ fn validate_issue_paths(
 }
 
 pub(super) fn consumed_authority_path(output_root: &Path) -> Result<PathBuf, String> {
+    consumed_authority_path_with_prefix(output_root, CONSUMED_AUTHORITY_FILE_PREFIX)
+}
+
+fn consumed_authority_guard_paths(output_root: &Path) -> Result<[PathBuf; 3], String> {
+    Ok([
+        consumed_authority_path_with_prefix(output_root, CONSUMED_AUTHORITY_FILE_PREFIX_V1)?,
+        consumed_authority_path_with_prefix(output_root, CONSUMED_AUTHORITY_FILE_PREFIX_V2)?,
+        consumed_authority_path(output_root)?,
+    ])
+}
+
+fn consumed_authority_path_with_prefix(
+    output_root: &Path,
+    prefix: &str,
+) -> Result<PathBuf, String> {
     let parent = output_root
         .parent()
         .ok_or_else(|| "delivery output root has no parent".to_string())?;
-    Ok(parent.join(format!(
-        "{CONSUMED_AUTHORITY_FILE_PREFIX}{}.json",
-        path_sha256(output_root)
-    )))
+    Ok(parent.join(format!("{prefix}{}.json", path_sha256(output_root))))
 }
 
 pub(super) fn read_consumed_delivery_authorization(

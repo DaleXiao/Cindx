@@ -169,7 +169,9 @@ pub use agent_realworld_eval::{
     run_delivery_verification_authorize, run_delivery_verification_execute,
     run_delivery_verification_preflight, run_delivery_verification_v2_authorize,
     run_delivery_verification_v2_execute, run_delivery_verification_v2_preflight,
-    run_direct_finalizer_gepa_eval, run_workflow_gepa_candidate_probe, run_workflow_gepa_eval,
+    run_delivery_verification_v3_authorize, run_delivery_verification_v3_execute,
+    run_delivery_verification_v3_preflight, run_direct_finalizer_gepa_eval,
+    run_workflow_gepa_candidate_probe, run_workflow_gepa_eval,
 };
 use agent_recovery_service::*;
 use agent_run_engine::continue_agent_loop;

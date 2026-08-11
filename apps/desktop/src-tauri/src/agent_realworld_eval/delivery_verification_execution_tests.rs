@@ -1,3 +1,4 @@
+use super::delivery_verification::DeliveryVerificationFindingCounts;
 use super::delivery_verification_authorization::*;
 use super::delivery_verification_execution_journal::*;
 use super::delivery_verification_preflight::{
@@ -34,10 +35,9 @@ const CONSUMED_AT_MS: u64 = 20_000;
 const CAMPAIGN_AT_MS: u64 = 30_000;
 const RUNNER_BYTES: &[u8] = b"provider-free exact delivery execute fixture";
 #[cfg(target_os = "macos")]
-const RUNNER_SWAP_CHILD_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_RUNNER_SWAP_TEST";
+const RUNNER_SWAP_CHILD_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_RUNNER_SWAP_TEST";
 
-const STAGES: [DeliveryVerificationCallStageV1; 4] = [
-    DeliveryVerificationCallStageV1::OwnerDraft,
+const STAGES: [DeliveryVerificationCallStageV1; 3] = [
     DeliveryVerificationCallStageV1::VerifierInitial,
     DeliveryVerificationCallStageV1::OwnerRepair,
     DeliveryVerificationCallStageV1::VerifierRecheck,
@@ -296,8 +296,7 @@ fn reservation_input(
     stage: DeliveryVerificationCallStageV1,
 ) -> DeliveryVerificationCallReservationInputV1 {
     let (role, configured_model_sha256, max_output_tokens) = match stage {
-        DeliveryVerificationCallStageV1::OwnerDraft
-        | DeliveryVerificationCallStageV1::OwnerRepair => (
+        DeliveryVerificationCallStageV1::OwnerRepair => (
             ModelRole::Executor,
             authorization.provider.owner_model_sha256.clone(),
             authorization.budget.max_owner_output_tokens,
@@ -378,37 +377,93 @@ fn complete_stage(
         .expect("completed call should retain its response artifact")
 }
 
-fn complete_case_input(
+fn unchanged_case_input(
+    authorization: &DeliveryVerificationAuthorizationV1,
     case_ordinal: usize,
-    owner: &DeliveryVerificationResponseArtifactV1,
-    treatment: &DeliveryVerificationResponseArtifactV1,
     completed_at_ms: u64,
 ) -> DeliveryVerificationCaseTerminalInputV1 {
+    let binding = &authorization.cases[case_ordinal - 1];
     DeliveryVerificationCaseTerminalInputV1 {
         case_ordinal,
         status: DeliveryVerificationCaseTerminalStatusV1::Complete,
         control_passed: Some(false),
-        treatment_passed: Some(true),
-        owner_draft_sha256: Some(owner.sha256.clone()),
-        owner_draft_bytes: Some(owner.bytes),
-        control_output_sha256: Some(owner.sha256.clone()),
-        treatment_output_sha256: Some(treatment.sha256.clone()),
+        treatment_passed: Some(false),
+        seeded_candidate_sha256: Some(binding.seeded_candidate_sha256.clone()),
+        seeded_candidate_bytes: Some(binding.seeded_candidate_bytes),
+        control_output_sha256: Some(binding.seeded_candidate_sha256.clone()),
+        treatment_output_sha256: Some(binding.seeded_candidate_sha256.clone()),
+        initial_verifier_decision: Some("passed".into()),
+        initial_finding_counts: DeliveryVerificationFindingCounts::default(),
+        repair_activated: false,
+        recheck_decision: None,
+        recheck_finding_counts: DeliveryVerificationFindingCounts::default(),
+        treatment_disposition: Some("passed_unchanged".into()),
+        failure_stage: None,
+        failure_code: None,
+        outcome_reason: "verifier_passed_unchanged".into(),
         observation_sha256: digest(format!("observation-{case_ordinal}")),
         completed_at_ms,
     }
 }
 
-fn terminal_complete_case(
-    journal: &mut DeliveryVerificationExecutionJournal,
+fn repaired_case_input(
+    authorization: &DeliveryVerificationAuthorizationV1,
     case_ordinal: usize,
-    owner: &DeliveryVerificationResponseArtifactV1,
+    treatment_sha256: String,
+    completed_at_ms: u64,
+) -> DeliveryVerificationCaseTerminalInputV1 {
+    let binding = &authorization.cases[case_ordinal - 1];
+    DeliveryVerificationCaseTerminalInputV1 {
+        case_ordinal,
+        status: DeliveryVerificationCaseTerminalStatusV1::Complete,
+        control_passed: Some(false),
+        treatment_passed: Some(true),
+        seeded_candidate_sha256: Some(binding.seeded_candidate_sha256.clone()),
+        seeded_candidate_bytes: Some(binding.seeded_candidate_bytes),
+        control_output_sha256: Some(binding.seeded_candidate_sha256.clone()),
+        treatment_output_sha256: Some(treatment_sha256),
+        initial_verifier_decision: Some("needs_revision".into()),
+        initial_finding_counts: DeliveryVerificationFindingCounts {
+            unsupported_claim: 1,
+            ..DeliveryVerificationFindingCounts::default()
+        },
+        repair_activated: true,
+        recheck_decision: Some("passed".into()),
+        recheck_finding_counts: DeliveryVerificationFindingCounts::default(),
+        treatment_disposition: Some("passed_after_repair".into()),
+        failure_stage: None,
+        failure_code: None,
+        outcome_reason: "repair_accepted".into(),
+        observation_sha256: digest(format!("observation-{case_ordinal}")),
+        completed_at_ms,
+    }
+}
+
+fn terminal_unchanged_case(
+    journal: &mut DeliveryVerificationExecutionJournal,
+    authorization: &DeliveryVerificationAuthorizationV1,
+    case_ordinal: usize,
+) {
+    journal
+        .record_case_terminal(unchanged_case_input(
+            authorization,
+            case_ordinal,
+            CAMPAIGN_AT_MS + 1_000 + case_ordinal as u64,
+        ))
+        .unwrap();
+}
+
+fn terminal_repaired_case(
+    journal: &mut DeliveryVerificationExecutionJournal,
+    authorization: &DeliveryVerificationAuthorizationV1,
+    case_ordinal: usize,
     treatment: &DeliveryVerificationResponseArtifactV1,
 ) {
     journal
-        .record_case_terminal(complete_case_input(
+        .record_case_terminal(repaired_case_input(
+            authorization,
             case_ordinal,
-            owner,
-            treatment,
+            treatment.sha256.clone(),
             CAMPAIGN_AT_MS + 1_000 + case_ordinal as u64,
         ))
         .unwrap();
@@ -416,18 +471,29 @@ fn terminal_complete_case(
 
 fn terminal_structural_case(
     journal: &mut DeliveryVerificationExecutionJournal,
+    authorization: &DeliveryVerificationAuthorizationV1,
     case_ordinal: usize,
 ) {
+    let binding = &authorization.cases[case_ordinal - 1];
     journal
         .record_case_terminal(DeliveryVerificationCaseTerminalInputV1 {
             case_ordinal,
             status: DeliveryVerificationCaseTerminalStatusV1::StructuralFailure,
             control_passed: None,
             treatment_passed: None,
-            owner_draft_sha256: None,
-            owner_draft_bytes: None,
-            control_output_sha256: None,
+            seeded_candidate_sha256: Some(binding.seeded_candidate_sha256.clone()),
+            seeded_candidate_bytes: Some(binding.seeded_candidate_bytes),
+            control_output_sha256: Some(binding.seeded_candidate_sha256.clone()),
             treatment_output_sha256: None,
+            initial_verifier_decision: None,
+            initial_finding_counts: DeliveryVerificationFindingCounts::default(),
+            repair_activated: false,
+            recheck_decision: None,
+            recheck_finding_counts: DeliveryVerificationFindingCounts::default(),
+            treatment_disposition: None,
+            failure_stage: None,
+            failure_code: None,
+            outcome_reason: "structural_failure".into(),
             observation_sha256: digest(format!("structural-observation-{case_ordinal}")),
             completed_at_ms: CAMPAIGN_AT_MS + 1_000 + case_ordinal as u64,
         })
@@ -456,6 +522,32 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
         fixture.authorization.validate_static().unwrap();
         assert_eq!(fixture.authorization.cases.len(), 32);
         assert_eq!(fixture.authorization.protocol_id, protocol.protocol_id());
+        assert_eq!(
+            fixture.authorization.case_order_sha256,
+            protocol.case_order_sha256()
+        );
+        assert_eq!(
+            fixture.authorization.seeded_candidates_sha256,
+            protocol.seeded_candidates_sha256()
+        );
+        assert_eq!(
+            fixture.authorization.model_inputs_sha256,
+            protocol.model_inputs_sha256()
+        );
+        assert_eq!(
+            fixture.authorization.output_contracts_sha256,
+            protocol.output_contracts_sha256()
+        );
+        for (binding, case) in fixture.authorization.cases.iter().zip(protocol.cases()) {
+            assert_eq!(
+                binding.seeded_candidate_sha256,
+                case.seeded_candidate_sha256()
+            );
+            assert_eq!(
+                binding.seeded_candidate_bytes,
+                case.seeded_candidate_bytes()
+            );
+        }
         assert_eq!(fixture.authorization.runner_sha256, digest(RUNNER_BYTES));
         assert_eq!(
             fixture.authorization.runner_bytes,
@@ -480,22 +572,29 @@ fn agent_delivery_verification_execution_contract_authorization_binds_exact_froz
         }
         assert!(read_current_delivery_execute().is_err());
 
-        let mut consumed_v1 = fixture.authorization.clone();
-        consumed_v1.protocol_id =
-            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID
-                .into();
-        consumed_v1.authorization_sha256 = authorization_digest(&consumed_v1).unwrap();
-        assert!(consumed_v1.validate_static().is_err());
+        for consumed_protocol_id in [
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
+        ] {
+            let mut consumed = fixture.authorization.clone();
+            consumed.protocol_id = consumed_protocol_id.into();
+            consumed.authorization_sha256 = authorization_digest(&consumed).unwrap();
+            assert!(consumed.validate_static().is_err());
+        }
 
-        let (_, mut tombstone, _) = new_journal(protocol, &fixture);
-        tombstone.authorization.protocol_id =
-            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID
-                .into();
-        tombstone.authorization.authorization_sha256 =
-            authorization_digest(&tombstone.authorization).unwrap();
-        tombstone.authorization_sha256 = tombstone.authorization.authorization_sha256.clone();
-        tombstone.tombstone_sha256 = tombstone_digest(&tombstone).unwrap();
-        assert!(tombstone.validate_for(&tombstone.authorization).is_err());
+        let (_, tombstone, _) = new_journal(protocol, &fixture);
+        for consumed_protocol_id in [
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
+            super::delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
+        ] {
+            let mut consumed = tombstone.clone();
+            consumed.authorization.protocol_id = consumed_protocol_id.into();
+            consumed.authorization.authorization_sha256 =
+                authorization_digest(&consumed.authorization).unwrap();
+            consumed.authorization_sha256 = consumed.authorization.authorization_sha256.clone();
+            consumed.tombstone_sha256 = tombstone_digest(&consumed).unwrap();
+            assert!(consumed.validate_for(&consumed.authorization).is_err());
+        }
     });
 }
 
@@ -823,7 +922,7 @@ fn agent_delivery_verification_execution_contract_call_reservation_charges_befor
         let value = journal_json(&fixture.output_root);
         assert_eq!(
             value["schema"],
-            "cindx.agent-eval.delivery-verification-execution-journal.v2"
+            "cindx.agent-eval.delivery-verification-execution-journal.v3"
         );
         assert_eq!(value["charged"]["physical_model_attempts"], 1);
         assert_eq!(value["cases"][0]["calls"][0]["state"]["state"], "reserved");
@@ -852,7 +951,7 @@ fn agent_delivery_verification_execution_contract_call_reservation_rejects_wrong
         journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
 
         let mut wrong = reservation_input(&validated.authorization, 1, STAGES[0]);
-        wrong.role = ModelRole::Reviewer;
+        wrong.role = ModelRole::Executor;
         assert!(journal.reserve_call(wrong).is_err());
         let mut wrong = reservation_input(&validated.authorization, 1, STAGES[0]);
         wrong.configured_model_sha256 = digest("wrong-model");
@@ -1033,62 +1132,73 @@ fn agent_delivery_verification_execution_contract_initial_pass_closes_optional_c
         let (validated, _, mut journal) = new_journal(protocol, &fixture);
         journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
         journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
-        let owner = complete_stage(&mut journal, &validated.authorization, 1, STAGES[0], 2);
-        complete_stage(&mut journal, &validated.authorization, 1, STAGES[1], 2);
-        let mut arbitrary = complete_case_input(1, &owner, &owner, CAMPAIGN_AT_MS + 1_001);
-        arbitrary.owner_draft_sha256 = Some(digest("arbitrary owner digest"));
-        arbitrary.control_output_sha256 = arbitrary.owner_draft_sha256.clone();
+        complete_stage(&mut journal, &validated.authorization, 1, STAGES[0], 2);
+        let mut arbitrary =
+            unchanged_case_input(&validated.authorization, 1, CAMPAIGN_AT_MS + 1_001);
+        arbitrary.seeded_candidate_sha256 = Some(digest("arbitrary seeded candidate digest"));
+        arbitrary.control_output_sha256 = arbitrary.seeded_candidate_sha256.clone();
         assert!(journal.record_case_terminal(arbitrary).is_err());
-        let late = complete_case_input(
+        let late = unchanged_case_input(
+            &validated.authorization,
             1,
-            &owner,
-            &owner,
             CAMPAIGN_AT_MS + validated.authorization.budget.campaign_timeout_ms + 1,
         );
         assert!(journal.record_case_terminal(late).is_err());
-        terminal_complete_case(&mut journal, 1, &owner, &owner);
+        terminal_unchanged_case(&mut journal, &validated.authorization, 1);
         let value = journal_json(&fixture.output_root);
+        assert_eq!(
+            value["cases"][0]["calls"][1]["state"]["state"],
+            "not_required"
+        );
         assert_eq!(
             value["cases"][0]["calls"][2]["state"]["state"],
             "not_required"
         );
         assert_eq!(
-            value["cases"][0]["calls"][3]["state"]["state"],
-            "not_required"
-        );
-        assert_eq!(
             value["cases"][0]["state"]["receipt"]["resources"]["terminal_model_calls"],
-            2
+            1
         );
-        assert_eq!(journal.observed().total_tokens, 4);
+        assert_eq!(journal.observed().total_tokens, 2);
     });
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_repair_path_records_four_distinct_calls() {
+fn agent_delivery_verification_execution_contract_repair_path_records_three_distinct_calls() {
     with_fixture(|protocol, fixture| {
         let (validated, _, mut journal) = new_journal(protocol, &fixture);
         journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
         journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
-        let owner = complete_stage(&mut journal, &validated.authorization, 1, STAGES[0], 2);
-        complete_stage(&mut journal, &validated.authorization, 1, STAGES[1], 2);
-        let repair = complete_stage(&mut journal, &validated.authorization, 1, STAGES[2], 2);
+        complete_stage(&mut journal, &validated.authorization, 1, STAGES[0], 2);
         assert!(journal
-            .record_case_terminal(complete_case_input(
+            .record_case_terminal(repaired_case_input(
+                &validated.authorization,
                 1,
-                &owner,
-                &repair,
+                digest("unexecuted repair"),
                 CAMPAIGN_AT_MS + 1_001,
             ))
             .is_err());
-        complete_stage(&mut journal, &validated.authorization, 1, STAGES[3], 2);
-        let mut arbitrary = complete_case_input(1, &owner, &repair, CAMPAIGN_AT_MS + 1_001);
+        let repair = complete_stage(&mut journal, &validated.authorization, 1, STAGES[1], 2);
+        assert!(journal
+            .record_case_terminal(repaired_case_input(
+                &validated.authorization,
+                1,
+                repair.sha256.clone(),
+                CAMPAIGN_AT_MS + 1_001,
+            ))
+            .is_err());
+        complete_stage(&mut journal, &validated.authorization, 1, STAGES[2], 2);
+        let mut arbitrary = repaired_case_input(
+            &validated.authorization,
+            1,
+            repair.sha256.clone(),
+            CAMPAIGN_AT_MS + 1_001,
+        );
         arbitrary.treatment_output_sha256 = Some(digest("arbitrary treatment digest"));
         assert!(journal.record_case_terminal(arbitrary).is_err());
-        terminal_complete_case(&mut journal, 1, &owner, &repair);
-        assert_eq!(journal.charged().logical_model_calls, 4);
-        assert_eq!(journal.observed().terminal_model_calls, 4);
-        assert_eq!(journal.observed().total_tokens, 8);
+        terminal_repaired_case(&mut journal, &validated.authorization, 1, &repair);
+        assert_eq!(journal.charged().logical_model_calls, 3);
+        assert_eq!(journal.observed().terminal_model_calls, 3);
+        assert_eq!(journal.observed().total_tokens, 6);
         assert!(journal_json(&fixture.output_root)["cases"][0]["calls"]
             .as_array()
             .unwrap()
@@ -1124,13 +1234,13 @@ fn agent_delivery_verification_execution_contract_resource_overflow_terminalizes
 #[test]
 fn agent_delivery_verification_execution_contract_calibration_gate_blocks_and_closes_holdout() {
     with_fixture(|protocol, fixture| {
-        let (_, _, mut journal) = new_journal(protocol, &fixture);
+        let (validated, _, mut journal) = new_journal(protocol, &fixture);
         journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
         for ordinal in 1..=8 {
             journal
                 .reserve_case(ordinal, CAMPAIGN_AT_MS + ordinal as u64)
                 .unwrap();
-            terminal_structural_case(&mut journal, ordinal);
+            terminal_structural_case(&mut journal, &validated.authorization, ordinal);
         }
         assert!(journal.reserve_case(9, CAMPAIGN_AT_MS + 9).is_err());
         let deadline = CAMPAIGN_AT_MS + fixture.authorization.budget.campaign_timeout_ms;
@@ -1173,7 +1283,7 @@ fn agent_delivery_verification_execution_contract_calibration_gate_blocks_and_cl
 }
 
 #[test]
-fn agent_delivery_verification_execution_contract_fixed_campaign_records_exactly_128_calls() {
+fn agent_delivery_verification_execution_contract_fixed_campaign_records_exactly_96_calls() {
     with_fixture(|protocol, fixture| {
         let (validated, _, mut journal) = new_journal(protocol, &fixture);
         journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
@@ -1181,35 +1291,28 @@ fn agent_delivery_verification_execution_contract_fixed_campaign_records_exactly
             journal
                 .reserve_case(ordinal, CAMPAIGN_AT_MS + ordinal as u64)
                 .unwrap();
-            let owner = complete_stage(
+            complete_stage(
                 &mut journal,
                 &validated.authorization,
                 ordinal,
                 STAGES[0],
                 2,
             );
-            complete_stage(
+            let repair = complete_stage(
                 &mut journal,
                 &validated.authorization,
                 ordinal,
                 STAGES[1],
                 2,
             );
-            let repair = complete_stage(
+            complete_stage(
                 &mut journal,
                 &validated.authorization,
                 ordinal,
                 STAGES[2],
                 2,
             );
-            complete_stage(
-                &mut journal,
-                &validated.authorization,
-                ordinal,
-                STAGES[3],
-                2,
-            );
-            terminal_complete_case(&mut journal, ordinal, &owner, &repair);
+            terminal_repaired_case(&mut journal, &validated.authorization, ordinal, &repair);
             if ordinal == 8 {
                 journal
                     .record_calibration_decision(
@@ -1222,25 +1325,25 @@ fn agent_delivery_verification_execution_contract_fixed_campaign_records_exactly
         }
         journal
             .record_holdout_decision(
-                "no_evidence",
+                "not_effective",
                 digest("holdout counts"),
                 CAMPAIGN_AT_MS + 3_000,
             )
             .unwrap();
         journal
             .finish(
-                DeliveryVerificationCampaignDispositionV1::NoEvidence,
+                DeliveryVerificationCampaignDispositionV1::NotEffective,
                 "frozen holdout decision",
                 digest("holdout evidence"),
                 CAMPAIGN_AT_MS + 3_001,
             )
             .unwrap();
-        assert_eq!(journal.charged().logical_model_calls, 128);
-        assert_eq!(journal.charged().physical_model_attempts, 128);
-        assert_eq!(journal.observed().terminal_model_calls, 128);
+        assert_eq!(journal.charged().logical_model_calls, 96);
+        assert_eq!(journal.charged().physical_model_attempts, 96);
+        assert_eq!(journal.observed().terminal_model_calls, 96);
         assert_eq!(
             journal_json(&fixture.output_root)["terminal"]["disposition"],
-            "no_evidence"
+            "not_effective"
         );
     });
 }

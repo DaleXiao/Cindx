@@ -1,15 +1,19 @@
 use super::*;
 
 const TRACKED_PROTOCOL: &[u8] =
+    include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v3.json");
+const CONSUMED_V2_PROTOCOL: &[u8] =
     include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v2.json");
 const CONSUMED_V1_PROTOCOL: &[u8] =
     include_bytes!("../../../../../benchmarks/agent/delivery-verification-protocol-v1.json");
 const TRACKED_SUITE: &[u8] =
+    include_bytes!("../../../../../benchmarks/agent/delivery-verification-v3.json");
+const CONSUMED_V1_SUITE: &[u8] =
     include_bytes!("../../../../../benchmarks/agent/delivery-verification-v1.json");
 
 fn tracked() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(TRACKED_PROTOCOL, TRACKED_SUITE)
-        .expect("tracked delivery verification authority should validate")
+        .expect("tracked delivery verification v3 authority should validate")
 }
 
 fn encoded(mut value: Value) -> Vec<u8> {
@@ -27,11 +31,16 @@ fn protocol_value() -> Value {
     serde_json::from_slice(TRACKED_PROTOCOL).unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn counts(
     complete_cases: usize,
     control_failures: usize,
     treatment_only_wins: usize,
     control_only_losses: usize,
+    unsupported_claim_wins: usize,
+    omitted_obligation_wins: usize,
+    contradiction_wins: usize,
+    preservation_losses: usize,
 ) -> MatchedPairCounts {
     MatchedPairCounts {
         complete_cases,
@@ -40,6 +49,10 @@ fn counts(
         control_only_losses,
         structural_failures: 0,
         treatment_execution_failures: 0,
+        unsupported_claim_wins,
+        omitted_obligation_wins,
+        contradiction_wins,
+        preservation_losses,
     }
 }
 
@@ -59,11 +72,11 @@ fn agent_delivery_verification_protocol_contract_tracked_authority_is_exact_and_
     assert!(!protocol.execution_authorized());
     assert_eq!(
         protocol.manifest_sha256(),
-        "3b1b758330403410486c28650f012b278859f680b55de23bc7aad0e09f6c4982"
+        "8da322b9336ec69d9f37bf12ce8d7698af55572d8d4173eddc45e6c2080cc8e8"
     );
     assert_eq!(
         protocol.suite_sha256(),
-        "b9672f7075d896e3c48673607c622604c0f8d6fb2b6df4499281b0741124fbcd"
+        "5bd95ed736641f0120ceab038a01249ee246b4394e403fa5386ebe0e5de88bc7"
     );
     assert_eq!(
         protocol.manifest.instrumentation.request_mode,
@@ -80,86 +93,24 @@ fn agent_delivery_verification_protocol_contract_tracked_authority_is_exact_and_
         protocol.manifest.instrumentation.execution_journal_schema,
         crate::agent_realworld_eval::delivery_verification_execution_journal::DELIVERY_EXECUTION_JOURNAL_SCHEMA
     );
-
-    let v1: Value = serde_json::from_slice(CONSUMED_V1_PROTOCOL).unwrap();
-    let v2: Value = serde_json::from_slice(TRACKED_PROTOCOL).unwrap();
-    for key in [
-        "suite",
-        "design",
-        "budget",
-        "calibration_gate",
-        "holdout_decision",
-        "stop_contract",
-    ] {
-        assert_eq!(v2[key], v1[key], "successor changed frozen {key}");
-    }
-    let mut v1_execution = v1["execution"].clone();
-    let mut v2_execution = v2["execution"].clone();
-    v1_execution
-        .as_object_mut()
-        .unwrap()
-        .remove("runner_binary");
-    v2_execution
-        .as_object_mut()
-        .unwrap()
-        .remove("runner_binary");
-    assert_eq!(v2_execution, v1_execution);
     assert_eq!(
         sha256_hex(CONSUMED_V1_PROTOCOL),
         "080229aa24f05aa7ac816773aa5b2eb1bba2d00f3d1ca6b757b617ab9e27f19f"
+    );
+    assert_eq!(
+        sha256_hex(CONSUMED_V2_PROTOCOL),
+        "3b1b758330403410486c28650f012b278859f680b55de23bc7aad0e09f6c4982"
+    );
+    assert_eq!(
+        sha256_hex(CONSUMED_V1_SUITE),
+        "b9672f7075d896e3c48673607c622604c0f8d6fb2b6df4499281b0741124fbcd"
     );
     eprintln!("{DELIVERY_VERIFICATION_PROTOCOL_SCHEMA}");
 }
 
 #[test]
-fn agent_delivery_verification_protocol_contract_cases_are_balanced_ordered_and_require_inference_markers(
-) {
+fn agent_delivery_verification_protocol_contract_cases_are_balanced_ordered_and_seeded() {
     let protocol = tracked();
-    let inference_markers = [
-        "exclude",
-        "plus",
-        "minus",
-        "sum",
-        "convert",
-        "outrank",
-        "priority",
-        "effective",
-        "when",
-        "only",
-        "count",
-        "divide",
-        "average",
-        "latest",
-        "shortest",
-        "preserve",
-        "subtract",
-        "times",
-        "after",
-        "at least",
-        "exceeds",
-        "distinct",
-    ];
-    let decoy_markers = [
-        "draft",
-        "future",
-        "stale",
-        "projection",
-        "target",
-        "expired",
-        "retired",
-        "failed",
-        "general",
-        "unverified",
-        "ceiling",
-        "default",
-        "warm-up",
-        "void",
-        "pending",
-        "forecast",
-        "draining",
-        "noncompliant",
-    ];
-
     for stratum in STRATA {
         let cases = protocol
             .cases()
@@ -167,30 +118,7 @@ fn agent_delivery_verification_protocol_contract_cases_are_balanced_ordered_and_
             .collect::<Vec<_>>();
         assert_eq!(cases.len(), 8);
         assert!(cases.iter().all(|case| case.evidence().len() >= 2));
-        assert!(
-            cases
-                .iter()
-                .filter(|case| {
-                    let text = String::from_utf8(case.model_input_bytes().unwrap())
-                        .unwrap()
-                        .to_ascii_lowercase();
-                    inference_markers.iter().any(|marker| text.contains(marker))
-                })
-                .count()
-                >= 6
-        );
-        assert!(
-            cases
-                .iter()
-                .filter(|case| {
-                    let text = String::from_utf8(case.model_input_bytes().unwrap())
-                        .unwrap()
-                        .to_ascii_lowercase();
-                    decoy_markers.iter().any(|marker| text.contains(marker))
-                })
-                .count()
-                >= 6
-        );
+        assert!(cases.iter().all(|case| !case.seeded_candidate().is_empty()));
     }
 
     for (index, case) in protocol.cases().enumerate() {
@@ -199,62 +127,73 @@ fn agent_delivery_verification_protocol_contract_cases_are_balanced_ordered_and_
         assert_eq!(case.stratum(), STRATA[index % 4]);
         assert_eq!(case.obligations()[0].obligation_ref.len(), 64);
         assert!(!case.objective().is_empty());
+        let expected = if case.stratum() == DeliveryVerificationStratum::Preservation {
+            OracleEvaluation::Passed
+        } else {
+            OracleEvaluation::Failed
+        };
+        assert_eq!(case.evaluate_output(case.seeded_candidate()), expected);
     }
 }
 
 #[test]
-fn agent_delivery_verification_protocol_contract_model_input_excludes_every_oracle_field() {
+fn agent_delivery_verification_protocol_contract_model_input_exposes_contract_not_oracle_values() {
     let protocol = tracked();
     for case in protocol.cases() {
         let input: Value = serde_json::from_slice(&case.model_input_bytes().unwrap()).unwrap();
         let object = input.as_object().unwrap();
-        assert_eq!(object.len(), 3);
-        assert!(object.contains_key("objective"));
-        assert!(object.contains_key("obligations"));
-        assert!(object.contains_key("evidence"));
+        assert_eq!(object.len(), 5);
+        for key in [
+            "objective",
+            "outputContract",
+            "obligations",
+            "evidence",
+            "seededCandidate",
+        ] {
+            assert!(object.contains_key(key));
+        }
         let text = serde_json::to_string(&input).unwrap();
-        for oracle_key in [
+        for hidden_key in [
             "oracle",
             "hiddenFromModel",
-            "requiredGroups",
-            "forbidden",
+            "hiddenMetadataFromModel",
+            "expectedFindingKind",
             "exactJson",
         ] {
-            assert!(!text.contains(oracle_key));
+            assert!(!text.contains(hidden_key));
         }
     }
 
     let mut suite: DeliveryVerificationSuite = serde_json::from_slice(TRACKED_SUITE).unwrap();
-    suite.cases[0]
-        .oracle
-        .forbidden
-        .push("MODEL_HIDDEN_ORACLE_ONLY_SENTINEL".into());
+    suite.cases[0].oracle.exact_json["marketable_crates"] = Value::from(999_999);
     let sentinel_case = ValidatedCase {
         case: &suite.cases[0],
         case_sha256: "fixture-case-sha256",
     };
     let input = String::from_utf8(sentinel_case.model_input_bytes().unwrap()).unwrap();
-    assert!(!input.contains("MODEL_HIDDEN_ORACLE_ONLY_SENTINEL"));
+    assert!(!input.contains("999999"));
 }
 
 #[test]
-fn agent_delivery_verification_protocol_contract_oracle_is_exact_and_externally_predicated() {
+fn agent_delivery_verification_protocol_contract_oracle_is_unique_json_and_exact() {
     let protocol = tracked();
     let first = protocol.cases().next().unwrap();
     assert_eq!(
-        first.evaluate_output(r#"{"mean_ms":118,"service":"api"}"#),
+        first.evaluate_output(r#"{"marketable_crates":212,"grove":"Lark-Field"}"#),
         OracleEvaluation::Passed
     );
     assert_eq!(
-        first.evaluate_output(r#"{"service":"api","mean_ms":118,"forecast":181}"#),
+        first.evaluate_output(first.seeded_candidate()),
         OracleEvaluation::Failed
     );
     assert_eq!(
-        first.evaluate_output(r#"{"service":"api","mean_ms":117}"#),
+        first.evaluate_output(r#"{"grove":"Lark-Field","marketable_crates":211}"#),
         OracleEvaluation::Failed
     );
     assert_eq!(
-        first.evaluate_output(r#"{"mean_ms":999,"mean_ms":118,"service":"api"}"#),
+        first.evaluate_output(
+            r#"{"grove":"Lark-Field","marketable_crates":999,"marketable_crates":212}"#
+        ),
         OracleEvaluation::Failed
     );
     assert!(parse_unique_json(r#"{"outer":{"value":1,"value":2}}"#).is_err());
@@ -262,29 +201,40 @@ fn agent_delivery_verification_protocol_contract_oracle_is_exact_and_externally_
 }
 
 #[test]
-fn agent_delivery_verification_protocol_contract_hashes_bind_cases_order_budget_and_hidden_oracle()
-{
+fn agent_delivery_verification_protocol_contract_hashes_bind_seeds_inputs_contracts_and_oracle() {
     let protocol = tracked();
     assert_eq!(protocol.case_sha256s().len(), 32);
     assert_eq!(
         protocol.case_sha256s().first().unwrap(),
-        "23c7a85cb4537fb0e3e98f580bd2d274ab393742eb733bb51161516f2225cb5c"
+        "f26d8834e291f3a0f7e1f949a216d387f46f66c509bc2629f02d4e771652ba47"
     );
     assert_eq!(
         protocol.case_sha256s().last().unwrap(),
-        "536138c08a7a06e0f58986bfd5d4382340135f8d13b828174b34b51afa2f2658"
+        "4b57671a7ba7dcd5444c66080df979b3ba1577ee43a0b250a4f77dcaa9766bb0"
+    );
+    assert_eq!(
+        protocol.case_order_sha256(),
+        "e2073c98fd878e5e50fda7d076b743b132dee705e40ea6ce26de8d7b31bb8bdc"
     );
     assert_eq!(
         protocol.hidden_oracle_sha256(),
-        "af47cdf41554956882e5fc42bd432a5c8dabff49573f2ce8f7181878e69d2b2d"
+        "1993e95ea7227d9ce65cd1c920d2f7698545341910b6f50d50070094220ec449"
+    );
+    assert_eq!(
+        protocol.seeded_candidates_sha256(),
+        "55c5d576ffe2fd06d504c186e4227998b9695b28ab58c546c566e61ce1b954df"
+    );
+    assert_eq!(
+        protocol.model_inputs_sha256(),
+        "6c0b7692fa283c056ef5cabe93c3fd116fbffde3ec33a84b10e76539d75d53ed"
+    );
+    assert_eq!(
+        protocol.output_contracts_sha256(),
+        "991d14b5f0d9b6c5e1269f8ad1c8001688769eba4040125eaf4f1b0eae24eb92"
     );
     assert_eq!(
         protocol.budget_sha256(),
-        "4b72b261ce347f7ec0ab80328f6ed57050a04260bf81c6f0930d9c08f5c710fe"
-    );
-    assert_eq!(
-        protocol.cases().next().unwrap().case_sha256(),
-        protocol.case_sha256s()[0]
+        "eb3ae14a6e0cd452b106f8c5bd85ad2575e204b0aee08ce1ce23b4a7ef007e11"
     );
 }
 
@@ -310,10 +260,9 @@ fn agent_delivery_verification_protocol_contract_rejects_unknown_fields_and_nonc
 }
 
 #[test]
-fn agent_delivery_verification_protocol_contract_rejects_suite_hash_order_or_oracle_drift() {
+fn agent_delivery_verification_protocol_contract_rejects_suite_seed_contract_or_oracle_drift() {
     let mut changed = suite_value();
-    changed["cases"][0]["objective"] =
-        Value::String("Return only JSON with service and a changed mean contract.".into());
+    changed["cases"][0]["objective"] = Value::String("changed objective".into());
     assert!(parse_and_validate_protocol(TRACKED_PROTOCOL, &encoded(changed)).is_err());
 
     let mut reordered = suite_value();
@@ -324,6 +273,15 @@ fn agent_delivery_verification_protocol_contract_rejects_suite_hash_order_or_ora
     exposed["cases"][0]["oracle"]["hiddenFromModel"] = Value::Bool(false);
     assert!(parse_and_validate_protocol(TRACKED_PROTOCOL, &encoded(exposed)).is_err());
 
+    let mut seed_drift = suite_value();
+    seed_drift["cases"][0]["seed"]["candidate"] = Value::String("{}".into());
+    assert!(parse_and_validate_protocol(TRACKED_PROTOCOL, &encoded(seed_drift)).is_err());
+
+    let mut contract_drift = suite_value();
+    contract_drift["cases"][0]["outputContract"]["properties"][0]["name"] =
+        Value::String("wrong_key".into());
+    assert!(parse_and_validate_protocol(TRACKED_PROTOCOL, &encoded(contract_drift)).is_err());
+
     let mut credential = suite_value();
     credential["cases"][0]["evidence"][0]["content"] =
         Value::String("raw marker ghp_fixture_must_fail_closed".into());
@@ -333,11 +291,15 @@ fn agent_delivery_verification_protocol_contract_rejects_suite_hash_order_or_ora
 #[test]
 fn agent_delivery_verification_protocol_contract_budget_topology_and_freeze_are_fixed() {
     let protocol = tracked();
-    assert_eq!(protocol.budget().max_logical_model_calls_per_case, 4);
-    assert_eq!(protocol.budget().max_logical_model_calls_total, 128);
-    assert_eq!(protocol.budget().max_physical_model_attempts_total, 128);
+    assert_eq!(protocol.budget().max_logical_model_calls_per_case, 3);
+    assert_eq!(protocol.budget().max_logical_model_calls_total, 96);
+    assert_eq!(protocol.budget().max_physical_model_attempts_total, 96);
     assert_eq!(protocol.budget().transport_retries, 0);
-    assert!(protocol.manifest.design.shared_owner_draft);
+    assert!(protocol.manifest.design.seeded_control);
+    assert_eq!(protocol.manifest.design.calibration_seeded_defects, 6);
+    assert_eq!(protocol.manifest.design.calibration_clean_sentinels, 2);
+    assert_eq!(protocol.manifest.design.holdout_seeded_defects, 18);
+    assert_eq!(protocol.manifest.design.holdout_clean_sentinels, 6);
     assert_eq!(protocol.manifest.design.max_owner_repairs_per_case, 1);
     assert_eq!(protocol.manifest.design.max_verifier_rechecks_per_case, 1);
     assert_eq!(
@@ -347,88 +309,75 @@ fn agent_delivery_verification_protocol_contract_budget_topology_and_freeze_are_
             .prompt_model_threshold_changes_after_calibration,
         "invalidate_protocol"
     );
-    assert!(
-        protocol
-            .manifest
-            .calibration_gate
-            .calibration_results_excluded_from_holdout
-    );
-    assert!(
-        protocol
-            .manifest
-            .holdout_decision
-            .calibration_results_excluded
-    );
+    assert!(protocol.manifest.holdout_decision.finite_frozen_suite_only);
 
     let mut changed = protocol_value();
     changed["budget"]["transport_retries"] = Value::from(1);
     assert!(parse_and_validate_protocol(&encoded(changed), TRACKED_SUITE).is_err());
 
     let mut changed = protocol_value();
-    changed["instrumentation"]["terminal_request_payload_binding"] =
-        Value::String("semantic_digest_incorrectly_equals_wire_digest".into());
+    changed["instrumentation"]["case_telemetry"][0] = Value::String("omitted".into());
     assert!(parse_and_validate_protocol(&encoded(changed), TRACKED_SUITE).is_err());
 }
 
 #[test]
-fn agent_delivery_verification_protocol_contract_calibration_gate_is_fail_closed() {
+fn agent_delivery_verification_protocol_contract_calibration_gate_is_stratified_and_fail_closed() {
     assert_eq!(
-        calibration_decision(counts(8, 2, 1, 0)),
+        calibration_decision(counts(8, 6, 4, 0, 2, 1, 1, 0)),
         CalibrationDecision::OpenHoldout
     );
     assert_eq!(
-        calibration_decision(counts(8, 1, 1, 0)),
+        calibration_decision(counts(8, 6, 3, 0, 1, 1, 1, 0)),
         CalibrationDecision::TerminalFutility
     );
     assert_eq!(
-        calibration_decision(counts(8, 2, 1, 1)),
+        calibration_decision(counts(8, 6, 4, 0, 0, 2, 2, 0)),
         CalibrationDecision::TerminalFutility
     );
     assert_eq!(
-        calibration_decision(counts(7, 2, 1, 0)),
+        calibration_decision(counts(8, 6, 4, 1, 2, 1, 1, 1)),
+        CalibrationDecision::TerminalFutility
+    );
+    assert_eq!(
+        calibration_decision(counts(8, 5, 4, 0, 2, 1, 1, 0)),
+        CalibrationDecision::Invalid
+    );
+    assert_eq!(
+        calibration_decision(counts(7, 6, 4, 0, 2, 1, 1, 0)),
         CalibrationDecision::Inconclusive
     );
-    let mut structural = counts(7, 2, 1, 0);
+    let mut structural = counts(7, 6, 4, 0, 2, 1, 1, 0);
     structural.structural_failures = 1;
     assert_eq!(
         calibration_decision(structural),
         CalibrationDecision::Inconclusive
     );
-    let mut execution = counts(8, 2, 1, 0);
-    execution.treatment_execution_failures = 1;
-    assert_eq!(
-        calibration_decision(execution),
-        CalibrationDecision::Inconclusive
-    );
-    assert_eq!(
-        calibration_decision(counts(9, 2, 1, 0)),
-        CalibrationDecision::Invalid
-    );
 }
 
 #[test]
-fn agent_delivery_verification_protocol_contract_holdout_requires_five_zero_and_no_censor() {
+fn agent_delivery_verification_protocol_contract_holdout_requires_joint_repair_and_preservation() {
     assert_eq!(
-        holdout_decision(counts(24, 5, 5, 0)),
-        HoldoutDecisionResult::EvidenceOfUplift
+        holdout_decision(counts(24, 18, 13, 0, 5, 4, 4, 0)),
+        HoldoutDecisionResult::SeededRepairEffective
     );
     assert_eq!(
-        holdout_decision(counts(24, 4, 4, 0)),
-        HoldoutDecisionResult::NoEvidence
+        holdout_decision(counts(24, 18, 12, 0, 4, 4, 4, 0)),
+        HoldoutDecisionResult::NotEffective
     );
     assert_eq!(
-        holdout_decision(counts(24, 7, 6, 1)),
-        HoldoutDecisionResult::Regression
+        holdout_decision(counts(24, 18, 13, 0, 6, 4, 3, 0)),
+        HoldoutDecisionResult::NotEffective
     );
     assert_eq!(
-        holdout_decision(counts(23, 5, 5, 0)),
+        holdout_decision(counts(24, 18, 13, 1, 5, 4, 4, 1)),
+        HoldoutDecisionResult::PreservationRegression
+    );
+    assert_eq!(
+        holdout_decision(counts(23, 18, 13, 0, 5, 4, 4, 0)),
         HoldoutDecisionResult::Inconclusive
     );
-
-    let mut censored = counts(24, 5, 5, 0);
-    censored.treatment_execution_failures = 1;
     assert_eq!(
-        holdout_decision(censored),
-        HoldoutDecisionResult::Inconclusive
+        holdout_decision(counts(24, 17, 13, 0, 5, 4, 4, 0)),
+        HoldoutDecisionResult::Invalid
     );
 }

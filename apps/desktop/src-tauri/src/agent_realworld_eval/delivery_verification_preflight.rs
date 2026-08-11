@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_OUTPUT_ROOT";
-const RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V2_PREFLIGHT_RECEIPT";
-pub(super) const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v2";
-const RECEIPT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v2\0";
-const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v1\0";
-const PROVIDER_CONFIG_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-config.v1\0";
-const PROVIDER_IDENTITY_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-identity.v1\0";
-const MODEL_BINDING_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-model-binding.v1\0";
+const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_OUTPUT_ROOT";
+const RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_PREFLIGHT_RECEIPT";
+pub(super) const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v3";
+const RECEIPT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v3\0";
+const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v3\0";
+const PROVIDER_CONFIG_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-config.v3\0";
+const PROVIDER_IDENTITY_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-identity.v3\0";
+const MODEL_BINDING_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-model-binding.v3\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +55,10 @@ pub(super) struct DeliveryVerificationProtocolSnapshot {
     pub(super) manifest_sha256: String,
     pub(super) suite_sha256: String,
     pub(super) case_sha256: Vec<String>,
+    pub(super) case_order_sha256: String,
+    pub(super) seeded_candidates_sha256: String,
+    pub(super) model_inputs_sha256: String,
+    pub(super) output_contracts_sha256: String,
     pub(super) budget_sha256: String,
     pub(super) hidden_oracle_sha256: String,
     pub(super) execution_authorized: bool,
@@ -74,6 +78,10 @@ pub(super) struct DeliveryVerificationPreflightReceipt {
     pub(super) suite_sha256: String,
     pub(super) case_sha256: Vec<String>,
     pub(super) cases_sha256: String,
+    pub(super) case_order_sha256: String,
+    pub(super) seeded_candidates_sha256: String,
+    pub(super) model_inputs_sha256: String,
+    pub(super) output_contracts_sha256: String,
     pub(super) budget_sha256: String,
     pub(super) hidden_oracle_sha256: String,
     pub(super) provider: DeliveryVerificationProviderBindingReceipt,
@@ -162,6 +170,10 @@ pub(super) fn protocol_snapshot(
         manifest_sha256: protocol.manifest_sha256().to_string(),
         suite_sha256: protocol.suite_sha256().to_string(),
         case_sha256: protocol.case_sha256s().to_vec(),
+        case_order_sha256: protocol.case_order_sha256().to_string(),
+        seeded_candidates_sha256: protocol.seeded_candidates_sha256().to_string(),
+        model_inputs_sha256: protocol.model_inputs_sha256().to_string(),
+        output_contracts_sha256: protocol.output_contracts_sha256().to_string(),
         budget_sha256: protocol.budget_sha256().to_string(),
         hidden_oracle_sha256: protocol.hidden_oracle_sha256().to_string(),
         execution_authorized: protocol.execution_authorized(),
@@ -264,6 +276,10 @@ pub(super) fn build_receipt(
         suite_sha256: protocol.suite_sha256.clone(),
         case_sha256: protocol.case_sha256.clone(),
         cases_sha256: cases_digest(&protocol.case_sha256)?,
+        case_order_sha256: protocol.case_order_sha256.clone(),
+        seeded_candidates_sha256: protocol.seeded_candidates_sha256.clone(),
+        model_inputs_sha256: protocol.model_inputs_sha256.clone(),
+        output_contracts_sha256: protocol.output_contracts_sha256.clone(),
         budget_sha256: protocol.budget_sha256.clone(),
         hidden_oracle_sha256: protocol.hidden_oracle_sha256.clone(),
         provider,
@@ -301,6 +317,10 @@ pub(super) fn validate_receipt(
         || receipt.suite_sha256 != protocol.suite_sha256
         || receipt.case_sha256 != protocol.case_sha256
         || receipt.cases_sha256 != cases_digest(&protocol.case_sha256)?
+        || receipt.case_order_sha256 != protocol.case_order_sha256
+        || receipt.seeded_candidates_sha256 != protocol.seeded_candidates_sha256
+        || receipt.model_inputs_sha256 != protocol.model_inputs_sha256
+        || receipt.output_contracts_sha256 != protocol.output_contracts_sha256
         || receipt.budget_sha256 != protocol.budget_sha256
         || receipt.hidden_oracle_sha256 != protocol.hidden_oracle_sha256
         || receipt.runner_binary != DELIVERY_VERIFICATION_EXECUTE_BINARY_NAME
@@ -415,6 +435,10 @@ fn validate_protocol_snapshot(
         || !is_sha256(&protocol.suite_sha256)
         || protocol.case_sha256.is_empty()
         || protocol.case_sha256.iter().any(|value| !is_sha256(value))
+        || !is_sha256(&protocol.case_order_sha256)
+        || !is_sha256(&protocol.seeded_candidates_sha256)
+        || !is_sha256(&protocol.model_inputs_sha256)
+        || !is_sha256(&protocol.output_contracts_sha256)
         || !is_sha256(&protocol.budget_sha256)
         || !is_sha256(&protocol.hidden_oracle_sha256)
         || protocol.execution_authorized

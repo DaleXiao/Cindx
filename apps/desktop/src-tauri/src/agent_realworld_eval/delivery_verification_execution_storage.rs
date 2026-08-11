@@ -1,4 +1,5 @@
 use super::*;
+use agent_runtime::MAX_DELIVERY_VERIFICATION_FINDINGS;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
@@ -251,8 +252,7 @@ pub(super) fn validate_call_binding(
     require_sha256(&input.semantic_request_sha256, "delivery semantic request")?;
     require_sha256(&input.wire_payload_sha256, "delivery wire payload")?;
     let (expected_role, expected_model, expected_output) = match input.stage {
-        DeliveryVerificationCallStageV1::OwnerDraft
-        | DeliveryVerificationCallStageV1::OwnerRepair => (
+        DeliveryVerificationCallStageV1::OwnerRepair => (
             "executor",
             &document.authorization.provider.owner_model_sha256,
             document.authorization.budget.max_owner_output_tokens,
@@ -299,8 +299,7 @@ pub(super) fn validate_stored_reservation(
     )?;
     require_sha256(&reservation.wire_payload_sha256, "delivery wire payload")?;
     let (role, model, output) = match reservation.stage {
-        DeliveryVerificationCallStageV1::OwnerDraft
-        | DeliveryVerificationCallStageV1::OwnerRepair => (
+        DeliveryVerificationCallStageV1::OwnerRepair => (
             "executor",
             &authorization.provider.owner_model_sha256,
             authorization.budget.max_owner_output_tokens,
@@ -443,11 +442,14 @@ pub(super) fn validate_case_terminal(
     receipt: &CaseTerminalReceiptV1,
 ) -> Result<(), String> {
     require_sha256(&receipt.observation_sha256, "delivery case observation")?;
-    if receipt.completed_at_ms == 0 || receipt.receipt_sha256 != case_terminal_digest(receipt)? {
+    if receipt.completed_at_ms == 0
+        || receipt.outcome_reason.trim().is_empty()
+        || receipt.receipt_sha256 != case_terminal_digest(receipt)?
+    {
         return Err("delivery case terminal receipt is invalid".into());
     }
     for digest in [
-        receipt.owner_draft_sha256.as_deref(),
+        receipt.seeded_candidate_sha256.as_deref(),
         receipt.control_output_sha256.as_deref(),
         receipt.treatment_output_sha256.as_deref(),
     ]
@@ -456,49 +458,251 @@ pub(super) fn validate_case_terminal(
     {
         require_sha256(digest, "delivery case output")?;
     }
-    if receipt.owner_draft_sha256.is_some() != receipt.owner_draft_bytes.is_some()
-        || receipt.owner_draft_bytes == Some(0)
-        || receipt.control_output_sha256.is_some()
-            && receipt.control_output_sha256 != receipt.owner_draft_sha256
+    if receipt.seeded_candidate_sha256.as_deref()
+        != Some(case.binding.seeded_candidate_sha256.as_str())
+        || receipt.seeded_candidate_bytes != Some(case.binding.seeded_candidate_bytes)
+        || receipt.seeded_candidate_bytes == Some(0)
+        || receipt.control_output_sha256 != receipt.seeded_candidate_sha256
         || receipt.resources != case_resources(case)?
     {
         return Err("delivery case output or resource receipt is inconsistent".into());
     }
-    if receipt.status == DeliveryVerificationCaseTerminalStatusV1::Complete {
-        let owner_draft = completed_call_receipt(case, DeliveryVerificationCallStageV1::OwnerDraft)
-            .ok_or_else(|| "complete delivery case lacks OwnerDraft evidence".to_string())?;
-        completed_call_receipt(case, DeliveryVerificationCallStageV1::VerifierInitial)
-            .ok_or_else(|| "complete delivery case lacks VerifierInitial evidence".to_string())?;
-        let treatment = match (
-            completed_call_receipt(case, DeliveryVerificationCallStageV1::OwnerRepair),
-            completed_call_receipt(case, DeliveryVerificationCallStageV1::VerifierRecheck),
-        ) {
-            (Some(owner_repair), Some(_)) => owner_repair,
-            (None, None)
-                if call_is_unneeded(case, DeliveryVerificationCallStageV1::OwnerRepair)
-                    && call_is_unneeded(case, DeliveryVerificationCallStageV1::VerifierRecheck) =>
+    validate_case_call_sequence(case, receipt.completed_at_ms)?;
+    validate_finding_telemetry(
+        receipt.initial_verifier_decision.as_deref(),
+        receipt.initial_finding_counts,
+    )?;
+    validate_finding_telemetry(
+        receipt.recheck_decision.as_deref(),
+        receipt.recheck_finding_counts,
+    )?;
+    match receipt.status {
+        DeliveryVerificationCaseTerminalStatusV1::Complete => {
+            validate_complete_case_terminal(case, receipt)?
+        }
+        _ => validate_failed_case_terminal(receipt)?,
+    }
+    Ok(())
+}
+
+fn validate_complete_case_terminal(
+    case: &JournalCaseV1,
+    receipt: &CaseTerminalReceiptV1,
+) -> Result<(), String> {
+    if receipt.control_passed.is_none() || receipt.treatment_passed.is_none() {
+        return Err("complete delivery case lacks matched-pair outcomes".into());
+    }
+    let initial_decision = receipt.initial_verifier_decision.as_deref();
+    if receipt.repair_activated != (initial_decision == Some("needs_revision"))
+        || receipt.recheck_decision.is_some() && !receipt.repair_activated
+        || initial_decision.is_some()
+            && completed_call_receipt(case, DeliveryVerificationCallStageV1::VerifierInitial)
+                .is_none()
+    {
+        return Err("complete delivery case activation telemetry is inconsistent".into());
+    }
+
+    match initial_decision {
+        Some("passed") => {
+            if !call_is_unneeded(case, DeliveryVerificationCallStageV1::OwnerRepair)
+                || !call_is_unneeded(case, DeliveryVerificationCallStageV1::VerifierRecheck)
+                || receipt.recheck_decision.is_some()
+                || receipt.treatment_output_sha256 != receipt.seeded_candidate_sha256
+                || receipt.treatment_disposition.as_deref() != Some("passed_unchanged")
+                || receipt.failure_stage.is_some()
+                || receipt.failure_code.is_some()
+                || receipt.outcome_reason != "verifier_passed_unchanged"
             {
-                owner_draft
+                return Err("unchanged delivery case has repair or output evidence".into());
             }
-            _ => {
+        }
+        Some("needs_revision") => {
+            validate_activated_case_terminal(case, receipt)?;
+        }
+        None => {
+            let initial =
+                terminal_call_receipt(case, DeliveryVerificationCallStageV1::VerifierInitial);
+            let failure_evidence = match (receipt.failure_code.as_deref(), initial) {
+                (Some("provider_unavailable" | "timeout"), Some(call)) => {
+                    call.status == DeliveryVerificationCallTerminalStatusV1::ProviderFailure
+                }
+                (Some("invalid_verifier_response"), Some(call)) => {
+                    call.status == DeliveryVerificationCallTerminalStatusV1::Completed
+                }
+                _ => false,
+            };
+            if !failure_evidence
+                || !call_is_unneeded(case, DeliveryVerificationCallStageV1::OwnerRepair)
+                || !call_is_unneeded(case, DeliveryVerificationCallStageV1::VerifierRecheck)
+                || receipt.treatment_output_sha256.is_some()
+                || receipt.treatment_passed != Some(false)
+                || !failure_telemetry_is(receipt, "initial_verification")
+            {
                 return Err(
-                    "complete delivery case has unmatched repair and verifier evidence".into(),
-                )
+                    "failed initial verification has inconsistent treatment evidence".into(),
+                );
             }
-        };
-        if receipt.control_passed.is_none()
-            || receipt.treatment_passed.is_none()
-            || receipt.owner_draft_sha256.as_ref() != owner_draft.response_artifact_sha256.as_ref()
-            || receipt.owner_draft_bytes != owner_draft.response_artifact_bytes
-            || receipt.control_output_sha256.as_ref()
-                != owner_draft.response_artifact_sha256.as_ref()
-            || receipt.treatment_output_sha256.as_ref()
-                != treatment.response_artifact_sha256.as_ref()
-        {
-            return Err("complete delivery case output digests do not match call artifacts".into());
+        }
+        Some(_) => unreachable!("finding telemetry validator rejects unknown decisions"),
+    }
+    Ok(())
+}
+
+fn validate_activated_case_terminal(
+    case: &JournalCaseV1,
+    receipt: &CaseTerminalReceiptV1,
+) -> Result<(), String> {
+    let repair = terminal_call_receipt(case, DeliveryVerificationCallStageV1::OwnerRepair)
+        .ok_or_else(|| "activated delivery case lacks OwnerRepair terminal evidence".to_string())?;
+    let recheck = terminal_call_receipt(case, DeliveryVerificationCallStageV1::VerifierRecheck);
+    if repair.status == DeliveryVerificationCallTerminalStatusV1::Completed {
+        if recheck.is_none() {
+            return Err("completed delivery repair lacks VerifierRecheck terminal evidence".into());
+        }
+    } else if !call_is_unneeded(case, DeliveryVerificationCallStageV1::VerifierRecheck) {
+        return Err("failed delivery repair has unexpected VerifierRecheck evidence".into());
+    }
+
+    match receipt.recheck_decision.as_deref() {
+        Some("passed") => {
+            let repair = completed_call_receipt(case, DeliveryVerificationCallStageV1::OwnerRepair)
+                .ok_or_else(|| "accepted delivery repair lacks OwnerRepair evidence".to_string())?;
+            completed_call_receipt(case, DeliveryVerificationCallStageV1::VerifierRecheck)
+                .ok_or_else(|| {
+                    "accepted delivery repair lacks VerifierRecheck evidence".to_string()
+                })?;
+            if receipt.treatment_output_sha256.as_ref() != repair.response_artifact_sha256.as_ref()
+                || receipt.treatment_disposition.as_deref() != Some("passed_after_repair")
+                || receipt.failure_stage.is_some()
+                || receipt.failure_code.is_some()
+                || receipt.outcome_reason != "repair_accepted"
+            {
+                return Err("accepted delivery repair has inconsistent output evidence".into());
+            }
+        }
+        Some("needs_revision") => {
+            completed_call_receipt(case, DeliveryVerificationCallStageV1::OwnerRepair)
+                .ok_or_else(|| "rejected delivery repair lacks OwnerRepair evidence".to_string())?;
+            completed_call_receipt(case, DeliveryVerificationCallStageV1::VerifierRecheck)
+                .ok_or_else(|| {
+                    "rejected delivery repair lacks VerifierRecheck evidence".to_string()
+                })?;
+            if receipt.treatment_output_sha256.is_some()
+                || receipt.treatment_passed != Some(false)
+                || receipt.failure_code.as_deref() != Some("verification_not_satisfied")
+                || !failure_telemetry_is(receipt, "recheck")
+            {
+                return Err("rejected delivery repair has inconsistent treatment evidence".into());
+            }
+        }
+        None => {
+            let failure_evidence = match receipt.failure_stage.as_deref() {
+                Some("owner_repair") => {
+                    matches!(
+                        receipt.failure_code.as_deref(),
+                        Some("provider_unavailable" | "timeout")
+                    ) && repair.status == DeliveryVerificationCallTerminalStatusV1::ProviderFailure
+                        && recheck.is_none()
+                }
+                Some("recheck") => match (receipt.failure_code.as_deref(), recheck) {
+                    (Some("provider_unavailable" | "timeout"), Some(call)) => {
+                        repair.status == DeliveryVerificationCallTerminalStatusV1::Completed
+                            && call.status
+                                == DeliveryVerificationCallTerminalStatusV1::ProviderFailure
+                    }
+                    (Some("invalid_verifier_response"), Some(call)) => {
+                        repair.status == DeliveryVerificationCallTerminalStatusV1::Completed
+                            && call.status == DeliveryVerificationCallTerminalStatusV1::Completed
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !failure_evidence
+                || receipt.treatment_output_sha256.is_some()
+                || receipt.treatment_passed != Some(false)
+                || receipt
+                    .failure_stage
+                    .as_deref()
+                    .is_none_or(|stage| !failure_telemetry_is(receipt, stage))
+            {
+                return Err("failed delivery repair has inconsistent treatment evidence".into());
+            }
+        }
+        Some(_) => unreachable!("finding telemetry validator rejects unknown decisions"),
+    }
+    Ok(())
+}
+
+fn validate_failed_case_terminal(receipt: &CaseTerminalReceiptV1) -> Result<(), String> {
+    if receipt.control_passed.is_some()
+        || receipt.treatment_passed.is_some()
+        || receipt.treatment_output_sha256.is_some()
+        || receipt.initial_verifier_decision.is_some()
+        || receipt.initial_finding_counts != DeliveryVerificationFindingCounts::default()
+        || receipt.repair_activated
+        || receipt.recheck_decision.is_some()
+        || receipt.recheck_finding_counts != DeliveryVerificationFindingCounts::default()
+        || receipt.treatment_disposition.is_some()
+        || receipt.failure_stage.is_some()
+        || receipt.failure_code.is_some()
+    {
+        return Err("failed delivery case contains matched-pair or activation claims".into());
+    }
+    Ok(())
+}
+
+fn validate_case_call_sequence(case: &JournalCaseV1, completed_at_ms: u64) -> Result<(), String> {
+    let mut prefix_open = true;
+    let mut previous_completed = true;
+    for call in &case.calls {
+        match &call.state {
+            JournalCallStateV1::Terminal { receipt, .. } => {
+                if !prefix_open || !previous_completed || receipt.terminal_at_ms > completed_at_ms {
+                    return Err("delivery case call sequence is invalid".into());
+                }
+                previous_completed =
+                    receipt.status == DeliveryVerificationCallTerminalStatusV1::Completed;
+            }
+            JournalCallStateV1::Planned | JournalCallStateV1::NotRequired { .. } => {
+                prefix_open = false;
+            }
+            JournalCallStateV1::Reserved { .. } => {
+                return Err("delivery case terminal retains a reserved call".into())
+            }
         }
     }
     Ok(())
+}
+
+fn validate_finding_telemetry(
+    decision: Option<&str>,
+    counts: DeliveryVerificationFindingCounts,
+) -> Result<(), String> {
+    let total = counts
+        .unsupported_claim
+        .checked_add(counts.omitted_obligation)
+        .and_then(|value| value.checked_add(counts.contradiction))
+        .ok_or_else(|| "delivery finding telemetry overflowed".to_string())?;
+    if total > MAX_DELIVERY_VERIFICATION_FINDINGS
+        || match decision {
+            None | Some("passed") => total != 0,
+            Some("needs_revision") => total == 0,
+            Some(_) => true,
+        }
+    {
+        return Err("delivery finding telemetry is invalid".into());
+    }
+    Ok(())
+}
+
+fn failure_telemetry_is(receipt: &CaseTerminalReceiptV1, stage: &str) -> bool {
+    receipt.treatment_disposition.as_deref() == Some("treatment_failure")
+        && receipt.failure_stage.as_deref() == Some(stage)
+        && receipt
+            .failure_code
+            .as_deref()
+            .is_some_and(|code| receipt.outcome_reason == format!("component_failure:{code}"))
 }
 
 pub(super) fn campaign_deadline_for_reservation(
@@ -547,13 +751,17 @@ pub(super) fn validate_finish_state(
     disposition: DeliveryVerificationCampaignDispositionV1,
 ) -> Result<(), String> {
     match disposition {
-        DeliveryVerificationCampaignDispositionV1::EvidenceOfUplift
-        | DeliveryVerificationCampaignDispositionV1::NoEvidence
-        | DeliveryVerificationCampaignDispositionV1::Regression => {
+        DeliveryVerificationCampaignDispositionV1::SeededRepairEffective
+        | DeliveryVerificationCampaignDispositionV1::NotEffective
+        | DeliveryVerificationCampaignDispositionV1::PreservationRegression => {
             let expected_decision = match disposition {
-                DeliveryVerificationCampaignDispositionV1::EvidenceOfUplift => "evidence_of_uplift",
-                DeliveryVerificationCampaignDispositionV1::NoEvidence => "no_evidence",
-                DeliveryVerificationCampaignDispositionV1::Regression => "regression",
+                DeliveryVerificationCampaignDispositionV1::SeededRepairEffective => {
+                    "seeded_repair_effective"
+                }
+                DeliveryVerificationCampaignDispositionV1::NotEffective => "not_effective",
+                DeliveryVerificationCampaignDispositionV1::PreservationRegression => {
+                    "preservation_regression"
+                }
                 _ => unreachable!(),
             };
             if document
@@ -654,12 +862,20 @@ fn completed_call_receipt(
     case: &JournalCaseV1,
     stage: DeliveryVerificationCallStageV1,
 ) -> Option<&CallTerminalReceiptV1> {
-    match &case.calls[stage_index(stage)].state {
-        JournalCallStateV1::Terminal { receipt, .. }
-            if receipt.status == DeliveryVerificationCallTerminalStatusV1::Completed =>
-        {
+    match terminal_call_receipt(case, stage) {
+        Some(receipt) if receipt.status == DeliveryVerificationCallTerminalStatusV1::Completed => {
             Some(receipt)
         }
+        _ => None,
+    }
+}
+
+fn terminal_call_receipt(
+    case: &JournalCaseV1,
+    stage: DeliveryVerificationCallStageV1,
+) -> Option<&CallTerminalReceiptV1> {
+    match &case.calls[stage_index(stage)].state {
+        JournalCallStateV1::Terminal { receipt, .. } => Some(receipt),
         _ => None,
     }
 }
@@ -738,10 +954,9 @@ pub(super) fn case_index(document: &JournalDocumentV1, ordinal: usize) -> Result
 
 pub(super) fn stage_index(stage: DeliveryVerificationCallStageV1) -> usize {
     match stage {
-        DeliveryVerificationCallStageV1::OwnerDraft => 0,
-        DeliveryVerificationCallStageV1::VerifierInitial => 1,
-        DeliveryVerificationCallStageV1::OwnerRepair => 2,
-        DeliveryVerificationCallStageV1::VerifierRecheck => 3,
+        DeliveryVerificationCallStageV1::VerifierInitial => 0,
+        DeliveryVerificationCallStageV1::OwnerRepair => 1,
+        DeliveryVerificationCallStageV1::VerifierRecheck => 2,
     }
 }
 
@@ -749,7 +964,7 @@ pub(super) fn role_label(role: &ModelRole) -> Result<String, String> {
     match role {
         ModelRole::Executor => Ok("executor".into()),
         ModelRole::Reviewer => Ok("reviewer".into()),
-        _ => Err("delivery runner accepts only Executor Owner or Reviewer calls".into()),
+        _ => Err("delivery runner accepts only Executor repair or Reviewer calls".into()),
     }
 }
 
