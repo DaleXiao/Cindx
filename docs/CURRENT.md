@@ -224,17 +224,25 @@ or establish any intelligence or performance result.
 A separate default-off Delivery Verification authority now includes a frozen,
 provider-free one-shot control plane under `realworld-eval`. Its preflight binds
 the clean source, tracked protocol and suite, 32 ordered case digests, budgets,
-hidden-oracle aggregate, redacted Executor/Reviewer configuration, exact
-execute-binary bytes, build profile and features, and new external paths. It
-records zero provider calls, `online_runner_frozen=true`, and
-`execution_authorized=false`. Authorization remains a separate private,
-short-lived capability; execution must consume it once and persist the campaign
-and every physical-call reservation before transport. An interrupted started
-call is censored without retry. No live preflight receipt, authorization, or
-provider result was created in this change. Production finalization, routing,
-prompt evolution, GEPA, the installed App, and the published release are
-unchanged. After this code is merged, the next action is a fresh provider-free
-preflight followed by an explicit authorization decision.
+hidden-oracle aggregate, redacted Executor/Reviewer configuration, and new
+external paths while performing zero provider calls. The separate authorization
+binds the exact execute-binary bytes and grants a short-lived, private one-shot
+capability. Execution must consume it once and persist the campaign and every
+physical-call reservation before transport; an interrupted started call is
+censored without retry.
+
+The frozen Delivery Verification v1 instance was authorized and consumed once
+on source `5373e65`. It closed `CENSORED` / `INVALID-INSTRUMENTATION` during the
+first calibration Owner call: the reservation recorded the canonical semantic
+request digest, the uncommitted provider result metadata supplied a
+domain-separated wire-payload digest, and the journal incorrectly required
+those distinct authorities to be equal. The journal charged one logical and one physical reservation but accepted
+zero terminal model-call receipts, zero case receipts, and zero valid pairs;
+holdout never opened. The unbound response artifact is excluded from evidence,
+so the run establishes no answer-quality, uplift, regression, usage, latency,
+or cost result. This one-shot protocol is consumed and must not be rerun.
+Production finalization, routing, prompt evolution, GEPA, the installed App, and
+the published release remain unchanged.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
