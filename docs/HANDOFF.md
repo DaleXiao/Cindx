@@ -203,9 +203,13 @@ authority:
    collaboration-learning gate now contains 18 tests. These counts prove
    contracts, not uplift.
 
-No Goal 3E authorization receipt was minted and no provider call was made.
-V12, the tracked successor manifest/suite, and production serving remain
-unchanged.
+Goal 3E was authorized and consumed once on `12a3ea2` / `0.2.32`. The private
+journal closed `CENSORED` after reserving the baseline Direct arm: the
+external-outcome projector rejected a malformed persisted strategy receipt,
+leaving zero valid observed runs. Workflow, candidate training, and holdout did
+not run. This is `INVALID_EVIDENCE`, not a collaboration or capability result;
+the frozen Goal 3E protocol must not be retried. V12, the tracked successor
+manifest/suite, and production serving remain unchanged.
 
 The Goal 3C revision passed the full deterministic profile (`55/55` gates),
 the offline application contract (`5/5`), and the desktop successor adapter
@@ -238,14 +242,12 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-Pause before minting authorization or running the provider path. Actual online
-execution is a separate decision and requires explicit user confirmation of
-the exact merged HEAD, canonical preflight and execute-runner digests, provider
-binding, three-pair/six-run matrix, fixed maximum campaign budget, and
-one-shot/no-retry consequence. The successor cases, candidate, budgets,
-ordering, holdout, evaluator, and stop rules remain frozen. Incomplete evidence
-or no causal uplift freezes this collaboration type; do not revise or rescue
-the protocol to continue.
+Do not rerun Goal 3E. First diagnose and repair the persisted strategy-receipt
+instrumentation that failed the external-outcome projection, with deterministic
+coverage for the exact malformed lineage. Only after that fix is merged may a
+new, separately named successor protocol be frozen and considered for another
+explicitly authorized provider attempt. Do not revise Goal 3E cases, candidate,
+budgets, ordering, holdout, evaluator, or receipts to rescue the consumed run.
 
 ## Structural Risks
 

@@ -30,6 +30,7 @@ Passing a lower level does not imply a higher-level result.
 | Workflow GEPA V5 | `86f7dd6`, `0.2.25` | `VALID_TARGETED_EVIDENCE`, `NO_GO_VALIDATION`. The learned profile changed training route and exercised Workflow, but unseen validation produced zero wins and two ties at `1.4337x` latency and `1.2966x` tokens. Nothing was promoted. |
 | Workflow GEPA V7 | `bc37fa9`, `0.2.26` | `VALID_TARGETED_EVIDENCE`, `NO_GO_TRAINING`. Three candidates completed six training pairs with full task quality, but all pairs tied, all routes remained Direct, and no candidate passed the Pareto resource gate. |
 | Workflow GEPA V12 | `ff8c238`, recorded in `0.2.30` | `INVALID_EVIDENCE`. The Direct arm retained route evidence but failed terminal completion; the Workflow arm stopped before strategy-event persistence. There is no matched pair, GO/NO-GO, candidate, snapshot, promotion, or capability conclusion. |
+| Collaboration successor V1 / Goal 3E | `12a3ea2`, `0.2.32` | `INVALID_EVIDENCE`, `CENSORED`. The one-shot capability was consumed and the first baseline Direct arm was reserved, but a malformed persisted strategy receipt prevented a valid external-outcome observation. Zero runs were admitted, no matched pair exists, and Workflow, candidate, and holdout did not run. The protocol cannot be retried and supports no uplift, cost, latency, or capability conclusion. |
 | GPQA matched diagnostic | `0.1.78` | On 12 frozen GPQA-Diamond questions, Direct scored `10/12`; Auto and Pro each scored `8/12`. This predates current code and is a reasoning diagnostic, not a current product baseline. |
 
 Earlier Real-World versions, memory V1, GPQA/Core pilots, Fugu pilots, and
@@ -169,13 +170,40 @@ expiry, drift, tamper, reuse, interruption, censor, non-positive baseline,
 candidate failure, resource failure, or absent holdout uplift stops terminally;
 recovery cannot retry a started physical run.
 
-No Goal 3E authorization was minted and no provider evaluation was run.
-Deterministic tests therefore prove only the binding, ordering, reservation,
-and fail-closed recovery contracts—not quality, cost, latency, or intelligence
-uplift. V12 remains unchanged and invalid. Actual execution requires another
-explicit user confirmation of the exact merged HEAD, canonical preflight and
-execute-runner digests, provider binding, three pairs/six runs, fixed maximum
-campaign budget, and the one-shot/no-retry consequence.
+The exact Goal 3E instance was then authorized and executed once. Its sanitized
+authority is:
+
+- source `12a3ea2105029d9df30781b1d2bf0cc832855a29`, tree
+  `22151a52f4906043b040ab6667f5e99a8b567b50`, version `0.2.32`;
+- manifest `befe6ee366f5d91cfac024b8d79493a616776cfbf2990cd071f16912a2ae61df`
+  and suite `12c6ac24d3bad5d99421f53bc7c42c2ee303941e55a31a95ff7af45ff4e44fc1`;
+- preflight receipt `82d3cd899ffe793b3df5ef091fdc1379b10c3c009d097e6f6ee191dd14a56f87`,
+  execute runner `90b37b722166fc2dc8b63f4bfa06a6ab5275b25c3b4438e7b13e35d50d1b4117`,
+  and authorization `34a87b2a137d5a3e7b3d51e844c2f3f888b036f02a11fbc8930e558844800f53`;
+- redacted provider identity `28db4f61122b0583b64308a476cc00923d81921719d5de4da270ed4daee1a043`,
+  configuration `ad6971a91692069b7b0ba93cebac182695a4ff218afca5e654a8e1ad3272f9ee`,
+  capture pool `73611876a040101a100423235ed40437bf45fcc70f62aa17ec4aa3ae30e8c734`,
+  and ordered pool `d02e5f8be5b3cb4c28c13f18eba2c60ebadc0973a0134dcd670368707a22c404`;
+- run, outcome, and campaign budget receipts
+  `aacf624fb32fd3cb5c397f5548bb8b3f665e38799cc597eaa47894c7c329da31`,
+  `59bf01edde1db9ed4219be9a1c687b9a10439e947ac19f4eedc4ae6f500e7f57`,
+  and `fd9e4c89936743a2575940a81c1a720d72538fccca5bc9d3abed3f97956869f2`.
+
+The terminal journal closed at revision 4 with tombstone digest
+`7add0265028b0baf918bc3f314398cb8bf4eab63ae2ea00223ad5e2ace6b001e`,
+journal digest
+`04c838031c9bc43be82aec4e97954b26fb501ecf53f138de7afa8a6e87db95c7`
+and terminal digest
+`b6e66f754fa20980b7e5d61f493af846895b687995ccd65fcfab929f0c5dc003`.
+It charged one run's maximum reservation but admitted zero observed runs and
+zero observed calls, attempts, tokens, or duration. The baseline Direct arm was
+reserved; its Workflow arm and both later cells remained unstarted. The
+normalized failure was a malformed persisted strategy receipt, so the outcome
+projector failed closed before a valid Pair/Censor observation could be
+formed. This is instrumentation evidence only: Goal 3E is consumed,
+`CENSORED`, and must not be rerun. A future provider attempt requires a new
+instrumentation fix, frozen successor protocol, revision, and authorization.
+V12 remains unchanged and invalid.
 
 ## Running Evaluation
 

@@ -247,11 +247,11 @@ state terminates frozen/censored and cannot resume a started physical run.
 The fixed controller admits the baseline before the candidate and the
 candidate before holdout, then exposes only ready-for-independent-review,
 frozen, or censored terminal state. It has no production serving or promotion
-consumer. No authorization receipt has been minted and the provider path has
-not been run; actual execution remains separately user-authorized against the
-exact merged HEAD, preflight and execute-runner digests, provider binding,
-three-pair/six-run matrix, fixed maximum campaign budget, and
-one-shot/no-retry consequence.
+consumer. The Goal 3E instance consumed its one-shot authorization, reserved
+the first baseline Direct arm, and closed `CENSORED` before a valid observation
+because the persisted strategy receipt failed external-outcome validation.
+This confirms the lifecycle stopped fail-closed; it is not a quality result and
+does not permit recovery or retry of that protocol.
 
 ## Persistence and Background Work
 
