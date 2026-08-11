@@ -225,52 +225,10 @@ persistent-state probes before installation. No provider evaluation was run,
 so this validates configuration semantics and compatibility rather than an
 intelligence uplift.
 
-A separate Delivery Verification experiment now has provider-free construction,
-projection, and a tracked frozen protocol without changing production serving
-or GEPA:
-
-1. Control and treatment start from one shared exact Owner final draft.
-2. The proposed treatment binds that draft, its grounded receipt, and the exact
-   obligation/evidence context to a model-distinct Independent Verifier.
-3. A pass preserves the exact Owner bytes. A revision permits exactly one Owner
-   repair and one Verifier recheck; the contract has no further repair loop.
-4. Default-off `realworld-eval` request and projector tests fail closed on
-   wrong configured models, tool use, incomplete reference coverage, invalid
-   receipts, and missing or extra attempt slots. Cancellation and steering are
-   censored.
-5. The tracked suite fixes eight calibration and 24 model-hidden holdout cases
-   across four strata. Hidden exact oracles are bound into case digests but are
-   excluded from model-facing input.
-6. Holdout opens only after the fixed calibration gate. Its sole positive rule
-   is all 24 valid pairs with at least five treatment-only wins and zero
-   control-only losses; calibration cannot tune prompts, models, or thresholds.
-7. The protocol caps each case at four tool-free calls with zero transport
-   retries, 128 total calls, 64,000 tokens per case, 2,048,000 campaign tokens,
-   and six hours.
-8. A separate provider-free authorization binds the canonical preflight,
-   current clean source, exact provider/credential and Executor/Reviewer
-   authority, exact execute binary, new one-shot output root, and a short
-   validity window.
-9. Execution atomically consumes that capability, persists the campaign before
-   provider construction, and persists the exact case/stage/model/request and
-   budget reservation before every physical call. Started calls are never
-   resumed or retried after an ambiguous interruption.
-10. A private durable journal retains resource accounting and closes incomplete,
-    tampered, expired, reused, or interrupted state as inconclusive/censored.
-    Calibration must pass before any holdout provider call can be dispatched.
-11. The `agent-delivery-verification-execution-contract` now contains 38
-    provider-free tests. Together with the existing 12 core, 22 request and
-    projection, and 19 protocol/preflight tests, this proves the frozen control
-    plane only.
-
-The v2 preflight binds source, protocol, case, budget, oracle, redacted model,
-exact v2 execute name/digest/size, and external-path authority while recording
-zero provider calls, `online_runner_frozen=true`, and
-`execution_authorized=false`. It also freezes the full SHA-256 CodeDirectory
-derived from a verified private copy of the exact execute bytes. A later
-authorization must match both the full-file and CodeDirectory identities, and
-execute must compare that CodeDirectory with the kernel-backed identity of its
-running process before consuming state.
+Delivery Verification remains default-off and separate from production serving
+and GEPA. V1 and v2 are consumed authorities. Their six public preflight,
+authorization, and execute entrypoints are permanently fail-closed before live
+state access.
 
 Delivery Verification v1 was then authorized and consumed once on source
 `5373e65`. It closed `CENSORED` / `INVALID-INSTRUMENTATION` during the first
@@ -286,22 +244,63 @@ quality, latency, usage, or cost result, and v1 must not be rerun. The productio
 finalizer, Workflow, Settings, prompt evolution, GEPA, routing, permissions,
 serving, installed App, and published release remain unchanged.
 
-The instrumentation successor is now implemented provider-free. It prepares an
-immutable non-streaming request, durably reserves separate semantic and wire
-digests and sizes in a v2 journal, dispatches exactly the prepared bytes, binds
-terminal metadata to the wire authority, and preserves the first terminal
-validation error. Real local-loopback coverage crosses model-provider prepare,
-reservation, HTTP dispatch, receipt, and terminal persistence. The consumed v1
-preflight, authorization, and execute entrypoints all reject before live state
-access. A separately named v2 protocol and three feature-gated control-plane
-binaries preserve the exact v1 suite, case order, hidden oracle, budgets,
-thresholds, and no-retry rule while freezing the repaired instrumentation and
-journal-v2 contract. One-shot consumption is anchored by an atomic no-clobber
-marker beside the canonical output root, shared across authorization paths and
-retained if the output root is moved or deleted. That marker is local
-filesystem state and does not claim protection against a same-user rollback of
-all private control-plane files. No v2 authorization or execution occurred,
-and no provider was called.
+Delivery Verification v2 was subsequently authorized and consumed once at
+source `275d79b883192bf4148f13123e0d0de788aa346d` / version `0.2.34`.
+All eight calibration pairs completed in 16 calls: seven both-pass and ordinal
+3 both-fail, with no treatment-only win or control-only loss. The unique failure
+was a frozen case-definition mismatch between the visible
+`controlling_revision` key and the hidden exact oracle's `revision` key. The
+fixed gate closed `terminal_futility`, and all 24 holdout cases were durably
+skipped. This is neither uplift nor regression evidence. V2 must not be rerun.
+
+V3 is a new fixed seeded-defect recovery and preservation component test, not a
+natural-draft uplift experiment:
+
+1. The 32-case suite freezes 24 seeded defects and eight clean preservation
+   sentinels, split 8 calibration / 24 holdout. Each of four strata has two
+   calibration and six holdout cases.
+2. Control is the exact frozen seed. Treatment starts with a model-distinct
+   Reviewer; `passed` preserves the seed, while `needs_revision` permits one
+   Executor repair and one Reviewer recheck. There is no initial drafting call,
+   second repair, retry, or replacement.
+3. Model-visible output contracts expose property names, JSON types,
+   requiredness, and additional-property policy. Exact oracle values remain
+   evaluator-only.
+4. Calibration requires all eight cases, exactly six control failures, at least
+   four treatment-only wins, at least one win per defect stratum, and no loss or
+   structural/treatment-execution failure. Otherwise it closes
+   `terminal_futility`.
+5. Holdout requires all 24 cases, exactly 18 control failures, at least 13
+   treatment-only wins, at least four wins per defect stratum, and no loss for
+   `seeded_repair_effective`; structural/treatment-execution failure is
+   ineligible. A clean-sentinel loss is
+   `preservation_regression`; an otherwise valid sub-threshold result is
+   `not_effective`.
+6. Requests are tool-free and non-streaming, with zero transport retries, one or
+   three calls per case, 96 total calls/attempts, 64,000 tokens per case,
+   2,048,000 campaign tokens, and six hours.
+   Durable provider timeout/unavailability or invalid Reviewer verdict JSON is
+   an intention-to-treat treatment failure; internal time-budget, binding, or
+   authority failure is structural and closes inconclusive.
+7. Provider-free preflight binds clean source HEAD/tree/version; protocol,
+   suite, case, order, seed, model-input, output-contract, budget, and hidden
+   oracle authorities; redacted provider/model authority; exact execute
+   full-file digest/size and CodeDirectory; and new canonical external paths.
+   It records zero provider calls and `execution_authorized=false`.
+8. Authorization remains a separate explicit one-shot step. Execute must match
+   the frozen runner's full-file and kernel-backed CodeDirectory identities and
+   atomically consume the shared no-clobber output marker before provider work.
+9. Journal v3 reserves campaign/case state and then stage, role, configured
+   model, semantic request digest/size, immutable prepared wire digest/size, and
+   output budget before every dispatch. Terminal metadata must match the
+   reserved wire authority; started calls never resume or retry.
+10. Case receipts retain seed/control/treatment digests and outcomes, verifier
+    decisions/finding counts, repair activation, recheck telemetry, treatment
+    disposition, failure stage/code, outcome reason, and exact accounting.
+
+Current v3 source and verification are provider-free only. There is no v3
+online authorization, campaign execution, provider result, or component-test
+decision. Do not infer intelligence uplift from deterministic gates.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -337,13 +336,15 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-Do not rerun Delivery Verification v1. The bounded instrumentation repair,
-provider-free real-path loopback, and v2 successor freeze are complete, but
-they prove no quality uplift. Stop after generating a fresh private v2
-preflight from clean merged source and exact feature-gated binaries. Any
-provider attempt requires another explicit one-shot authorization for that
-exact binding. Do not change production serving or GEPA, and do not create an
-App build, version tag, or GitHub release for this evidence-only update.
+Do not rerun Delivery Verification v1 or v2. Complete only the provider-free v3
+gates, merge the exact source, build the three feature-gated evaluator binaries,
+and generate a new private v3 preflight from clean merged `main`. Recheck its
+source, protocol/suite/case/seed/input/contract/budget/oracle, runner full-file
+and CodeDirectory, redacted provider/model, and external-path bindings, with
+`provider_calls=0` and `execution_authorized=false`; then stop. Any online v3
+attempt requires a later explicit one-shot authorization for that exact binding.
+Do not change production serving or GEPA, and do not create an App build,
+version tag, or GitHub release for this evidence-only update.
 
 ## Structural Risks
 

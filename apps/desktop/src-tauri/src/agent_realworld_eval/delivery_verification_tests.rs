@@ -1,8 +1,8 @@
 use super::delivery_verification::*;
 use agent_runtime::{
-    DeliveryVerificationEvidence, DeliveryVerificationObligation, DeliveryVerificationStatus,
-    DeliveryVerificationSubjectV1, GroundedCompletionBasis, GroundedCompletionReceipt,
-    DELIVERY_VERIFICATION_VERDICT_SCHEMA, GROUNDED_COMPLETION_SCHEMA,
+    DeliveryVerificationDecision, DeliveryVerificationEvidence, DeliveryVerificationObligation,
+    DeliveryVerificationStatus, DeliveryVerificationSubjectV1, GroundedCompletionBasis,
+    GroundedCompletionReceipt, DELIVERY_VERIFICATION_VERDICT_SCHEMA, GROUNDED_COMPLETION_SCHEMA,
 };
 use orchestrator::sha256_hex;
 use serde_json::{json, Value};
@@ -149,6 +149,16 @@ fn agent_delivery_verification_contract_initial_pass_preserves_exact_owner_bytes
     assert_eq!(observation.initial_verifier_calls, 1);
     assert_eq!(observation.owner_repair_calls, 0);
     assert_eq!(observation.recheck_calls, 0);
+    assert_eq!(
+        observation.initial_verifier_decision,
+        Some(DeliveryVerificationDecision::Passed)
+    );
+    assert_eq!(
+        observation.initial_finding_counts,
+        DeliveryVerificationFindingCounts::default()
+    );
+    assert!(!observation.repair_activated);
+    assert_eq!(observation.recheck_decision, None);
 }
 
 #[test]
@@ -179,6 +189,16 @@ fn agent_delivery_verification_contract_failed_verdict_runs_one_repair_and_one_r
     assert_eq!(observation.initial_verifier_calls, 1);
     assert_eq!(observation.owner_repair_calls, 1);
     assert_eq!(observation.recheck_calls, 1);
+    assert_eq!(
+        observation.initial_verifier_decision,
+        Some(DeliveryVerificationDecision::NeedsRevision)
+    );
+    assert_eq!(observation.initial_finding_counts.unsupported_claim, 1);
+    assert!(observation.repair_activated);
+    assert_eq!(
+        observation.recheck_decision,
+        Some(DeliveryVerificationDecision::Passed)
+    );
     assert_ne!(
         observation.initial_subject_sha256,
         observation.final_subject_sha256

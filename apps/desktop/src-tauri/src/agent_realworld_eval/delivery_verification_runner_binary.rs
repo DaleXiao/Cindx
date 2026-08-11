@@ -150,7 +150,29 @@ pub(super) fn running_code_directory_sha256() -> Result<String, String> {
 
 pub(super) fn validate_running_code_directory(expected: &str) -> Result<(), String> {
     validate_code_directory_sha256(expected)?;
-    if running_code_directory_sha256()? != expected {
+    #[cfg(target_os = "macos")]
+    verify_running_code_signature()?;
+    let running = running_code_directory_sha256()?;
+    #[cfg(target_os = "macos")]
+    verify_running_code_signature()?;
+    if running != expected {
+        return Err(
+            "running delivery execute image differs from the frozen code-directory identity".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_running_code_signature() -> Result<(), String> {
+    let process = format!("+{}", std::process::id());
+    let verification = Command::new(CODESIGN_PATH)
+        .env("LC_ALL", "C")
+        .args(["--verify", "--strict"])
+        .arg(&process)
+        .output()
+        .map_err(|error| format!("failed to verify running delivery execute image: {error}"))?;
+    if !verification.status.success() {
         return Err(
             "running delivery execute image differs from the frozen code-directory identity".into(),
         );

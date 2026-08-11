@@ -1,3 +1,4 @@
+use super::delivery_verification::DeliveryVerificationFindingCounts;
 use super::delivery_verification_authorization::*;
 use super::delivery_verification_protocol::DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA;
 use agent_core::ModelRole;
@@ -13,27 +14,27 @@ use self::storage::*;
 pub(super) const DELIVERY_EXECUTION_JOURNAL_SCHEMA: &str =
     DELIVERY_VERIFICATION_EXECUTION_JOURNAL_SCHEMA;
 pub(super) const DELIVERY_EXECUTION_RECOVERY_SCHEMA: &str =
-    "cindx.agent-eval.delivery-verification-execution-recovery.v1";
+    "cindx.agent-eval.delivery-verification-execution-recovery.v3";
 pub(super) const DELIVERY_EXECUTION_JOURNAL_FILE_NAME: &str =
     "delivery-verification-execution-journal.json";
 pub(super) const DELIVERY_EXECUTION_RECOVERY_FILE_NAME: &str =
     "delivery-verification-execution-recovery.json";
 pub(super) const DELIVERY_EXECUTION_LOCK_FILE_NAME: &str = "delivery-verification-execution.lock";
 
-const JOURNAL_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-execution-journal.v2\0";
+const JOURNAL_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-execution-journal.v3\0";
 const CAMPAIGN_RESERVATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-campaign-reservation.v1\0";
+    b"cindx.agent-eval.delivery-verification-campaign-reservation.v3\0";
 const CALL_RESERVATION_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-call-reservation.v2\0";
+    b"cindx.agent-eval.delivery-verification-call-reservation.v3\0";
 const CALL_TERMINAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-call-receipt.v1\0";
+    b"cindx.agent-eval.delivery-verification-call-receipt.v3\0";
 const CASE_TERMINAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-case-receipt.v1\0";
-const DECISION_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-decision-receipt.v1\0";
+    b"cindx.agent-eval.delivery-verification-case-receipt.v3\0";
+const DECISION_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-decision-receipt.v3\0";
 const TERMINAL_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-campaign-terminal.v1\0";
+    b"cindx.agent-eval.delivery-verification-campaign-terminal.v3\0";
 const RECOVERY_HASH_DOMAIN: &[u8] =
-    b"cindx.agent-eval.delivery-verification-execution-recovery.v1\0";
+    b"cindx.agent-eval.delivery-verification-execution-recovery.v3\0";
 const MAX_SEMANTIC_REQUEST_BYTES: u64 = 512 * 1024;
 const MAX_WIRE_PAYLOAD_BYTES: u64 = 512 * 1024;
 const CASE_COUNT: usize = 32;
@@ -42,14 +43,12 @@ const CALIBRATION_CASES: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum DeliveryVerificationCallStageV1 {
-    OwnerDraft,
     VerifierInitial,
     OwnerRepair,
     VerifierRecheck,
 }
 
-const CALL_STAGES: [DeliveryVerificationCallStageV1; 4] = [
-    DeliveryVerificationCallStageV1::OwnerDraft,
+const CALL_STAGES: [DeliveryVerificationCallStageV1; 3] = [
     DeliveryVerificationCallStageV1::VerifierInitial,
     DeliveryVerificationCallStageV1::OwnerRepair,
     DeliveryVerificationCallStageV1::VerifierRecheck,
@@ -77,9 +76,9 @@ pub(super) enum DeliveryVerificationCaseTerminalStatusV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum DeliveryVerificationCampaignDispositionV1 {
-    EvidenceOfUplift,
-    NoEvidence,
-    Regression,
+    SeededRepairEffective,
+    NotEffective,
+    PreservationRegression,
     TerminalFutility,
     Inconclusive,
     Invalid,
@@ -174,10 +173,19 @@ pub(super) struct DeliveryVerificationCaseTerminalInputV1 {
     pub(super) status: DeliveryVerificationCaseTerminalStatusV1,
     pub(super) control_passed: Option<bool>,
     pub(super) treatment_passed: Option<bool>,
-    pub(super) owner_draft_sha256: Option<String>,
-    pub(super) owner_draft_bytes: Option<u64>,
+    pub(super) seeded_candidate_sha256: Option<String>,
+    pub(super) seeded_candidate_bytes: Option<u64>,
     pub(super) control_output_sha256: Option<String>,
     pub(super) treatment_output_sha256: Option<String>,
+    pub(super) initial_verifier_decision: Option<String>,
+    pub(super) initial_finding_counts: DeliveryVerificationFindingCounts,
+    pub(super) repair_activated: bool,
+    pub(super) recheck_decision: Option<String>,
+    pub(super) recheck_finding_counts: DeliveryVerificationFindingCounts,
+    pub(super) treatment_disposition: Option<String>,
+    pub(super) failure_stage: Option<String>,
+    pub(super) failure_code: Option<String>,
+    pub(super) outcome_reason: String,
     pub(super) observation_sha256: String,
     pub(super) completed_at_ms: u64,
 }
@@ -197,6 +205,7 @@ enum JournalPhaseV1 {
     Terminal,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum JournalCaseStateV1 {
@@ -293,10 +302,19 @@ struct CaseTerminalReceiptV1 {
     status: DeliveryVerificationCaseTerminalStatusV1,
     control_passed: Option<bool>,
     treatment_passed: Option<bool>,
-    owner_draft_sha256: Option<String>,
-    owner_draft_bytes: Option<u64>,
+    seeded_candidate_sha256: Option<String>,
+    seeded_candidate_bytes: Option<u64>,
     control_output_sha256: Option<String>,
     treatment_output_sha256: Option<String>,
+    initial_verifier_decision: Option<String>,
+    initial_finding_counts: DeliveryVerificationFindingCounts,
+    repair_activated: bool,
+    recheck_decision: Option<String>,
+    recheck_finding_counts: DeliveryVerificationFindingCounts,
+    treatment_disposition: Option<String>,
+    failure_stage: Option<String>,
+    failure_code: Option<String>,
+    outcome_reason: String,
     observation_sha256: String,
     resources: DeliveryVerificationObservedResourcesV1,
     completed_at_ms: u64,
@@ -847,10 +865,19 @@ impl DeliveryVerificationExecutionJournal {
             status: input.status,
             control_passed: input.control_passed,
             treatment_passed: input.treatment_passed,
-            owner_draft_sha256: input.owner_draft_sha256,
-            owner_draft_bytes: input.owner_draft_bytes,
+            seeded_candidate_sha256: input.seeded_candidate_sha256,
+            seeded_candidate_bytes: input.seeded_candidate_bytes,
             control_output_sha256: input.control_output_sha256,
             treatment_output_sha256: input.treatment_output_sha256,
+            initial_verifier_decision: input.initial_verifier_decision,
+            initial_finding_counts: input.initial_finding_counts,
+            repair_activated: input.repair_activated,
+            recheck_decision: input.recheck_decision,
+            recheck_finding_counts: input.recheck_finding_counts,
+            treatment_disposition: input.treatment_disposition,
+            failure_stage: input.failure_stage,
+            failure_code: input.failure_code,
+            outcome_reason: input.outcome_reason,
             observation_sha256: input.observation_sha256,
             resources,
             completed_at_ms: input.completed_at_ms,
@@ -931,7 +958,11 @@ impl DeliveryVerificationExecutionJournal {
     ) -> Result<(), String> {
         if !matches!(
             decision,
-            "evidence_of_uplift" | "no_evidence" | "regression" | "inconclusive" | "invalid"
+            "seeded_repair_effective"
+                | "not_effective"
+                | "preservation_regression"
+                | "inconclusive"
+                | "invalid"
         ) {
             return Err("delivery holdout decision is invalid".into());
         }
@@ -998,14 +1029,14 @@ impl DeliveryVerificationExecutionJournal {
     ) -> Result<(), String> {
         if matches!(
             disposition,
-            DeliveryVerificationCampaignDispositionV1::EvidenceOfUplift
-                | DeliveryVerificationCampaignDispositionV1::NoEvidence
-                | DeliveryVerificationCampaignDispositionV1::Regression
+            DeliveryVerificationCampaignDispositionV1::SeededRepairEffective
+                | DeliveryVerificationCampaignDispositionV1::NotEffective
+                | DeliveryVerificationCampaignDispositionV1::PreservationRegression
         ) {
             return Err("delivery freeze cannot claim a completed holdout decision".into());
         }
         let evidence_sha256 =
-            sha256_hex(format!("cindx.delivery-verification-freeze.v1\0{reason}").as_bytes());
+            sha256_hex(format!("cindx.delivery-verification-freeze.v3\0{reason}").as_bytes());
         self.finish(disposition, reason, evidence_sha256, terminal_at_ms)
     }
 

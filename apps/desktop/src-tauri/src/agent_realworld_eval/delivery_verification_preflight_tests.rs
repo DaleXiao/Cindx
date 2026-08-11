@@ -16,11 +16,15 @@ fn runner_binding() -> DeliveryVerificationRunnerBinary {
 
 fn protocol() -> DeliveryVerificationProtocolSnapshot {
     DeliveryVerificationProtocolSnapshot {
-        protocol_id: "cindx-delivery-verification-protocol-v2".into(),
-        suite_id: "cindx-delivery-verification-v1".into(),
+        protocol_id: "cindx-delivery-verification-protocol-v3".into(),
+        suite_id: "cindx-delivery-verification-v3".into(),
         manifest_sha256: digest("manifest"),
         suite_sha256: digest("suite"),
         case_sha256: vec![digest("case-1"), digest("case-2")],
+        case_order_sha256: digest("case-order"),
+        seeded_candidates_sha256: digest("seeded-candidates"),
+        model_inputs_sha256: digest("model-inputs"),
+        output_contracts_sha256: digest("output-contracts"),
         budget_sha256: digest("budget"),
         hidden_oracle_sha256: digest("hidden-oracle"),
         execution_authorized: false,
@@ -75,6 +79,16 @@ fn agent_delivery_verification_protocol_contract_preflight_is_provider_free_and_
     assert!(!receipt.online_execution_requires_new_frozen_runner);
     assert!(receipt.online_execution_requires_explicit_authorization);
     assert_eq!(receipt.case_sha256, protocol.case_sha256);
+    assert_eq!(receipt.case_order_sha256, protocol.case_order_sha256);
+    assert_eq!(
+        receipt.seeded_candidates_sha256,
+        protocol.seeded_candidates_sha256
+    );
+    assert_eq!(receipt.model_inputs_sha256, protocol.model_inputs_sha256);
+    assert_eq!(
+        receipt.output_contracts_sha256,
+        protocol.output_contracts_sha256
+    );
     assert_eq!(receipt.hidden_oracle_sha256, protocol.hidden_oracle_sha256);
     assert_eq!(
         receipt.runner_binary,
@@ -86,6 +100,19 @@ fn agent_delivery_verification_protocol_contract_preflight_is_provider_free_and_
         receipt.runner_code_directory_sha256,
         runner_binding().code_directory_sha256
     );
+    assert_eq!(
+        OUTPUT_ROOT_ENV,
+        "CINDX_DELIVERY_VERIFICATION_V3_OUTPUT_ROOT"
+    );
+    assert_eq!(
+        RECEIPT_ENV,
+        "CINDX_DELIVERY_VERIFICATION_V3_PREFLIGHT_RECEIPT"
+    );
+    assert_eq!(
+        RECEIPT_HASH_DOMAIN,
+        b"cindx.agent-eval.delivery-verification-preflight.v3\0"
+    );
+    assert_eq!(CASES_HASH_DOMAIN, b"cindx.delivery-verification-cases.v3\0");
     eprintln!("{PREFLIGHT_SCHEMA}");
 }
 
@@ -103,6 +130,16 @@ fn agent_delivery_verification_protocol_contract_preflight_binds_source_cases_bu
     assert_eq!(
         receipt.cases_sha256,
         cases_digest(&protocol.case_sha256).unwrap()
+    );
+    assert_eq!(receipt.case_order_sha256, protocol.case_order_sha256);
+    assert_eq!(
+        receipt.seeded_candidates_sha256,
+        protocol.seeded_candidates_sha256
+    );
+    assert_eq!(receipt.model_inputs_sha256, protocol.model_inputs_sha256);
+    assert_eq!(
+        receipt.output_contracts_sha256,
+        protocol.output_contracts_sha256
     );
     assert_eq!(receipt.budget_sha256, protocol.budget_sha256);
     assert_eq!(
@@ -148,6 +185,18 @@ fn agent_delivery_verification_protocol_contract_provider_binding_is_exact_redac
     assert_ne!(
         binding.model_binding_sha256,
         provider_binding(&changed).unwrap().model_binding_sha256
+    );
+    assert_eq!(
+        PROVIDER_CONFIG_HASH_DOMAIN,
+        b"cindx.delivery-verification-provider-config.v3\0"
+    );
+    assert_eq!(
+        PROVIDER_IDENTITY_HASH_DOMAIN,
+        b"cindx.delivery-verification-provider-identity.v3\0"
+    );
+    assert_eq!(
+        MODEL_BINDING_HASH_DOMAIN,
+        b"cindx.delivery-verification-model-binding.v3\0"
     );
 }
 
@@ -211,6 +260,11 @@ fn agent_delivery_verification_protocol_contract_preflight_rejects_authority_tam
     calls.provider_calls_performed = 1;
     rehash(&mut calls);
     assert!(validate_receipt(&protocol, &calls).is_err());
+
+    let mut seeded_candidates = receipt();
+    seeded_candidates.seeded_candidates_sha256 = digest("changed-seeded-candidates");
+    rehash(&mut seeded_candidates);
+    assert!(validate_receipt(&protocol, &seeded_candidates).is_err());
 
     let mut runner_required = receipt();
     runner_required.online_execution_requires_new_frozen_runner = true;
