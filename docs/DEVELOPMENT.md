@@ -183,12 +183,16 @@ and new output root for 15 minutes. Execution revalidates and consumes that
 private capability and output root once, reserves the campaign/cell/arm before
 model work, and never retries a started physical run after interruption.
 
-Neither Goal 3E binary has been run: no authorization receipt was minted and no
-provider evaluation occurred. Before either authorization or execution, obtain
-another explicit user confirmation covering the exact merged HEAD, preflight
-and execute-runner digests, provider binding, three pairs/six runs, fixed
-maximum campaign budget, and one-shot/no-retry consequence. Deterministic green
-gates are not that authorization and do not establish uplift.
+The frozen Goal 3E instance was authorized and consumed once on source
+`12a3ea2`. It stopped `CENSORED` after reserving the first baseline Direct arm
+because the persisted strategy receipt was invalid for external-outcome
+projection; zero valid runs were observed. Do not run its authorization or
+execute path again. Keep the private authorization, tombstone, journal, logs,
+workspaces, artifacts, model identities, and raw outputs outside Git; only the
+sanitized decision in [EVALUATION.md](EVALUATION.md) is tracked. Any future
+provider attempt requires a deterministic instrumentation fix and a new frozen
+successor, exact revision, preflight, authorization, and explicit user
+decision. Deterministic green gates do not establish uplift.
 
 ## Browser and Computer Sidecars
 
