@@ -45,6 +45,7 @@
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
+      "agent-delivery-verification-execution-contract",
       "agent-collaboration-learning-contract",
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
@@ -90,6 +91,7 @@
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
+      "agent-delivery-verification-execution-contract",
       "agent-collaboration-learning-contract",
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
@@ -178,6 +180,7 @@
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
+      "agent-delivery-verification-execution-contract",
       "agent-collaboration-learning-contract",
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
@@ -589,7 +592,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 20 passed; 0 failed",
+        "test result: ok. 22 passed; 0 failed",
         "cindx.agent-eval.delivery-verification-observation.v1"
       ]
     },
@@ -614,6 +617,35 @@
         "test result: ok. 19 passed; 0 failed",
         "cindx.agent-eval.delivery-verification-protocol.v1",
         "cindx.agent-eval.delivery-verification-preflight.v1"
+      ]
+    },
+    {
+      "id": "agent-delivery-verification-execution-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--features",
+        "realworld-eval",
+        "--lib",
+        "--bin",
+        "cindx-delivery-verification-preflight",
+        "--bin",
+        "cindx-delivery-verification-authorize",
+        "--bin",
+        "cindx-delivery-verification-execute",
+        "agent_delivery_verification_execution_contract_",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 32 passed; 0 failed",
+        "cindx.agent-eval.delivery-verification-authorization.v1",
+        "cindx.agent-eval.delivery-verification-execution-journal.v1"
       ]
     },
     {

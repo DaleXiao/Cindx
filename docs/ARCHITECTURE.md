@@ -229,11 +229,24 @@ model-distinct Reviewer verdict, at most one same-Owner repair, and one
 Reviewer recheck. Model-facing case input contains only the objective and
 ordered obligation/evidence bodies; the deterministic exact-output oracle is
 sealed into the tracked case digest but omitted from every model request. The
-adjacent preflight binds a clean source tree, protocol/suite/case/budget hashes,
-redacted configured Owner/Reviewer identities, and new external paths into a
-private receipt. It performs zero provider calls and records both
-`online_runner_frozen=false` and `execution_authorized=false`; there is no
-Delivery execution, serving, learning, promotion, or GEPA dependency.
+runner receives only the bounded model input and evaluates an output against
+the hidden oracle after the response; raw suite bytes and debug formatting are
+not model-facing access paths.
+
+The adjacent preflight binds a clean source tree, protocol/suite/case/budget and
+hidden-oracle aggregate hashes, redacted configured Owner/Reviewer identities,
+the exact execute-binary bytes, build profile and features, and new external
+paths into a private receipt. It performs zero provider calls and records
+`online_runner_frozen=true` and `execution_authorized=false`. A separate
+provider-free authorization binary may bind that canonical receipt, current
+source/provider/model/credential authority, the exact execute binary, a new
+one-shot output root, and a short validity window. The execute binary must
+atomically consume that capability, persist the campaign before constructing
+provider transport, and persist each exact physical-call reservation before
+dispatch. Ambiguous or interrupted started calls become terminal
+inconclusive/censored state and are never resumed or retried. No live preflight
+receipt, authorization, or provider result exists yet, and there is no Delivery
+serving, learning, promotion, production-finalizer, or GEPA dependency.
 
 The same crate owns the portable collaboration-learning contracts, separate
 from production prompt evolution. A structured policy keeps the Goal 2 graph
