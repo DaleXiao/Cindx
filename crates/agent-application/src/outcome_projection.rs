@@ -4,7 +4,7 @@ use crate::outcome_evidence::{
     AgentOutcomeUsageV1,
 };
 use crate::{
-    AgentRunEvent, AgentRunStatus, AgentStrategyDecisionReceipt, AgentTerminalCommitIdentity,
+    AgentRunEvent, AgentRunStatus, AgentStrategyReceiptState, AgentTerminalCommitIdentity,
     AgentTerminalCommitState, AGENT_TERMINAL_COMMIT_EPOCH_METADATA_KEY,
     AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY, AGENT_TERMINAL_COMMIT_SCHEMA,
     AGENT_TERMINAL_COMMIT_SCHEMA_METADATA_KEY,
@@ -93,17 +93,17 @@ impl AgentOutcomeLifecycleBindingV1 {
                     "externally verified outcome terminal epoch is invalid",
                 )
             })?;
-        let strategy = AgentStrategyDecisionReceipt::from_metadata(&terminal.metadata)
-            .map_err(|error| {
+        let strategy_state =
+            AgentStrategyReceiptState::from_metadata(&terminal.metadata).map_err(|error| {
                 AgentOutcomeEvidenceError::new(format!(
                     "externally verified outcome strategy receipt is invalid: {error}"
                 ))
-            })?
-            .ok_or_else(|| {
-                AgentOutcomeEvidenceError::new(
-                    "externally verified outcome strategy receipt is missing",
-                )
             })?;
+        if strategy_state == AgentStrategyReceiptState::Absent {
+            return Err(AgentOutcomeEvidenceError::new(
+                "externally verified outcome strategy receipt is missing",
+            ));
+        }
         let identity =
             AgentTerminalCommitIdentity::new(&terminal.task_id, &terminal.metadata, steer_epoch)
                 .map_err(|error| {
@@ -124,6 +124,19 @@ impl AgentOutcomeLifecycleBindingV1 {
                 )))
             }
         }
+        let strategy = match strategy_state {
+            AgentStrategyReceiptState::Selected(strategy) => strategy,
+            AgentStrategyReceiptState::NotSelected => {
+                return Err(AgentOutcomeEvidenceError::new(
+                    "externally verified outcome is censored before strategy decision because no strategy was selected",
+                ))
+            }
+            AgentStrategyReceiptState::Absent => {
+                return Err(AgentOutcomeEvidenceError::new(
+                    "externally verified outcome strategy receipt is missing",
+                ))
+            }
+        };
         let decisions = events
             .iter()
             .filter(|event| {
@@ -642,7 +655,8 @@ mod tests {
     use super::*;
     use crate::{
         AgentExternalPostconditionV1, AgentExternalVerifierV1, AgentOutcomeDispositionV1,
-        AgentOutcomeResourcesV1, ExternallyVerifiedOutcomeV1, EXTERNALLY_VERIFIED_OUTCOME_SCHEMA,
+        AgentOutcomeResourcesV1, AgentStrategyDecisionReceipt, ExternallyVerifiedOutcomeV1,
+        EXTERNALLY_VERIFIED_OUTCOME_SCHEMA,
     };
     use agent_core::{
         insert_event_type_v1, AgentActor, AgentEffectAuthority, AgentModelAttribution,
@@ -736,6 +750,20 @@ mod tests {
             AgentTerminalCommitIdentity::new(&terminal.task_id, &terminal.metadata, 0).unwrap();
         terminal.metadata.extend(terminal_identity.metadata());
         vec![decision, terminal]
+    }
+
+    fn pre_decision_terminal_event() -> Event {
+        let mut terminal = event(
+            5,
+            EventKind::Error,
+            EventTypeV1::AgentRunFailed,
+            "Agent task failed",
+        );
+        crate::insert_strategy_not_selected(&mut terminal.metadata, 0).unwrap();
+        let terminal_identity =
+            AgentTerminalCommitIdentity::new(&terminal.task_id, &terminal.metadata, 0).unwrap();
+        terminal.metadata.extend(terminal_identity.metadata());
+        terminal
     }
 
     fn model_call(sequence: u64, actor: AgentActor, model: &str) -> (Event, Event) {
@@ -851,6 +879,28 @@ mod tests {
         assert_eq!(lifecycle.decision_sequence, 2);
         assert_eq!(lifecycle.terminal_sequence, 5);
         println!("{EXTERNALLY_VERIFIED_OUTCOME_SCHEMA}");
+    }
+
+    #[test]
+    fn agent_outcome_evidence_contract_censors_valid_pre_decision_terminal_after_identity_check() {
+        let terminal = pre_decision_terminal_event();
+        let error = AgentOutcomeLifecycleBindingV1::from_events(std::slice::from_ref(&terminal))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "externally verified outcome is censored before strategy decision because no strategy was selected"
+        );
+
+        let mut tampered = terminal;
+        tampered.metadata.insert(
+            AGENT_TERMINAL_COMMIT_KEY_METADATA_KEY.to_string(),
+            "9".repeat(64),
+        );
+        let error = AgentOutcomeLifecycleBindingV1::from_events(&[tampered])
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("externally verified outcome terminal receipt is invalid:"));
     }
 
     #[test]

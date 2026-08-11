@@ -30,7 +30,7 @@ Passing a lower level does not imply a higher-level result.
 | Workflow GEPA V5 | `86f7dd6`, `0.2.25` | `VALID_TARGETED_EVIDENCE`, `NO_GO_VALIDATION`. The learned profile changed training route and exercised Workflow, but unseen validation produced zero wins and two ties at `1.4337x` latency and `1.2966x` tokens. Nothing was promoted. |
 | Workflow GEPA V7 | `bc37fa9`, `0.2.26` | `VALID_TARGETED_EVIDENCE`, `NO_GO_TRAINING`. Three candidates completed six training pairs with full task quality, but all pairs tied, all routes remained Direct, and no candidate passed the Pareto resource gate. |
 | Workflow GEPA V12 | `ff8c238`, recorded in `0.2.30` | `INVALID_EVIDENCE`. The Direct arm retained route evidence but failed terminal completion; the Workflow arm stopped before strategy-event persistence. There is no matched pair, GO/NO-GO, candidate, snapshot, promotion, or capability conclusion. |
-| Collaboration successor V1 / Goal 3E | `12a3ea2`, `0.2.32` | `INVALID_EVIDENCE`, `CENSORED`. The one-shot capability was consumed and the first baseline Direct arm was reserved, but a malformed persisted strategy receipt prevented a valid external-outcome observation. Zero runs were admitted, no matched pair exists, and Workflow, candidate, and holdout did not run. The protocol cannot be retried and supports no uplift, cost, latency, or capability conclusion. |
+| Collaboration successor V1 / Goal 3E | `12a3ea2`, `0.2.32` | `INVALID_EVIDENCE`, `CENSORED`. The one-shot capability was consumed and the first baseline Direct arm was reserved, but the product run ended before selection with zero selected decisions. The terminal producer correctly persisted explicit `not_selected`; no treatment or Owner execution occurred. The selected-only projector misclassified that legal state as a malformed receipt, so zero runs were admitted, no matched pair exists, and Workflow, candidate, and holdout did not run. The protocol cannot be retried and supports no uplift, cost, latency, or capability conclusion. |
 | GPQA matched diagnostic | `0.1.78` | On 12 frozen GPQA-Diamond questions, Direct scored `10/12`; Auto and Pro each scored `8/12`. This predates current code and is a reasoning diagnostic, not a current product baseline. |
 
 Earlier Real-World versions, memory V1, GPQA/Core pilots, Fugu pilots, and
@@ -198,12 +198,17 @@ and terminal digest
 It charged one run's maximum reservation but admitted zero observed runs and
 zero observed calls, attempts, tokens, or duration. The baseline Direct arm was
 reserved; its Workflow arm and both later cells remained unstarted. The
-normalized failure was a malformed persisted strategy receipt, so the outcome
-projector failed closed before a valid Pair/Censor observation could be
+product run terminated before selection with zero selected decisions. Its
+terminal producer correctly persisted the explicit pre-decision `not_selected`
+state; the treatment was never selected and Owner did not execute. The
+selected-only outcome projector misclassified that legal state as a malformed
+receipt and failed closed before a valid Pair/Censor observation could be
 formed. This is instrumentation evidence only: Goal 3E is consumed,
-`CENSORED`, and must not be rerun. A future provider attempt requires a new
-instrumentation fix, frozen successor protocol, revision, and authorization.
-V12 remains unchanged and invalid.
+`CENSORED`, and must not be rerun. Current source now classifies that legal
+pre-decision state explicitly and covers the real terminal-producer-to-outcome-
+projector seam; this corrects the diagnostic but cannot turn the consumed run
+into evidence. No Goal 3F or provider run is authorized. V12 remains unchanged
+and invalid.
 
 ## Running Evaluation
 

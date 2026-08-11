@@ -249,9 +249,15 @@ candidate before holdout, then exposes only ready-for-independent-review,
 frozen, or censored terminal state. It has no production serving or promotion
 consumer. The Goal 3E instance consumed its one-shot authorization, reserved
 the first baseline Direct arm, and closed `CENSORED` before a valid observation
-because the persisted strategy receipt failed external-outcome validation.
-This confirms the lifecycle stopped fail-closed; it is not a quality result and
-does not permit recovery or retry of that protocol.
+after the product run terminated before selection with zero selected decisions.
+The terminal producer correctly persisted the explicit pre-decision
+`not_selected` state, with no treatment or Owner execution, but the
+selected-only external-outcome projector misclassified that legal state as a
+malformed receipt. This confirms the lifecycle stopped fail-closed; it is not a
+quality result and does not permit recovery or retry of that protocol.
+The current projector now distinguishes selected, explicit pre-decision
+not-selected, absent, and malformed receipt states before outcome construction;
+a legal not-selected terminal remains a censor and can never become an outcome.
 
 ## Persistence and Background Work
 
