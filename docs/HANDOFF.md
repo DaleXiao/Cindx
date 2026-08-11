@@ -5,17 +5,17 @@ in place; do not create versioned handoff files.
 
 ## Release Identity
 
-Current release version: `0.2.32`
+Current release version: `0.2.33`
 
 | Item | Verified value |
 | --- | --- |
-| Local build source commit | `ef2cac38f5b4455e13f3e57ac3d48a8e5b8275e6` |
+| Local build source commit | `45bf2ec458c6ad92a44e0ab7ee3cf532512ce6ee` |
 | Tag | Not tagged; latest published tag remains `v0.2.30` |
 | GitHub release | Not published; latest published release remains <https://github.com/DaleXiao/Cindx/releases/tag/v0.2.30> |
-| Local asset | `dist/Cindx-0.2.31-macOS-arm64.zip` |
-| Local asset size | `53,780,372` bytes |
-| Local asset SHA-256 | `26fc553805615221c87483ddca67b13ac0c71d6e661e6b095fa53e501fffa337` |
-| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.31` |
+| Local asset | `dist/Cindx-0.2.33-macOS-arm64.zip` |
+| Local asset size | `53,780,147` bytes |
+| Local asset SHA-256 | `aacd0a4def1aadfb61df0acbb5a650b855f53519d565e695b9173db381c9c704` |
+| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.33` |
 | Installed signature | `codesign --verify --deep --strict` passed |
 
 This is an ad-hoc-signed local validation build, not a tagged, notarized, or
@@ -28,7 +28,7 @@ above; the subsequent version/evidence commit does not change the binary.
 - Integration branch: `origin/main`
 - The local continuation branch may have a different name. Compare it to
   `origin/main`; do not infer divergence from the branch name.
-- The installed `0.2.31` local build embeds `ef2cac3`; the latest published
+- The installed `0.2.33` local build embeds `45bf2ec`; the latest published
   `v0.2.30` release embeds `f2ce3b7`. Read later source state from Git rather
   than copying it into this file as a second log.
 - The current document set is intentionally limited to `README.md`, `AGENTS.md`,
@@ -217,10 +217,11 @@ Current source now distinguishes the legal pre-decision state before selected-
 outcome projection and covers the real terminal-producer-to-projector seam.
 This corrects classification only; it does not recover or reinterpret the run.
 
-The Goal 3C revision passed the full deterministic profile (`55/55` gates),
-the offline application contract (`5/5`), and the desktop successor adapter
-contract (`12/12`). The formal `0.2.31` arm64 build then passed strict signature,
-clean-start, and fail-closed persistent-state probes before installation.
+The bounded classifier repair passed the outcome contract (`9/9`), strategy
+lifecycle contract (`7/7`), and full deterministic profile (`57/57` gates).
+The single formal `0.2.33` arm64 build from `45bf2ec` then passed strict
+signature, clean-start, and fail-closed persistent-state probes before
+installation.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -251,7 +252,7 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 The bounded Goal 3 instrumentation repair is complete: `selected`, explicit
 pre-decision `not_selected`, absent, and malformed states are distinct; legal
 `not_selected` remains a censor; and the real terminal producer-to-projector
-seam is covered. Finish the deterministic gates and one formal App build, then
+seam is covered. The deterministic gates and one formal App build are complete;
 stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
