@@ -132,6 +132,15 @@ violations. Both are included in `ci-contract`, `control-plane`, and `full`,
 but not `quick`; neither exercises the production finalizer or GEPA or proves
 quality uplift.
 
+`agent-delivery-verification-protocol-contract` runs 19 additional
+provider-free tests over the tracked eight-case calibration / 24-case holdout
+suite, exact case/oracle/order/budget digests, matched decision table, redacted
+model-distinct provider binding, clean-source authority, canonical private
+preflight receipt, and zero-call/non-authorizing boundary. It is included in
+`ci-contract`, `control-plane`, and `full`, but not `quick`. The preflight bin
+must not be run as an online experiment: it explicitly records that the online
+runner is not frozen and execution is not authorized.
+
 ```sh
 cargo test --locked -p agent-runtime \
   delivery_verification_contract_ -- --nocapture
@@ -140,6 +149,11 @@ cargo test --locked \
   --manifest-path apps/desktop/src-tauri/Cargo.toml \
   --no-default-features --features realworld-eval \
   agent_delivery_verification_contract_ --lib -- --nocapture
+
+cargo test --locked \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --no-default-features --features realworld-eval \
+  agent_delivery_verification_protocol_contract_ --lib -- --nocapture
 ```
 
 ```sh

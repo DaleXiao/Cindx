@@ -166,7 +166,8 @@ use agent_read_model::*;
 pub use agent_realworld_eval::{
     run_agent_realworld_eval, run_collaboration_successor_authorize,
     run_collaboration_successor_execute, run_collaboration_successor_preflight,
-    run_direct_finalizer_gepa_eval, run_workflow_gepa_candidate_probe, run_workflow_gepa_eval,
+    run_delivery_verification_preflight, run_direct_finalizer_gepa_eval,
+    run_workflow_gepa_candidate_probe, run_workflow_gepa_eval,
 };
 use agent_recovery_service::*;
 use agent_run_engine::continue_agent_loop;
