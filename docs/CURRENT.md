@@ -221,6 +221,21 @@ a real terminal-producer-to-outcome-projector regression test. The repair only
 corrects instrumentation classification; it does not recover the consumed run
 or establish any intelligence or performance result.
 
+A separate default-off Delivery Verification authority now includes a frozen,
+provider-free one-shot control plane under `realworld-eval`. Its preflight binds
+the clean source, tracked protocol and suite, 32 ordered case digests, budgets,
+hidden-oracle aggregate, redacted Executor/Reviewer configuration, exact
+execute-binary bytes, build profile and features, and new external paths. It
+records zero provider calls, `online_runner_frozen=true`, and
+`execution_authorized=false`. Authorization remains a separate private,
+short-lived capability; execution must consume it once and persist the campaign
+and every physical-call reservation before transport. An interrupted started
+call is censored without retry. No live preflight receipt, authorization, or
+provider result was created in this change. Production finalization, routing,
+prompt evolution, GEPA, the installed App, and the published release are
+unchanged. After this code is merged, the next action is a fresh provider-free
+preflight followed by an explicit authorization decision.
+
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
 ## Known Structural Limits

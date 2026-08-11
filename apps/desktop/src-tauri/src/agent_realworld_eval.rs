@@ -13,6 +13,20 @@ mod collaboration_learning_capture;
 mod collaboration_learning_journal;
 mod collaboration_successor_protocol;
 mod conductor_ownership_suite;
+#[allow(dead_code)]
+mod delivery_verification;
+mod delivery_verification_authorization;
+mod delivery_verification_campaign;
+mod delivery_verification_execution_journal;
+#[cfg(test)]
+mod delivery_verification_execution_tests;
+mod delivery_verification_preflight;
+mod delivery_verification_protocol;
+#[allow(dead_code)]
+mod delivery_verification_requests;
+mod delivery_verification_runner;
+#[cfg(test)]
+mod delivery_verification_tests;
 mod direct_finalizer;
 mod direct_finalizer_campaign;
 mod direct_finalizer_campaign_contract;
@@ -26,14 +40,6 @@ mod direct_finalizer_receipts;
 mod direct_finalizer_receipts_tests;
 #[cfg(test)]
 mod direct_finalizer_tests;
-#[allow(dead_code)]
-mod delivery_verification;
-mod delivery_verification_preflight;
-mod delivery_verification_protocol;
-#[allow(dead_code)]
-mod delivery_verification_requests;
-#[cfg(test)]
-mod delivery_verification_tests;
 mod execution;
 mod http_fixture;
 mod memory_receipts;
@@ -555,6 +561,14 @@ pub fn run_collaboration_successor_execute() -> Result<(), String> {
 
 pub fn run_delivery_verification_preflight() -> Result<(), String> {
     delivery_verification_preflight::run_preflight()
+}
+
+pub fn run_delivery_verification_authorize() -> Result<(), String> {
+    delivery_verification_runner::run_authorize()
+}
+
+pub fn run_delivery_verification_execute() -> Result<(), String> {
+    delivery_verification_runner::run_execute()
 }
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {

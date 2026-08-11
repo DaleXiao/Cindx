@@ -116,18 +116,24 @@ no-evidence, regression, incomplete, or invalid rather than a positive claim.
 The protocol fixes tool-free requests, no transport retries, at most four
 physical calls per case, 128 calls total, 64,000 tokens per case, 2,048,000
 tokens for the campaign, and a six-hour campaign ceiling. Its preflight only
-validates the clean source, tracked bytes, case order, budgets, and redacted
-configured Executor/Reviewer identities before writing a new private external
-receipt. The receipt states `provider_calls=0`,
-`online_runner_frozen=false`, and `execution_authorized=false`.
+validates the clean source, tracked bytes, case order, budgets, hidden-oracle
+aggregate, redacted configured Executor/Reviewer identities, exact execute
+binary, build profile and features, and new external paths before writing a new
+private receipt. That receipt states `provider_calls=0`,
+`online_runner_frozen=true`, and `execution_authorized=false`.
 
-There is still no frozen online runner, durable attempt/resource journal,
-authorization, live preflight receipt, or provider result. Production
-finalization, Workflow, Settings, serving, learning, promotion, and GEPA remain
-unchanged. Deterministic gates establish the experiment boundary only; they do
-not establish answer-quality, latency, cost, or intelligence uplift. A future
-runner change will alter the source binding and must be followed by a new
-provider-free preflight and a separate exact authorization decision.
+The source now contains the frozen provider-free authorization, one-shot
+execution, durable campaign/call reservation, accounting, and fail-closed
+recovery control plane. Its 32 deterministic execution tests do not invoke a
+provider. No live preflight receipt or authorization was minted, and no provider
+result exists. Production finalization, Workflow, Settings, serving, learning,
+promotion, GEPA, the installed App, and the published release remain unchanged.
+These gates establish the experiment boundary only; they do not establish
+answer quality, latency, cost, or intelligence uplift. After the runner is
+merged, build its exact feature-gated binaries at the clean merge revision,
+generate one fresh provider-free preflight, inspect its bindings, and stop for
+a separate explicit authorization decision. Any later source or runner change
+requires another fresh preflight.
 
 ## Required Next Evidence
 

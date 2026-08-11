@@ -247,15 +247,29 @@ or GEPA:
 7. The protocol caps each case at four tool-free calls with zero transport
    retries, 128 total calls, 64,000 tokens per case, 2,048,000 campaign tokens,
    and six hours.
+8. A separate provider-free authorization binds the canonical preflight,
+   current clean source, exact provider/credential and Executor/Reviewer
+   authority, exact execute binary, new one-shot output root, and a short
+   validity window.
+9. Execution atomically consumes that capability, persists the campaign before
+   provider construction, and persists the exact case/stage/model/request and
+   budget reservation before every physical call. Started calls are never
+   resumed or retried after an ambiguous interruption.
+10. A private durable journal retains resource accounting and closes incomplete,
+    tampered, expired, reused, or interrupted state as inconclusive/censored.
+    Calibration must pass before any holdout provider call can be dispatched.
+11. The new `agent-delivery-verification-execution-contract` contains 32
+    provider-free tests. Together with the existing 12 core, 22 request and
+    projection, and 19 protocol/preflight tests, this proves the frozen control
+    plane only.
 
-The new preflight is provider-free and writes only a private external receipt
-bound to clean source, tracked bytes, budgets, and redacted configured
-Executor/Reviewer identities. It records zero provider calls,
-`online_runner_frozen=false`, and `execution_authorized=false`. No live receipt
-was minted. There is no online runner, durable attempt/resource journal,
-authorization, or provider result. The production finalizer, Workflow,
-Settings, prompt evolution, GEPA, routing, permissions, and serving remain
-unchanged; no quality or intelligence uplift is claimed.
+The updated preflight binds exact runner bytes, profile and features and records
+zero provider calls, `online_runner_frozen=true`, and
+`execution_authorized=false`. No live receipt or authorization was minted, and
+there is no provider result. The production finalizer, Workflow, Settings,
+prompt evolution, GEPA, routing, permissions, serving, installed App, and
+published release remain unchanged; no quality or intelligence uplift is
+claimed.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -291,13 +305,16 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-The next separate decision is whether the frozen protocol justifies a narrow
-one-shot Delivery runner and durable attempt/resource journal. If implemented,
-that code changes the source authority, so generate a fresh provider-free
-preflight only after the runner is merged, then request explicit authorization
-for its exact source, runner bytes, provider binding, 32 cases, budgets, and
-no-retry scope. Do not change production serving or GEPA until an independently
-reviewable provider result exists.
+The narrow one-shot Delivery runner and durable attempt/resource journal are now
+implemented. Merge them only after the provider-free gates pass. At the clean
+merge revision, build the exact feature-gated preflight, authorization, and
+execute binaries, generate a fresh provider-free preflight in new external
+paths, inspect its source, runner, provider/model, 32-case, budget, oracle, and
+no-retry bindings, then stop and request explicit authorization. Do not mint an
+authorization or run the provider as part of merge delivery. Do not change
+production serving or GEPA until an independently reviewable provider result
+exists, and do not create an App build, version tag, or GitHub release for this
+evaluation-only control-plane change.
 
 ## Structural Risks
 

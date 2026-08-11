@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_OUTPUT_ROOT";
 const RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_PREFLIGHT_RECEIPT";
-const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v1";
+pub(super) const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v1";
 const RECEIPT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v1\0";
 const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v1\0";
 const PROVIDER_CONFIG_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-config.v1\0";
@@ -131,14 +131,16 @@ pub(super) fn run_preflight() -> Result<(), String> {
     }
     write_receipt(&revalidated_receipt_path, &receipt)?;
     eprintln!(
-        "[delivery-verification-preflight] receipt={} digest={} provider_calls=0 online_runner_frozen=false execution_authorized=false",
+        "[delivery-verification-preflight] receipt={} digest={} provider_calls=0 online_runner_frozen=true execution_authorized=false",
         receipt_path.display(),
         receipt.receipt_sha256,
     );
     Ok(())
 }
 
-fn protocol_snapshot(protocol: &ValidatedProtocol<'_>) -> DeliveryVerificationProtocolSnapshot {
+pub(super) fn protocol_snapshot(
+    protocol: &ValidatedProtocol<'_>,
+) -> DeliveryVerificationProtocolSnapshot {
     DeliveryVerificationProtocolSnapshot {
         protocol_id: protocol.protocol_id().to_string(),
         suite_id: protocol.suite_id().to_string(),
@@ -250,9 +252,9 @@ pub(super) fn build_receipt(
         provider,
         output_root_sha256: path_sha256(output_root),
         provider_calls_performed: 0,
-        online_runner_frozen: false,
+        online_runner_frozen: true,
         execution_authorized: false,
-        online_execution_requires_new_frozen_runner: true,
+        online_execution_requires_new_frozen_runner: false,
         online_execution_requires_explicit_authorization: true,
         receipt_sha256: String::new(),
     };
@@ -282,9 +284,9 @@ pub(super) fn validate_receipt(
         || receipt.hidden_oracle_sha256 != protocol.hidden_oracle_sha256
         || !is_sha256(&receipt.output_root_sha256)
         || receipt.provider_calls_performed != 0
-        || receipt.online_runner_frozen
+        || !receipt.online_runner_frozen
         || receipt.execution_authorized
-        || !receipt.online_execution_requires_new_frozen_runner
+        || receipt.online_execution_requires_new_frozen_runner
         || !receipt.online_execution_requires_explicit_authorization
         || receipt.receipt_sha256 != receipt_digest(receipt)?
     {

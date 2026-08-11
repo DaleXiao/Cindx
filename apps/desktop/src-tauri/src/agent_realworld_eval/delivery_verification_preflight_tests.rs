@@ -60,9 +60,9 @@ fn agent_delivery_verification_protocol_contract_preflight_is_provider_free_and_
     validate_receipt(&protocol, &receipt).unwrap();
     assert_eq!(receipt.schema, PREFLIGHT_SCHEMA);
     assert_eq!(receipt.provider_calls_performed, 0);
-    assert!(!receipt.online_runner_frozen);
+    assert!(receipt.online_runner_frozen);
     assert!(!receipt.execution_authorized);
-    assert!(receipt.online_execution_requires_new_frozen_runner);
+    assert!(!receipt.online_execution_requires_new_frozen_runner);
     assert!(receipt.online_execution_requires_explicit_authorization);
     assert_eq!(receipt.case_sha256, protocol.case_sha256);
     assert_eq!(receipt.hidden_oracle_sha256, protocol.hidden_oracle_sha256);
@@ -152,7 +152,7 @@ fn agent_delivery_verification_protocol_contract_preflight_rejects_authority_tam
     let protocol = protocol();
 
     let mut runner = receipt();
-    runner.online_runner_frozen = true;
+    runner.online_runner_frozen = false;
     rehash(&mut runner);
     assert!(validate_receipt(&protocol, &runner).is_err());
 
@@ -167,7 +167,7 @@ fn agent_delivery_verification_protocol_contract_preflight_rejects_authority_tam
     assert!(validate_receipt(&protocol, &calls).is_err());
 
     let mut runner_required = receipt();
-    runner_required.online_execution_requires_new_frozen_runner = false;
+    runner_required.online_execution_requires_new_frozen_runner = true;
     rehash(&mut runner_required);
     assert!(validate_receipt(&protocol, &runner_required).is_err());
 }
