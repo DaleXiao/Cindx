@@ -185,14 +185,18 @@ model work, and never retries a started physical run after interruption.
 
 The frozen Goal 3E instance was authorized and consumed once on source
 `12a3ea2`. It stopped `CENSORED` after reserving the first baseline Direct arm
-because the persisted strategy receipt was invalid for external-outcome
-projection; zero valid runs were observed. Do not run its authorization or
-execute path again. Keep the private authorization, tombstone, journal, logs,
-workspaces, artifacts, model identities, and raw outputs outside Git; only the
-sanitized decision in [EVALUATION.md](EVALUATION.md) is tracked. Any future
-provider attempt requires a deterministic instrumentation fix and a new frozen
-successor, exact revision, preflight, authorization, and explicit user
-decision. Deterministic green gates do not establish uplift.
+after the product run ended before selection with zero selected decisions. The
+terminal producer correctly persisted explicit pre-decision `not_selected`; no
+treatment or Owner execution occurred. The selected-only external-outcome
+projector misclassified that legal state as a malformed receipt, so zero valid
+runs were observed. Do not run its authorization or execute path again. Keep
+the private authorization, tombstone, journal, logs, workspaces, artifacts,
+model identities, and raw outputs outside Git; only the sanitized decision in
+[EVALUATION.md](EVALUATION.md) is tracked. Current source now distinguishes the
+legal pre-decision state before selected-outcome projection and covers the real
+terminal producer-to-projector seam in `agent-strategy-lifecycle-contract`.
+This is a classifier repair only: no Goal 3F or provider run is authorized, and
+deterministic green gates do not establish uplift.
 
 ## Browser and Computer Sidecars
 

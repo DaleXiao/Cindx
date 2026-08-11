@@ -205,11 +205,17 @@ authority:
 
 Goal 3E was authorized and consumed once on `12a3ea2` / `0.2.32`. The private
 journal closed `CENSORED` after reserving the baseline Direct arm: the
-external-outcome projector rejected a malformed persisted strategy receipt,
-leaving zero valid observed runs. Workflow, candidate training, and holdout did
-not run. This is `INVALID_EVIDENCE`, not a collaboration or capability result;
-the frozen Goal 3E protocol must not be retried. V12, the tracked successor
-manifest/suite, and production serving remain unchanged.
+product run ended before selection with zero selected decisions. The terminal
+producer correctly persisted explicit pre-decision `not_selected`; no treatment
+or Owner execution occurred. The selected-only external-outcome projector
+misclassified that legal state as a malformed receipt, leaving zero valid
+observed runs. Workflow, candidate training, and holdout did not run. This is
+`INVALID_EVIDENCE`, not a collaboration or capability result; the frozen Goal
+3E protocol must not be retried. V12, the tracked successor manifest/suite, and
+production serving remain unchanged.
+Current source now distinguishes the legal pre-decision state before selected-
+outcome projection and covers the real terminal-producer-to-projector seam.
+This corrects classification only; it does not recover or reinterpret the run.
 
 The Goal 3C revision passed the full deterministic profile (`55/55` gates),
 the offline application contract (`5/5`), and the desktop successor adapter
@@ -242,12 +248,13 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-Do not rerun Goal 3E. First diagnose and repair the persisted strategy-receipt
-instrumentation that failed the external-outcome projection, with deterministic
-coverage for the exact malformed lineage. Only after that fix is merged may a
-new, separately named successor protocol be frozen and considered for another
-explicitly authorized provider attempt. Do not revise Goal 3E cases, candidate,
-budgets, ordering, holdout, evaluator, or receipts to rescue the consumed run.
+The bounded Goal 3 instrumentation repair is complete: `selected`, explicit
+pre-decision `not_selected`, absent, and malformed states are distinct; legal
+`not_selected` remains a censor; and the real terminal producer-to-projector
+seam is covered. Finish the deterministic gates and one formal App build, then
+stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
+cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
+the consumed run.
 
 ## Structural Risks
 

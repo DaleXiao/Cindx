@@ -199,12 +199,19 @@ never resumes or retries a started physical run.
 
 The frozen Goal 3E instance was authorized and consumed once on source
 `12a3ea2` / version `0.2.32`. Its first baseline Direct arm was durably
-reserved, but the external-outcome projection rejected a malformed persisted
-strategy receipt before producing a valid observation. The journal therefore
+reserved, but the product run ended before selection with zero selected
+decisions. Its terminal lineage correctly recorded the explicit pre-decision
+`not_selected` state; no treatment or Owner execution occurred. The
+selected-only external-outcome projector misclassified that legal state as a
+malformed receipt before producing a valid observation. The journal therefore
 closed `CENSORED` with zero observed runs; Workflow, candidate training, and
 holdout never ran. This is `INVALID_EVIDENCE`, not a no-uplift or capability
 result, and the protocol must not be retried. V12 and production routing,
 prompt serving, permissions, safety, recovery, and history remain unchanged.
+Current source now classifies that legal pre-decision state explicitly and has
+a real terminal-producer-to-outcome-projector regression test. The repair only
+corrects instrumentation classification; it does not recover the consumed run
+or establish any intelligence or performance result.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
