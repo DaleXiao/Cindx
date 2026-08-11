@@ -222,21 +222,29 @@ preservation-breaking outcomes remain zero-score evidence. The receipt is
 shadow-only and has no production routing, prompt, memory, permission, or
 serving consumer.
 
-Delivery Verification remains a separate `realworld-eval` authority. V1 and v2
-are consumed lineages: each of their preflight, authorization, and execute
-entrypoints returns a consumed-protocol error before reading or creating live
-control-plane state. V1 exposed the semantic/wire digest instrumentation defect.
-V2 fixed that defect, completed all eight calibration pairs once, and closed
-`terminal_futility`; it cannot be resumed, relocated, or rerun.
+Delivery Verification remains a separate `realworld-eval` authority. V1, v2,
+and v3 are consumed lineages: all nine of their preflight, authorization, and
+execute entrypoints return a consumed-protocol error before reading arguments,
+environment, configuration, paths, or live control-plane state. V1 exposed the
+semantic/wire digest instrumentation defect. V2 fixed that defect, completed all
+eight calibration pairs once, and closed `terminal_futility`. V3 made one
+provider attempt for its first calibration Reviewer call, but its journal
+rejected a bound zero-byte response artifact before committing a terminal call
+receipt and froze `CENSORED`. None can be resumed, relocated, or rerun.
 
-V3 is a distinct seeded-defect recovery and preservation component test. The
-tracked suite contains 24 seeded defects and eight clean preservation sentinels,
-with 8 calibration / 24 holdout cases and equal representation of unsupported
-claims, omitted obligations, contradictions, and preservation. Every case owns
-a frozen seed, a model-visible objective, ordered obligations/evidence, and an
-output contract that exposes property names, JSON types, requiredness, and the
-additional-properties rule. Exact semantic values remain in the hidden oracle
-and never enter a model request.
+V4 is a distinct protocol and control-plane authority over the exact same tracked
+v3 seeded-defect recovery and preservation suite. Its 32 cases, order, hidden
+oracle, seeded candidates, model inputs, output contracts, budgets, decision
+thresholds, and no-retry rule are unchanged. The suite contains 24 seeded
+defects and eight clean preservation sentinels, with 8 calibration / 24 holdout
+cases and equal representation of unsupported claims, omitted obligations,
+contradictions, and preservation. Every case owns a frozen seed, a model-visible
+objective, ordered obligations/evidence, and an output contract that exposes
+property names, JSON types, requiredness, and the additional-properties rule.
+Exact semantic values remain in the hidden oracle and never enter a model
+request. The model-visible request envelope deliberately retains its v3
+compatibility schema so the successor does not change prepared semantic or wire
+payloads for reasons unrelated to the instrumentation fix.
 
 The control arm is the exact frozen seed. Treatment starts with a model-distinct
 Reviewer over that same seed. `passed` returns the unchanged seed; only
@@ -248,12 +256,15 @@ Reviewer accepts it. This topology measures joint defect detection and repair
 plus clean-input preservation. It does not estimate uplift over naturally
 generated drafts.
 
-A durably terminal provider timeout/unavailability or completed but invalid
-Reviewer verdict JSON remains an intention-to-treat treatment failure for that
-fixed case, with no retry or replacement. Internal time-budget, request-binding,
-or authority failure is structural and closes the campaign inconclusive.
+A durably terminal provider timeout/unavailability, invalid Reviewer verdict
+JSON, or empty Reviewer content remains an intention-to-treat treatment failure
+for that fixed case, with no retry or replacement. V4 records an exact response
+artifact even when it contains zero bytes, including its digest and zero length,
+then projects empty content as `invalid_verifier_response`. Internal time-budget,
+request-binding, or authority failure remains structural and closes the campaign
+inconclusive.
 
-V3 preflight is provider-free. It binds the clean source HEAD/tree and app
+V4 preflight is provider-free. It binds the clean source HEAD/tree and app
 version; protocol, suite, per-case and aggregate case digests; case order;
 seeded-candidate, model-input, output-contract, budget, and hidden-oracle
 aggregates; redacted provider/model authority; exact execute name, full-file
@@ -269,7 +280,7 @@ macOS's kernel-backed identity for the running process and atomically creates a
 no-clobber marker in the output root's parent. All authorization paths for that
 canonical output authority share the marker; the output-root tombstone must
 byte-match it, so relocating or deleting the output directory does not reopen
-consumption. The v3 journal persists campaign and case reservation before work.
+consumption. The v4 journal persists campaign and case reservation before work.
 Each call then reserves stage/role/model, semantic request digest/size,
 immutable prepared wire-payload digest/size, and output budget before dispatch;
 the provider receives exactly the prepared non-streaming bytes, and terminal
@@ -280,7 +291,7 @@ latency, hashed provider identities, exact usage, and response-artifact binding.
 Case receipts retain seed/control/treatment authorities, arm outcomes, initial
 verdict and finding counts, repair activation, recheck verdict/counts, treatment
 disposition, failure stage/code, and outcome reason. Interrupted started calls
-are terminal and never resumed or retried. V3 has no current online
+are terminal and never resumed or retried. V4 has no current online
 authorization or execution, and there is no Delivery serving, learning,
 promotion, production-finalizer, or GEPA dependency.
 

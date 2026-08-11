@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_OUTPUT_ROOT";
-const RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V3_PREFLIGHT_RECEIPT";
-pub(super) const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v3";
-const RECEIPT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v3\0";
-const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v3\0";
-const PROVIDER_CONFIG_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-config.v3\0";
-const PROVIDER_IDENTITY_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-identity.v3\0";
-const MODEL_BINDING_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-model-binding.v3\0";
+const OUTPUT_ROOT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V4_OUTPUT_ROOT";
+const RECEIPT_ENV: &str = "CINDX_DELIVERY_VERIFICATION_V4_PREFLIGHT_RECEIPT";
+pub(super) const PREFLIGHT_SCHEMA: &str = "cindx.agent-eval.delivery-verification-preflight.v4";
+const RECEIPT_HASH_DOMAIN: &[u8] = b"cindx.agent-eval.delivery-verification-preflight.v4\0";
+const CASES_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-cases.v4\0";
+const PROVIDER_CONFIG_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-config.v4\0";
+const PROVIDER_IDENTITY_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-provider-identity.v4\0";
+const MODEL_BINDING_HASH_DOMAIN: &[u8] = b"cindx.delivery-verification-model-binding.v4\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
