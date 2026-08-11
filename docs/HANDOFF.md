@@ -263,10 +263,14 @@ or GEPA:
     projection, and 19 protocol/preflight tests, this proves the frozen control
     plane only.
 
-The preflight binds source, protocol, case, budget, oracle, redacted model, and
-external-path authority while recording zero provider calls,
-`online_runner_frozen=true`, and `execution_authorized=false`. Exact execute
-bytes are bound later by the separate authorization, not by preflight.
+The v2 preflight binds source, protocol, case, budget, oracle, redacted model,
+exact v2 execute name/digest/size, and external-path authority while recording
+zero provider calls, `online_runner_frozen=true`, and
+`execution_authorized=false`. It also freezes the full SHA-256 CodeDirectory
+derived from a verified private copy of the exact execute bytes. A later
+authorization must match both the full-file and CodeDirectory identities, and
+execute must compare that CodeDirectory with the kernel-backed identity of its
+running process before consuming state.
 
 Delivery Verification v1 was then authorized and consumed once on source
 `5373e65`. It closed `CENSORED` / `INVALID-INSTRUMENTATION` during the first
@@ -289,8 +293,15 @@ terminal metadata to the wire authority, and preserves the first terminal
 validation error. Real local-loopback coverage crosses model-provider prepare,
 reservation, HTTP dispatch, receipt, and terminal persistence. The consumed v1
 preflight, authorization, and execute entrypoints all reject before live state
-access. No successor protocol or private authority was generated, and no
-provider was called.
+access. A separately named v2 protocol and three feature-gated control-plane
+binaries preserve the exact v1 suite, case order, hidden oracle, budgets,
+thresholds, and no-retry rule while freezing the repaired instrumentation and
+journal-v2 contract. One-shot consumption is anchored by an atomic no-clobber
+marker beside the canonical output root, shared across authorization paths and
+retained if the output root is moved or deleted. That marker is local
+filesystem state and does not claim protection against a same-user rollback of
+all private control-plane files. No v2 authorization or execution occurred,
+and no provider was called.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -326,13 +337,13 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-Do not rerun Delivery Verification v1. The bounded instrumentation repair and
-provider-free real-path loopback are complete, but they prove no quality uplift.
-Stop here: a future provider attempt requires a separately reviewed protocol
-version, frozen revision and cases, new private authority, and another explicit
-one-shot authorization. Do not change production serving or GEPA, and do not
-create an App build, version tag, or GitHub release for this evidence-only
-update.
+Do not rerun Delivery Verification v1. The bounded instrumentation repair,
+provider-free real-path loopback, and v2 successor freeze are complete, but
+they prove no quality uplift. Stop after generating a fresh private v2
+preflight from clean merged source and exact feature-gated binaries. Any
+provider attempt requires another explicit one-shot authorization for that
+exact binding. Do not change production serving or GEPA, and do not create an
+App build, version tag, or GitHub release for this evidence-only update.
 
 ## Structural Risks
 

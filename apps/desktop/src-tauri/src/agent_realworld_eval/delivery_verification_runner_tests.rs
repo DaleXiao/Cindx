@@ -183,7 +183,7 @@ fn protocol() -> ValidatedProtocol<'static> {
     parse_and_validate_protocol(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../benchmarks/agent/delivery-verification-protocol-v1.json"
+            "/../../../benchmarks/agent/delivery-verification-protocol-v2.json"
         )),
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -274,6 +274,12 @@ fn agent_delivery_verification_execution_contract_requires_explicit_authorize_co
     assert!(require_authorize_arguments([
         OsString::from("authorize"),
         OsString::from(AUTHORIZE_FLAG),
+        OsString::from(CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID),
+    ])
+    .is_err());
+    assert!(require_authorize_arguments([
+        OsString::from("authorize"),
+        OsString::from(AUTHORIZE_FLAG),
         OsString::from("wrong-protocol"),
     ])
     .is_err());
@@ -281,10 +287,20 @@ fn agent_delivery_verification_execution_contract_requires_explicit_authorize_co
 
 #[test]
 fn agent_delivery_verification_execution_contract_consumed_v1_cannot_authorize_or_execute() {
-    let error = reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID).unwrap_err();
+    let error = reject_consumed_delivery_protocol(CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID)
+        .unwrap_err();
     assert!(error.contains("is consumed"));
     assert!(error.contains("successor protocol"));
-    assert!(reject_consumed_delivery_protocol("cindx-delivery-verification-protocol-v2").is_ok());
+    assert!(reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID).is_ok());
+    for retired in [
+        crate::agent_realworld_eval::run_delivery_verification_preflight(),
+        crate::agent_realworld_eval::run_delivery_verification_authorize(),
+        crate::agent_realworld_eval::run_delivery_verification_execute(),
+    ] {
+        let error = retired.unwrap_err();
+        assert!(error.contains(CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID));
+        assert!(error.contains("is consumed"));
+    }
 }
 
 #[test]

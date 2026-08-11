@@ -221,15 +221,21 @@ a real terminal-producer-to-outcome-projector regression test. The repair only
 corrects instrumentation classification; it does not recover the consumed run
 or establish any intelligence or performance result.
 
-A separate default-off Delivery Verification authority now includes a frozen,
-provider-free one-shot control plane under `realworld-eval`. Its preflight binds
-the clean source, tracked protocol and suite, 32 ordered case digests, budgets,
-hidden-oracle aggregate, redacted Executor/Reviewer configuration, and new
-external paths while performing zero provider calls. The separate authorization
-binds the exact execute-binary bytes and grants a short-lived, private one-shot
-capability. Execution must consume it once and persist the campaign and every
-physical-call reservation before transport; an interrupted started call is
-censored without retry.
+A separate default-off Delivery Verification v2 authority now includes a
+frozen, provider-free one-shot control plane under `realworld-eval`. Its
+preflight binds the clean source, tracked v2 protocol, unchanged 32-case v1
+suite, ordered case digests, budgets, hidden-oracle aggregate, redacted
+Executor/Reviewer configuration, exact v2 execute-binary bytes, and new
+external paths while performing zero provider calls. It also derives the
+execute binary's full SHA-256 CodeDirectory identity from those exact bytes.
+The separate authorization must match both identities before granting a
+short-lived, private one-shot capability. Execution compares the frozen
+CodeDirectory with the kernel identity of its running process, then atomically
+creates one output-authority marker beside the output root before any provider
+work. Every authorization path for that output authority shares the marker, so
+moving or deleting the output directory cannot make the campaign reusable.
+Execution then persists the campaign and every physical-call reservation before
+transport; an interrupted started call is censored without retry.
 
 The frozen Delivery Verification v1 instance was authorized and consumed once
 on source `5373e65`. It closed `CENSORED` / `INVALID-INSTRUMENTATION` during the
@@ -254,8 +260,13 @@ before an artifact or terminal receipt is committed, and the first validation
 error is no longer masked by a later incomplete-case error. Provider-free
 loopback coverage crosses the real model-provider preparation and HTTP dispatch
 path. All three external v1 entrypoints reject the consumed protocol before
-creating or reading live control-plane state. No successor protocol, live
-preflight, authorization, provider result, or intelligence evidence exists.
+creating or reading live control-plane state. The tracked v2 successor keeps
+the exact v1 cases, order, hidden oracle, budget, decision thresholds, and
+no-retry rules, and additionally freezes the immutable prepared non-streaming
+wire contract, distinct semantic/wire reservation digests, wire-bound terminal
+receipt, and execution-journal v2 schema. Its three independently named v2
+binaries remain feature-gated. No v2 authorization, execution, provider result,
+or intelligence evidence exists.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
@@ -270,6 +281,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 - Evaluation binaries still compile through the desktop adapter when the
   `realworld-eval` feature is enabled. `orchestrator-eval` is non-shipping, but
   the provider campaign surface is not fully isolated from desktop code.
+- Delivery Verification's no-clobber consumption marker is a local filesystem
+  authority. It fails closed across output-root relocation and normal crashes,
+  but it is not an external anti-rollback service against an actor able to
+  delete or restore every private control-plane file under the same user ID.
 - Current evidence does not establish general Auto/Pro superiority, successful
   GEPA self-improvement, or Fugu Ultra parity.
 - The installed `0.2.34` validation build and published `v0.2.30` archive are

@@ -753,7 +753,17 @@ pub(super) fn role_label(role: &ModelRole) -> Result<String, String> {
     }
 }
 
-pub(super) fn acquire_execution_lock(root: &Path) -> Result<File, String> {
+pub(super) struct DeliveryVerificationExecutionLock(File);
+
+impl Drop for DeliveryVerificationExecutionLock {
+    fn drop(&mut self) {
+        let _ = File::unlock(&self.0);
+    }
+}
+
+pub(super) fn acquire_execution_lock(
+    root: &Path,
+) -> Result<DeliveryVerificationExecutionLock, String> {
     let path = root.join(DELIVERY_EXECUTION_LOCK_FILE_NAME);
     let file = loop {
         match fs::symlink_metadata(&path) {
@@ -798,7 +808,7 @@ pub(super) fn acquire_execution_lock(root: &Path) -> Result<File, String> {
     }
     file.try_lock()
         .map_err(|error| format!("delivery execution is already active: {error}"))?;
-    Ok(file)
+    Ok(DeliveryVerificationExecutionLock(file))
 }
 
 pub(super) fn validate_lock_metadata(metadata: &fs::Metadata) -> Result<(), String> {
