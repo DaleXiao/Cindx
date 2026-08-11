@@ -258,7 +258,7 @@ or GEPA:
 10. A private durable journal retains resource accounting and closes incomplete,
     tampered, expired, reused, or interrupted state as inconclusive/censored.
     Calibration must pass before any holdout provider call can be dispatched.
-11. The new `agent-delivery-verification-execution-contract` contains 32
+11. The `agent-delivery-verification-execution-contract` now contains 38
     provider-free tests. Together with the existing 12 core, 22 request and
     projection, and 19 protocol/preflight tests, this proves the frozen control
     plane only.
@@ -281,6 +281,16 @@ is excluded from evidence. This is not an uplift, no-evidence, regression,
 quality, latency, usage, or cost result, and v1 must not be rerun. The production
 finalizer, Workflow, Settings, prompt evolution, GEPA, routing, permissions,
 serving, installed App, and published release remain unchanged.
+
+The instrumentation successor is now implemented provider-free. It prepares an
+immutable non-streaming request, durably reserves separate semantic and wire
+digests and sizes in a v2 journal, dispatches exactly the prepared bytes, binds
+terminal metadata to the wire authority, and preserves the first terminal
+validation error. Real local-loopback coverage crosses model-provider prepare,
+reservation, HTTP dispatch, receipt, and terminal persistence. The consumed v1
+preflight, authorization, and execute entrypoints all reject before live state
+access. No successor protocol or private authority was generated, and no
+provider was called.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -316,17 +326,13 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-Do not rerun Delivery Verification v1. The next bounded goal is a successor
-instrumentation repair only: prepare the exact immutable non-streaming wire
-request before dispatch; reserve separate semantic-request and wire-payload
-digests; dispatch those exact prepared bytes; retain the primary terminal
-validation failure instead of masking it with a later pending-case error; and
-exercise the real model-provider prepare-to-reserve-to-dispatch-to-terminal
-boundary in a provider-free local-loopback contract test. Only after those
-deterministic gates pass may a new protocol version, new frozen revision, new cases and
-authority, and a separately authorized one-shot run be considered. Do not
-change production serving or GEPA, and do not create an App build, version tag,
-or GitHub release for this evidence-only update.
+Do not rerun Delivery Verification v1. The bounded instrumentation repair and
+provider-free real-path loopback are complete, but they prove no quality uplift.
+Stop here: a future provider attempt requires a separately reviewed protocol
+version, frozen revision and cases, new private authority, and another explicit
+one-shot authorization. Do not change production serving or GEPA, and do not
+create an App build, version tag, or GitHub release for this evidence-only
+update.
 
 ## Structural Risks
 

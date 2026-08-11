@@ -962,6 +962,7 @@ const modelProviderModuleBudgets = new Map([
   ["image_provider.rs", 430],
   ["json_wire.rs", 320],
   ["lib.rs", 900],
+  ["prepared_non_streaming.rs", 130],
   ["prepared_payload.rs", 70],
   ["prepared_request.rs", 140],
   ["provider_receipt.rs", 150],

@@ -34,6 +34,7 @@ const AUTHORIZE_FLAG: &str = "--authorize-once";
 
 pub(in super::super) fn run_authorize() -> Result<(), String> {
     require_authorize_arguments(std::env::args_os())?;
+    reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID)?;
     let runner_bytes = read_delivery_execute_sibling_bytes()?;
     let inputs = StaticInputs::load(true)?;
     let provider = crate::configuration_persistence::load_provider_config();
@@ -82,6 +83,7 @@ pub(in super::super) fn run_execute() -> Result<(), String> {
     if std::env::args_os().len() != 1 {
         return Err("delivery verification execute accepts no command-line arguments".into());
     }
+    reject_consumed_delivery_protocol(DELIVERY_VERIFICATION_PROTOCOL_ID)?;
     let runner_bytes = read_current_delivery_execute_bytes()?;
     let repo_root = repository_root()?;
     let raw_output_root = required_path(OUTPUT_ROOT_ENV)?;
@@ -153,6 +155,15 @@ pub(super) fn require_authorize_arguments(
             "delivery authorization requires exactly `{AUTHORIZE_FLAG} {DELIVERY_VERIFICATION_PROTOCOL_ID}`"
         ))
     }
+}
+
+pub(super) fn reject_consumed_delivery_protocol(protocol_id: &str) -> Result<(), String> {
+    if protocol_id == DELIVERY_VERIFICATION_PROTOCOL_ID {
+        return Err(format!(
+            "delivery verification protocol `{protocol_id}` is consumed and cannot be authorized or executed again; a separately frozen successor protocol is required"
+        ));
+    }
+    Ok(())
 }
 
 fn authorization_nonce(now_ms: u64, authorization: &Path, output: &Path, runner: &[u8]) -> String {
@@ -275,6 +286,7 @@ struct JournalRuntime<'a> {
     campaign_started: Instant,
     case_started: Option<Instant>,
     served_models: ServedModelBinding,
+    primary_terminal_error: Option<String>,
 }
 
 impl<'a> JournalRuntime<'a> {
@@ -294,7 +306,15 @@ impl<'a> JournalRuntime<'a> {
             campaign_started: Instant::now(),
             case_started: None,
             served_models: ServedModelBinding::default(),
+            primary_terminal_error: None,
         }
+    }
+
+    fn retain_primary_terminal_error(&mut self, error: String) -> CallOutcome {
+        if self.primary_terminal_error.is_none() {
+            self.primary_terminal_error = Some(error.clone());
+        }
+        CallOutcome::StructuralFailure(error)
     }
 
     fn time_budget_exhausted(&self) -> bool {
@@ -311,9 +331,6 @@ impl<'a> JournalRuntime<'a> {
         latency_ms: u64,
         terminal_at_ms: u64,
     ) -> CallOutcome {
-        let artifact = self
-            .journal
-            .persist_response_artifact(&permit, response.message.content.as_bytes());
         let validated = validate_model_response(&response);
         let (status, failure_class, retryable) = match &validated {
             Ok(_) => (
@@ -327,20 +344,6 @@ impl<'a> JournalRuntime<'a> {
                 Some(false),
             ),
         };
-        let artifact = match artifact {
-            Ok(artifact) => Some(artifact),
-            Err(error) => {
-                let _ = self.journal.record_call_terminal(failed_terminal(
-                    permit,
-                    "artifact_persistence",
-                    false,
-                    None,
-                    latency_ms,
-                    terminal_at_ms,
-                ));
-                return CallOutcome::StructuralFailure(error);
-            }
-        };
         let terminal = DeliveryVerificationCallTerminalInputV1 {
             permit,
             status,
@@ -348,8 +351,6 @@ impl<'a> JournalRuntime<'a> {
             retryable,
             provider_status_code: None,
             latency_ms,
-            response_artifact_sha256: artifact.as_ref().map(|value| value.sha256.clone()),
-            response_artifact_bytes: artifact.as_ref().map(|value| value.bytes),
             request_payload_sha256: response.metadata.get("request_payload_sha256").cloned(),
             response_semantic_sha256: response.metadata.get("response_semantic_sha256").cloned(),
             provider_response_id_sha256: response
@@ -368,8 +369,11 @@ impl<'a> JournalRuntime<'a> {
             usage: exact_usage(&response),
             terminal_at_ms,
         };
-        if let Err(error) = self.journal.record_call_terminal(terminal) {
-            return CallOutcome::StructuralFailure(error);
+        if let Err(error) = self
+            .journal
+            .record_call_terminal(terminal, Some(response.message.content.as_bytes()))
+        {
+            return self.retain_primary_terminal_error(error);
         }
         match validated {
             Ok(served_model_sha256) => CallOutcome::Completed(CompletedCall {
@@ -428,11 +432,31 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
         if self.time_budget_exhausted() {
             return CallOutcome::ModelFailure(DeliveryVerificationModelFailure::BudgetExhausted);
         }
+        let call_role = call.role.clone();
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: self.provider.base_url.clone(),
+            api_key: self.provider.api_key.clone(),
+            model: call.configured_model.clone(),
+            embedding_model: self.provider.embedding_model.clone(),
+            timeout_seconds: self.budget.model_call_timeout_ms.div_ceil(1_000).max(1),
+        });
+        let prepared = match provider.prepare_non_streaming_request(&call.request) {
+            Ok(prepared) => prepared,
+            Err(error) => return self.retain_primary_terminal_error(error.to_string()),
+        };
+        let (wire_payload_sha256, wire_payload_bytes) = prepared.payload_receipt();
+        let wire_payload_sha256 = wire_payload_sha256.to_string();
+        let wire_payload_bytes = match u64::try_from(wire_payload_bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return self
+                    .retain_primary_terminal_error("delivery wire payload size overflowed".into())
+            }
+        };
         let reserved_at_ms = match now_millis() {
             Ok(value) => value,
-            Err(error) => return CallOutcome::StructuralFailure(error),
+            Err(error) => return self.retain_primary_terminal_error(error),
         };
-        let call_role = call.role.clone();
         let permit = match self
             .journal
             .reserve_call(DeliveryVerificationCallReservationInputV1 {
@@ -440,23 +464,18 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
                 stage: call.stage,
                 role: call.role.clone(),
                 configured_model_sha256: sha256_hex(call.configured_model.as_bytes()),
-                canonical_request_sha256: call.canonical_request_sha256,
-                canonical_request_bytes: call.canonical_request_bytes,
+                semantic_request_sha256: call.canonical_request_sha256,
+                semantic_request_bytes: call.canonical_request_bytes,
+                wire_payload_sha256,
+                wire_payload_bytes,
                 max_output_tokens: call.max_output_tokens,
                 reserved_at_ms,
             }) {
             Ok(permit) => permit,
-            Err(error) => return CallOutcome::StructuralFailure(error),
+            Err(error) => return self.retain_primary_terminal_error(error),
         };
         let started = Instant::now();
-        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url: self.provider.base_url.clone(),
-            api_key: self.provider.api_key.clone(),
-            model: call.configured_model,
-            embedding_model: self.provider.embedding_model.clone(),
-            timeout_seconds: self.budget.model_call_timeout_ms.div_ceil(1_000).max(1),
-        });
-        let response = provider.complete_once(call.request);
+        let response = provider.complete_prepared_non_streaming_request(prepared);
         let latency_ms = elapsed_ms(started);
         let terminal_at_ms = now_millis().unwrap_or(reserved_at_ms);
         match response {
@@ -497,8 +516,8 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
                         terminal_at_ms,
                     )
                 };
-                if let Err(error) = self.journal.record_call_terminal(terminal) {
-                    return CallOutcome::StructuralFailure(error);
+                if let Err(error) = self.journal.record_call_terminal(terminal, None) {
+                    return self.retain_primary_terminal_error(error);
                 }
                 outcome
             }
@@ -508,6 +527,9 @@ impl DeliveryVerificationRuntime for JournalRuntime<'_> {
     fn record_case(&mut self, outcome: &CaseOutcome) -> Result<(), String> {
         if self.journal.is_terminal() {
             return Ok(());
+        }
+        if let Some(error) = self.primary_terminal_error.take() {
+            return Err(error);
         }
         self.journal
             .record_case_terminal(DeliveryVerificationCaseTerminalInputV1 {
@@ -645,8 +667,6 @@ fn failed_terminal(
         retryable: Some(retryable),
         provider_status_code,
         latency_ms,
-        response_artifact_sha256: None,
-        response_artifact_bytes: None,
         request_payload_sha256: None,
         response_semantic_sha256: None,
         provider_response_id_sha256: None,
@@ -684,3 +704,7 @@ fn elapsed_ms(start: Instant) -> u64 {
 #[cfg(test)]
 #[path = "delivery_verification_runner_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "delivery_verification_loopback_tests.rs"]
+mod loopback_tests;

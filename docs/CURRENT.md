@@ -244,6 +244,19 @@ or cost result. This one-shot protocol is consumed and must not be rerun.
 Production finalization, routing, prompt evolution, GEPA, the installed App, and
 the published release remain unchanged.
 
+Current source repairs that instrumentation boundary without recovering or
+rerunning v1. A non-streaming request is now encoded once into immutable bytes;
+its domain-separated wire digest and size are available before dispatch. The
+v2 execution journal reserves that wire authority beside the semantic request
+authority, dispatches the same prepared bytes, and binds the terminal provider
+receipt to the reserved wire digest. Invalid terminal evidence is rejected
+before an artifact or terminal receipt is committed, and the first validation
+error is no longer masked by a later incomplete-case error. Provider-free
+loopback coverage crosses the real model-provider preparation and HTTP dispatch
+path. All three external v1 entrypoints reject the consumed protocol before
+creating or reading live control-plane state. No successor protocol, live
+preflight, authorization, provider result, or intelligence evidence exists.
+
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
 ## Known Structural Limits
