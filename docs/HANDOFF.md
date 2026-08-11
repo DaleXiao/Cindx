@@ -278,10 +278,11 @@ experiment:
 3. Model-visible output contracts expose property names, JSON types,
    requiredness, and additional-property policy. Exact oracle values remain
    evaluator-only.
-4. Calibration requires all eight cases, exactly six control failures, at least
-   four treatment-only wins, at least one win per defect stratum, and no loss or
-   structural/treatment-execution failure. Otherwise it closes
-   `terminal_futility`.
+4. An incomplete calibration or any structural/treatment-execution failure
+   closes `inconclusive` before the decision gate. Among eight complete,
+   structurally eligible cases, exactly six control failures, at least four
+   treatment-only wins, at least one win per defect stratum, and no loss opens
+   holdout; an eligible threshold miss closes `terminal_futility`.
 5. Holdout requires all 24 cases, exactly 18 control failures, at least 13
    treatment-only wins, at least four wins per defect stratum, and no loss for
    `seeded_repair_effective`; structural/treatment-execution failure is
@@ -306,16 +307,26 @@ experiment:
    model, semantic request digest/size, immutable prepared wire digest/size, and
    output budget before every dispatch. Terminal metadata must match the
    reserved wire authority. Exact zero-byte response artifacts retain their
-   digest and zero length; empty Reviewer content becomes
+   digest and zero length; completed empty Reviewer content becomes
    `invalid_verifier_response` without retry. Started calls never resume or
    retry.
 10. Case receipts retain seed/control/treatment digests and outcomes, verifier
     decisions/finding counts, repair activation, recheck telemetry, treatment
     disposition, failure stage/code, outcome reason, and exact accounting.
 
-Current v4 source and verification are provider-free only. There is no v4
-online authorization, campaign execution, provider result, or component-test
-decision. Do not infer intelligence uplift from deterministic gates.
+V4 was subsequently frozen from clean merged source
+`275868e4dd84692f15998a1cb95afa99df264267` / tree
+`75f304e160c0b7bab37f5158b383fade970af271`, authorized, and consumed once.
+The zero-byte instrumentation fix worked: the first Reviewer response was
+committed as a 0600 empty artifact with exact provider identity, usage, latency,
+and request bindings. The call was nevertheless `invalid_output`, non-retryable,
+because it was not a complete tool-free answer. Case 1 closed
+`structural_failure`, the campaign closed `inconclusive`, and 31 cases never
+started. Accounting is one logical call, one physical attempt, one terminal
+call, and zero retries. There are zero matched pairs and no calibration or
+holdout decision. V4 must not be rerun, and this result is not repair
+effectiveness, ineffectiveness, preservation regression, or model-quality
+evidence.
 
 The `0.2.30` release itself contains two scoped code changes after `0.2.29`:
 
@@ -351,19 +362,21 @@ stop this line of work. Do not create Goal 3F, run a provider, or revise Goal 3E
 cases, candidate, budgets, ordering, holdout, evaluator, or receipts to rescue
 the consumed run.
 
-Do not rerun Delivery Verification v1, v2, or v3. Complete only the provider-free
-v4 gates, merge the exact source, build the three active v4 feature-gated
-evaluator binaries, and generate a new private v4 preflight from clean merged
-`main`. Recheck its source, protocol/suite/case/seed/input/contract/budget/oracle,
-runner full-file and CodeDirectory, redacted provider/model, and external-path
-bindings, with `provider_calls=0` and `execution_authorized=false`. For this
-active task, the user has explicitly authorized one v4 attempt after that exact
-binding is independently verified; issue one bound authorization and execute it
-once without requesting another prompt. Any failure is terminal and must not be
-rerun. The nine v1-v3 binaries remain compiled only to prove their entrypoints
-permanently reject; all twelve binaries remain behind `realworld-eval`.
-Do not change production serving or GEPA, and do not create an App build,
-version tag, or GitHub release for this evidence-only update.
+Do not rerun Delivery Verification v1, v2, v3, or v4. The v4 preflight digest is
+`f0264540eeefde1c66e7933c521e60b129d235359d236253156d68df74a84635`,
+its consumed authorization digest is
+`bbdf2bbb7e1e2c189f0eaa4ee0cc800806742a8ba430dfa71a8a4d6fd4f956f9`,
+and its terminal journal digest is
+`272d3102c6118c9b1cc4d136c64d285a5629725543920a2f1922dae22e05d616`.
+The advance one-shot authorization is exhausted; there is no remaining online
+authority. A future Delivery Verification attempt must be a separately frozen
+successor and must not revise v4 cases, order, oracle, seeds, model inputs,
+output contracts, budgets, thresholds, or no-retry behavior to rescue this
+result. Do not weaken the complete tool-free response contract or normalize the
+provider's reported 2,049 completion tokens to fit the 2,048 reservation without
+a separately reviewed protocol change. Do not change production serving or
+GEPA, and do not create an App build, version tag, or GitHub release for this
+evidence-only update.
 
 ## Structural Risks
 

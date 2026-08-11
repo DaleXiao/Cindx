@@ -32,6 +32,7 @@ Passing a lower level does not imply a higher-level result.
 | Workflow GEPA V12 | `ff8c238`, recorded in `0.2.30` | `INVALID_EVIDENCE`. The Direct arm retained route evidence but failed terminal completion; the Workflow arm stopped before strategy-event persistence. There is no matched pair, GO/NO-GO, candidate, snapshot, promotion, or capability conclusion. |
 | Collaboration successor V1 / Goal 3E | `12a3ea2`, `0.2.32` | `INVALID_EVIDENCE`, `CENSORED`. The one-shot capability was consumed and the first baseline Direct arm was reserved, but the product run ended before selection with zero selected decisions. The terminal producer correctly persisted explicit `not_selected`; no treatment or Owner execution occurred. The selected-only projector misclassified that legal state as a malformed receipt, so zero runs were admitted, no matched pair exists, and Workflow, candidate, and holdout did not run. The protocol cannot be retried and supports no uplift, cost, latency, or capability conclusion. |
 | Delivery Verification v3 | frozen v3 authority, `0.2.34` | `INVALID_EVIDENCE`, `CENSORED`. Its first calibration Reviewer call made one provider attempt and returned empty content. Journal validation rejected the bound zero-byte response artifact before accepting a terminal call receipt, so no case completed, holdout never opened, and no matched pair or scientific conclusion exists. The protocol is consumed and cannot be retried. |
+| Delivery Verification v4 | `275868e`, `0.2.34` | `INVALID_EVIDENCE`, `INCONCLUSIVE`. The zero-byte artifact fix retained the first Reviewer response and its exact receipt, but the call was non-retryable `invalid_output` because it was not a complete tool-free answer. Case 1 became structural, the other 31 cases never started, and zero matched pairs exist. The one-shot authority is consumed and cannot be retried. |
 | GPQA matched diagnostic | `0.1.78` | On 12 frozen GPQA-Diamond questions, Direct scored `10/12`; Auto and Pro each scored `8/12`. This predates current code and is a reasoning diagnostic, not a current product baseline. |
 
 Earlier Real-World versions, memory V1, GPQA/Core pilots, Fugu pilots, and
@@ -93,8 +94,8 @@ not changed by V5, V7, or V12.
 
 ## Delivery Verification Experiment
 
-The current tracked v4 authority is a provider-free successor over the exact
-same v3 seeded-defect recovery and preservation suite under the default-off
+The consumed v4 authority was frozen as a successor over the exact same v3
+seeded-defect recovery and preservation suite under the default-off
 `realworld-eval` feature. It does not compare treatment with naturally generated
 Owner drafts. The 32-case suite freezes 24 defective candidates across
 unsupported-claim, omitted-obligation, and contradiction strata plus eight clean
@@ -115,14 +116,17 @@ Durably recorded provider timeout/unavailability and completed calls whose
 Reviewer verdict JSON is invalid count as intention-to-treat treatment failures
 for their fixed cases; they are never retried or replaced. V4 additionally
 records the exact response artifact digest and byte count when content is empty,
-then classifies empty Reviewer content as `invalid_verifier_response` without a
-retry. Internal time-budget, binding, or authority failures are structural and
-make the campaign inconclusive.
+then classifies completed empty Reviewer content as
+`invalid_verifier_response` without a retry. A response that is not complete
+and tool-free is structural, as are internal time-budget, binding, or authority
+failures; either closes the campaign inconclusive.
 
-Calibration opens holdout only when all eight cases complete with exactly six
-control failures, at least four treatment-only wins, at least one win in each
-defect stratum, and no control-only loss or structural failure. Otherwise it
-closes `terminal_futility`. Treatment-execution failure is likewise excluded.
+An incomplete calibration or any structural/treatment-execution failure closes
+`inconclusive` before the decision gate. Among eight complete, structurally
+eligible cases, calibration opens holdout only with exactly six control
+failures, at least four treatment-only wins, at least one win in each defect
+stratum, and no control-only loss; an eligible calibration that misses those
+thresholds closes `terminal_futility`.
 The holdout result is
 `seeded_repair_effective` only when all 24 cases complete with exactly 18
 control failures, at least 13 treatment-only wins, at least four wins in each
@@ -152,15 +156,15 @@ references the same immutable suite, its retained experimental authorities are:
 - budget aggregate
   `eb3ae14a6e0cd452b106f8c5bd85ad2575e204b0aee08ce1ce23b4a7ef007e11`.
 
-The provider-free v4 preflight is the boundary between tracked design and an
-executable frozen instance. It must bind a clean source HEAD/tree and version;
+The provider-free v4 preflight was the boundary between tracked design and its
+executable frozen instance. It bound a clean source HEAD/tree and version;
 all protocol, suite, case, seed, model-input, output-contract, budget, and oracle
 authorities; redacted provider/model authority; the exact execute full-file
 digest/size and verified SHA-256 CodeDirectory; and new canonical external
-paths. A receipt is valid only with zero provider calls,
-`online_runner_frozen=true`, and `execution_authorized=false`. No v4 preflight
-receipt currently grants execution, and no v4 authorization or online execution
-has occurred.
+paths. Its receipt recorded zero provider calls,
+`online_runner_frozen=true`, and `execution_authorized=false`; the later
+short-lived authorization was separately bound and consumed exactly once. The
+retained terminal result is described below.
 
 ### Consumed v1 result
 
@@ -268,27 +272,57 @@ valid matched pair exists. The attempt supports no answer-quality, uplift,
 regression, latency, usage, cost, or provider-capability conclusion. V3 is
 consumed and must not be rerun or reinterpreted.
 
-### Current v4 boundary
+### Consumed v4 result
 
-Current v4 implementation, tests, and journal contracts are provider-free. The
-journal reserves separate semantic-request and immutable prepared wire-payload
-digests/sizes before dispatch, sends exactly the prepared non-streaming bytes,
-and requires terminal request metadata to match the reserved wire authority. It
-accepts an exact zero-byte response artifact as present, persists its digest and
-zero length, and projects empty Reviewer content to
-`invalid_verifier_response`. That is an intention-to-treat failure for the fixed
-case and is never retried or replaced. Per-case evidence otherwise retains the
-same decisions, finding counts, repair activation, recheck telemetry,
-disposition, failure stage/code, and outcome reason as v3.
+V4 was frozen and executed once from clean merged source
+`275868e4dd84692f15998a1cb95afa99df264267` with tree
+`75f304e160c0b7bab37f5158b383fade970af271`. Its retained public authorities
+are:
 
-All nine v1-v3 preflight, authorization, and execute entrypoints reject their
-consumed protocols before live state access. A v4 preflight may be generated
-provider-free only from clean merged source and the exact three v4 binaries; it
-does not authorize execution. There is currently no v4 one-shot authorization,
-instantiated campaign journal, provider result, or uplift/regression result. Any
-online attempt requires a later explicit authorization bound to that exact
-preflight, source, runner full-file/CodeDirectory identities, provider/model
-authority, credential fingerprint, and new output authority. GEPA and production
+- preflight receipt digest
+  `f0264540eeefde1c66e7933c521e60b129d235359d236253156d68df74a84635`;
+- execute full-file SHA-256
+  `0c22cf3df421b1d57e156ea38f69357562205abaebc3d2fc1b97a04211e43870`,
+  size `4,574,288`, and CodeDirectory SHA-256
+  `393179158e792eeaab8e9ab328f76823edcafc3c19fab5e2bdcdecbf05f2c1c2`;
+- one-shot authorization digest
+  `bbdf2bbb7e1e2c189f0eaa4ee0cc800806742a8ba430dfa71a8a4d6fd4f956f9`;
+- consumed-tombstone digest
+  `43befa6d8368d6f16925d9c193cd051374e712be6311ae33820f42cf07e12723`;
+- terminal journal digest
+  `272d3102c6118c9b1cc4d136c64d285a5629725543920a2f1922dae22e05d616`;
+- terminal receipt digest
+  `60a4b58c86cf9a556f5d5ea6ce4157f3e184c99f33a819c487a56bae4b4d7d6c`.
+
+The first calibration case executed only `verifier_initial`. Its request
+reserved semantic SHA-256
+`63b740e67ec3ff9b23c0b92c2fe23ed810e7df743036d9c3f4cd550ac11457d6`
+over 4,664 bytes and immutable wire SHA-256
+`42748ae4890dc82a9608231e0f121257518531b9c476174f3f594b75200a017c`
+over 3,389 bytes; the terminal request digest matched that wire authority. The
+provider returned an observed receipt whose artifact was exactly zero bytes.
+V4 correctly wrote the 0600 artifact with SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+and committed the call receipt, so the v3 instrumentation failure was fixed.
+
+The call nevertheless closed `invalid_output`, non-retryable, with reason
+`delivery provider response is not a complete tool-free answer`. The journal
+does not retain the underlying finish-reason subtype, so no more specific cause
+is asserted. Exact provider usage was 840 prompt, 2,049 completion, and 2,889
+total tokens over 19,755 ms; the reported completion count is one above the
+frozen 2,048 output reservation and is retained as an anomaly, not silently
+normalized. Case 1 closed `structural_failure`; its optional repair and recheck
+were `not_required`. The campaign then closed `inconclusive` with one logical
+call, one physical attempt, one terminal call, and zero retries. The other 31
+cases remained unstarted, calibration and holdout decisions are null, and no
+matched pair exists. The partial calibration counts are one started, one
+terminal, zero complete, and one structural failure; control failures,
+treatment-only wins, control-only losses, treatment-execution failures, wins in
+each defect stratum, and preservation losses are all zero. Holdout was never
+started rather than evaluated as a zero-result cohort. This is not
+`seeded_repair_effective`, `not_effective`,
+`preservation_regression`, or `terminal_futility`, and it supports no model-
+quality conclusion. V4 is consumed and must not be rerun. GEPA and production
 serving remain out of scope.
 
 ## Required Next Evidence
