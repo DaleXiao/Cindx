@@ -256,12 +256,14 @@ Reviewer accepts it. This topology measures joint defect detection and repair
 plus clean-input preservation. It does not estimate uplift over naturally
 generated drafts.
 
-A durably terminal provider timeout/unavailability, invalid Reviewer verdict
-JSON, or empty Reviewer content remains an intention-to-treat treatment failure
+A durably terminal provider timeout/unavailability or completed call whose
+Reviewer verdict JSON is invalid remains an intention-to-treat treatment failure
 for that fixed case, with no retry or replacement. V4 records an exact response
-artifact even when it contains zero bytes, including its digest and zero length,
-then projects empty content as `invalid_verifier_response`. Internal time-budget,
-request-binding, or authority failure remains structural and closes the campaign
+artifact even when it contains zero bytes, including its digest and zero length.
+A complete tool-free response with empty content projects as
+`invalid_verifier_response`; a response that fails the complete tool-free
+contract closes `invalid_output` and remains structural. Internal time-budget,
+request-binding, or authority failure likewise closes the campaign
 inconclusive.
 
 V4 preflight is provider-free. It binds the clean source HEAD/tree and app
@@ -291,9 +293,11 @@ latency, hashed provider identities, exact usage, and response-artifact binding.
 Case receipts retain seed/control/treatment authorities, arm outcomes, initial
 verdict and finding counts, repair activation, recheck verdict/counts, treatment
 disposition, failure stage/code, and outcome reason. Interrupted started calls
-are terminal and never resumed or retried. V4 has no current online
-authorization or execution, and there is no Delivery serving, learning,
-promotion, production-finalizer, or GEPA dependency.
+are terminal and never resumed or retried. V4's single consumed attempt retained
+one zero-byte `invalid_output` artifact, closed its first case
+`structural_failure`, and terminated the campaign `inconclusive` with no matched
+pair. Its canonical output authority cannot execute again. There is no Delivery
+serving, learning, promotion, production-finalizer, or GEPA dependency.
 
 The consumed marker is an intentionally local authority, not an external
 anti-rollback ledger. Normal crashes, concurrent consumers, alternate
