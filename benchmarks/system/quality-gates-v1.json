@@ -42,6 +42,8 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "agent-delivery-verification-core-contract",
+      "agent-delivery-verification-contract",
       "agent-collaboration-learning-contract",
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
@@ -84,6 +86,8 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "agent-delivery-verification-core-contract",
+      "agent-delivery-verification-contract",
       "agent-collaboration-learning-contract",
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
@@ -169,6 +173,8 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "agent-delivery-verification-core-contract",
+      "agent-delivery-verification-contract",
       "agent-collaboration-learning-contract",
       "agent-collaboration-learning-offline-contract",
       "agent-collaboration-learning-offline-adapter-contract",
@@ -542,6 +548,46 @@
       "required_output": [
         "test result: ok. 9 passed; 0 failed",
         "cindx.agent.externally-verified-outcome.v1"
+      ]
+    },
+    {
+      "id": "agent-delivery-verification-core-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-runtime",
+        "delivery_verification_contract_",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 12 passed; 0 failed",
+        "cindx.agent.delivery-verification-subject.v1"
+      ]
+    },
+    {
+      "id": "agent-delivery-verification-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "--no-default-features",
+        "--features",
+        "realworld-eval",
+        "agent_delivery_verification_contract_",
+        "--lib",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 20 passed; 0 failed",
+        "cindx.agent-eval.delivery-verification-observation.v1"
       ]
     },
     {
