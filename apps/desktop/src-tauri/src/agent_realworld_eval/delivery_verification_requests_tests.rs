@@ -87,6 +87,117 @@ fn verifier_input<'a>(
     }
 }
 
+#[test]
+fn agent_delivery_verification_contract_owner_draft_request_is_exact_tool_free_non_streaming_and_executor_owned(
+) {
+    let obligations = obligations();
+    let evidence = evidence();
+    let prepared = prepare_owner_draft_request(DeliveryOwnerDraftRequestInput {
+        objective: OBJECTIVE,
+        obligations: &obligations,
+        evidence: &evidence,
+        owner_model: "owner-primary",
+        budget: DeliveryVerificationRequestBudget {
+            max_request_bytes: 64 * 1024,
+            max_output_tokens: 4_096,
+        },
+    })
+    .expect("Owner draft request");
+    let request = prepared.request();
+
+    assert_eq!(request.role, ModelRole::Executor);
+    assert_eq!(request.mode, ModelCallMode::NonStreaming);
+    assert!(request.tools.is_empty());
+    assert_eq!(
+        request
+            .metadata
+            .get("delivery_verification_target_model")
+            .map(String::as_str),
+        Some("owner-primary")
+    );
+    assert_eq!(
+        request
+            .metadata
+            .get("max_output_tokens")
+            .map(String::as_str),
+        Some("4096")
+    );
+    let payload = serde_json::from_str::<Value>(&request.messages[1].content)
+        .expect("exact Owner draft JSON payload");
+    assert_eq!(
+        payload
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["evidence", "kind", "objective", "obligations", "schema"]
+    );
+    assert_eq!(payload["kind"], "owner_draft");
+    assert_eq!(payload["objective"], OBJECTIVE);
+    assert_eq!(payload["obligations"][0]["obligationRef"], "2".repeat(64));
+    assert_eq!(payload["evidence"][0]["evidenceRef"], 7);
+    assert!(payload.get("oracle").is_none());
+    assert!(payload.get("ownerDraft").is_none());
+    assert_eq!(
+        prepared.binding().objective_sha256,
+        sha256_hex(OBJECTIVE.as_bytes())
+    );
+    assert!(prepared.binding().canonical_request_bytes <= 64 * 1024);
+
+    let repeated = prepare_owner_draft_request(DeliveryOwnerDraftRequestInput {
+        objective: OBJECTIVE,
+        obligations: &obligations,
+        evidence: &evidence,
+        owner_model: "owner-primary",
+        budget: DeliveryVerificationRequestBudget {
+            max_request_bytes: 64 * 1024,
+            max_output_tokens: 4_096,
+        },
+    })
+    .unwrap();
+    assert_eq!(
+        prepared.binding().canonical_request_sha256,
+        repeated.binding().canonical_request_sha256
+    );
+}
+
+#[test]
+fn agent_delivery_verification_contract_owner_draft_request_fails_closed_before_dispatch() {
+    let obligations = obligations();
+    let evidence = evidence();
+    let input = |objective, owner_model, budget| DeliveryOwnerDraftRequestInput {
+        objective,
+        obligations: &obligations,
+        evidence: &evidence,
+        owner_model,
+        budget,
+    };
+
+    assert!(prepare_owner_draft_request(input(" ", "owner-primary", budget())).is_err());
+    assert!(prepare_owner_draft_request(input(OBJECTIVE, " owner-primary", budget())).is_err());
+    assert!(prepare_owner_draft_request(input(
+        OBJECTIVE,
+        "owner-primary",
+        DeliveryVerificationRequestBudget {
+            max_request_bytes: 1,
+            max_output_tokens: 4_096,
+        },
+    ))
+    .is_err());
+
+    let mut oversized = obligations.clone();
+    oversized[0].content = "x".repeat(MAX_DELIVERY_VERIFICATION_BOUND_CONTEXT_BYTES + 1);
+    assert!(prepare_owner_draft_request(DeliveryOwnerDraftRequestInput {
+        objective: OBJECTIVE,
+        obligations: &oversized,
+        evidence: &evidence,
+        owner_model: "owner-primary",
+        budget: budget(),
+    })
+    .is_err());
+}
+
 fn needs_revision_verdict(
     subject: &DeliveryVerificationSubjectV1,
 ) -> DeliveryVerificationVerdictV1 {
