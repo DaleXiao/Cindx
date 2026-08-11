@@ -235,18 +235,20 @@ not model-facing access paths.
 
 The adjacent preflight binds a clean source tree, protocol/suite/case/budget and
 hidden-oracle aggregate hashes, redacted configured Owner/Reviewer identities,
-the exact execute-binary bytes, build profile and features, and new external
-paths into a private receipt. It performs zero provider calls and records
-`online_runner_frozen=true` and `execution_authorized=false`. A separate
-provider-free authorization binary may bind that canonical receipt, current
-source/provider/model/credential authority, the exact execute binary, a new
-one-shot output root, and a short validity window. The execute binary must
+and new external paths into a private receipt. It performs zero provider calls
+and records `online_runner_frozen=true` and `execution_authorized=false`; it does
+not itself hash the execute binary. A separate provider-free authorization
+binary binds that canonical receipt, current source/provider/model/credential
+authority, the exact execute binary, a new one-shot output root, and a short
+validity window. The execute binary must
 atomically consume that capability, persist the campaign before constructing
 provider transport, and persist each exact physical-call reservation before
 dispatch. Ambiguous or interrupted started calls become terminal
-inconclusive/censored state and are never resumed or retried. No live preflight
-receipt, authorization, or provider result exists yet, and there is no Delivery
-serving, learning, promotion, production-finalizer, or GEPA dependency.
+inconclusive/censored state and are never resumed or retried. The consumed v1
+attempt failed closed before any terminal provider receipt because its journal
+incorrectly equated the semantic request digest with the independently
+domain-separated wire-payload digest. There is no Delivery serving, learning,
+promotion, production-finalizer, or GEPA dependency.
 
 The same crate owns the portable collaboration-learning contracts, separate
 from production prompt evolution. A structured policy keeps the Goal 2 graph

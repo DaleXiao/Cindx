@@ -138,9 +138,10 @@ suite, exact case/oracle/order/budget digests, matched decision table, redacted
 model-distinct provider binding, clean-source authority, canonical private
 preflight receipt, and zero-call/non-authorizing boundary. It is included in
 `ci-contract`, `control-plane`, and `full`, but not `quick`. The updated
-preflight binds the exact execute binary, profile, and features and records
-`provider_calls=0`, `online_runner_frozen=true`, and
-`execution_authorized=false`; runner freezing is not online authorization.
+preflight binds the clean source, protocol, cases, budgets, oracle aggregate,
+redacted model authority, and new external paths and records `provider_calls=0`,
+`online_runner_frozen=true`, and `execution_authorized=false`. The separate
+authorization binds exact execute-binary bytes; preflight does not.
 
 `agent-delivery-verification-execution-contract` runs 32 provider-free tests
 for canonical short-lived authorization, exact preflight/source/provider/model/
@@ -279,16 +280,24 @@ CINDX_DELIVERY_VERIFICATION_PREFLIGHT_RECEIPT=/private/path/new-preflight.json \
 ./apps/desktop/src-tauri/target/release/cindx-delivery-verification-preflight
 ```
 
-The preflight must report zero provider calls, frozen exact runner bytes, and
+The preflight must report zero provider calls and
 `execution_authorized=false`. Inspect its clean-source, provider/model,
-32-case/order, budget, hidden-oracle aggregate, runner, profile, feature, and
-external-path bindings, then stop and request explicit authorization. Do not
-issue the short-lived authorization or invoke execute as part of code delivery.
-Authorization remains provider-free but grants a one-shot capability; execute
-is billable and provider-backed. Private receipts, tombstones, journals,
-requests, responses, model identities, secrets, and raw outputs stay outside
-Git. This evaluator-binary build does not change the installed App, version,
-tag, or GitHub release.
+32-case/order, budget, hidden-oracle aggregate, and external-path bindings, then
+stop and request explicit authorization. The authorization step is where exact
+execute-binary bytes, credential authority, and the short validity window are
+bound. Authorization remains provider-free but grants a one-shot capability;
+execute is billable and provider-backed. Private receipts, tombstones,
+journals, requests, responses, model identities, secrets, and raw outputs stay
+outside Git. This evaluator-binary build does not change the installed App,
+version, tag, or GitHub release.
+
+Delivery Verification protocol v1 has already consumed its one authorized
+attempt and closed `CENSORED` / `INVALID-INSTRUMENTATION` because journal
+validation equated its semantic-request digest with the separately
+domain-separated wire-payload digest. Never use the commands above to mint or
+execute another v1 authority. A successor must first reserve both identities
+from one immutable prepared request, dispatch those exact bytes, preserve the
+primary terminal error, and pass a real preparation-boundary loopback contract.
 
 ## Browser and Computer Sidecars
 
