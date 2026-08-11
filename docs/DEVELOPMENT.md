@@ -123,7 +123,7 @@ provider retry. Both successor gates are in `ci-contract`, `control-plane`, and
 
 `agent-delivery-verification-core-contract` runs 12 portable receipt and state
 tests. `agent-delivery-verification-contract` enables only `realworld-eval`
-with default desktop features disabled and runs 20 exact request and attempt
+with default desktop features disabled and runs 22 exact request and attempt
 projection tests. Together they bind one shared exact Owner draft and its
 ordered obligation/evidence content, preserve exact control bytes on pass,
 allow at most one Owner repair from a later model turn and one recheck, and
@@ -137,9 +137,21 @@ provider-free tests over the tracked eight-case calibration / 24-case holdout
 suite, exact case/oracle/order/budget digests, matched decision table, redacted
 model-distinct provider binding, clean-source authority, canonical private
 preflight receipt, and zero-call/non-authorizing boundary. It is included in
-`ci-contract`, `control-plane`, and `full`, but not `quick`. The preflight bin
-must not be run as an online experiment: it explicitly records that the online
-runner is not frozen and execution is not authorized.
+`ci-contract`, `control-plane`, and `full`, but not `quick`. The updated
+preflight binds the exact execute binary, profile, and features and records
+`provider_calls=0`, `online_runner_frozen=true`, and
+`execution_authorized=false`; runner freezing is not online authorization.
+
+`agent-delivery-verification-execution-contract` runs 32 provider-free tests
+for canonical short-lived authorization, exact preflight/source/provider/model/
+credential/runner/output binding, private one-shot consumption, campaign and
+physical-call reservations before transport, complete resource accounting,
+crash/tamper/concurrency recovery without retry, exact shared-Owner control and
+treatment execution, and calibration-before-holdout ordering. It also compiles
+the three feature-gated Delivery binaries without invoking their entrypoints.
+It is included in `ci-contract`, `control-plane`, and `full`, but not `quick`,
+`performance`, or `shipping-performance`. It proves no provider outcome or
+intelligence uplift.
 
 ```sh
 cargo test --locked -p agent-runtime \
@@ -154,6 +166,15 @@ cargo test --locked \
   --manifest-path apps/desktop/src-tauri/Cargo.toml \
   --no-default-features --features realworld-eval \
   agent_delivery_verification_protocol_contract_ --lib -- --nocapture
+
+cargo test --locked \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --no-default-features --features realworld-eval \
+  --lib \
+  --bin cindx-delivery-verification-preflight \
+  --bin cindx-delivery-verification-authorize \
+  --bin cindx-delivery-verification-execute \
+  agent_delivery_verification_execution_contract_ -- --nocapture
 ```
 
 ```sh
@@ -232,6 +253,42 @@ legal pre-decision state before selected-outcome projection and covers the real
 terminal producer-to-projector seam in `agent-strategy-lifecycle-contract`.
 This is a classifier repair only: no Goal 3F or provider run is authorized, and
 deterministic green gates do not establish uplift.
+
+Delivery Verification uses separate feature-gated
+`cindx-delivery-verification-preflight`,
+`cindx-delivery-verification-authorize`, and
+`cindx-delivery-verification-execute` binaries. After the runner change is
+merged and the checkout is clean, build those exact binaries without building
+or releasing the production App:
+
+```sh
+cargo build --locked --release \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --no-default-features --features realworld-eval \
+  --bin cindx-delivery-verification-preflight \
+  --bin cindx-delivery-verification-authorize \
+  --bin cindx-delivery-verification-execute
+```
+
+Then run only the provider-free preflight with new private paths outside the
+repository:
+
+```sh
+CINDX_DELIVERY_VERIFICATION_OUTPUT_ROOT=/private/path/new-output-root \
+CINDX_DELIVERY_VERIFICATION_PREFLIGHT_RECEIPT=/private/path/new-preflight.json \
+./apps/desktop/src-tauri/target/release/cindx-delivery-verification-preflight
+```
+
+The preflight must report zero provider calls, frozen exact runner bytes, and
+`execution_authorized=false`. Inspect its clean-source, provider/model,
+32-case/order, budget, hidden-oracle aggregate, runner, profile, feature, and
+external-path bindings, then stop and request explicit authorization. Do not
+issue the short-lived authorization or invoke execute as part of code delivery.
+Authorization remains provider-free but grants a one-shot capability; execute
+is billable and provider-backed. Private receipts, tombstones, journals,
+requests, responses, model identities, secrets, and raw outputs stay outside
+Git. This evaluator-binary build does not change the installed App, version,
+tag, or GitHub release.
 
 ## Browser and Computer Sidecars
 
