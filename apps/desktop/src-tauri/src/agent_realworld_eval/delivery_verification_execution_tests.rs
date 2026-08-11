@@ -214,13 +214,16 @@ fn reservation_input(
         ),
     };
     let request = format!("case={case_ordinal};stage={stage:?}");
+    let wire_payload = format!("wire:{request}");
     DeliveryVerificationCallReservationInputV1 {
         case_ordinal,
         stage,
         role,
         configured_model_sha256,
-        canonical_request_sha256: digest(request.as_bytes()),
-        canonical_request_bytes: request.len() as u64,
+        semantic_request_sha256: digest(request.as_bytes()),
+        semantic_request_bytes: request.len() as u64,
+        wire_payload_sha256: digest(wire_payload.as_bytes()),
+        wire_payload_bytes: wire_payload.len() as u64,
         max_output_tokens,
         reserved_at_ms: CAMPAIGN_AT_MS + 100 + case_ordinal as u64 * 10 + stage_index(stage) as u64,
     }
@@ -238,7 +241,7 @@ fn complete_stage(
     total_tokens: u64,
 ) -> DeliveryVerificationResponseArtifactV1 {
     let input = reservation_input(authorization, case_ordinal, stage);
-    let request_sha256 = input.canonical_request_sha256.clone();
+    let request_payload_sha256 = input.wire_payload_sha256.clone();
     let configured_model_sha256 = input.configured_model_sha256.clone();
     let reserved_at_ms = input.reserved_at_ms;
     let permit = journal.reserve_call(input).unwrap();
@@ -247,38 +250,36 @@ fn complete_stage(
         case_ordinal,
         permit.global_call_ordinal()
     );
-    let artifact = journal
-        .persist_response_artifact(&permit, response.as_bytes())
-        .unwrap();
     journal
-        .record_call_terminal(DeliveryVerificationCallTerminalInputV1 {
-            permit,
-            status: DeliveryVerificationCallTerminalStatusV1::Completed,
-            failure_class: None,
-            retryable: None,
-            provider_status_code: Some(200),
-            latency_ms: 7,
-            response_artifact_sha256: Some(artifact.sha256.clone()),
-            response_artifact_bytes: Some(artifact.bytes),
-            request_payload_sha256: Some(request_sha256),
-            response_semantic_sha256: Some(digest(response.as_bytes())),
-            provider_response_id_sha256: Some(digest(format!(
-                "response-id-{case_ordinal}-{stage:?}"
-            ))),
-            provider_response_model_sha256: Some(configured_model_sha256),
-            provider_system_fingerprint_sha256: Some(digest("provider-system-fingerprint")),
-            provider_receipt_status: Some("observed".into()),
-            usage: Some(DeliveryVerificationCallUsageV1 {
-                prompt_tokens: total_tokens.saturating_sub(1),
-                completion_tokens: 1,
-                total_tokens,
-                usage_source: "provider".into(),
-                usage_estimated: false,
-            }),
-            terminal_at_ms: reserved_at_ms + 1,
-        })
-        .unwrap();
-    artifact
+        .record_call_terminal(
+            DeliveryVerificationCallTerminalInputV1 {
+                permit,
+                status: DeliveryVerificationCallTerminalStatusV1::Completed,
+                failure_class: None,
+                retryable: None,
+                provider_status_code: Some(200),
+                latency_ms: 7,
+                request_payload_sha256: Some(request_payload_sha256),
+                response_semantic_sha256: Some(digest(response.as_bytes())),
+                provider_response_id_sha256: Some(digest(format!(
+                    "response-id-{case_ordinal}-{stage:?}"
+                ))),
+                provider_response_model_sha256: Some(configured_model_sha256),
+                provider_system_fingerprint_sha256: Some(digest("provider-system-fingerprint")),
+                provider_receipt_status: Some("observed".into()),
+                usage: Some(DeliveryVerificationCallUsageV1 {
+                    prompt_tokens: total_tokens.saturating_sub(1),
+                    completion_tokens: 1,
+                    total_tokens,
+                    usage_source: "provider".into(),
+                    usage_estimated: false,
+                }),
+                terminal_at_ms: reserved_at_ms + 1,
+            },
+            Some(response.as_bytes()),
+        )
+        .unwrap()
+        .expect("completed call should retain its response artifact")
 }
 
 fn complete_case_input(
@@ -604,7 +605,13 @@ fn agent_delivery_verification_execution_contract_call_reservation_charges_befor
         journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
         journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
         let input = reservation_input(&validated.authorization, 1, STAGES[0]);
+        let semantic_request_sha256 = input.semantic_request_sha256.clone();
+        let semantic_request_bytes = input.semantic_request_bytes;
+        let wire_payload_sha256 = input.wire_payload_sha256.clone();
+        let wire_payload_bytes = input.wire_payload_bytes;
         let reserved_output = input.max_output_tokens;
+        assert_ne!(semantic_request_sha256, wire_payload_sha256);
+        assert_ne!(semantic_request_bytes, wire_payload_bytes);
         let _permit = journal.reserve_call(input).unwrap();
         assert_eq!(
             journal.charged(),
@@ -615,8 +622,25 @@ fn agent_delivery_verification_execution_contract_call_reservation_charges_befor
             }
         );
         let value = journal_json(&fixture.output_root);
+        assert_eq!(
+            value["schema"],
+            "cindx.agent-eval.delivery-verification-execution-journal.v2"
+        );
         assert_eq!(value["charged"]["physical_model_attempts"], 1);
         assert_eq!(value["cases"][0]["calls"][0]["state"]["state"], "reserved");
+        let reservation = &value["cases"][0]["calls"][0]["state"]["reservation"];
+        assert_eq!(
+            reservation["semantic_request_sha256"],
+            semantic_request_sha256
+        );
+        assert_eq!(
+            reservation["semantic_request_bytes"],
+            semantic_request_bytes
+        );
+        assert_eq!(reservation["wire_payload_sha256"], wire_payload_sha256);
+        assert_eq!(reservation["wire_payload_bytes"], wire_payload_bytes);
+        assert!(reservation.get("canonical_request_sha256").is_none());
+        assert!(reservation.get("canonical_request_bytes").is_none());
     });
 }
 
@@ -638,7 +662,19 @@ fn agent_delivery_verification_execution_contract_call_reservation_rejects_wrong
         wrong.max_output_tokens += 1;
         assert!(journal.reserve_call(wrong).is_err());
         let mut wrong = reservation_input(&validated.authorization, 1, STAGES[0]);
-        wrong.canonical_request_bytes = 512 * 1024 + 1;
+        wrong.semantic_request_bytes = 512 * 1024 + 1;
+        assert!(journal.reserve_call(wrong).is_err());
+        let mut wrong = reservation_input(&validated.authorization, 1, STAGES[0]);
+        wrong.semantic_request_sha256 = "not-a-sha256".into();
+        assert!(journal.reserve_call(wrong).is_err());
+        let mut wrong = reservation_input(&validated.authorization, 1, STAGES[0]);
+        wrong.wire_payload_bytes = 0;
+        assert!(journal.reserve_call(wrong).is_err());
+        let mut wrong = reservation_input(&validated.authorization, 1, STAGES[0]);
+        wrong.wire_payload_bytes = 512 * 1024 + 1;
+        assert!(journal.reserve_call(wrong).is_err());
+        let mut wrong = reservation_input(&validated.authorization, 1, STAGES[0]);
+        wrong.wire_payload_sha256 = "not-a-sha256".into();
         assert!(journal.reserve_call(wrong).is_err());
         assert!(journal
             .reserve_call(reservation_input(&validated.authorization, 1, STAGES[1]))
@@ -664,15 +700,83 @@ fn agent_delivery_verification_execution_contract_completed_call_retains_exact_a
         assert_eq!(journal.observed().total_tokens, 11);
         let receipt =
             &journal_json(&fixture.output_root)["cases"][0]["calls"][0]["state"]["receipt"];
+        let reservation =
+            &journal_json(&fixture.output_root)["cases"][0]["calls"][0]["state"]["reservation"];
         assert_eq!(receipt["provider_receipt_status"], "observed");
         assert_eq!(receipt["usage"]["usage_source"], "provider");
         assert_eq!(receipt["usage"]["usage_estimated"], false);
         assert_eq!(receipt["response_artifact_sha256"], artifact.sha256);
+        assert_eq!(
+            receipt["request_payload_sha256"],
+            reservation["wire_payload_sha256"]
+        );
+        assert_ne!(
+            receipt["request_payload_sha256"],
+            reservation["semantic_request_sha256"]
+        );
+        assert!(!fs::read(&artifact.path).unwrap().is_empty());
         #[cfg(unix)]
         assert_eq!(
             fs::metadata(artifact.path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    });
+}
+
+#[test]
+fn agent_delivery_verification_execution_contract_invalid_completed_receipt_writes_no_artifact_or_terminal(
+) {
+    with_fixture(|protocol, fixture| {
+        let (validated, _, mut journal) = new_journal(protocol, &fixture);
+        journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
+        journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
+        let input = reservation_input(&validated.authorization, 1, STAGES[0]);
+        let semantic_request_sha256 = input.semantic_request_sha256.clone();
+        let configured_model_sha256 = input.configured_model_sha256.clone();
+        let terminal_at_ms = input.reserved_at_ms + 1;
+        let permit = journal.reserve_call(input).unwrap();
+        let response = b"response rejected before artifact persistence";
+        let artifact_path = fixture.output_root.join("case-01-call-001-response.bin");
+
+        let error = journal
+            .record_call_terminal(
+                DeliveryVerificationCallTerminalInputV1 {
+                    permit,
+                    status: DeliveryVerificationCallTerminalStatusV1::Completed,
+                    failure_class: None,
+                    retryable: None,
+                    provider_status_code: Some(200),
+                    latency_ms: 7,
+                    request_payload_sha256: Some(semantic_request_sha256),
+                    response_semantic_sha256: Some(digest(response)),
+                    provider_response_id_sha256: Some(digest("response-id")),
+                    provider_response_model_sha256: Some(configured_model_sha256),
+                    provider_system_fingerprint_sha256: Some(digest("system-fingerprint")),
+                    provider_receipt_status: Some("observed".into()),
+                    usage: Some(DeliveryVerificationCallUsageV1 {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        usage_source: "provider".into(),
+                        usage_estimated: false,
+                    }),
+                    terminal_at_ms,
+                },
+                Some(response),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "completed delivery call lacks exact provider receipts"
+        );
+        assert!(!artifact_path.exists());
+        assert_eq!(journal.observed().terminal_model_calls, 0);
+        let value = journal_json(&fixture.output_root);
+        assert_eq!(value["cases"][0]["calls"][0]["state"]["state"], "reserved");
+        assert!(value["cases"][0]["calls"][0]["state"]
+            .get("receipt")
+            .is_none());
     });
 }
 
@@ -687,24 +791,25 @@ fn agent_delivery_verification_execution_contract_failed_call_is_retained_and_ne
             CAMPAIGN_AT_MS + validated.authorization.budget.campaign_timeout_ms + 1;
         let permit = journal.reserve_call(input).unwrap();
         journal
-            .record_call_terminal(DeliveryVerificationCallTerminalInputV1 {
-                permit,
-                status: DeliveryVerificationCallTerminalStatusV1::ProviderFailure,
-                failure_class: Some("transport_timeout".into()),
-                retryable: Some(true),
-                provider_status_code: None,
-                latency_ms: 9,
-                response_artifact_sha256: None,
-                response_artifact_bytes: None,
-                request_payload_sha256: None,
-                response_semantic_sha256: None,
-                provider_response_id_sha256: None,
-                provider_response_model_sha256: None,
-                provider_system_fingerprint_sha256: None,
-                provider_receipt_status: None,
-                usage: None,
-                terminal_at_ms,
-            })
+            .record_call_terminal(
+                DeliveryVerificationCallTerminalInputV1 {
+                    permit,
+                    status: DeliveryVerificationCallTerminalStatusV1::ProviderFailure,
+                    failure_class: Some("transport_timeout".into()),
+                    retryable: Some(true),
+                    provider_status_code: None,
+                    latency_ms: 9,
+                    request_payload_sha256: None,
+                    response_semantic_sha256: None,
+                    provider_response_id_sha256: None,
+                    provider_response_model_sha256: None,
+                    provider_system_fingerprint_sha256: None,
+                    provider_receipt_status: None,
+                    usage: None,
+                    terminal_at_ms,
+                },
+                None,
+            )
             .unwrap();
         assert!(journal
             .reserve_call(reservation_input(&validated.authorization, 1, STAGES[0]))
@@ -994,6 +1099,79 @@ fn agent_delivery_verification_execution_contract_recovery_terminalizes_tombston
                 .unwrap(),
             DeliveryVerificationRecoveryV1::Terminal(
                 DeliveryVerificationCampaignDispositionV1::Censored
+            )
+        );
+    });
+}
+
+#[test]
+fn agent_delivery_verification_execution_contract_recovery_rejects_legacy_v1_journal_shape() {
+    with_fixture(|protocol, fixture| {
+        let (validated, _, mut journal) = new_journal(protocol, &fixture);
+        journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
+        journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
+        journal
+            .reserve_call(reservation_input(&validated.authorization, 1, STAGES[0]))
+            .unwrap();
+
+        let mut legacy = journal_json(&fixture.output_root);
+        legacy["schema"] =
+            Value::String("cindx.agent-eval.delivery-verification-execution-journal.v1".into());
+        let reservation = legacy["cases"][0]["calls"][0]["state"]["reservation"]
+            .as_object_mut()
+            .unwrap();
+        let semantic_sha256 = reservation.remove("semantic_request_sha256").unwrap();
+        let semantic_bytes = reservation.remove("semantic_request_bytes").unwrap();
+        reservation.remove("wire_payload_sha256").unwrap();
+        reservation.remove("wire_payload_bytes").unwrap();
+        reservation.insert("canonical_request_sha256".into(), semantic_sha256);
+        reservation.insert("canonical_request_bytes".into(), semantic_bytes);
+        replace_private_file(
+            &fixture
+                .output_root
+                .join(DELIVERY_EXECUTION_JOURNAL_FILE_NAME),
+            &canonical_json(&legacy, "legacy delivery execution journal").unwrap(),
+            "legacy delivery execution journal",
+        )
+        .unwrap();
+        drop(journal);
+
+        assert_eq!(
+            DeliveryVerificationExecutionJournal::recover(
+                &fixture.output_root,
+                CAMPAIGN_AT_MS + 1_000,
+            )
+            .unwrap(),
+            DeliveryVerificationRecoveryV1::RecoveryTerminal(
+                DeliveryVerificationCampaignDispositionV1::Invalid
+            )
+        );
+    });
+}
+
+#[test]
+fn agent_delivery_verification_execution_contract_recovery_rejects_tampered_response_artifact() {
+    with_fixture(|protocol, fixture| {
+        let (validated, _, mut journal) = new_journal(protocol, &fixture);
+        journal.reserve_campaign(CAMPAIGN_AT_MS).unwrap();
+        journal.reserve_case(1, CAMPAIGN_AT_MS + 1).unwrap();
+        let artifact = complete_stage(&mut journal, &validated.authorization, 1, STAGES[0], 2);
+        replace_private_file(
+            &artifact.path,
+            b"tampered response artifact",
+            "tampered delivery response artifact",
+        )
+        .unwrap();
+        drop(journal);
+
+        assert_eq!(
+            DeliveryVerificationExecutionJournal::recover(
+                &fixture.output_root,
+                CAMPAIGN_AT_MS + 1_000,
+            )
+            .unwrap(),
+            DeliveryVerificationRecoveryV1::RecoveryTerminal(
+                DeliveryVerificationCampaignDispositionV1::Invalid
             )
         );
     });

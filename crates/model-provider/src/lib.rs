@@ -15,6 +15,7 @@ mod dashscope_realtime_guard;
 mod dashscope_realtime_provider;
 mod image_provider;
 mod json_wire;
+mod prepared_non_streaming;
 mod prepared_payload;
 mod prepared_request;
 mod provider_receipt;
@@ -32,11 +33,11 @@ mod streaming_wire;
 mod usage;
 
 use redirect_policy::api_key_safe_redirect_policy;
-use request_builder::build_chat_request_json_with_tools_output_limit_vision_and_images;
 #[cfg(test)]
 use request_builder::{
     build_chat_request_json_with_tools_and_output_limit,
     build_chat_request_json_with_tools_output_limit_and_vision,
+    build_chat_request_json_with_tools_output_limit_vision_and_images,
 };
 use request_vision::ImageDataUrlCache;
 #[cfg(test)]
@@ -56,6 +57,7 @@ pub use dashscope_realtime_provider::{
 pub use image_provider::{
     build_image_generation_request_json, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
 };
+pub use prepared_non_streaming::PreparedNonStreamingModelRequest;
 pub use prepared_payload::PreparedStreamingModelRequest;
 pub use provider_validation::parse_model_list_response;
 pub use realtime_provider::{
@@ -584,58 +586,8 @@ impl OpenAiCompatibleProvider {
     }
 
     pub fn complete_once(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
-        if !self.config.is_ready() {
-            return Err(ModelError::new("provider config is incomplete"));
-        }
-
-        let estimated_prompt_tokens = estimate_request_tokens(&request.messages, &request.tools);
-        let max_output_tokens = request
-            .metadata
-            .get("max_output_tokens")
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0);
-        let request_body = build_chat_request_json_with_tools_output_limit_vision_and_images(
-            &self.config.model,
-            &request.messages,
-            false,
-            &request.tools,
-            max_output_tokens,
-            self.config.supports_vision_content(),
-            &mut |path| self.image_cache.resolve(path),
-        )?;
-        let request_payload_sha256 =
-            provider_receipt::request_payload_sha256(request_body.as_bytes());
-        let output = execute_http(
-            &self.config.chat_completions_url(),
-            &self.config.api_key,
-            Some(&request_body),
-            self.config.timeout_seconds,
-            MAX_MODEL_RESPONSE_BYTES,
-        )?;
-
-        let stdout = String::from_utf8_lossy(&output.body).to_string();
-        if !output.status.is_success() {
-            let provider_error = parse_provider_error(&stdout).unwrap_or_default();
-            return Err(ModelError::with_status(
-                output.status.as_u16(),
-                if provider_error.is_empty() {
-                    format!("model request failed with status {}", output.status)
-                } else {
-                    provider_error
-                },
-            ));
-        }
-
-        let mut response = parse_model_response(&stdout)?;
-        response
-            .metadata
-            .insert("model".to_string(), self.config.model.clone());
-        provider_receipt::attach_request_payload_sha256(
-            &mut response.metadata,
-            &request_payload_sha256,
-        );
-        normalize_model_usage(&mut response, estimated_prompt_tokens);
-        Ok(response)
+        let prepared = self.prepare_non_streaming_request(&request)?;
+        self.complete_prepared_non_streaming_request(prepared)
     }
 
     pub fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
