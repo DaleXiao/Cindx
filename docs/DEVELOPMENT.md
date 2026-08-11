@@ -164,9 +164,9 @@ kernel-backed CodeDirectory identity and output-root relocation after competing
 authorization files through one parent-level no-clobber consumed marker. It
 compiles the three permanently fail-closed v1 binaries, the three permanently
 fail-closed v2 binaries, the three permanently fail-closed v3 binaries, and the
-three active v4 binaries without invoking their entrypoints. The loopback
+three tracked v4 binaries without invoking their entrypoints. The loopback
 coverage also proves that an exact zero-byte response artifact is retained with
-its digest and zero length, while empty Reviewer content becomes
+its digest and zero length, while completed empty Reviewer content becomes
 `invalid_verifier_response` without retry.
 It is included in `ci-contract`, `control-plane`, and `full`, but not `quick`,
 `performance`, or `shipping-performance`. It proves no provider outcome or
@@ -288,30 +288,30 @@ Delivery Verification retains separate feature-gated v1
 `cindx-delivery-verification-execute` binaries plus the separately named v2 and
 v3 triples. All nine old binaries are retired and permanently reject their
 consumed protocols before reading arguments, environment, paths, configuration,
-or live state. The active v4 successor uses
+or live state. The tracked v4 implementation uses
 `cindx-delivery-verification-v4-preflight`,
 `cindx-delivery-verification-v4-authorize`, and
 `cindx-delivery-verification-v4-execute` plus
 `CINDX_DELIVERY_VERIFICATION_V4_*` paths. All twelve binaries require
 `realworld-eval` and are compiled by the provider-free contract gate.
 
-Build the three v4 binaries together from clean merged source into one new
-private target root outside the repository. Run only the preflight binary; it
-requires its exact sibling execute binary and writes a private receipt binding
+The consumed v4 instance built the three binaries together from clean merged
+source into one new private target root outside the repository. Its preflight
+required its exact sibling execute binary and wrote a private receipt binding
 source, runner full-file and CodeDirectory identities, provider, cases, case
 order, seeded candidates, model inputs, output contracts, hidden oracle,
 budget, and new output path while reporting zero provider calls and
 `execution_authorized=false`. This preflight is provider-free. Verify the
 receipt CodeDirectory against `CandidateCDHashFull sha256=` from the exact
-copied execute binary. Do not run the authorize or execute binaries without a
-later explicit one-shot authorization.
+copied execute binary. Do not mint another v4 preflight or run its authorization
+or execute binaries again; the one-shot authority is consumed.
 Private receipts, tombstones, journals, requests, responses, model identities,
 secrets, and raw outputs stay outside Git. This successor does not change the
 installed App, version, tag, or GitHub release.
 
-If a later one-shot authorization is explicitly granted, execute first checks
+The consumed one-shot execute first checked
 the frozen CodeDirectory against the kernel identity of its running process,
-then atomically creates a consumed marker in the output root's parent. Its name
+then atomically created a consumed marker in the output root's parent. Its name
 is derived from the canonical output-path digest, so all authorization paths
 for that campaign compete for the same marker; moving or deleting the output
 root cannot reopen it. This is a local-filesystem guarantee for normal crashes,
@@ -324,8 +324,11 @@ its semantic-request digest with the separately domain-separated wire-payload
 digest. Protocol v2 separately consumed its one authorized attempt and closed
 `terminal_futility` after calibration. Protocol v3 consumed one attempt, made
 one provider call, then froze `CENSORED` because terminal validation rejected an
-otherwise bound zero-byte response artifact. Never mint or execute another v1,
-v2, or v3 authority; every old CLI stage now rejects permanently.
+otherwise bound zero-byte response artifact. Protocol v4 then consumed one
+attempt whose zero-byte artifact was retained correctly, but the first call was
+non-retryable `invalid_output`; case 1 closed `structural_failure` and the
+campaign closed `inconclusive` with zero matched pairs. Never mint or execute
+another v1, v2, v3, or v4 authority.
 
 The v4 protocol is a new authority over the byte-identical v3 suite. Cases,
 order, hidden oracle, seeds, model inputs, output contracts, budgets, thresholds,
@@ -334,9 +337,10 @@ keeps its v3 compatibility schema so the instrumentation successor does not
 change model-visible semantic or wire payloads. V4 reserves both identities from
 one immutable prepared request, dispatches those exact bytes, and accepts an
 exact zero-byte response artifact with its digest and zero length. Empty Reviewer
-content is retained as `invalid_verifier_response` without retry or replacement.
-Its provider-free preflight remains non-authorizing; a
-provider-backed v4 execute still requires a new explicit one-shot authorization.
+content from a complete tool-free response is retained as
+`invalid_verifier_response` without retry or replacement; a response that is
+not complete and tool-free remains structural. Its retained preflight was
+non-authorizing, and its later explicit one-shot authorization is now exhausted.
 
 ## Browser and Computer Sidecars
 

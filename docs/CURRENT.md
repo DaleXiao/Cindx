@@ -283,18 +283,28 @@ execution failure for `seeded_repair_effective`.
 
 V4 changes only the protocol/control-plane namespace and the defective response-
 artifact instrumentation. The journal now accepts and hashes an exact zero-byte
-artifact instead of treating its length as missing. Empty Reviewer content is
-then retained as `invalid_verifier_response`, an intention-to-treat treatment
-failure for that fixed case, without retry or replacement. Semantic-request and
+artifact instead of treating its length as missing. Completed empty Reviewer
+content is then retained as `invalid_verifier_response`, an intention-to-treat
+treatment failure for that fixed case, without retry or replacement; a response
+that is not complete and tool-free remains structural. Semantic-request and
 immutable prepared-wire digests/sizes are still reserved before dispatch, and
 terminal request metadata must match the reserved wire authority.
 
 All nine v1-v3 preflight, authorization, and execute entrypoints reject their
-consumed authorities before reading live state. The three separately named v4
-entrypoints are the only active Delivery Verification control plane. Current v4
-implementation and verification are provider-free only; no v4 online
-authorization, campaign execution, provider result, or scientific decision
-exists.
+consumed authorities before reading live state. V4 was frozen from clean merged
+source `275868e4dd84692f15998a1cb95afa99df264267`, authorized, and consumed
+exactly once. Its first calibration Reviewer call retained the exact zero-byte
+artifact as a 0600 file with SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+so the v3 instrumentation defect did not recur. The provider-bound receipt
+classified that call `invalid_output` and non-retryable because the response was
+not a complete tool-free answer. Case 1 therefore closed
+`structural_failure`, and the campaign closed `inconclusive` before any matched
+pair or calibration decision existed. Accounting is one logical call, one
+physical attempt, one terminal call, and zero retries; the other 31 cases never
+started. V4 is consumed and must not be rerun or interpreted as repair
+effectiveness, ineffectiveness, preservation regression, or provider-quality
+evidence.
 
 See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
