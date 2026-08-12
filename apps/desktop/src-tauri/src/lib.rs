@@ -87,6 +87,7 @@ mod platform_runtime;
 mod prepared_task_state_metadata;
 mod project_commands;
 mod project_config_persistence;
+mod project_instructions_runtime;
 mod project_lifecycle_runtime;
 mod project_session_persistence;
 mod prompt_attempt_runtime;
