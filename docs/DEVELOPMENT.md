@@ -50,7 +50,7 @@ The source of truth is `benchmarks/system/quality-gates-v1.json`.
 
 | Profile | Purpose |
 | --- | --- |
-| `quick` | Documentation, version, layout, and structural contracts |
+| `quick` | Documentation, version, layout, structural, and workspace-undo contracts |
 | `ci-contract` | Quick checks plus deterministic routing, context, memory, task, tool, and evaluation contracts |
 | `control-plane` | Deterministic agent contracts plus Rust workspace and desktop tests |
 | `performance` | Same-machine diagnostics for long sessions, context, RAG, streaming, and provider health |
@@ -88,6 +88,12 @@ gate checks exact lifecycle, treatment-exposure, and resource bindings;
 integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
+
+`workspace-undo-contract` runs 9 provider-free desktop tests covering undo
+entry projection from tool events, undo/redo of created, overwritten, and
+patched files, external-edit conflict blocking, LIFO ordering, and undo
+registry persistence. It is included in `quick`, `ci-contract`,
+`control-plane`, and `full`.
 
 They also include `agent-collaboration-learning-contract`. Its 18 provider-free
 tests check the bounded policy schema, trusted assignment-to-exercise binding,

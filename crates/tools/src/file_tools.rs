@@ -254,8 +254,8 @@ impl Tool for WriteFileTool {
         let version_key = stable_hash(&invocation.id.0).to_string();
         let snapshot_relative = PathBuf::from(".cindx")
             .join("output-history")
-            .join(session_key)
-            .join(version_key)
+            .join(&session_key)
+            .join(&version_key)
             .join(&path);
         let snapshot = self.workspace_root.join(&snapshot_relative);
         if let Some(parent) = snapshot.parent() {
@@ -268,6 +268,31 @@ impl Tool for WriteFileTool {
         fs::write(&snapshot, content.as_bytes()).map_err(|error| {
             ToolError::new(format!("failed to preserve output version: {error}"))
         })?;
+        let prior_content = fs::read(&resolved).ok();
+        let file_existed = prior_content.is_some();
+        let mut undo_before_relative: Option<PathBuf> = None;
+        let mut undo_before_sha256: Option<String> = None;
+        if let Some(prior) = prior_content.as_deref() {
+            // Best-effort undo capture. A failure here does not block the
+            // write (matching the output-history contract); it only leaves this
+            // change without an undo path, disclosed by missing undo metadata.
+            let undo_relative = PathBuf::from(".cindx")
+                .join("undo-history")
+                .join(&session_key)
+                .join(&version_key)
+                .join(&path);
+            let undo_target = self.workspace_root.join(&undo_relative);
+            let captured = (|| -> std::io::Result<()> {
+                if let Some(parent) = undo_target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&undo_target, prior)
+            })();
+            if captured.is_ok() {
+                undo_before_sha256 = Some(sha256_bytes(prior));
+                undo_before_relative = Some(undo_relative);
+            }
+        }
         if let Some(parent) = resolved.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 ToolError::new(format!("failed to create parent directory: {error}"))
@@ -284,6 +309,30 @@ impl Tool for WriteFileTool {
             snapshot_relative.display().to_string(),
         );
         metadata.insert("bytes".to_string(), content.len().to_string());
+        metadata.insert(
+            "undo_action".to_string(),
+            if file_existed {
+                "overwritten".to_string()
+            } else {
+                "created".to_string()
+            },
+        );
+        if let Some(undo_relative) = undo_before_relative.as_ref() {
+            metadata.insert(
+                "undo_before_path".to_string(),
+                undo_relative.display().to_string(),
+            );
+        }
+        if let Some(before_sha256) = undo_before_sha256.as_deref() {
+            metadata.insert("undo_before_sha256".to_string(), before_sha256.to_string());
+            metadata.insert(
+                "undo_before_bytes".to_string(),
+                prior_content
+                    .as_deref()
+                    .map(|prior| prior.len().to_string())
+                    .unwrap_or_default(),
+            );
+        }
 
         Ok(tool_result(
             invocation.id,

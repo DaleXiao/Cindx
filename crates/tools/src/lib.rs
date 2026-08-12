@@ -1158,6 +1158,65 @@ mod tests {
     }
 
     #[test]
+    fn file_write_overwrite_captures_undo_before_state() {
+        let root = temp_workspace();
+        fs::write(root.join("note.txt"), "original content").expect("fixture should be written");
+        let writer = WriteFileTool::new(root.clone());
+
+        let result = writer
+            .execute(invocation(
+                "file.write",
+                encode_input(&[("path", "note.txt"), ("content", "replacement content")]),
+            ))
+            .expect("write should succeed");
+
+        assert_eq!(
+            result.metadata.get("undo_action").map(String::as_str),
+            Some("overwritten")
+        );
+        let undo_relative = result
+            .metadata
+            .get("undo_before_path")
+            .expect("undo snapshot path recorded");
+        assert_eq!(
+            fs::read(root.join(undo_relative)).expect("undo snapshot exists"),
+            b"original content"
+        );
+        assert_eq!(
+            result
+                .metadata
+                .get("undo_before_sha256")
+                .map(|value| value.len()),
+            Some(64)
+        );
+        assert_eq!(
+            fs::read(root.join(result.metadata.get("artifact_path").unwrap()))
+                .expect("output history snapshot exists"),
+            b"replacement content"
+        );
+    }
+
+    #[test]
+    fn file_write_creation_marks_created_without_undo_snapshot() {
+        let root = temp_workspace();
+        let writer = WriteFileTool::new(root.clone());
+
+        let result = writer
+            .execute(invocation(
+                "file.write",
+                encode_input(&[("path", "fresh.txt"), ("content", "new file")]),
+            ))
+            .expect("write should succeed");
+
+        assert_eq!(
+            result.metadata.get("undo_action").map(String::as_str),
+            Some("created")
+        );
+        assert!(!result.metadata.contains_key("undo_before_path"));
+        assert!(!result.metadata.contains_key("undo_before_sha256"));
+    }
+
+    #[test]
     fn read_list_search_and_write_file_inside_workspace() {
         let root = temp_workspace();
         let writer = WriteFileTool::new(root.clone());

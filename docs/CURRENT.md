@@ -20,6 +20,11 @@ The desktop app currently includes:
   personalization, appearance, and runtime diagnostics.
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
+- Workspace file changes made by `file.write` and `file.patch` preserve their
+  prior content best-effort for recovery. A session can undo and redo its most
+  recent file change through Composer controls, guarded by content-hash
+  conflict checks. Shell, browser, computer, and process effects remain
+  irreversible.
 
 ## Execution Modes
 
@@ -310,6 +315,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
 ## Known Structural Limits
 
+- Undo and redo cover only `file.write` and `file.patch` changes whose undo
+  snapshot was captured. A change whose snapshot capture failed is disclosed
+  as not undoable, and undo is blocked when the target file changed outside
+  the recorded run.
 - `apps/desktop/src-tauri/src/lib.rs` is still a large composition root with
   many sibling modules and broad imports. Portable crates now own substantial
   contracts, but desktop orchestration remains the primary coupling hotspot.
