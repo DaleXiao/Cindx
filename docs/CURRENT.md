@@ -31,6 +31,11 @@ The desktop app currently includes:
   with a durable provenance receipt. Files over the byte caps are recorded as
   omitted rather than silently dropped. The feature is enabled by default and
   can be disabled through the app support configuration file.
+- Custom commands: markdown templates discovered from the workspace
+  `.cindx/commands/` directory and the global `~/.cindx/commands/` directory
+  (project names override global names). They appear in a Composer menu;
+  selecting one expands its template into the draft, substituting `$ARGUMENTS`
+  with the current draft text and applying an optional effort override.
 
 ## Execution Modes
 

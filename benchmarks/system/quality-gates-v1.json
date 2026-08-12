@@ -20,7 +20,8 @@
       "desktop-layout",
       "desktop-structure",
       "workspace-undo-contract",
-      "project-instructions-contract"
+      "project-instructions-contract",
+      "custom-commands-contract"
     ],
     "ci-contract": [
       "documentation-contract",
@@ -69,6 +70,7 @@
       "prompt-distillation-control-contract",
       "prompt-profile-selection-scaling",
       "memory-contract",
+      "custom-commands-contract",
       "workspace-undo-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
@@ -117,6 +119,7 @@
       "prompt-distillation-control-contract",
       "prompt-profile-selection-scaling",
       "memory-contract",
+      "custom-commands-contract",
       "workspace-undo-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
@@ -207,6 +210,7 @@
       "prompt-live-assignment-attribution-contract",
       "prompt-distillation-control-contract",
       "memory-contract",
+      "custom-commands-contract",
       "workspace-undo-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
@@ -229,48 +233,79 @@
     {
       "id": "documentation-contract",
       "category": "documentation",
-      "command": ["node", "scripts/check-docs.mjs"]
+      "command": [
+        "node",
+        "scripts/check-docs.mjs"
+      ]
     },
     {
       "id": "version-contract",
       "category": "release",
-      "command": ["node", "scripts/check-release-version.mjs"]
+      "command": [
+        "node",
+        "scripts/check-release-version.mjs"
+      ]
     },
     {
       "id": "desktop-layout",
       "category": "ux",
-      "command": ["node", "scripts/check-desktop-layout.mjs"]
+      "command": [
+        "node",
+        "scripts/check-desktop-layout.mjs"
+      ]
     },
     {
       "id": "desktop-structure",
       "category": "ux_and_architecture",
-      "command": ["node", "scripts/check-desktop-structure.mjs"]
+      "command": [
+        "node",
+        "scripts/check-desktop-structure.mjs"
+      ]
     },
     {
       "id": "desktop-dto-contract",
       "category": "architecture",
-      "command": ["node", "scripts/check-desktop-dto-contract.mjs"],
-      "required_output": ["cindx.desktop-dto-contract.v1"]
+      "command": [
+        "node",
+        "scripts/check-desktop-dto-contract.mjs"
+      ],
+      "required_output": [
+        "cindx.desktop-dto-contract.v1"
+      ]
     },
     {
       "id": "performance-comparator-contract",
       "category": "performance",
-      "command": ["node", "--test", "scripts/performance-comparison.test.mjs"]
+      "command": [
+        "node",
+        "--test",
+        "scripts/performance-comparison.test.mjs"
+      ]
     },
     {
       "id": "paired-performance-contract",
       "category": "performance",
-      "command": ["node", "--test", "scripts/paired-performance.test.mjs"]
+      "command": [
+        "node",
+        "--test",
+        "scripts/paired-performance.test.mjs"
+      ]
     },
     {
       "id": "browser-sidecar",
       "category": "tools",
-      "command": ["node", "scripts/test-browser-sidecar.mjs"]
+      "command": [
+        "node",
+        "scripts/test-browser-sidecar.mjs"
+      ]
     },
     {
       "id": "computer-sidecar",
       "category": "tools",
-      "command": ["node", "scripts/test-computer-sidecar.mjs"]
+      "command": [
+        "node",
+        "scripts/test-computer-sidecar.mjs"
+      ]
     },
     {
       "id": "routing-contract",
@@ -289,10 +324,22 @@
       ],
       "report": "target/agent-benchmark-report.json",
       "assertions": [
-        { "path": "baseline_passed", "equals": true },
-        { "path": "contract.pass_rate", "equals": 1 },
-        { "path": "contract.over_orchestrated", "equals": 0 },
-        { "path": "contract.under_orchestrated", "equals": 0 }
+        {
+          "path": "baseline_passed",
+          "equals": true
+        },
+        {
+          "path": "contract.pass_rate",
+          "equals": 1
+        },
+        {
+          "path": "contract.over_orchestrated",
+          "equals": 0
+        },
+        {
+          "path": "contract.under_orchestrated",
+          "equals": 0
+        }
       ]
     },
     {
@@ -350,7 +397,10 @@
       ],
       "report": "target/evaluation-v2-foundation.json",
       "assertions": [
-        { "path": "routing_contract_verified", "equals": true }
+        {
+          "path": "routing_contract_verified",
+          "equals": true
+        }
       ]
     },
     {
@@ -370,10 +420,22 @@
       ],
       "report": "target/agent-arena-contract.json",
       "assertions": [
-        { "path": "cases", "equals": 120 },
-        { "path": "observed_runs", "equals": 0 },
-        { "path": "missing_runs", "equals_path": "required_observations" },
-        { "path": "ready_for_scientific_comparison", "equals": false }
+        {
+          "path": "cases",
+          "equals": 120
+        },
+        {
+          "path": "observed_runs",
+          "equals": 0
+        },
+        {
+          "path": "missing_runs",
+          "equals_path": "required_observations"
+        },
+        {
+          "path": "ready_for_scientific_comparison",
+          "equals": false
+        }
       ]
     },
     {
@@ -923,7 +985,9 @@
         "--exact",
         "--nocapture"
       ],
-      "required_output": ["test result: ok. 1 passed; 0 failed"]
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed"
+      ]
     },
     {
       "id": "prompt-profile-serving-contract",
@@ -1059,6 +1123,24 @@
       ]
     },
     {
+      "id": "custom-commands-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "custom_commands_contract_",
+        "--lib",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 9 passed; 0 failed"
+      ]
+    },
+    {
       "id": "memory-contract",
       "category": "memory",
       "command": [
@@ -1075,17 +1157,50 @@
       ],
       "report": "target/memory-evaluation.json",
       "assertions": [
-        { "path": "top_1_correct", "equals_path": "cases" },
-        { "path": "recall_at_3_correct", "equals_path": "cases" },
-        { "path": "trust_violations", "equals": 0 },
-        { "path": "dedup_failures", "equals": 0 },
-        { "path": "supersession_failures", "equals": 0 },
-        { "path": "false_positive_failures", "equals": 0 },
-        { "path": "false_persistence_failures", "equals": 0 },
-        { "path": "verbatim_evidence_failures", "equals": 0 },
-        { "path": "semantic_laundering_failures", "equals": 0 },
-        { "path": "security_cases", "equals": 6 },
-        { "path": "security_case_failures", "equals": 0 }
+        {
+          "path": "top_1_correct",
+          "equals_path": "cases"
+        },
+        {
+          "path": "recall_at_3_correct",
+          "equals_path": "cases"
+        },
+        {
+          "path": "trust_violations",
+          "equals": 0
+        },
+        {
+          "path": "dedup_failures",
+          "equals": 0
+        },
+        {
+          "path": "supersession_failures",
+          "equals": 0
+        },
+        {
+          "path": "false_positive_failures",
+          "equals": 0
+        },
+        {
+          "path": "false_persistence_failures",
+          "equals": 0
+        },
+        {
+          "path": "verbatim_evidence_failures",
+          "equals": 0
+        },
+        {
+          "path": "semantic_laundering_failures",
+          "equals": 0
+        },
+        {
+          "path": "security_cases",
+          "equals": 6
+        },
+        {
+          "path": "security_case_failures",
+          "equals": 0
+        }
       ]
     },
     {
@@ -1102,7 +1217,9 @@
         "--exact",
         "--nocapture"
       ],
-      "required_output": ["test result: ok. 1 passed; 0 failed"]
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed"
+      ]
     },
     {
       "id": "memory-attribution-atomicity-contract",
@@ -1118,12 +1235,19 @@
         "--exact",
         "--nocapture"
       ],
-      "required_output": ["test result: ok. 1 passed; 0 failed"]
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed"
+      ]
     },
     {
       "id": "workspace-tests",
       "category": "correctness",
-      "command": ["cargo", "test", "--workspace", "--locked"]
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked"
+      ]
     },
     {
       "id": "desktop-tests",
@@ -1140,13 +1264,20 @@
       "id": "frontend-test",
       "category": "ux_and_state",
       "cwd": "apps/desktop",
-      "command": ["npm", "test"]
+      "command": [
+        "npm",
+        "test"
+      ]
     },
     {
       "id": "frontend-build",
       "category": "ux",
       "cwd": "apps/desktop",
-      "command": ["npm", "run", "build"]
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ]
     },
     {
       "id": "session-projection-scaling",
