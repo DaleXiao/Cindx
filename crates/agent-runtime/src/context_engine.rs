@@ -19,6 +19,7 @@ pub enum ContextSourceKind {
     ArtifactManifest,
     WorkspaceKnowledge,
     ProjectMemory,
+    ProjectInstructions,
     Skill,
     SingleModelPolicy,
     Collaboration,
@@ -138,6 +139,7 @@ impl ContextSourceKind {
             Some("artifact_manifest") => Self::ArtifactManifest,
             Some("knowledge_context") => Self::WorkspaceKnowledge,
             Some("project_memory") => Self::ProjectMemory,
+            Some("project_instructions") => Self::ProjectInstructions,
             Some("skill_context") => Self::Skill,
             Some("single_model_policy_guidance") => Self::SingleModelPolicy,
             _ if message.metadata.contains_key("collaboration_stage") => Self::Collaboration,
@@ -157,6 +159,7 @@ impl ContextSourceKind {
             Self::ArtifactManifest => "artifact_manifest",
             Self::WorkspaceKnowledge => "knowledge_context",
             Self::ProjectMemory => "project_memory",
+            Self::ProjectInstructions => "project_instructions",
             Self::Skill => "skill_context",
             Self::SingleModelPolicy => "single_model_policy_guidance",
             Self::Collaboration => "collaboration",
@@ -179,6 +182,10 @@ impl ContextSourceKind {
             // and can contain durable user requirements. Keep it ahead of
             // bulk workspace evidence when the input budget is tight.
             Self::ProjectMemory => 96,
+            // Bounded project instruction files re-enter every preparation as
+            // durable guidance. Keep them protected, but rank them below the
+            // current-recall and restore sources.
+            Self::ProjectInstructions => 94,
             Self::Skill => 75,
             Self::SingleModelPolicy => 70,
             Self::Collaboration => 68,
@@ -198,6 +205,7 @@ impl ContextSourceKind {
                 | Self::RestorePack
                 | Self::ArtifactManifest
                 | Self::ProjectMemory
+                | Self::ProjectInstructions
         )
     }
 }
@@ -555,6 +563,21 @@ mod tests {
         assert_eq!(source, ContextSourceKind::GroundingEvidence);
         assert_eq!(source.as_str(), "grounding_evidence");
         assert!(source.is_protected());
+    }
+
+    #[test]
+    fn project_instructions_are_protected_below_recalled_memory() {
+        let mut instructions = message(MessageRole::System, "workspace guidance");
+        instructions
+            .metadata
+            .insert("kind".to_string(), "project_instructions".to_string());
+
+        let source = ContextSourceKind::from_message(&instructions).unwrap();
+        assert_eq!(source, ContextSourceKind::ProjectInstructions);
+        assert_eq!(source.as_str(), "project_instructions");
+        assert!(source.is_protected());
+        assert!(source.priority() < ContextSourceKind::ProjectMemory.priority());
+        assert!(source.priority() > ContextSourceKind::WorkspaceKnowledge.priority());
     }
 
     #[test]

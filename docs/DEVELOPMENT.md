@@ -51,6 +51,7 @@ The source of truth is `benchmarks/system/quality-gates-v1.json`.
 | Profile | Purpose |
 | --- | --- |
 | `quick` | Documentation, version, layout, structural, and workspace-undo contracts |
+| `quick` | Documentation, version, layout, structural, and project-instruction contracts |
 | `ci-contract` | Quick checks plus deterministic routing, context, memory, task, tool, and evaluation contracts |
 | `control-plane` | Deterministic agent contracts plus Rust workspace and desktop tests |
 | `performance` | Same-machine diagnostics for long sessions, context, RAG, streaming, and provider health |
@@ -94,6 +95,12 @@ entry projection from tool events, undo/redo of created, overwritten, and
 patched files, external-edit conflict blocking, LIFO ordering, and undo
 registry persistence. It is included in `quick`, `ci-contract`,
 `control-plane`, and `full`.
+`project-instructions-contract` runs 17 provider-free desktop tests covering
+bounded discovery of workspace instruction files (`AGENTS.md` from the
+workspace root up to the Git root and `.cindx/instructions/*.md`), per-file
+and total byte caps, receipt digests, glob validation, the untrusted-guidance
+boundary text, and stale-context removal on re-preparation. It is included in
+`quick`, `ci-contract`, `control-plane`, and `full`.
 
 They also include `agent-collaboration-learning-contract`. Its 18 provider-free
 tests check the bounded policy schema, trusted assignment-to-exercise binding,

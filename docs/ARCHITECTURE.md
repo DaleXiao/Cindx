@@ -122,7 +122,10 @@ physical attempt ID, and steer epoch define replay and recovery boundaries.
 
 The desktop adapter projects bounded history and an authoritative effective
 objective. `agent-runtime` compiles invariant sources, complete tool rounds,
-optional evidence, and a bounded cognitive overlay.
+optional evidence, and a bounded cognitive overlay. Bounded project
+instruction files (`AGENTS.md` between the workspace root and the Git root,
+plus `.cindx/instructions/*.md`) join the prepared context as a protected,
+untrusted guidance source carrying a provenance receipt.
 
 Fast creates a fixed direct candidate. Auto and Pro request one typed Conductor
 candidate. `orchestrator` validates route, task class, model capabilities,

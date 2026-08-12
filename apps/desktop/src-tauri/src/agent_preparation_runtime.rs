@@ -21,6 +21,7 @@ use crate::memory_runtime::{
     append_prepared_memory_context, append_skill_context_for_run, commit_prepared_memory_recall,
     prepare_run_knowledge_contexts, MEMORY_RECALL_STALE_ERROR,
 };
+use crate::project_instructions_runtime::append_project_instructions_context_for_run;
 use crate::prompt_profile_serving::copy_prompt_profile_assignment;
 use crate::runtime_values::add_image_generation_run_context;
 use crate::session_context_service::prepare_session_history_context;
@@ -192,6 +193,7 @@ pub(crate) fn remove_stale_preparation_context(history: &mut Vec<Message>) {
                 "project_memory"
                     | "skill_context"
                     | "knowledge_context"
+                    | "project_instructions"
                     | "single_model_policy_guidance"
                     | "agent_evidence_packet"
                     | "collaboration_tool_evidence"
@@ -269,6 +271,11 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "memory_selected_count",
         "routed_memory_policy",
         "effective_memory_policy",
+        "project_instructions_schema",
+        "project_instructions_count",
+        "project_instructions_digest",
+        "project_instructions_truncated",
+        "project_instructions_omitted_json",
     ] {
         run_context.remove(key);
     }
@@ -482,6 +489,13 @@ pub(crate) fn prepare_agent_execution_replay(
         preparation_try!(append_skill_context_for_run(
             workspace_root,
             &planning_objective,
+            &mut history
+        )
+        .map_err(|error| runtime_preparation_error(&run_context, error)));
+        preparation_try!(append_project_instructions_context_for_run(
+            workspace_root,
+            &crate::persistence_runtime::project_instructions_config_path(),
+            &mut run_context,
             &mut history
         )
         .map_err(|error| runtime_preparation_error(&run_context, error)));

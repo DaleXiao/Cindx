@@ -348,6 +348,16 @@ Composer renders Undo/Redo controls when a session has recorded changes. The
 9-test `workspace-undo-contract` gate joins `quick`, `ci-contract`,
 `control-plane`, and `full`. No provider evaluation was run; route selection,
 permission authority, budgets, learning consumers, and serving are unchanged.
+Project instruction files are wired into run preparation: bounded discovery of
+`AGENTS.md` from the workspace root up to the Git root plus
+`.cindx/instructions/*.md`, a protected `ProjectInstructions` context source,
+untrusted-guidance boundary text, and a provenance receipt in the preparation
+commit event. The 17-test `project-instructions-contract` gate joins `quick`,
+`ci-contract`, `control-plane`, and `full`. The feature is enabled by default;
+until a Settings UI exists it is toggled only through
+`project_instructions.json` in the app support directory. No provider
+evaluation was run; route selection, permission authority, budgets, learning
+consumers, and serving are unchanged.
 
 ## Blocking Fact
 

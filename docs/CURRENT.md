@@ -25,6 +25,12 @@ The desktop app currently includes:
   recent file change through Composer controls, guarded by content-hash
   conflict checks. Shell, browser, computer, and process effects remain
   irreversible.
+- Project instruction files: `AGENTS.md` discovered from the workspace root up
+  to the Git root, plus `.cindx/instructions/*.md` files, are loaded under
+  bounded byte caps and injected into every run as untrusted project guidance
+  with a durable provenance receipt. Files over the byte caps are recorded as
+  omitted rather than silently dropped. The feature is enabled by default and
+  can be disabled through the app support configuration file.
 
 ## Execution Modes
 
@@ -319,6 +325,9 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   snapshot was captured. A change whose snapshot capture failed is disclosed
   as not undoable, and undo is blocked when the target file changed outside
   the recorded run.
+- Project instruction files are enabled by default and can currently only be
+  toggled or extended through `project_instructions.json` in the app support
+  directory; a Settings UI is not wired yet.
 - `apps/desktop/src-tauri/src/lib.rs` is still a large composition root with
   many sibling modules and broad imports. Portable crates now own substantial
   contracts, but desktop orchestration remains the primary coupling hotspot.

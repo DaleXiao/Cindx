@@ -276,6 +276,10 @@ pub(crate) fn personalization_config_path() -> PathBuf {
     app_data_root().join("personalization.json")
 }
 
+pub(crate) fn project_instructions_config_path() -> PathBuf {
+    app_data_root().join("project_instructions.json")
+}
+
 pub(crate) fn workspace_config_path() -> PathBuf {
     app_data_root().join("workspace.conf")
 }
