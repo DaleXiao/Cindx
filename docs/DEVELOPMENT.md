@@ -185,7 +185,7 @@ and records `provider_calls=0`, `online_runner_frozen=true`, and
 private copy of the exact bytes. The separate authorization must match both
 runner identities and every aggregate already frozen by preflight.
 
-`agent-delivery-verification-execution-contract` runs 40 provider-free tests
+`agent-delivery-verification-execution-contract` runs 42 provider-free tests
 for canonical short-lived authorization, exact preflight/source/provider/model/
 credential/runner/output binding, per-case seeded candidate SHA-256/byte
 binding, private one-shot consumption, campaign and physical-call reservations
@@ -202,7 +202,11 @@ fail-closed v2 binaries, the three permanently fail-closed v3 binaries, and the
 three tracked v4 binaries without invoking their entrypoints. The loopback
 coverage also proves that an exact zero-byte response artifact is retained with
 its digest and zero length, while completed empty Reviewer content becomes
-`invalid_verifier_response` without retry.
+`invalid_verifier_response` without retry. Two loopback fault-injection tests
+guard the instrumentation against the failure modes observed in consumed
+campaigns: an over-reservation provider usage report is retained verbatim
+without silent normalization, and an output-limit (`finish_reason="length"`)
+response is rejected as `invalid_output` without retry.
 It is included in `ci-contract`, `control-plane`, and `full`, but not `quick`,
 `performance`, or `shipping-performance`. It proves no provider outcome or
 intelligence uplift.

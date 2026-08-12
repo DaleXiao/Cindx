@@ -585,3 +585,201 @@ fn agent_delivery_verification_execution_contract_loopback_preserves_primary_ter
         sha256_hex(WRONG_SERVED_MODEL.as_bytes())
     );
 }
+
+fn spawn_loopback_server_custom(
+    listener: TcpListener,
+    output_root: PathBuf,
+    response_body: Value,
+) -> JoinHandle<Result<LoopbackAcceptedRequest, String>> {
+    thread::spawn(move || {
+        let mut stream = accept_with_deadline(&listener)?;
+        let body = read_http_body(&mut stream);
+        let journal_at_accept = journal_json(&output_root);
+        let response_body = response_body.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .map_err(|error| format!("failed to write loopback response: {error}"))?;
+        stream
+            .flush()
+            .map_err(|error| format!("failed to flush loopback response: {error}"))?;
+        Ok(LoopbackAcceptedRequest {
+            body: body?,
+            journal_at_accept: journal_at_accept?,
+        })
+    })
+}
+
+fn loopback_response_body(
+    served_model: &str,
+    finish_reason: &str,
+    response_content: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) -> Value {
+    json!({
+        "id": "loopback-response-1",
+        "model": served_model,
+        "system_fingerprint": "loopback-fingerprint",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": response_content},
+            "finish_reason": finish_reason
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens
+        }
+    })
+}
+
+fn run_loopback_custom(response_body: Value, record_structural_case: bool) -> LoopbackRun {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let protocol = protocol();
+    let config = provider_config(base_url);
+    let (temp, output_root, mut journal) = create_journal(&protocol, &config);
+    let case = protocol.calibration_cases().next().unwrap();
+    let call = initial_verifier_call(&protocol);
+    let semantic_request_sha256 = call.canonical_request_sha256.clone();
+    let semantic_request_bytes = call.canonical_request_bytes;
+    let prepared_provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+        base_url: config.base_url.clone(),
+        api_key: config.api_key.clone(),
+        model: call.configured_model.clone(),
+        embedding_model: config.embedding_model.clone(),
+        timeout_seconds: protocol
+            .budget()
+            .model_call_timeout_ms
+            .div_ceil(1_000)
+            .max(1),
+    });
+    let prepared = prepared_provider
+        .prepare_non_streaming_request(&call.request)
+        .unwrap();
+    let (prepared_wire_sha256, prepared_wire_bytes) = prepared.payload_receipt();
+    let prepared_wire_sha256 = prepared_wire_sha256.to_string();
+    let prepared_wire_bytes = u64::try_from(prepared_wire_bytes).unwrap();
+    let server = spawn_loopback_server_custom(listener, output_root.clone(), response_body);
+
+    let mut runtime = JournalRuntime::new(&mut journal, config, protocol.budget().clone());
+    runtime.begin_case(1).unwrap();
+    let outcome = runtime.dispatch(call);
+    let record_case_result = record_structural_case.then(|| {
+        let reason = match &outcome {
+            CallOutcome::StructuralFailure(error) => error.clone(),
+            other => panic!("expected structural failure, got {other:?}"),
+        };
+        runtime.record_case(&CaseOutcome {
+            ordinal: 1,
+            stratum: case.stratum(),
+            status: CaseStatus::StructuralFailure,
+            seeded_candidate_sha256: Some(case.seeded_candidate_sha256()),
+            seeded_candidate_bytes: Some(case.seeded_candidate_bytes()),
+            control_output_sha256: Some(case.seeded_candidate_sha256()),
+            treatment_output_sha256: None,
+            control_passed: None,
+            treatment_passed: None,
+            initial_verifier_decision: None,
+            initial_finding_counts: Default::default(),
+            repair_activated: false,
+            recheck_decision: None,
+            recheck_finding_counts: Default::default(),
+            treatment_disposition: None,
+            failure_stage: None,
+            failure_code: None,
+            observation_sha256: sha256_hex(b"loopback fault observation"),
+            reason,
+        })
+    });
+    drop(runtime);
+    let accepted = server.join().unwrap().unwrap();
+    let final_journal = journal_json(&output_root).unwrap();
+    LoopbackRun {
+        _temp: temp,
+        output_root,
+        outcome,
+        record_case_result,
+        accepted,
+        final_journal,
+        semantic_request_sha256,
+        semantic_request_bytes,
+        prepared_wire_sha256,
+        prepared_wire_bytes,
+    }
+}
+
+#[test]
+fn agent_delivery_verification_execution_contract_loopback_retains_over_reservation_usage_without_normalizing(
+) {
+    let response_body = loopback_response_body(VERIFIER_MODEL, "stop", RESPONSE_CONTENT, 7, 2_049);
+    let run = run_loopback_custom(response_body, false);
+    assert_exact_reserved_wire(&run);
+    match &run.outcome {
+        CallOutcome::Completed(completed) => {
+            assert_eq!(completed.content, RESPONSE_CONTENT);
+        }
+        other => panic!("expected completed call despite usage anomaly, got {other:?}"),
+    }
+    let state = first_call_state(&run.final_journal);
+    let receipt = &state["receipt"];
+    assert_eq!(state["state"], "terminal");
+    assert_eq!(receipt["status"], "completed");
+    assert_eq!(receipt["usage"]["prompt_tokens"], 7);
+    assert_eq!(receipt["usage"]["completion_tokens"], 2_049);
+    assert_eq!(receipt["usage"]["total_tokens"], 2_056);
+    assert_eq!(receipt["usage"]["usage_source"], "provider");
+    assert_eq!(receipt["usage"]["usage_estimated"], false);
+    assert_eq!(run.final_journal["observed"]["terminal_model_calls"], 1);
+    assert_eq!(run.final_journal["charged"]["logical_model_calls"], 1);
+    assert_eq!(run.final_journal["charged"]["physical_model_attempts"], 1);
+    assert_eq!(
+        run.final_journal["cases"][0]["calls"][1]["state"]["state"],
+        "planned"
+    );
+    assert_eq!(
+        run.final_journal["cases"][0]["calls"][2]["state"]["state"],
+        "planned"
+    );
+}
+
+#[test]
+fn agent_delivery_verification_execution_contract_loopback_rejects_output_limit_response_without_retry(
+) {
+    let response_body = loopback_response_body(VERIFIER_MODEL, "length", RESPONSE_CONTENT, 7, 2);
+    let run = run_loopback_custom(response_body, true);
+    assert_exact_reserved_wire(&run);
+    let reason = match &run.outcome {
+        CallOutcome::StructuralFailure(error) => error.clone(),
+        other => panic!("expected invalid output structural failure, got {other:?}"),
+    };
+    assert_eq!(
+        reason,
+        "delivery provider response is not a complete tool-free answer"
+    );
+    let state = first_call_state(&run.final_journal);
+    let receipt = &state["receipt"];
+    assert_eq!(state["state"], "terminal");
+    assert_eq!(receipt["status"], "invalid_output");
+    assert_eq!(receipt["usage"]["prompt_tokens"], 7);
+    assert_eq!(receipt["usage"]["completion_tokens"], 2);
+    assert_eq!(receipt["usage"]["total_tokens"], 9);
+    assert_eq!(receipt["usage"]["usage_source"], "provider");
+    assert_eq!(run.final_journal["observed"]["terminal_model_calls"], 1);
+    assert_eq!(run.final_journal["charged"]["logical_model_calls"], 1);
+    assert_eq!(run.final_journal["charged"]["physical_model_attempts"], 1);
+    assert_eq!(
+        run.final_journal["cases"][0]["calls"][1]["state"]["state"],
+        "not_required"
+    );
+    assert_eq!(
+        run.final_journal["cases"][0]["calls"][2]["state"]["state"],
+        "not_required"
+    );
+    assert!(run.record_case_result.is_some());
+}
