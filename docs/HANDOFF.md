@@ -5,17 +5,17 @@ in place; do not create versioned handoff files.
 
 ## Release Identity
 
-Current release version: `0.2.34`
+Current release version: `0.2.35`
 
 | Item | Verified value |
 | --- | --- |
-| Local build source commit | `e0f8b8bed2b479aefd8bf4bc6760382af0ba1b0a` |
+| Local build source commit | `73cfc4a8917ef45e4e2784162375d388a37e9c16` |
 | Tag | Not tagged; latest published tag remains `v0.2.30` |
 | GitHub release | Not published; latest published release remains <https://github.com/DaleXiao/Cindx/releases/tag/v0.2.30> |
-| Local asset | `dist/Cindx-0.2.34-macOS-arm64.zip` |
-| Local asset size | `53,796,291` bytes |
-| Local asset SHA-256 | `a251a995aeac6c227a77404bdca5f119966280ed91781428a7d4da369259ff35` |
-| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.34` |
+| Local asset | `dist/Cindx-0.2.35-macOS-arm64.zip` |
+| Local asset size | `53,834,452` bytes |
+| Local asset SHA-256 | `228c365241855ac96f2c3abb3a80d1c45b02e64d18098332d8095cb84b4f208f` |
+| Installed bundle | `/Applications/Cindx.app`, version/build `0.2.35` |
 | Installed signature | `codesign --verify --deep --strict` passed |
 
 This is an ad-hoc-signed local validation build, not a tagged, notarized, or
