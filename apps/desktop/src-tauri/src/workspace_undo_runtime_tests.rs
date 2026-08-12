@@ -1,0 +1,414 @@
+use super::*;
+use crate::runtime_values::phase16_task_id;
+use agent_core::EventId;
+use std::path::PathBuf;
+
+const SESSION: &str = "session-undo-test";
+
+fn event_sequence_store(database: &Path) -> SqliteStore {
+    SqliteStore::open(database).expect("writable store should open")
+}
+
+fn tool_finished_event(
+    sequence: u64,
+    tool_call_id: &str,
+    tool: &str,
+    path: &str,
+    action: &str,
+    undo_before_path: Option<&str>,
+    artifact_path: Option<&str>,
+) -> Event {
+    let mut metadata: agent_core::Metadata = [
+        ("tool_call_id".to_string(), tool_call_id.to_string()),
+        ("tool".to_string(), tool.to_string()),
+        ("status".to_string(), "succeeded".to_string()),
+        ("result_path".to_string(), path.to_string()),
+        ("result_undo_action".to_string(), action.to_string()),
+        ("session_id".to_string(), SESSION.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    if let Some(before) = undo_before_path {
+        metadata.insert("result_undo_before_path".to_string(), before.to_string());
+    }
+    if let Some(artifact) = artifact_path {
+        metadata.insert("result_artifact_path".to_string(), artifact.to_string());
+    }
+    Event {
+        id: EventId(format!("event-{sequence}")),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: sequence * 10,
+        kind: EventKind::ToolCallFinished,
+        summary: format!("Tool call finished: {tool}"),
+        metadata,
+    }
+}
+
+fn write_file(path: &Path, content: &[u8]) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("parent should be created");
+    }
+    fs::write(path, content).expect("file should be written");
+}
+
+struct MutationFixture {
+    workspace: PathBuf,
+    database: PathBuf,
+}
+
+impl MutationFixture {
+    fn new(tag: &str) -> Self {
+        let base =
+            std::env::temp_dir().join(format!("cindx-undo-test-{tag}-{}", current_time_millis()));
+        let workspace = base.join("workspace");
+        let database = base.join("state.sqlite3");
+        fs::create_dir_all(&workspace).expect("workspace should be created");
+        Self {
+            workspace,
+            database,
+        }
+    }
+}
+
+struct MutationSpec<'a> {
+    tool_call_id: &'a str,
+    tool: &'a str,
+    path: &'a str,
+    action: &'a str,
+    prior: Option<&'a [u8]>,
+    after: &'a [u8],
+}
+
+fn seed_mutation(
+    store: &mut SqliteStore,
+    fixture: &MutationFixture,
+    sequence: u64,
+    spec: MutationSpec<'_>,
+) {
+    let MutationSpec {
+        tool_call_id,
+        tool,
+        path,
+        action,
+        prior,
+        after,
+    } = spec;
+    let target = fixture.workspace.join(path);
+    write_file(&target, after);
+    let artifact_relative = format!(".cindx/output-history/{tool_call_id}/{path}");
+    write_file(&fixture.workspace.join(&artifact_relative), after);
+    let undo_relative = prior.map(|_| format!(".cindx/undo-history/{tool_call_id}/{path}"));
+    if let (Some(prior_bytes), Some(relative)) = (prior, undo_relative.as_ref()) {
+        write_file(&fixture.workspace.join(relative), prior_bytes);
+    }
+    let event = tool_finished_event(
+        sequence,
+        tool_call_id,
+        tool,
+        path,
+        action,
+        undo_relative.as_deref(),
+        Some(artifact_relative.as_str()),
+    );
+    store
+        .append_next_event(
+            event.id.clone(),
+            event.task_id.clone(),
+            event.timestamp_ms,
+            event.kind,
+            event.summary.clone(),
+            event.metadata.clone(),
+        )
+        .expect("event should append");
+}
+
+#[test]
+fn projection_orders_successful_file_mutations() {
+    let events = vec![
+        tool_finished_event(
+            3,
+            "call-b",
+            "file.patch",
+            "b.txt",
+            "patched",
+            Some("u/b.txt"),
+            Some("o/b.txt"),
+        ),
+        tool_finished_event(
+            1,
+            "call-a",
+            "file.write",
+            "a.txt",
+            "created",
+            None,
+            Some("o/a.txt"),
+        ),
+        tool_finished_event(
+            2,
+            "call-c",
+            "shell.run",
+            "ignored",
+            "overwritten",
+            None,
+            None,
+        ),
+        {
+            let mut failed = tool_finished_event(
+                4,
+                "call-d",
+                "file.write",
+                "d.txt",
+                "overwritten",
+                Some("u/d.txt"),
+                Some("o/d.txt"),
+            );
+            failed
+                .metadata
+                .insert("status".to_string(), "failed".to_string());
+            failed
+        },
+    ];
+
+    let entries = project_workspace_undo_entries(&events);
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].tool_call_id, "call-a");
+    assert_eq!(entries[0].action, "created");
+    assert_eq!(entries[1].tool_call_id, "call-b");
+    assert_eq!(entries[1].tool, "file.patch");
+    assert_eq!(entries[1].undo_before_path.as_deref(), Some("u/b.txt"));
+}
+
+#[test]
+fn undo_created_file_deletes_it() {
+    let fixture = MutationFixture::new("created");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-create",
+            tool: "file.write",
+            path: "notes/new.txt",
+            action: "created",
+            prior: None,
+            after: b"fresh content",
+        },
+    );
+
+    let state = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect("undo should succeed");
+
+    assert!(!fixture.workspace.join("notes/new.txt").exists());
+    assert!(state.can_redo);
+    assert!(!state.can_undo);
+}
+
+#[test]
+fn undo_overwritten_file_restores_prior_content() {
+    let fixture = MutationFixture::new("overwrite");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-overwrite",
+            tool: "file.write",
+            path: "notes/today.txt",
+            action: "overwritten",
+            prior: Some(b"original version"),
+            after: b"replacement version",
+        },
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false).expect("undo should succeed");
+
+    assert_eq!(
+        fs::read(fixture.workspace.join("notes/today.txt")).unwrap(),
+        b"original version"
+    );
+}
+
+#[test]
+fn undo_patch_restores_prior_content() {
+    let fixture = MutationFixture::new("patch");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-patch",
+            tool: "file.patch",
+            path: "src/lib.rs",
+            action: "patched",
+            prior: Some(b"fn old() {}"),
+            after: b"fn new() {}",
+        },
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false).expect("undo should succeed");
+
+    assert_eq!(
+        fs::read(fixture.workspace.join("src/lib.rs")).unwrap(),
+        b"fn old() {}"
+    );
+}
+
+#[test]
+fn redo_reapplies_undone_change() {
+    let fixture = MutationFixture::new("redo");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-overwrite",
+            tool: "file.write",
+            path: "notes/today.txt",
+            action: "overwritten",
+            prior: Some(b"original version"),
+            after: b"replacement version",
+        },
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false).expect("undo should succeed");
+    let state = change_undo_stack(&mut store, &fixture.workspace, SESSION, true)
+        .expect("redo should succeed");
+
+    assert_eq!(
+        fs::read(fixture.workspace.join("notes/today.txt")).unwrap(),
+        b"replacement version"
+    );
+    assert!(state.can_undo);
+    assert!(!state.can_redo);
+}
+
+#[test]
+fn undo_is_blocked_when_file_changed_externally() {
+    let fixture = MutationFixture::new("conflict");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-overwrite",
+            tool: "file.write",
+            path: "notes/today.txt",
+            action: "overwritten",
+            prior: Some(b"original version"),
+            after: b"replacement version",
+        },
+    );
+
+    write_file(
+        &fixture.workspace.join("notes/today.txt"),
+        b"edited outside cindx",
+    );
+
+    let error = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect_err("undo should be blocked");
+    assert!(error.contains("changed outside this run"));
+    assert_eq!(
+        fs::read(fixture.workspace.join("notes/today.txt")).unwrap(),
+        b"edited outside cindx"
+    );
+}
+
+#[test]
+fn nothing_to_undo_reports_a_clear_error() {
+    let fixture = MutationFixture::new("empty");
+    let mut store = event_sequence_store(&fixture.database);
+
+    let error = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect_err("empty undo stack should error");
+    assert!(error.contains("nothing to undo"));
+}
+
+#[test]
+fn undo_stack_follows_last_in_first_out_across_mutations() {
+    let fixture = MutationFixture::new("lifo");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-first",
+            tool: "file.write",
+            path: "a.txt",
+            action: "overwritten",
+            prior: Some(b"a-original"),
+            after: b"a-changed",
+        },
+    );
+    seed_mutation(
+        &mut store,
+        &fixture,
+        2,
+        MutationSpec {
+            tool_call_id: "call-second",
+            tool: "file.write",
+            path: "b.txt",
+            action: "overwritten",
+            prior: Some(b"b-original"),
+            after: b"b-changed",
+        },
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect("first undo should succeed");
+
+    assert_eq!(
+        fs::read(fixture.workspace.join("b.txt")).unwrap(),
+        b"b-original"
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-changed"
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect("second undo should succeed");
+
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-original"
+    );
+}
+
+#[test]
+fn undo_registry_survives_store_reopen() {
+    println!("{WORKSPACE_UNDO_SCHEMA}");
+    let fixture = MutationFixture::new("persist");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-overwrite",
+            tool: "file.write",
+            path: "notes/today.txt",
+            action: "overwritten",
+            prior: Some(b"original version"),
+            after: b"replacement version",
+        },
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false).expect("undo should succeed");
+    drop(store);
+
+    let reopened = event_sequence_store(&fixture.database);
+    let state = get_workspace_undo_state_for_session(&reopened, &fixture.workspace, SESSION)
+        .expect("state should load");
+    assert!(!state.can_undo);
+    assert!(state.can_redo);
+    assert_eq!(state.entries.len(), 1);
+    assert!(state.entries[0].undone);
+}

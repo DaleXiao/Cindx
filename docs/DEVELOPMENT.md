@@ -50,6 +50,7 @@ The source of truth is `benchmarks/system/quality-gates-v1.json`.
 
 | Profile | Purpose |
 | --- | --- |
+| `quick` | Documentation, version, layout, structural, and workspace-undo contracts |
 | `quick` | Documentation, version, layout, structural, and project-instruction contracts |
 | `ci-contract` | Quick checks plus deterministic routing, context, memory, task, tool, and evaluation contracts |
 | `control-plane` | Deterministic agent contracts plus Rust workspace and desktop tests |
@@ -89,6 +90,11 @@ integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
 
+`workspace-undo-contract` runs 9 provider-free desktop tests covering undo
+entry projection from tool events, undo/redo of created, overwritten, and
+patched files, external-edit conflict blocking, LIFO ordering, and undo
+registry persistence. It is included in `quick`, `ci-contract`,
+`control-plane`, and `full`.
 `project-instructions-contract` runs 17 provider-free desktop tests covering
 bounded discovery of workspace instruction files (`AGENTS.md` from the
 workspace root up to the Git root and `.cindx/instructions/*.md`), per-file

@@ -25,6 +25,7 @@ import {
 } from "../providerReadinessModel";
 import { permissionFocusTarget } from "./accessibilityFocusModel";
 import { VoiceInputButton } from "./VoiceInputButton";
+import { WorkspaceUndoControl } from "./WorkspaceUndoControl";
 
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 180;
@@ -583,6 +584,7 @@ export function Composer({
           </button>
         </div>
       )}
+      <WorkspaceUndoControl sessionId={sessionId} disabled={working} />
     </form>
   );
 }

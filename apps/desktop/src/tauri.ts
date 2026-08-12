@@ -28,6 +28,7 @@ import type {
   McpState,
   SkillRecord,
   SkillState,
+  WorkspaceUndoState,
   ProjectView,
   SessionView,
   ProjectSessionState,
@@ -290,6 +291,29 @@ export async function getSkillState(): Promise<SkillState> {
 
 export async function refreshSkills(): Promise<SkillState> {
   return await invoke<SkillState>("refresh_skills");
+}
+
+export async function getWorkspaceUndoState(
+  sessionId: string
+): Promise<WorkspaceUndoState> {
+  try {
+    return await invoke<WorkspaceUndoState>("get_workspace_undo_state", { sessionId });
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
+    return { sessionId, entries: [], canUndo: false, canRedo: false };
+  }
+}
+
+export async function undoWorkspaceChange(
+  sessionId: string
+): Promise<WorkspaceUndoState> {
+  return await invoke<WorkspaceUndoState>("undo_workspace_change", { sessionId });
+}
+
+export async function redoWorkspaceChange(
+  sessionId: string
+): Promise<WorkspaceUndoState> {
+  return await invoke<WorkspaceUndoState>("redo_workspace_change", { sessionId });
 }
 
 export async function saveSkillPreference(

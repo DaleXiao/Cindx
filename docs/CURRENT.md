@@ -20,6 +20,11 @@ The desktop app currently includes:
   personalization, appearance, and runtime diagnostics.
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
+- Workspace file changes made by `file.write` and `file.patch` preserve their
+  prior content best-effort for recovery. A session can undo and redo its most
+  recent file change through Composer controls, guarded by content-hash
+  conflict checks. Shell, browser, computer, and process effects remain
+  irreversible.
 - Project instruction files: `AGENTS.md` discovered from the workspace root up
   to the Git root, plus `.cindx/instructions/*.md` files, are loaded under
   bounded byte caps and injected into every run as untrusted project guidance
@@ -316,6 +321,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
 ## Known Structural Limits
 
+- Undo and redo cover only `file.write` and `file.patch` changes whose undo
+  snapshot was captured. A change whose snapshot capture failed is disclosed
+  as not undoable, and undo is blocked when the target file changed outside
+  the recorded run.
 - Project instruction files are enabled by default and can currently only be
   toggled or extended through `project_instructions.json` in the app support
   directory; a Settings UI is not wired yet.
