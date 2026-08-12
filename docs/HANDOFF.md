@@ -339,6 +339,17 @@ This documentation cleanup removes obsolete reports and duplicate explanations
 from the current tree. Full historical documents remain available at
 `f2ce3b7` and earlier commits.
 
+Project instruction files are wired into run preparation: bounded discovery of
+`AGENTS.md` from the workspace root up to the Git root plus
+`.cindx/instructions/*.md`, a protected `ProjectInstructions` context source,
+untrusted-guidance boundary text, and a provenance receipt in the preparation
+commit event. The 17-test `project-instructions-contract` gate joins `quick`,
+`ci-contract`, `control-plane`, and `full`. The feature is enabled by default;
+until a Settings UI exists it is toggled only through
+`project_instructions.json` in the app support directory. No provider
+evaluation was run; route selection, permission authority, budgets, learning
+consumers, and serving are unchanged.
+
 ## Blocking Fact
 
 V12 did not produce a causal result:
