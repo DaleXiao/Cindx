@@ -371,6 +371,13 @@ optional effort override. The 9-test `custom-commands-contract` gate joins
 was run; route selection, permission authority, budgets, learning consumers,
 and serving are unchanged.
 
+Frontend component logic extraction continues: the Composer textarea
+auto-sizing computation and the attachment batch validation rules now live in
+the pure `composerSizingModel.ts` and `attachmentLimitsModel.ts` modules with
+11 node tests, and `Composer.tsx` / `attachmentIpc.ts` consume them. Behavior
+is unchanged; this reduces untested logic inside components without touching
+the gate-pinned Composer assertions.
+
 ## Blocking Fact
 
 V12 did not produce a causal result:
