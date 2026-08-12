@@ -26,10 +26,17 @@ Run documentation and static structure checks after every relevant change:
 
 ```sh
 node scripts/check-docs.mjs
+node scripts/check-gates-manifest.mjs
 node scripts/check-desktop-structure.mjs
 node scripts/check-desktop-layout.mjs
 git diff --check
 ```
+
+`check-gates-manifest.mjs` parses every tracked benchmark contract and checks
+the quality-gates manifest for duplicate gate ids, dangling profile
+references, orphaned gates, and the four required profiles. It is the first
+CI step, so a merge-corrupted JSON file fails the pipeline before any cargo or
+npm work begins.
 
 The normal repository checks are:
 
@@ -43,6 +50,16 @@ scripts/check-desktop.sh
 the frontend bundle and heavy vector dependency graph. It is feedback, not a
 shipping gate. `scripts/check-rust-quality.sh` is the mandatory formatting and
 Clippy gate used by CI.
+
+## Merge Discipline
+
+Stacked feature branches must be rebased onto the integration branch and have
+their conflicts resolved locally before merge. Resolving conflicts against
+tracked machine-read manifests (notably `benchmarks/system/quality-gates-v1.json`)
+through a web editor or by hand without re-running the fast checks is how a
+syntactically invalid manifest reaches `main` and breaks every quality gate.
+After any merge that touches `benchmarks/`, run `node scripts/check-gates-manifest.mjs`
+(and `node scripts/check-docs.mjs`) before considering the merge done.
 
 ## Quality Profiles
 
