@@ -731,7 +731,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 40 passed; 0 failed",
+        "test result: ok. 42 passed; 0 failed",
         "cindx.agent-eval.delivery-verification-authorization.v4",
         "cindx.agent-eval.delivery-verification-execution-journal.v4"
       ]
