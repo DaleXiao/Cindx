@@ -24,6 +24,7 @@ import {
   type ProviderReadiness
 } from "../providerReadinessModel";
 import { applyCustomCommandTemplate } from "../customCommandsModel";
+import { composerTextareaSizing } from "../composerSizingModel";
 import type { CustomCommandView } from "../tauriTypes";
 import { permissionFocusTarget } from "./accessibilityFocusModel";
 import { CustomCommandsMenu } from "./CustomCommandsMenu";
@@ -213,13 +214,13 @@ export function Composer({
     const textarea = textareaRef.current;
     if (!textarea) return;
     textarea.style.height = `${COMPOSER_TEXTAREA_MIN_HEIGHT}px`;
-    const nextHeight = Math.min(
-      COMPOSER_TEXTAREA_MAX_HEIGHT,
-      Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, textarea.scrollHeight)
+    const sizing = composerTextareaSizing(
+      textarea.scrollHeight,
+      COMPOSER_TEXTAREA_MIN_HEIGHT,
+      COMPOSER_TEXTAREA_MAX_HEIGHT
     );
-    textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY =
-      textarea.scrollHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
+    textarea.style.height = `${sizing.heightPx}px`;
+    textarea.style.overflowY = sizing.overflowY;
   }, [value]);
 
   useEffect(() => {

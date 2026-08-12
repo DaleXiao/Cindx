@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { attachmentBatchTotalBytes, validateAttachmentBatch } from "./attachmentLimitsModel.ts";
 import type { AgentAttachment } from "./tauriTypes";
 
 export async function stageAgentAttachments(
@@ -6,20 +7,14 @@ export async function stageAgentAttachments(
   files: File[]
 ): Promise<AgentAttachment[]> {
   if (files.length === 0) return [];
-  if (files.length > 10) {
-    throw new Error("A message can include at most 10 attachments.");
-  }
-  const totalBytes = files.reduce((total, file) => total + file.size, 0);
   const batchFileSizes = files.map((file) => file.size);
+  const totalBytes = attachmentBatchTotalBytes(files);
+  const validationError = validateAttachmentBatch(files);
+  if (validationError) {
+    throw new Error(validationError);
+  }
   const randomId = globalThis.crypto?.randomUUID?.();
   const batchId = `attachment-batch-${randomId ?? `${Date.now()}-${Math.random()}`}`;
-  if (totalBytes > 50 * 1024 * 1024) {
-    throw new Error("Attachments exceed the 50 MB message limit.");
-  }
-  const oversized = files.find((file) => file.size > 20 * 1024 * 1024);
-  if (oversized) {
-    throw new Error(`${oversized.name} exceeds the 20 MB attachment limit.`);
-  }
   const staged: AgentAttachment[] = [];
   try {
     for (const [batchIndex, file] of files.entries()) {
