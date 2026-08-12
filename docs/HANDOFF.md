@@ -348,6 +348,7 @@ Composer renders Undo/Redo controls when a session has recorded changes. The
 9-test `workspace-undo-contract` gate joins `quick`, `ci-contract`,
 `control-plane`, and `full`. No provider evaluation was run; route selection,
 permission authority, budgets, learning consumers, and serving are unchanged.
+
 Project instruction files are wired into run preparation: bounded discovery of
 `AGENTS.md` from the workspace root up to the Git root plus
 `.cindx/instructions/*.md`, a protected `ProjectInstructions` context source,
@@ -358,6 +359,17 @@ until a Settings UI exists it is toggled only through
 `project_instructions.json` in the app support directory. No provider
 evaluation was run; route selection, permission authority, budgets, learning
 consumers, and serving are unchanged.
+
+Custom commands are wired end to end: markdown command files are discovered
+from the workspace `.cindx/commands/` and global `~/.cindx/commands/`
+directories (project names override global names, capped at 24 files and
+8 KB each), listed through the `get_custom_commands` command, and rendered in
+a Composer toolbar menu. Selecting a command expands its template into the
+draft (`$ARGUMENTS` substitutes the current draft text) and applies an
+optional effort override. The 9-test `custom-commands-contract` gate joins
+`quick`, `ci-contract`, `control-plane`, and `full`. No provider evaluation
+was run; route selection, permission authority, budgets, learning consumers,
+and serving are unchanged.
 
 ## Blocking Fact
 

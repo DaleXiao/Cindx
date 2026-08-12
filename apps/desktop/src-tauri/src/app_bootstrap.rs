@@ -269,6 +269,7 @@ pub fn run() -> Result<(), String> {
             workspace_undo_runtime::get_workspace_undo_state,
             workspace_undo_runtime::undo_workspace_change,
             workspace_undo_runtime::redo_workspace_change,
+            custom_commands_runtime::get_custom_commands,
             ensure_workspace_knowledge,
             index_workspace_rag,
             search_rag,

@@ -23,7 +23,10 @@ import {
   providerSubmissionPreflight,
   type ProviderReadiness
 } from "../providerReadinessModel";
+import { applyCustomCommandTemplate } from "../customCommandsModel";
+import type { CustomCommandView } from "../tauriTypes";
 import { permissionFocusTarget } from "./accessibilityFocusModel";
+import { CustomCommandsMenu } from "./CustomCommandsMenu";
 import { VoiceInputButton } from "./VoiceInputButton";
 import { WorkspaceUndoControl } from "./WorkspaceUndoControl";
 
@@ -465,6 +468,15 @@ export function Composer({
                 )}
               </button>
               <div className="composer-toolbar-actions">
+                <CustomCommandsMenu
+                  disabled={working || canStop}
+                  onApply={(command: CustomCommandView) => {
+                    if (command.effort === "fast" || command.effort === "auto" || command.effort === "pro") {
+                      onEffortChange(command.effort);
+                    }
+                    onChange(applyCustomCommandTemplate(command.template, value));
+                  }}
+                />
                 <div
                   className="composer-effort-control"
                   data-open={effortMenuOpen}
