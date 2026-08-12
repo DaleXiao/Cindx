@@ -322,9 +322,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 - `apps/desktop/src-tauri/src/lib.rs` is still a large composition root with
   many sibling modules and broad imports. Portable crates now own substantial
   contracts, but desktop orchestration remains the primary coupling hotspot.
-- The frontend has been split into components and style sheets, but `App.tsx`,
-  `tauri.ts`, settings, inspector, and thread styling remain large change
-  surfaces.
+- The frontend has been split into components and style sheets. The browser
+  preview fallback state now lives in its own module beside `tauri.ts`, but
+  `App.tsx`, `tauri.ts`, settings, inspector, and thread styling remain large
+  change surfaces.
 - Evaluation binaries still compile through the desktop adapter when the
   `realworld-eval` feature is enabled. `orchestrator-eval` is non-shipping, but
   the provider campaign surface is not fully isolated from desktop code.
