@@ -19,6 +19,7 @@
       "version-contract",
       "desktop-layout",
       "desktop-structure",
+      "workspace-undo-contract"
       "project-instructions-contract"
     ],
     "ci-contract": [
@@ -68,6 +69,7 @@
       "prompt-distillation-control-contract",
       "prompt-profile-selection-scaling",
       "memory-contract",
+      "workspace-undo-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
@@ -115,6 +117,7 @@
       "prompt-distillation-control-contract",
       "prompt-profile-selection-scaling",
       "memory-contract",
+      "workspace-undo-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
@@ -204,6 +207,7 @@
       "prompt-live-assignment-attribution-contract",
       "prompt-distillation-control-contract",
       "memory-contract",
+      "workspace-undo-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
@@ -1017,6 +1021,7 @@
       ]
     },
     {
+      "id": "workspace-undo-contract",
       "id": "project-instructions-contract",
       "category": "correctness_and_recovery",
       "command": [
@@ -1025,12 +1030,15 @@
         "--locked",
         "--manifest-path",
         "apps/desktop/src-tauri/Cargo.toml",
+        "workspace_undo_runtime::tests::",
         "project_instructions_contract_",
         "--lib",
         "--",
         "--nocapture"
       ],
       "required_output": [
+        "test result: ok. 9 passed; 0 failed",
+        "cindx.workspace-undo-registry.v1"
         "test result: ok. 17 passed; 0 failed",
         "cindx.project-instructions.v1"
       ]

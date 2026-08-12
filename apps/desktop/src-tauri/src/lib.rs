@@ -149,6 +149,7 @@ mod view_models;
 mod voice_commands;
 mod workflow_checkpoint_runtime;
 mod workflow_routing_runtime;
+mod workspace_undo_runtime;
 use adaptive_anytime_runtime::*;
 use adaptive_collaboration_finalization::*;
 use adaptive_collaboration_setup::*;

@@ -110,6 +110,11 @@ export type SkillState = {
   skills: SkillRecord[];
   lastError: string | null;
 };
+export type WorkspaceUndoEntryView = {
+  toolCallId: string; sequence: number; tool: string; path: string;
+  action: string; undone: boolean; undoable: boolean;
+};
+export type WorkspaceUndoState = { sessionId: string; entries: WorkspaceUndoEntryView[]; canUndo: boolean; canRedo: boolean; };
 
 export type ProjectView = {
   id: string;

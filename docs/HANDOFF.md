@@ -339,6 +339,15 @@ This documentation cleanup removes obsolete reports and duplicate explanations
 from the current tree. Full historical documents remain available at
 `f2ce3b7` and earlier commits.
 
+Workspace undo/redo is wired into the file tools and the session surface:
+`file.write` and `file.patch` capture pre-change bytes under
+`.cindx/undo-history` on a best-effort basis (matching the output-history
+contract), and a per-session undo registry stored as a CAS-protected read
+model supports last-in-first-out undo/redo with content-hash conflict guards.
+Composer renders Undo/Redo controls when a session has recorded changes. The
+9-test `workspace-undo-contract` gate joins `quick`, `ci-contract`,
+`control-plane`, and `full`. No provider evaluation was run; route selection,
+permission authority, budgets, learning consumers, and serving are unchanged.
 Project instruction files are wired into run preparation: bounded discovery of
 `AGENTS.md` from the workspace root up to the Git root plus
 `.cindx/instructions/*.md`, a protected `ProjectInstructions` context source,

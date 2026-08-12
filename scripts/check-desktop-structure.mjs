@@ -1008,6 +1008,8 @@ const toolsModuleBudgets = new Map([
   ["contract.rs", 410],
   ["receipt.rs", 160],
   ["tests.rs", 270],
+  ["undo.rs", 70],
+  ["undo_tests.rs", 110],
   ["file_query_contract_v3.rs", 460],
   ["file_search.rs", 260],
   ["file_search_candidate.rs", 80],

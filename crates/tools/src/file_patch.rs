@@ -1,20 +1,23 @@
 mod contract;
 mod receipt;
+mod undo;
 
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod undo_tests;
+
 use self::contract::{input_path, patch_spec, PatchIssue, PatchPlan, PatchRequest};
 use self::receipt::{failed_patch_result, successful_patch_result};
+use self::undo::{preserve_history_version, undo_version_relative_path};
 #[cfg(test)]
 use super::workspace_file::atomic_replace_preserving_permissions_if_sha256_with;
 use super::workspace_file::{
-    atomic_replace_preserving_permissions_if_sha256, sha256_bytes, write_immutable_file_atomically,
-    AtomicReplaceError,
+    atomic_replace_preserving_permissions_if_sha256, sha256_bytes, AtomicReplaceError,
 };
 use super::{
-    permission_request, resolve_workspace_path, resolve_workspace_read_path, stable_hash, Tool,
-    ToolError,
+    permission_request, resolve_workspace_path, resolve_workspace_read_path, Tool, ToolError,
 };
 use agent_core::{
     PermissionRequest, PermissionRisk, ToolEffectSemantics, ToolInvocation, ToolResult, ToolSpec,
@@ -51,6 +54,7 @@ impl PatchFileTool {
             request,
             target,
             plan,
+            before: base.into_bytes(),
         })
     }
 
@@ -63,6 +67,7 @@ impl PatchFileTool {
         match result {
             Ok(()) => {
                 let snapshot = preserve_output_version(&self.workspace_root, &invocation, &prepared);
+                let undo_relative = undo_version_relative_path(&invocation, &prepared.request.path);
                 let mut result = successful_patch_result(
                     invocation,
                     &prepared.request.path,
@@ -87,6 +92,16 @@ impl PatchFileTool {
                             "output_history_unavailable".to_string(),
                         );
                     }
+                }
+                if self.workspace_root.join(&undo_relative).exists() {
+                    let before_sha256 =
+                        result.metadata.get("before_sha256").cloned().unwrap_or_default();
+                    result.metadata.insert("undo_action".to_string(), "patched".to_string());
+                    result.metadata.insert(
+                        "undo_before_path".to_string(),
+                        undo_relative.display().to_string(),
+                    );
+                    result.metadata.insert("undo_before_sha256".to_string(), before_sha256);
                 }
                 Ok(result)
             }
@@ -183,6 +198,13 @@ impl Tool for PatchFileTool {
             Ok(prepared) => prepared,
             Err(issue) => return Ok(failed_patch_result(invocation, path.as_deref(), issue)),
         };
+        let _ = preserve_history_version(
+            &self.workspace_root,
+            &invocation,
+            "undo-history",
+            &prepared.request.path,
+            &prepared.before,
+        );
         let result = atomic_replace_preserving_permissions_if_sha256(
             &prepared.target,
             &prepared.plan.after,
@@ -197,6 +219,7 @@ struct PreparedPatch {
     request: PatchRequest,
     target: PathBuf,
     plan: PatchPlan,
+    before: Vec<u8>,
 }
 
 fn resolve_existing_target(workspace_root: &Path, path: &str) -> Result<PathBuf, PatchIssue> {
@@ -282,19 +305,11 @@ fn preserve_output_version(
     invocation: &ToolInvocation,
     prepared: &PreparedPatch,
 ) -> Result<PathBuf, ()> {
-    let session_key = invocation
-        .metadata
-        .get("session_id")
-        .map(|session_id| stable_hash(session_id).to_string())
-        .unwrap_or_else(|| "unscoped".to_string());
-    let version_key = stable_hash(&invocation.id.0).to_string();
-    let relative = PathBuf::from(".cindx")
-        .join("output-history")
-        .join(session_key)
-        .join(version_key)
-        .join(&prepared.request.path);
-    let snapshot =
-        resolve_workspace_path(workspace_root, &relative.to_string_lossy()).map_err(|_| ())?;
-    write_immutable_file_atomically(&snapshot, &prepared.plan.after).map_err(|_| ())?;
-    Ok(relative)
+    preserve_history_version(
+        workspace_root,
+        invocation,
+        "output-history",
+        &prepared.request.path,
+        &prepared.plan.after,
+    )
 }
