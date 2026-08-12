@@ -337,7 +337,9 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   many sibling modules and broad imports. Portable crates now own substantial
   contracts, but desktop orchestration remains the primary coupling hotspot.
 - The frontend has been split into components and style sheets. The browser
-  preview fallback state now lives in its own module beside `tauri.ts`, but
+  preview fallback state now lives in its own module beside `tauri.ts`, and
+  Composer textarea sizing plus attachment batch limits are extracted into
+  pure, node-tested models (`composerSizingModel`, `attachmentLimitsModel`).
   `App.tsx`, `tauri.ts`, settings, inspector, and thread styling remain large
   change surfaces.
 - Evaluation binaries still compile through the desktop adapter when the
