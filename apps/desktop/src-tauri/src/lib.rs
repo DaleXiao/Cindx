@@ -53,6 +53,7 @@ mod collaboration_worker_runtime;
 mod conductor_health_runtime;
 mod configuration_models;
 mod configuration_persistence;
+mod custom_commands_runtime;
 mod desktop_event_sink;
 mod desktop_prelude;
 mod event_persistence;

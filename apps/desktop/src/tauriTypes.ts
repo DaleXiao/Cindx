@@ -111,10 +111,11 @@ export type SkillState = {
   lastError: string | null;
 };
 export type WorkspaceUndoEntryView = {
-  toolCallId: string; sequence: number; tool: string; path: string;
-  action: string; undone: boolean; undoable: boolean;
+  toolCallId: string; sequence: number; tool: string; path: string; action: string; undone: boolean; undoable: boolean;
 };
 export type WorkspaceUndoState = { sessionId: string; entries: WorkspaceUndoEntryView[]; canUndo: boolean; canRedo: boolean; };
+export type CustomCommandView = { name: string; description: string; effort: string | null; template: string; scope: string; };
+export type CustomCommandsState = { schema: string; commands: CustomCommandView[]; lastError: string | null; };
 
 export type ProjectView = {
   id: string;

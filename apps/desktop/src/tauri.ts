@@ -29,6 +29,7 @@ import type {
   SkillRecord,
   SkillState,
   WorkspaceUndoState,
+  CustomCommandsState,
   ProjectView,
   SessionView,
   ProjectSessionState,
@@ -314,6 +315,15 @@ export async function redoWorkspaceChange(
   sessionId: string
 ): Promise<WorkspaceUndoState> {
   return await invoke<WorkspaceUndoState>("redo_workspace_change", { sessionId });
+}
+
+export async function getCustomCommands(): Promise<CustomCommandsState> {
+  try {
+    return await invoke<CustomCommandsState>("get_custom_commands");
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
+    return { schema: "cindx.custom-commands.v1", commands: [], lastError: String(error) };
+  }
 }
 
 export async function saveSkillPreference(
