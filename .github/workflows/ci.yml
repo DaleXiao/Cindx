@@ -64,6 +64,9 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
+      - name: Check benchmark and gates manifest integrity
+        run: node scripts/check-gates-manifest.mjs
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
