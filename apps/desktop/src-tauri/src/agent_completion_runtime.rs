@@ -139,6 +139,41 @@ pub(crate) fn finalize_agent_completion(
             &receipt_sequences,
         )
         .map_err(|issue| format!("{} receipt validation failed: {issue:?}", delivery.label()))?;
+    let (answer, mut grounded_completion_receipt, judge_disposition) = if delivery.used_fallback()
+        || collaboration.is_some()
+    {
+        (
+            answer,
+            grounded_completion_receipt,
+            "direct_judge_not_applicable".to_string(),
+        )
+    } else {
+        let judge_candidate = crate::agent_finalizer_runtime::GroundedFinalizerCandidate {
+            content: answer,
+            receipt: grounded_completion_receipt,
+            already_persisted: false,
+        };
+        let (judged, disposition) = crate::direct_judge_runtime::apply_direct_judge_gate(
+            state,
+            config,
+            &runtime.task_id,
+            run_context,
+            runtime,
+            run_context
+                .get("agent_model")
+                .map(String::as_str)
+                .unwrap_or_default(),
+            prompt,
+            judge_candidate,
+        );
+        (judged.content, judged.receipt, disposition)
+    };
+    let mut direct_judge_run_context = run_context.clone();
+    direct_judge_run_context.insert(
+        "direct_judge_disposition".to_string(),
+        judge_disposition,
+    );
+    let run_context = &direct_judge_run_context;
     let (completion_evidence, routing_learning_eligible) = completion_learning_signal(runtime);
     let tool_evidence =
         crate::agent_result_evidence::completion_tool_evidence(runtime, epoch_lease.epoch());

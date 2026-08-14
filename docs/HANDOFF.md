@@ -403,8 +403,11 @@ Auto and Pro direct execution now contract a delivery judge:
 reviewer selection, the eligibility gate (never Fast), the judge prompt, the
 repair directive, and the one-repair/one-recheck cap, while
 `direct_judge_runtime` plans and resolves the judge round on desktop. Eight
-deterministic tests pin the contract, and the judge gate is wired into the
-terminal finalizer: eligible non-fallback Auto/Pro deliveries run one judge
+deterministic tests pin the contract. Smoke testing found that completed
+deliveries bypass the terminal finalizer (zero finalizer events in 312
+historical completions), so the gate now sits on the shared completion
+chokepoint (`finalize_agent_completion`), covering both direct completion and
+terminal-finalizer routes. Eligible direct Auto/Pro deliveries run one judge
 call, at most one repair round with one recheck, and every fail-open path
 records a `direct_judge_disposition` on the completion context.
 

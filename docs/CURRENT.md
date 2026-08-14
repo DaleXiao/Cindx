@@ -64,14 +64,14 @@ All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
 effect authority does not.
 
-Auto and Pro direct execution carry a contracted delivery judge: a
-model-distinct Reviewer audits the final answer against the objective and
-returns one typed single-line receipt (`pass` or `revise` with findings). A
-`revise` verdict permits at most one repair round and one recheck; Fast runs
-are never judged. The gate runs on non-fallback Auto/Pro finalizer
-deliveries; judge unavailability, inconclusive receipts, empty or ungrounded
-repairs keep the original answer and record a disposition instead of
-blocking delivery.
+Auto and Pro direct execution carry a contracted delivery judge at the
+shared completion point: a model-distinct Reviewer audits the final answer
+against the objective and returns one typed single-line receipt (`pass` or
+`revise` with findings). A `revise` verdict permits at most one repair round
+and one recheck; Fast runs and collaboration workflow products are never
+judged. Judge unavailability, inconclusive receipts, empty or ungrounded
+repairs, and fallback candidates keep the original answer and record a
+`direct_judge_disposition` instead of blocking delivery.
 
 Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is
