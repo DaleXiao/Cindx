@@ -70,16 +70,16 @@ legacy and are not reclassified from display strings.
 | Crate | Current owner responsibility |
 | --- | --- |
 | `agent-core` | Transport-free IDs, messages, events, permissions, tool/model contracts, and shared schemas |
-| `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, model-turn and tool-runtime semantics |
+| `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, system-prompt composition, model-turn and tool-runtime semantics |
 | `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
-| `orchestrator` | Conductor execution contracts, run decisions, workflows, task graph, verification, routing evidence, and prompt-evolution policy |
+| `orchestrator` | Conductor execution contracts, run decisions, workflows, task graph, verification, direct-delivery judge contracts, routing evidence, and prompt-evolution policy |
 | `orchestrator-eval` | Non-default evaluation and Fugu comparison contracts |
 | `agent-memory` | Memory records, retention, recall, utility attribution, and deterministic curation contracts |
 | `agent-rag` | Workspace indexing, file adapter, semantic retrieval, and vector-store integration |
 | `agent-graph` | Graph extraction, direct graph retrieval, and graph walk |
 | `agent-storage` | SQLite schema and durable event/state repositories |
-| `model-provider` | HTTP/WebSocket provider transport and streaming adapters |
+| `model-provider` | HTTP/WebSocket provider transport, streaming adapters, and request-generation semantics (thinking defaults and generation-temperature overrides) |
 | `tools` | Tool schemas and portable tool implementations |
 | `agent-mcp` | MCP transport, catalog, and invocation adapter |
 | `agent-skills` | Skill discovery, trust, loading, and built-in skill assets |
@@ -144,6 +144,13 @@ preparation checkpoint without entering execution, while one immediate SQLite
 transaction writes both the router event and selected decision. A cancellation
 or steer that wins first prevents that stale decision from being committed.
 
+Model request generation follows the effort policy: chat requests and the
+credential probe disable provider-side thinking for model families whose
+builds enable it by default, and the executor loop pins deterministic sampling
+(`generation_temperature` `0`) for Fast and Auto while Pro keeps provider
+defaults. `agent-core` owns the metadata key; `model-provider` owns the wire
+emission; desktop owns the per-effort value.
+
 ### 3. Retrieval and memory
 
 Workspace retrieval and durable memory are independent inputs:
@@ -170,7 +177,10 @@ repair round through `WorkflowExecutionCheckpoint::begin_verification_repair`:
 the audited steps return to a pending state under one additional granted model
 turn, the revision receipt stays readable for repair prompting, and the same
 verification step is then rechecked once. A second revision verdict exhausts the
-one-repair budget and leaves verification unsatisfied.
+one-repair budget and leaves verification unsatisfied. The adaptive frontier
+requeues the audited and verification candidates in the anytime controller and
+injects the unresolved findings into the repaired worker prompt before the
+recheck wave runs.
 
 The final sink is not a model Actor. The runtime completes it deterministically
 from the checkpoint after its dependency succeeds, preserving step identity,
@@ -207,6 +217,18 @@ Terminal selection cannot convert an unmet obligation into verified success. A
 tools-disabled finalizer may produce the visible response without consuming an
 actor turn; an invalid finalizer falls back to the exact eligible grounded
 candidate rather than restarting the actor.
+
+Auto and Pro direct finalizer deliveries pass an optional bounded judge gate:
+when the execution contract requires verification, the configured Reviewer
+model is distinct from the executor, and the candidate is not a fallback, one
+tool-free Reviewer call audits the candidate against the objective and returns
+a typed single-line receipt. A `revise` verdict permits at most one Executor
+repair round over the recorded findings and one recheck; a repaired answer is
+re-grounded against the task contract before replacing the candidate. Judge
+unavailability, inconclusive receipts, empty or ungrounded repairs, and
+fallback candidates retain the original answer and record a
+`direct_judge_disposition` instead of blocking delivery. Fast execution is
+never judged.
 
 The completion transaction persists terminal event, result, artifacts,
 lifecycle, learning evidence, and cleanup under one attempt/epoch identity.
