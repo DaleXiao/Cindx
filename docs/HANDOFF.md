@@ -412,7 +412,9 @@ exist and `file.list` (excluded from substantive reads) was the only success.
 Prompt-scoped any-tool obligations now also accept an anchor-matched absence
 receipt from one of their alternative tools, checked in both the outcome-ledger
 obligation evaluation and the completion-instruction gate; run-scoped
-obligations are unchanged. A contract test pins the satisfaction behavior.
+obligations are unchanged. A contract test pins the satisfaction behavior, and the absence query moved
+to the cognitive-state file to keep task_contract.rs inside the cohesion
+budget.
 
 The first absence-evidence build regressed one bounded-context contract
 test: an unconditional `grounding_absent:false` marker grew every grounding
