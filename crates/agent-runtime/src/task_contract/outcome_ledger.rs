@@ -879,7 +879,8 @@ impl AgentTaskContract {
         } else {
             &self.successful_tools
         };
-        let satisfied = !alternatives.is_disjoint(successful_tools);
+        let satisfied = !alternatives.is_disjoint(successful_tools)
+            || (prompt_scoped && self.has_anchor_matched_absence_for(alternatives));
         let denial = (!satisfied)
             .then(|| self.action_denial_for_tools(alternatives.iter().map(String::as_str)))
             .flatten();

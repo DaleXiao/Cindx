@@ -405,6 +405,15 @@ repair directive, and the one-repair/one-recheck cap, while
 `direct_judge_runtime` plans and resolves the judge round on desktop. Nine
 deterministic tests pin the contract and the run-context parsing.
 
+Smoke testing then found the same death spiral one obligation family over:
+prompt-scoped any-tool read obligations (`conductor_read_evidence`) still
+demanded a successful substantive read even when the requested file does not
+exist and `file.list` (excluded from substantive reads) was the only success.
+Prompt-scoped any-tool obligations now also accept an anchor-matched absence
+receipt from one of their alternative tools, checked in both the outcome-ledger
+obligation evaluation and the completion-instruction gate; run-scoped
+obligations are unchanged. A contract test pins the satisfaction behavior.
+
 The first absence-evidence build regressed one bounded-context contract
 test: an unconditional `grounding_absent:false` marker grew every grounding
 capsule and pushed an at-the-edge context budget over the governance limit.
