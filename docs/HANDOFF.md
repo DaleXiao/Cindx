@@ -5,7 +5,7 @@ in place; do not create versioned handoff files.
 
 ## Release Identity
 
-Current release version: `0.2.35`
+Current release version: `0.2.36`
 
 | Item | Verified value |
 | --- | --- |
