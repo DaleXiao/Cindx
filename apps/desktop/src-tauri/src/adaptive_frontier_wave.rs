@@ -113,6 +113,11 @@ pub(super) fn prepare_adaptive_wave(
                 outputs,
             )
             .ok_or_else(|| format!("adaptive worker prompt is missing for {}", step.id))?;
+            let worker_prompt = match verification_repair_findings(workflow_checkpoint, &step.id)
+            {
+                Some(findings) => format!("{worker_prompt}\n\n{findings}"),
+                None => worker_prompt,
+            };
             Ok(AdaptiveCollaborationSpec {
                 step_index,
                 step_id: step.id.clone(),
@@ -382,4 +387,35 @@ pub(super) fn execute_adaptive_wave(
         cancellation,
         completions,
     })
+}
+
+fn verification_repair_findings(
+    workflow_checkpoint: &WorkflowExecutionCheckpoint,
+    step_id: &str,
+) -> Option<String> {
+    for verification_step in workflow_checkpoint.steps.values() {
+        if verification_step.verification_repair_rounds == 0
+            || verification_step.status != WorkflowStepStatus::Pending
+        {
+            continue;
+        }
+        let receipt = verification_step.semantic.verification_receipt.as_ref()?;
+        if receipt.verdict != orchestrator::WorkflowVerificationVerdict::NeedsRevision
+            || !receipt
+                .reviewed_steps
+                .iter()
+                .any(|reviewed| reviewed == step_id)
+        {
+            continue;
+        }
+        let findings = if receipt.unresolved.is_empty() {
+            "(the verifier recorded no unresolved findings)".to_string()
+        } else {
+            receipt.unresolved.join("; ")
+        };
+        return Some(format!(
+            "Verification repair round: the Independent Verifier required revisions to this step. Address every unresolved finding below while preserving the rest of the prior work.\nUnresolved findings:\n{findings}"
+        ));
+    }
+    None
 }
