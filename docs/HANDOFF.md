@@ -403,8 +403,10 @@ Auto and Pro direct execution now contract a delivery judge:
 reviewer selection, the eligibility gate (never Fast), the judge prompt, the
 repair directive, and the one-repair/one-recheck cap, while
 `direct_judge_runtime` plans and resolves the judge round on desktop. Eight
-deterministic tests pin the contract. The judge provider dispatch is not yet
-wired into terminal delivery.
+deterministic tests pin the contract, and the judge gate is wired into the
+terminal finalizer: eligible non-fallback Auto/Pro deliveries run one judge
+call, at most one repair round with one recheck, and every fail-open path
+records a `direct_judge_disposition` on the completion context.
 
 Chat request preparation also accepts an optional `generation_temperature`
 metadata override that is clamped into the provider range and carried on both

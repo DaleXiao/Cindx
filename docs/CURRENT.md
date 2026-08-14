@@ -68,7 +68,10 @@ Auto and Pro direct execution carry a contracted delivery judge: a
 model-distinct Reviewer audits the final answer against the objective and
 returns one typed single-line receipt (`pass` or `revise` with findings). A
 `revise` verdict permits at most one repair round and one recheck; Fast runs
-are never judged.
+are never judged. The gate runs on non-fallback Auto/Pro finalizer
+deliveries; judge unavailability, inconclusive receipts, empty or ungrounded
+repairs keep the original answer and record a disposition instead of
+blocking delivery.
 
 Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is
@@ -371,9 +374,7 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   executor loop: Fast and Auto pin deterministic sampling (`0`), Pro keeps
   provider defaults. Collaboration worker, Conductor, and utility calls still
   use provider defaults.
-- The direct-judge contract, plan, and receipt resolution are tested in
-  `orchestrator` and the desktop runtime, but the judge provider dispatch is
-  not yet wired into terminal delivery.
+
 - The installed `0.2.34` validation build and published `v0.2.30` archive are
   Apple Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution
   still needs the appropriate Apple signing and notarization path.

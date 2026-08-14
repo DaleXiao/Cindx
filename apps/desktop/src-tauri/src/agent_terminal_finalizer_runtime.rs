@@ -2,6 +2,7 @@ use crate::{
     agent_completion_runtime::{
         finalize_agent_completion, AgentCompletionDelivery, AgentCompletionOutcome,
     },
+    direct_judge_runtime::apply_direct_judge_gate,
     agent_failure_terminal_runtime::{resolve_loop_failure, AgentFailureLoopOutcome},
     agent_finalizer_runtime::direct_finalizer_policy::{
         insert_direct_finalizer_receipt_metadata, selected_direct_finalizer_policy,
@@ -322,7 +323,25 @@ pub(crate) fn execute_terminal_finalizer(
                     .cancellation
                     .record_partial_output_at(epoch_lease.epoch(), &candidate.content);
             }
+            let (candidate, judge_disposition) = if resolution.used_fallback {
+                (candidate, "direct_judge_fallback_skipped".to_string())
+            } else {
+                apply_direct_judge_gate(
+                    context.state,
+                    context.config,
+                    &runtime.task_id,
+                    context.run_context,
+                    runtime,
+                    context.agent_model,
+                    context.prompt,
+                    candidate,
+                )
+            };
             let mut completion_run_context = context.run_context.clone();
+            completion_run_context.insert(
+                "direct_judge_disposition".to_string(),
+                judge_disposition,
+            );
             if !resolution.used_fallback {
                 if let Some(selection) = &direct_finalizer_policy {
                     insert_direct_finalizer_receipt_metadata(
