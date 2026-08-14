@@ -68,6 +68,8 @@ impl OpenAiCompatibleProvider {
             .get("max_output_tokens")
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0);
+        let generation_temperature =
+            crate::request_builder::generation_temperature_from_metadata(&request.metadata);
         let estimated_prompt_tokens = estimate_request_tokens(&request.messages, &request.tools);
         let request_body = build_chat_request_json_with_tools_output_limit_vision_and_images(
             &self.config.model,
@@ -77,6 +79,7 @@ impl OpenAiCompatibleProvider {
             max_output_tokens,
             self.config.supports_vision_content(),
             &mut |path| self.image_cache.resolve(path),
+            generation_temperature,
         )?;
         Ok(PreparedNonStreamingModelRequest::encoded(
             request_body,
@@ -255,6 +258,34 @@ mod tests {
         assert!(debug.contains("request_body_bytes"));
         assert!(!debug.contains("frozen request body"));
         assert!(!debug.contains("private-api-key"));
+    }
+
+    #[test]
+    fn prepared_non_streaming_request_carries_generation_temperature() {
+        let response_body = r#"{"id":"temperature-response","model":"receipt-model","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#;
+        let (base_url, server) = serve_non_streaming_response(response_body);
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "private-api-key".to_string(),
+            model: "receipt-model".to_string(),
+            embedding_model: String::new(),
+            timeout_seconds: 5,
+        });
+        let mut request = non_streaming_request("temperature probe");
+        request.metadata.insert(
+            crate::GENERATION_TEMPERATURE_KEY.to_string(),
+            "0".to_string(),
+        );
+        let prepared = provider
+            .prepare_non_streaming_request(&request)
+            .expect("non-streaming request should prepare");
+        provider
+            .complete_prepared_non_streaming_request(prepared)
+            .expect("prepared request should complete");
+        let captured_body = server.join().expect("loopback server should finish");
+        let captured_json: serde_json::Value =
+            serde_json::from_slice(&captured_body).expect("captured body should be JSON");
+        assert_eq!(captured_json["temperature"], 0);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use super::{
 use crate::json_wire::{
     extract_json_array_after, extract_json_string_field, split_top_level_objects,
 };
+use crate::request_builder::model_disables_thinking_by_default;
 use crate::response_parser::parse_provider_error;
 use reqwest::StatusCode;
 
@@ -127,6 +128,9 @@ fn chat_verification_request_body(model: &str, use_completion_limit: bool) -> St
     } else {
         body["max_tokens"] = serde_json::json!(1);
     }
+    if model_disables_thinking_by_default(model) {
+        body["enable_thinking"] = serde_json::json!(false);
+    }
     body.to_string()
 }
 
@@ -161,4 +165,27 @@ pub fn parse_model_list_response(text: &str) -> Result<Vec<String>, ModelError> 
         return Err(ModelError::new("provider returned an empty model list"));
     }
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chat_verification_request_body;
+
+    #[test]
+    fn verification_probe_disables_thinking_for_thinking_default_models() {
+        let body: serde_json::Value =
+            serde_json::from_str(&chat_verification_request_body("qwen3.8-max", false))
+                .expect("valid probe JSON");
+        assert_eq!(body["enable_thinking"], false);
+        assert_eq!(body["max_tokens"], 1);
+    }
+
+    #[test]
+    fn verification_probe_leaves_thinking_absent_for_other_models() {
+        let body: serde_json::Value =
+            serde_json::from_str(&chat_verification_request_body("model-a", true))
+                .expect("valid probe JSON");
+        assert!(body.get("enable_thinking").is_none());
+        assert_eq!(body["max_completion_tokens"], 1);
+    }
 }

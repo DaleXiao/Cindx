@@ -54,7 +54,8 @@ Never use `reset --hard` or force-push to synchronize this checkout.
 - A production Workflow runs exactly one read-only Specialist, optionally one
   model-distinct Independent Verifier, then a deterministic checkpoint handoff
   to the Owner. It has no competing anchor, reviewer tournament, or model
-  synthesis layer.
+  synthesis layer. A `needs_revision` verdict opens at most one bounded repair
+  round before a single recheck.
 - One shared kernel owns model/tool turns, permission suspension, steer,
   recovery, and terminal commit.
 - Workspace retrieval, durable memory, task graph, and prompt evolution are
@@ -370,6 +371,32 @@ optional effort override. The 9-test `custom-commands-contract` gate joins
 `quick`, `ci-contract`, `control-plane`, and `full`. No provider evaluation
 was run; route selection, permission authority, budgets, learning consumers,
 and serving are unchanged.
+
+The chat request builder and the credential verification probe now set
+`enable_thinking: false` for model families whose provider builds enable
+reasoning by default (`qwen`, `qwq`, `glm`, `kimi`, `deepseek`). This keeps
+bounded output budgets spent on the answer instead of provider-side reasoning
+traces — the failure class behind the empty-content responses observed in the
+consumed Delivery Verification v3 and v4 Reviewer calls. Five deterministic
+contract tests cover the wire-format and probe behavior. Other model families
+keep provider defaults, and there is no runtime or per-effort toggle yet.
+Consumed one-shot protocols were not rerun or reinterpreted; no provider
+evaluation was run, and no intelligence, quality, or latency uplift is claimed.
+
+The workflow checkpoint now contracts one bounded verification-repair round:
+`begin_verification_repair` accepts a completed verification step whose
+`needs_revision` receipt is valid, returns its audited steps to a pending state
+under one additional granted model turn, keeps the revision receipt readable
+for repair prompting, and caps the verification step at one repair round before
+its single recheck. Two deterministic contract tests cover the transition and
+its guards. The desktop wave driver does not schedule the repair round yet.
+
+Chat request preparation also accepts an optional `generation_temperature`
+metadata override that is clamped into the provider range and carried on both
+streaming and non-streaming wire payloads; without the key the provider default
+is unchanged. No producer sets this metadata per effort yet. No provider
+evaluation was run for either change; routing, budgets, permissions, learning
+consumers, and serving semantics are otherwise unchanged.
 
 Frontend component logic extraction continues: the Composer textarea
 auto-sizing computation and the attachment batch validation rules now live in

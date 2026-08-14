@@ -165,6 +165,13 @@ optionally one tool-free and model-distinct Independent Verifier, and one final
 compatibility sink. The Specialist receives only its admitted read-only catalog.
 Side effects remain with the foreground Owner.
 
+A completed verification verdict of `needs_revision` opens at most one bounded
+repair round through `WorkflowExecutionCheckpoint::begin_verification_repair`:
+the audited steps return to a pending state under one additional granted model
+turn, the revision receipt stays readable for repair prompting, and the same
+verification step is then rechecked once. A second revision verdict exhausts the
+one-repair budget and leaves verification unsatisfied.
+
 The final sink is not a model Actor. The runtime completes it deterministically
 from the checkpoint after its dependency succeeds, preserving step identity,
 input and output digests, evidence lineage, resume identity, and typed

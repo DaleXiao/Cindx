@@ -54,9 +54,11 @@ deterministic handoff to the foreground Owner. It does not run competing
 anchors, reviewer tournaments, repair syntheses, or a model-authored final
 synthesis. An Independent Verifier must use a different configured model from
 the Specialist; a second prompt to the same model is not treated as
-independence. Invalid candidates receive bounded repair; if planning still
-fails, execution falls back to the shared foreground Owner without
-manufacturing a workflow.
+independence. A `needs_revision` verification verdict opens at most one bounded
+repair round on the audited steps before one recheck; a second revision verdict
+exhausts the repair budget. Invalid candidates receive bounded repair; if
+planning still fails, execution falls back to the shared foreground Owner
+without manufacturing a workflow.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
@@ -77,6 +79,14 @@ Changing the compatibility model does not silently overwrite those profiles;
 copying it to every profile is an explicit action. The legacy configuration and
 wire keys remain unchanged for saved-provider compatibility, and Actor and
 Stage attribution is still selected at each call site.
+
+Chat completion requests and the credential verification probe explicitly set
+`enable_thinking: false` for model families whose provider builds enable
+reasoning by default (`qwen`, `qwq`, `glm`, `kimi`, `deepseek`). This keeps
+bounded output budgets spent on the answer instead of provider-side reasoning
+traces, the failure class behind the empty-content responses observed in the
+consumed Delivery Verification v3 and v4 Reviewer calls. Other model families
+keep their provider defaults. There is no runtime or per-effort toggle yet.
 
 ## Run Lifecycle
 
@@ -351,6 +361,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   delete or restore every private control-plane file under the same user ID.
 - Current evidence does not establish general Auto/Pro superiority, successful
   GEPA self-improvement, or Fugu Ultra parity.
+- The one-repair verification round and the per-request `generation_temperature`
+  override are contracted in `orchestrator` and `model-provider` but not yet
+  consumed: no desktop driver schedules the repair round, and no producer sets
+  the temperature metadata per effort yet.
 - The installed `0.2.34` validation build and published `v0.2.30` archive are
   Apple Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution
   still needs the appropriate Apple signing and notarization path.
