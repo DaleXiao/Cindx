@@ -405,6 +405,19 @@ repair directive, and the one-repair/one-recheck cap, while
 `direct_judge_runtime` plans and resolves the judge round on desktop. Nine
 deterministic tests pin the contract and the run-context parsing.
 
+The first absence-evidence build regressed one bounded-context contract
+test: an unconditional `grounding_absent:false` marker grew every grounding
+capsule and pushed an at-the-edge context budget over the governance limit.
+The marker is now emitted only when absence is recorded, keeping capsules
+byte-stable in the common case.
+
+The direct judge now receives bounded execution facts alongside the
+objective and candidate answer: successful workspace mutation count, whether
+mutations carry post-mutation verification evidence, the workspace
+verification policy, and whether grounding evidence was recorded. Judge and
+recheck prompts both carry the facts; a deterministic test pins the summary
+shape.
+
 Smoke testing also reproduced a grounding death spiral: tasks requesting a
 workspace file that does not exist registered a workspace_grounding
 obligation that no successful tool call could ever satisfy, because evidence
