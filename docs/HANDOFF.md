@@ -397,6 +397,15 @@ repaired worker prompt before the single recheck. A desktop contract test
 pins the exactly-once requeue; a second revision verdict still exhausts the
 budget and falls through to the Owner.
 
+Auto and Pro direct execution now contract a delivery judge:
+`orchestrator::direct_judge` defines the typed single-line receipt
+(`CINDX_DIRECT_JUDGE`, `pass`/`revise` with findings), the model-distinct
+reviewer selection, the eligibility gate (never Fast), the judge prompt, the
+repair directive, and the one-repair/one-recheck cap, while
+`direct_judge_runtime` plans and resolves the judge round on desktop. Eight
+deterministic tests pin the contract. The judge provider dispatch is not yet
+wired into terminal delivery.
+
 Chat request preparation also accepts an optional `generation_temperature`
 metadata override that is clamped into the provider range and carried on both
 streaming and non-streaming wire payloads; without the key the provider default
