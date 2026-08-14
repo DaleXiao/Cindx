@@ -409,7 +409,11 @@ historical completions), so the gate now sits on the shared completion
 chokepoint (`finalize_agent_completion`), covering both direct completion and
 terminal-finalizer routes. Eligible direct Auto/Pro deliveries run one judge
 call, at most one repair round with one recheck, and every fail-open path
-records a `direct_judge_disposition` on the completion context.
+records a `direct_judge_disposition` on the completion context. Live smoke
+testing exercised judge pass, verified-revise repair, and the ungrounded
+fail-open path; repaired answers rebind the original visible evidence
+sequences (mirroring the finalizer fallback) so grounding-restricted tasks
+can accept a repair.
 
 Chat request preparation also accepts an optional `generation_temperature`
 metadata override that is clamped into the provider range and carried on both

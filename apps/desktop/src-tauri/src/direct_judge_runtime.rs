@@ -99,11 +99,17 @@ fn ground_repaired_answer(
     runtime: &agent_runtime::AgentLoopState,
     run_context: &Metadata,
     content: &str,
+    visible_evidence_sequences: &[u64],
 ) -> Option<agent_runtime::GroundedCompletionReceipt> {
     let steer_epoch = run_context_steer_epoch(run_context);
     runtime
         .task_contract
-        .grounded_completion_receipt(steer_epoch, runtime.turn, content, &[])
+        .grounded_completion_receipt(
+            steer_epoch,
+            runtime.turn,
+            content,
+            visible_evidence_sequences,
+        )
         .ok()
 }
 
@@ -173,8 +179,12 @@ pub(crate) fn apply_direct_judge_gate(
     if repaired_output.trim().is_empty() {
         return (candidate, "direct_judge_repair_empty".to_string());
     }
-    let Some(repaired_receipt) = ground_repaired_answer(runtime, run_context, &repaired_output)
-    else {
+    let Some(repaired_receipt) = ground_repaired_answer(
+        runtime,
+        run_context,
+        &repaired_output,
+        &candidate.receipt.visible_evidence_sequences.clone(),
+    ) else {
         return (candidate, "direct_judge_repair_ungrounded".to_string());
     };
 
