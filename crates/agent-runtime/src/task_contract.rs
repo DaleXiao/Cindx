@@ -110,6 +110,7 @@ pub struct PromptEvidenceContext {
     pub source: String,
     pub observation: String,
     pub evidence_sequence: u64,
+    pub absent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +119,7 @@ struct PromptEvidenceReceipt {
     observation: String,
     context_backed: bool,
     evidence_sequence: u64,
+    absent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -424,6 +426,7 @@ impl AgentTaskContract {
             observation,
             false,
             false,
+            false,
         )
     }
 
@@ -443,9 +446,11 @@ impl AgentTaskContract {
             observation,
             true,
             false,
+            false,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn record_prompt_evidence_at(
         &mut self,
@@ -456,6 +461,7 @@ impl AgentTaskContract {
         observation: &str,
         context_backed: bool,
         target_witness_trusted: bool,
+        absent: bool,
     ) -> bool {
         if self.prompt_evidence_epoch != epoch
             || source.trim().is_empty()
@@ -491,6 +497,7 @@ impl AgentTaskContract {
             observation: bounded_grounding_excerpt(observation),
             context_backed,
             evidence_sequence,
+            absent,
         });
         let gate_key = format!(
             "prompt_evidence:{}:{requirement_id}",
@@ -564,6 +571,47 @@ impl AgentTaskContract {
                 observation,
                 false,
                 target_witness_trusted,
+                false,
+            );
+        }
+        recorded
+    }
+
+    /// Records an anchor-matched failed tool attempt as negative grounding
+    /// evidence. The target's observed absence is itself a workspace fact, so
+    /// the obligation is satisfied instead of spinning through repairs that
+    /// can never succeed. Anchor matching stays mandatory: failures against
+    /// unrelated inputs never satisfy an obligation.
+    pub fn record_prompt_tool_absence_observation_at(
+        &mut self,
+        epoch: u64,
+        tool_name: &str,
+        source: &str,
+        receipt: &str,
+        observation: &str,
+    ) -> bool {
+        if self.prompt_evidence_epoch != epoch || !substantive_observation(observation) {
+            return false;
+        }
+        let requirement_ids = self
+            .prompt_evidence_requirements
+            .iter()
+            .filter(|(_, requirement)| {
+                requirement.tools.contains(tool_name) && !requirement.target_anchors.is_empty()
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut recorded = false;
+        for requirement_id in requirement_ids {
+            recorded |= self.record_prompt_evidence_at(
+                epoch,
+                &requirement_id,
+                source,
+                receipt,
+                observation,
+                false,
+                false,
+                true,
             );
         }
         recorded
@@ -579,6 +627,7 @@ impl AgentTaskContract {
                         source: receipt.source.clone(),
                         observation: receipt.observation.clone(),
                         evidence_sequence: receipt.evidence_sequence,
+                        absent: receipt.absent,
                     })
                 })
             })
@@ -1700,6 +1749,93 @@ mod tests {
 
         contract.replace_prompt_evidence_requirement(5, None, std::iter::empty::<&str>());
         assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    fn bind_workspace_readme_anchor(contract: &mut AgentTaskContract, epoch: u64) {
+        contract.bind_prompt_evidence_targets(
+            epoch,
+            [(
+                "workspace_grounding".to_string(),
+                [crate::EvidenceTargetAnchor::Workspace(
+                    "readme.md".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+    }
+
+    #[test]
+    fn prompt_evidence_absence_satisfies_anchor_matched_failed_reads() {
+        let mut contract = AgentTaskContract::default();
+        let tools = vec![tool("file.read", ToolRisk::ReadOnly)];
+        contract.replace_prompt_evidence_requirement(2, Some("workspace_grounding"), ["file.read"]);
+        bind_workspace_readme_anchor(&mut contract, 2);
+
+        assert!(!contract.record_prompt_tool_absence_observation_at(
+            2,
+            "file.read",
+            "file.read",
+            r#"{"path":"unrelated.md"}"#,
+            "tool=file.read\nstatus=failed\noutput=\nfile not found",
+        ));
+        assert!(contract
+            .completion_instruction_for_task(&tools)
+            .expect("completion gate evaluates")
+            .is_some());
+
+        assert!(contract.record_prompt_tool_absence_observation_at(
+            2,
+            "file.read",
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            "tool=file.read\nstatus=failed\noutput=\nREADME.md does not exist",
+        ));
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+
+        let contexts = contract.prompt_evidence_contexts();
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].absent);
+        assert!(contexts[0].observation.contains("does not exist"));
+    }
+
+    #[test]
+    fn prompt_evidence_absence_never_grants_a_free_pass() {
+        let mut contract = AgentTaskContract::default();
+        contract.replace_prompt_evidence_requirement(2, Some("workspace_grounding"), ["file.read"]);
+
+        assert!(!contract.record_prompt_tool_absence_observation_at(
+            2,
+            "file.read",
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            "tool=file.read\nstatus=failed\noutput=\nmissing",
+        ));
+
+        bind_workspace_readme_anchor(&mut contract, 2);
+        assert!(!contract.record_prompt_tool_absence_observation_at(
+            9,
+            "file.read",
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            "tool=file.read\nstatus=failed\noutput=\nmissing",
+        ));
+        assert!(!contract.record_prompt_tool_absence_observation_at(
+            2,
+            "file.search",
+            "file.search",
+            r#"{"query":"README"}"#,
+            "tool=file.search\nstatus=failed\noutput=\nnothing",
+        ));
+        assert!(!contract.record_prompt_tool_absence_observation_at(
+            2,
+            "file.read",
+            "file.read",
+            r#"{"path":"README.md"}"#,
+            "   ",
+        ));
     }
 
     #[test]

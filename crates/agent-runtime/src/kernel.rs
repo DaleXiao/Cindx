@@ -750,6 +750,19 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                     &request.input,
                     observation,
                 );
+        } else if matches!(status, ToolOutcomeStatus::Failed) {
+            let evidence_tool =
+                deferred_tool_name(request).unwrap_or_else(|| request.tool_name.clone());
+            let evidence_epoch = self.state.task_contract.prompt_evidence_epoch();
+            self.state
+                .task_contract
+                .record_prompt_tool_absence_observation_at(
+                    evidence_epoch,
+                    &evidence_tool,
+                    &evidence_tool,
+                    &request.input,
+                    observation,
+                );
         }
         append_tool_observation(self.state, request.call_id.clone(), observation);
         let new_evidence = self
@@ -1063,6 +1076,7 @@ fn grounding_evidence_message(
             "requirementId": context.requirement_id,
             "source": context.source,
             "observation": observation,
+            "grounding_absent": context.absent,
         })
         .to_string(),
         metadata: [

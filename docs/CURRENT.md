@@ -71,7 +71,10 @@ against the objective and returns one typed single-line receipt (`pass` or
 and one recheck; Fast runs and collaboration workflow products are never
 judged. Judge unavailability, inconclusive receipts, empty or ungrounded
 repairs, and fallback candidates keep the original answer and record a
-`direct_judge_disposition` instead of blocking delivery.
+`direct_judge_disposition` instead of blocking delivery. Grounding obligations also accept anchor-matched failed tool attempts
+as absent-target evidence, so a task whose requested workspace file does not
+exist fails closed on content but no longer spins through unsatisfiable
+grounding repairs.
 
 Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is
