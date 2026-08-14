@@ -122,9 +122,11 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
         max_output_tokens,
         supports_vision,
         &mut image_data_url,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
     model: &str,
     messages: &[Message],
@@ -133,6 +135,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
     max_output_tokens: Option<u64>,
     supports_vision: bool,
     image_resolver: &mut dyn FnMut(&str) -> Option<Arc<str>>,
+    temperature: Option<f64>,
 ) -> Result<String, ModelError> {
     let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
@@ -191,15 +194,43 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
         .filter(|value| *value > 0)
         .map(|value| format!(",\"max_tokens\":{value}"))
         .unwrap_or_default();
+    let thinking_json = if model_disables_thinking_by_default(model) {
+        ",\"enable_thinking\":false"
+    } else {
+        ""
+    };
+    let temperature_json = temperature
+        .map(|value| value.clamp(0.0, 2.0))
+        .map(|value| format!(",\"temperature\":{value}"))
+        .unwrap_or_default();
 
     Ok(format!(
-        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]{}{}}}",
+        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]{}{}{}{}}}",
         json_escape(model),
         if stream { "true" } else { "false" },
         messages_json.join(","),
+        thinking_json,
+        temperature_json,
         output_limit_json,
         tools_json
     ))
+}
+
+pub const GENERATION_TEMPERATURE_KEY: &str = "generation_temperature";
+
+pub fn generation_temperature_from_metadata(metadata: &Metadata) -> Option<f64> {
+    metadata
+        .get(GENERATION_TEMPERATURE_KEY)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+}
+
+pub fn model_disables_thinking_by_default(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase().replace('_', "-");
+    model.starts_with("qwen")
+        || model.starts_with("qwq")
+        || model.starts_with("glm")
+        || model.starts_with("kimi")
+        || model.contains("deepseek")
 }
 
 fn message_content_json(

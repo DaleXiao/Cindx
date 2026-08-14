@@ -454,6 +454,185 @@ fn workflow_verification_receipt_is_exactly_one_final_line() {
 }
 
 #[test]
+fn verification_needs_revision_opens_one_bounded_repair_round() {
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        "verification-repair",
+        workflow_plan("workflow-verification-repair", true),
+        1,
+    );
+    for (step_id, model) in [("approach_a", "planner"), ("approach_b", "reviewer")] {
+        checkpoint
+            .complete_step(
+                step_id,
+                model,
+                format!("{step_id} output"),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+    }
+    let receipt = WorkflowVerificationReceipt {
+        schema: WORKFLOW_VERIFICATION_RECEIPT_SCHEMA.to_string(),
+        verdict: WorkflowVerificationVerdict::NeedsRevision,
+        reviewed_steps: vec!["approach_a".to_string(), "approach_b".to_string()],
+        evidence_refs: Vec::new(),
+        unresolved: vec!["approach_a misses the boundary case".to_string()],
+    };
+    checkpoint
+        .complete_step_with_evidence(
+            "verify",
+            "reviewer",
+            "revision required".to_string(),
+            "[]".to_string(),
+            WorkflowEvidenceSummary::default(),
+            Some(receipt),
+            3,
+        )
+        .unwrap();
+    assert_eq!(
+        checkpoint.steps["verify"].semantic.verification,
+        WorkflowVerificationState::Degraded
+    );
+    assert!(!checkpoint.workflow_verification_satisfied(true));
+
+    let audited = checkpoint.begin_verification_repair("verify", 4).unwrap();
+    assert_eq!(
+        audited,
+        vec!["approach_a".to_string(), "approach_b".to_string()]
+    );
+    assert_eq!(
+        checkpoint.steps["verify"].status,
+        WorkflowStepStatus::Pending
+    );
+    assert_eq!(checkpoint.steps["verify"].verification_repair_rounds, 1);
+    assert_eq!(
+        checkpoint.steps["approach_a"].status,
+        WorkflowStepStatus::Pending
+    );
+    assert_eq!(
+        checkpoint.steps["approach_b"].status,
+        WorkflowStepStatus::Pending
+    );
+    assert_eq!(checkpoint.additional_model_turns_per_step, 1);
+    assert_eq!(
+        checkpoint.steps["verify"]
+            .semantic
+            .verification_receipt
+            .as_ref()
+            .unwrap()
+            .unresolved
+            .len(),
+        1
+    );
+
+    let reopened = checkpoint.begin_verification_repair("verify", 5);
+    assert_eq!(
+        reopened,
+        Err("workflow verification step verify has not completed".to_string())
+    );
+
+    checkpoint.begin_step("approach_a", "planner", 6).unwrap();
+    checkpoint
+        .complete_step(
+            "approach_a",
+            "planner",
+            "repaired output".to_string(),
+            "[]".to_string(),
+            7,
+        )
+        .unwrap();
+    checkpoint.begin_step("approach_b", "reviewer", 8).unwrap();
+    checkpoint
+        .complete_step(
+            "approach_b",
+            "reviewer",
+            "kept output".to_string(),
+            "[]".to_string(),
+            9,
+        )
+        .unwrap();
+
+    let recheck_receipt = WorkflowVerificationReceipt {
+        schema: WORKFLOW_VERIFICATION_RECEIPT_SCHEMA.to_string(),
+        verdict: WorkflowVerificationVerdict::NeedsRevision,
+        reviewed_steps: vec!["approach_a".to_string(), "approach_b".to_string()],
+        evidence_refs: Vec::new(),
+        unresolved: vec!["still unresolved".to_string()],
+    };
+    checkpoint
+        .complete_step_with_evidence(
+            "verify",
+            "reviewer",
+            "recheck still fails".to_string(),
+            "[]".to_string(),
+            WorkflowEvidenceSummary::default(),
+            Some(recheck_receipt),
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        checkpoint.steps["verify"].semantic.verification,
+        WorkflowVerificationState::Degraded
+    );
+    let exhausted = checkpoint.begin_verification_repair("verify", 11);
+    assert_eq!(
+        exhausted,
+        Err("workflow verification step verify exhausted its one-repair budget".to_string())
+    );
+    assert!(!checkpoint.workflow_verification_satisfied(true));
+}
+
+#[test]
+fn verification_repair_rejects_non_verification_and_passing_steps() {
+    let mut checkpoint = WorkflowExecutionCheckpoint::new(
+        "verification-repair-guards",
+        workflow_plan("workflow-verification-repair-guards", true),
+        1,
+    );
+    for (step_id, model) in [("approach_a", "planner"), ("approach_b", "reviewer")] {
+        checkpoint
+            .complete_step(
+                step_id,
+                model,
+                format!("{step_id} output"),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+    }
+
+    let not_verification = checkpoint.begin_verification_repair("approach_a", 3);
+    assert_eq!(
+        not_verification,
+        Err("workflow step approach_a is not a verification step".to_string())
+    );
+
+    let receipt = WorkflowVerificationReceipt {
+        schema: WORKFLOW_VERIFICATION_RECEIPT_SCHEMA.to_string(),
+        verdict: WorkflowVerificationVerdict::Passed,
+        reviewed_steps: vec!["approach_a".to_string(), "approach_b".to_string()],
+        evidence_refs: Vec::new(),
+        unresolved: Vec::new(),
+    };
+    checkpoint
+        .complete_step_with_evidence(
+            "verify",
+            "reviewer",
+            "audit passed".to_string(),
+            "[]".to_string(),
+            WorkflowEvidenceSummary::default(),
+            Some(receipt),
+            4,
+        )
+        .unwrap();
+    let passing = checkpoint.begin_verification_repair("verify", 5);
+    assert_eq!(
+        passing,
+        Err("workflow verification step verify is not awaiting revision".to_string())
+    );
+}
+
+#[test]
 fn workflow_verification_receipt_must_cite_each_grounded_input() {
     let mut checkpoint = WorkflowExecutionCheckpoint::new(
         "verification-evidence",

@@ -642,6 +642,8 @@ pub struct WorkflowStepCheckpoint {
     #[serde(default)]
     pub semantic: WorkflowStepSemanticState,
     pub error: Option<String>,
+    #[serde(default)]
+    pub verification_repair_rounds: usize,
     pub updated_at_ms: u64,
 }
 
@@ -689,6 +691,85 @@ impl WorkflowExecutionCheckpoint {
         })
     }
 
+    pub fn begin_verification_repair(
+        &mut self,
+        verification_step_id: &str,
+        now_ms: u64,
+    ) -> Result<Vec<String>, String> {
+        const MAX_VERIFICATION_REPAIR_ROUNDS: usize = 1;
+        if !self.plan.steps.iter().any(|step| {
+            step.id == verification_step_id
+                && step.contract.output_kind == WorkflowOutputKind::Verification
+        }) {
+            return Err(format!(
+                "workflow step {verification_step_id} is not a verification step"
+            ));
+        }
+        let audited_steps = {
+            let verification_step = self.steps.get(verification_step_id).ok_or_else(|| {
+                format!("unknown workflow checkpoint step: {verification_step_id}")
+            })?;
+            if verification_step.status != WorkflowStepStatus::Completed {
+                return Err(format!(
+                    "workflow verification step {verification_step_id} has not completed"
+                ));
+            }
+            if verification_step.verification_repair_rounds >= MAX_VERIFICATION_REPAIR_ROUNDS {
+                return Err(format!(
+                    "workflow verification step {verification_step_id} exhausted its one-repair budget"
+                ));
+            }
+            if verification_step.semantic.verification != WorkflowVerificationState::Degraded {
+                return Err(format!(
+                    "workflow verification step {verification_step_id} is not awaiting revision"
+                ));
+            }
+            let receipt = verification_step
+                .semantic
+                .verification_receipt
+                .as_ref()
+                .ok_or_else(|| {
+                    format!("workflow verification step {verification_step_id} has no receipt")
+                })?;
+            if receipt.verdict != WorkflowVerificationVerdict::NeedsRevision
+                || receipt.reviewed_steps.is_empty()
+            {
+                return Err(format!(
+                    "workflow verification step {verification_step_id} verdict does not require revision"
+                ));
+            }
+            let audited = receipt.reviewed_steps.clone();
+            for audited_id in &audited {
+                let audited_step = self.steps.get(audited_id).ok_or_else(|| {
+                    format!("workflow verification receipt references missing step {audited_id}")
+                })?;
+                if audited_step.status != WorkflowStepStatus::Completed {
+                    return Err(format!(
+                        "audited workflow step {audited_id} is not completed"
+                    ));
+                }
+            }
+            audited
+        };
+        for audited_id in &audited_steps {
+            let audited_step = self.steps.get_mut(audited_id).expect("validated above");
+            audited_step.status = WorkflowStepStatus::Pending;
+            audited_step.error = None;
+            audited_step.updated_at_ms = now_ms;
+        }
+        let verification_step = self
+            .steps
+            .get_mut(verification_step_id)
+            .expect("verification step validated above");
+        verification_step.status = WorkflowStepStatus::Pending;
+        verification_step.semantic.verification = WorkflowVerificationState::default();
+        verification_step.verification_repair_rounds += 1;
+        verification_step.updated_at_ms = now_ms;
+        self.additional_model_turns_per_step += 1;
+        self.updated_at_ms = now_ms;
+        Ok(audited_steps)
+    }
+
     pub fn new(resume_key: impl Into<String>, plan: WorkflowPlanIr, now_ms: u64) -> Self {
         let steps = plan
             .steps
@@ -712,6 +793,7 @@ impl WorkflowExecutionCheckpoint {
                             ..WorkflowStepSemanticState::default()
                         },
                         error: None,
+                        verification_repair_rounds: 0,
                         updated_at_ms: now_ms,
                     },
                 )

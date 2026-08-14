@@ -377,6 +377,7 @@ impl WorkflowExecutionCheckpoint {
                         ..WorkflowStepSemanticState::default()
                     },
                     error: None,
+                    verification_repair_rounds: 0,
                     updated_at_ms: now_ms,
                 },
             );

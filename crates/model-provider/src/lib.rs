@@ -65,7 +65,8 @@ pub use realtime_provider::{
 };
 pub use request_builder::{
     build_chat_request_json, build_chat_request_json_with_tools, build_embedding_request_json,
-    parse_embedding_response,
+    generation_temperature_from_metadata, model_disables_thinking_by_default,
+    parse_embedding_response, GENERATION_TEMPERATURE_KEY,
 };
 pub use request_vision::model_supports_vision_content;
 pub use response_parser::{
@@ -1093,6 +1094,142 @@ mod tests {
         assert!(body.contains("\"stream\":true"));
         assert!(body.contains("\"role\":\"user\""));
         assert!(body.contains("\"content\":\"hello\""));
+    }
+
+    #[test]
+    fn request_json_disables_thinking_for_thinking_default_models() {
+        let body = build_chat_request_json(
+            "qwen3.8-max",
+            &[Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            false,
+        )
+        .expect("body should encode");
+
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert_eq!(value["enable_thinking"], false);
+    }
+
+    #[test]
+    fn request_json_leaves_thinking_absent_for_other_models() {
+        let body = build_chat_request_json(
+            "model-a",
+            &[Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            false,
+        )
+        .expect("body should encode");
+
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert!(value.get("enable_thinking").is_none());
+    }
+
+    #[test]
+    fn thinking_default_predicate_covers_configured_dashscope_families() {
+        for model in [
+            "qwen3.8-max",
+            "qwq-plus",
+            "glm-5.2-fast-preview",
+            "kimi-k2",
+            "deepseek-v4-flash-0731",
+        ] {
+            assert!(
+                model_disables_thinking_by_default(model),
+                "{model} should disable thinking by default"
+            );
+        }
+        for model in ["model-a", "gpt-5", "claude-4-sonnet"] {
+            assert!(
+                !model_disables_thinking_by_default(model),
+                "{model} should keep thinking untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn request_json_includes_metadata_generation_temperature() {
+        let body = build_chat_request_json_with_tools_output_limit_vision_and_images(
+            "model-a",
+            &[Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            false,
+            &[],
+            None,
+            false,
+            &mut |_| None,
+            Some(0.0),
+        )
+        .expect("body should encode");
+
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert_eq!(value["temperature"], 0.0);
+    }
+
+    #[test]
+    fn request_json_omits_temperature_without_an_explicit_override() {
+        let body = build_chat_request_json_with_tools_output_limit_vision_and_images(
+            "model-a",
+            &[Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            false,
+            &[],
+            None,
+            false,
+            &mut |_| None,
+            None,
+        )
+        .expect("body should encode");
+
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert!(value.get("temperature").is_none());
+    }
+
+    #[test]
+    fn request_json_clamps_generation_temperature_into_provider_bounds() {
+        let body = build_chat_request_json_with_tools_output_limit_vision_and_images(
+            "model-a",
+            &[Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            false,
+            &[],
+            None,
+            false,
+            &mut |_| None,
+            Some(9.0),
+        )
+        .expect("body should encode");
+
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert_eq!(value["temperature"], 2.0);
+    }
+
+    #[test]
+    fn generation_temperature_metadata_parses_valid_values_only() {
+        let present: Metadata = [(GENERATION_TEMPERATURE_KEY.to_string(), "0.3".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(generation_temperature_from_metadata(&present), Some(0.3));
+
+        let invalid: Metadata = [(GENERATION_TEMPERATURE_KEY.to_string(), "warm".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(generation_temperature_from_metadata(&invalid), None);
+        assert_eq!(generation_temperature_from_metadata(&Metadata::new()), None);
     }
 
     #[test]
