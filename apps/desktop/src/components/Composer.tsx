@@ -58,17 +58,17 @@ const EFFORT_OPTIONS: Array<{
   {
     value: "fast",
     label: "Cindx Fast",
-    description: "One model for quick, focused tasks"
+    description: "Direct single-model execution for quick, focused tasks"
   },
   {
     value: "auto",
     label: "Cindx Auto",
-    description: "Routes each request by complexity"
+    description: "Plans each request; adds collaboration and verification when valuable"
   },
   {
     value: "pro",
     label: "Cindx Pro",
-    description: "Learns from Auto and continuously improves"
+    description: "Larger planning and execution budget for demanding tasks"
   }
 ];
 
