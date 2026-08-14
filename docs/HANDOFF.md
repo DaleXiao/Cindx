@@ -470,6 +470,28 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
+Two approved directions from the execution-grounded verification program
+remain, each deliberately scoped to its own session:
+
+1. Bounded read-only parallel exploration. The owner-execution graph pins
+   exactly one Specialist (owner_execution_graph validation plus contract
+   tests pin it); widening to at most two Analysis specialists for
+   read-only exploration tasks requires a deliberate invariant change:
+   a graph-shape variant, conductor contract selection for read-only
+   task classes, anytime candidate fan-out under the existing branch
+   budget, and verifier audit of both branches. Do not loosen the
+   single-Specialist invariant for mutation-bearing graphs.
+2. Real reward into prompt evolution. The judge disposition is recorded on
+   the completion context (`direct_judge_disposition`); the next step is to
+   project it plus post-mutation verification success into outcome evidence
+   and use it as prompt-evolution fitness, keeping the shadow-only evidence
+   boundary until an independent review admits a record.
+
+Do not start either change in the middle of an unrelated session; each needs
+its own contract tests and documentation pass.
+
+
+
 The bounded Goal 3 instrumentation repair is complete: `selected`, explicit
 pre-decision `not_selected`, absent, and malformed states are distinct; legal
 `not_selected` remains a censor; and the real terminal producer-to-projector
