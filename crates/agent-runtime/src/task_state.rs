@@ -162,6 +162,7 @@ impl AgentTaskStateSnapshot {
             ),
             prepared_task_state,
             context_token_ledger: Default::default(),
+            generation_temperature: None,
         })
     }
 

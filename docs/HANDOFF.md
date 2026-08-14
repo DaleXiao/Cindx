@@ -400,9 +400,13 @@ budget and falls through to the Owner.
 Chat request preparation also accepts an optional `generation_temperature`
 metadata override that is clamped into the provider range and carried on both
 streaming and non-streaming wire payloads; without the key the provider default
-is unchanged. No producer sets this metadata per effort yet. No provider
-evaluation was run for either change; routing, budgets, permissions, learning
-consumers, and serving semantics are otherwise unchanged.
+is unchanged. The executor loop now produces it per effort: Fast and Auto pin
+`0` for deterministic sampling through the shared `AgentLoopState` metadata
+hook, Pro keeps provider defaults, and the field survives loop reprepare.
+Collaboration worker, Conductor, and utility calls still use provider
+defaults. No provider evaluation was run for either change; routing, budgets,
+permissions, learning consumers, and serving semantics are otherwise
+unchanged.
 
 Frontend component logic extraction continues: the Composer textarea
 auto-sizing computation and the attachment batch validation rules now live in

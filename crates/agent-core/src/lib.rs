@@ -22,7 +22,7 @@ pub use model_attribution::{
 pub use model_contract::{
     classify_provider_failure, tool_function_name, ModelCallMode, ModelError, ModelRequest,
     ModelResponse, ModelResponseAssessment, ModelResponseDisposition, ModelResponseTermination,
-    ModelToolCall, ProviderFailureClass,
+    ModelToolCall, ProviderFailureClass, GENERATION_TEMPERATURE_KEY,
 };
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,

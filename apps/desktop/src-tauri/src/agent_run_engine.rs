@@ -81,10 +81,11 @@ impl<'app, 'state> AgentExecutionService<'app, 'state> {
         &self,
         config: &ProviderConfig,
         workspace_root: &Path,
-        prepared: PreparedAgentExecution,
+        mut prepared: PreparedAgentExecution,
         effort: AgentPolicy,
         cancellation: &Arc<AgentRunControl>,
     ) -> Result<AgentState, String> {
+        prepared.runtime.generation_temperature = effort.generation_temperature().map(str::to_string);
         let mut executor = DesktopAgentRunExecutor {
             app: self.app,
             state: self.state,

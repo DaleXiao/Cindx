@@ -216,7 +216,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
     ))
 }
 
-pub const GENERATION_TEMPERATURE_KEY: &str = "generation_temperature";
+pub use agent_core::GENERATION_TEMPERATURE_KEY;
 
 pub fn generation_temperature_from_metadata(metadata: &Metadata) -> Option<f64> {
     metadata

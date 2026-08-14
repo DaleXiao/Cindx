@@ -2080,4 +2080,40 @@ mod tests {
                 if receipt.basis == crate::GroundedCompletionBasis::ConstraintObserved
         ));
     }
+
+    #[test]
+    fn model_request_metadata_carries_generation_temperature_only_when_configured() {
+        let mut configured = start_agent_loop(
+            TaskId("temperature-configured".to_string()),
+            "run with deterministic sampling",
+            AgentRuntimeConfig::default(),
+        );
+        configured.generation_temperature = Some("0".to_string());
+        let (request, _) = model_request_for_turn_with_context_budget(
+            &mut configured,
+            &[],
+            None,
+            None,
+            4_096,
+            512,
+        );
+        assert_eq!(
+            request
+                .metadata
+                .get(agent_core::GENERATION_TEMPERATURE_KEY)
+                .map(String::as_str),
+            Some("0")
+        );
+
+        let mut default = start_agent_loop(
+            TaskId("temperature-default".to_string()),
+            "keep provider sampling defaults",
+            AgentRuntimeConfig::default(),
+        );
+        let (request, _) =
+            model_request_for_turn_with_context_budget(&mut default, &[], None, None, 4_096, 512);
+        assert!(!request
+            .metadata
+            .contains_key(agent_core::GENERATION_TEMPERATURE_KEY));
+    }
 }
