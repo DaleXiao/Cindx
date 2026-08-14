@@ -66,8 +66,9 @@ effect authority does not.
 
 Auto and Pro direct execution carry a contracted delivery judge at the
 shared completion point: a model-distinct Reviewer audits the final answer
-against the objective and returns one typed single-line receipt (`pass` or
-`revise` with findings). A `revise` verdict permits at most one repair round
+together with bounded execution facts (mutation count, mutation-verification
+state, verification policy, grounding evidence) and returns one typed
+single-line receipt (`pass` or `revise` with findings). A `revise` verdict permits at most one repair round
 and one recheck; Fast runs and collaboration workflow products are never
 judged. Judge unavailability, inconclusive receipts, empty or ungrounded
 repairs, and fallback candidates keep the original answer and record a

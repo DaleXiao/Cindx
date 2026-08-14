@@ -113,6 +113,40 @@ fn ground_repaired_answer(
         .ok()
 }
 
+pub(crate) fn direct_judge_execution_summary(runtime: &agent_runtime::AgentLoopState) -> String {
+    let contract = &runtime.task_contract;
+    let mutations = contract.successful_mutations();
+    let verification_state = if mutations == 0 {
+        "no workspace mutations occurred"
+    } else if contract.latest_mutation_verified() {
+        "all workspace mutations carry post-mutation verification evidence"
+    } else {
+        "workspace mutations occurred WITHOUT post-mutation verification"
+    };
+    let policy = match contract.workspace_verification_policy() {
+        agent_runtime::WorkspaceVerificationPolicy::RequiredAfterMutation => {
+            "workspace verification is required after mutations"
+        }
+        _ => "workspace verification is not required",
+    };
+    format!(
+        "Execution facts (trusted runtime record):\n- Successful workspace mutations: {mutations}\n- Mutation verification: {verification_state}\n- Policy: {policy}\n- Grounding evidence recorded: {}",
+        contract.has_prompt_evidence()
+    )
+}
+
+pub(crate) fn direct_judge_prompt_with_facts(
+    objective: &str,
+    candidate: &str,
+    runtime: &agent_runtime::AgentLoopState,
+) -> String {
+    format!(
+        "{}\n\n{}",
+        orchestrator::direct_judge_prompt(objective, candidate),
+        direct_judge_execution_summary(runtime)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_direct_judge_gate(
     state: &tauri::State<'_, AppState>,
@@ -144,7 +178,7 @@ pub(crate) fn apply_direct_judge_gate(
         &plan.judge_model,
         ModelRole::Reviewer,
         "direct_judge",
-        plan.prompt,
+        format!("{prompt}\n\n{facts}", prompt = plan.prompt, facts = direct_judge_execution_summary(runtime)),
     ) {
         Ok(output) => output,
         Err(_) => return (candidate, "direct_judge_unavailable".to_string()),
@@ -188,7 +222,7 @@ pub(crate) fn apply_direct_judge_gate(
         return (candidate, "direct_judge_repair_ungrounded".to_string());
     };
 
-    let recheck_prompt = orchestrator::direct_judge_prompt(objective, &repaired_output);
+    let recheck_prompt = direct_judge_prompt_with_facts(objective, &repaired_output, runtime);
     let disposition = match dispatch_direct_judge_call(
         state,
         config,
@@ -242,6 +276,21 @@ mod tests {
         assert!(plan_direct_judge("auto", true, "same", Some("same"), "o", "a").is_none());
         assert!(plan_direct_judge("auto", true, "m", None, "o", "a").is_none());
         assert!(plan_direct_judge("auto", true, "m", Some("r"), "o", "   ").is_none());
+    }
+
+    #[test]
+    fn direct_judge_execution_summary_reports_unmutated_state() {
+        let runtime = agent_runtime::start_agent_loop(
+            agent_core::TaskId("judge-facts".to_string()),
+            "objective",
+            agent_runtime::AgentRuntimeConfig::default(),
+        );
+        let summary = direct_judge_execution_summary(&runtime);
+        assert!(summary.contains("Successful workspace mutations: 0"));
+        assert!(summary.contains("no workspace mutations occurred"));
+        let prompt = direct_judge_prompt_with_facts("objective", "candidate", &runtime);
+        assert!(prompt.contains("Execution facts"));
+        assert!(prompt.contains("CINDX_DIRECT_JUDGE:"));
     }
 
     #[test]
