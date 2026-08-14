@@ -218,11 +218,12 @@ tools-disabled finalizer may produce the visible response without consuming an
 actor turn; an invalid finalizer falls back to the exact eligible grounded
 candidate rather than restarting the actor.
 
-Auto and Pro direct finalizer deliveries pass an optional bounded judge gate:
-when the execution contract requires verification, the configured Reviewer
-model is distinct from the executor, and the candidate is not a fallback, one
-tool-free Reviewer call audits the candidate against the objective and returns
-a typed single-line receipt. A `revise` verdict permits at most one Executor
+Auto and Pro direct deliveries pass an optional bounded judge gate at the
+shared completion chokepoint (both direct completion and terminal-finalizer
+routes): when the execution contract requires verification, the configured
+Reviewer model is distinct from the executor, and the candidate is not a
+fallback or a collaboration product, one tool-free Reviewer call audits the
+candidate against the objective and returns a typed single-line receipt. A `revise` verdict permits at most one Executor
 repair round over the recorded findings and one recheck; a repaired answer is
 re-grounded against the task contract before replacing the candidate. Judge
 unavailability, inconclusive receipts, empty or ungrounded repairs, and
