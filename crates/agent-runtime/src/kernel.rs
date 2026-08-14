@@ -1070,15 +1070,19 @@ fn grounding_evidence_message(
     let observation = bounded_grounding_observation(&context.observation, observation_token_budget);
     Message {
         role: MessageRole::Reviewer,
-        content: serde_json::json!({
-            "type": "grounding_evidence",
-            "trust": "untrusted_tool_data",
-            "requirementId": context.requirement_id,
-            "source": context.source,
-            "observation": observation,
-            "grounding_absent": context.absent,
-        })
-        .to_string(),
+        content: {
+            let mut payload = serde_json::json!({
+                "type": "grounding_evidence",
+                "trust": "untrusted_tool_data",
+                "requirementId": context.requirement_id,
+                "source": context.source,
+                "observation": observation,
+            });
+            if context.absent {
+                payload["grounding_absent"] = serde_json::json!(true);
+            }
+            payload.to_string()
+        },
         metadata: [
             ("internal".to_string(), "true".to_string()),
             ("kind".to_string(), "grounding_evidence_capsule".to_string()),
