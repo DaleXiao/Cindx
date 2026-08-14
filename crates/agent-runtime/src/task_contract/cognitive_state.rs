@@ -614,6 +614,21 @@ fn select_focus(
     AgentCognitiveFocus::Answer
 }
 
+impl super::AgentTaskContract {
+    /// Anchor-matched absence is an observed workspace fact, so prompt-scoped
+    /// any-tool obligations accept it instead of an impossible successful read.
+    pub(crate) fn has_anchor_matched_absence_for(&self, tools: &BTreeSet<String>) -> bool {
+        self.prompt_evidence_requirements
+            .values()
+            .any(|requirement| {
+                requirement
+                    .receipt
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.absent && tools.contains(&receipt.source))
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
