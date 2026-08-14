@@ -17,6 +17,7 @@ mod agent_conductor_scheduler;
 mod agent_execution_constraint;
 mod agent_failure_terminal_runtime;
 mod agent_finalizer_runtime;
+mod direct_judge_runtime;
 mod agent_grounded_response_runtime;
 mod agent_loop_runtime;
 mod agent_model_turn_runtime;
