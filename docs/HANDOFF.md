@@ -403,7 +403,16 @@ Auto and Pro direct execution now contract a delivery judge:
 reviewer selection, the eligibility gate (never Fast), the judge prompt, the
 repair directive, and the one-repair/one-recheck cap, while
 `direct_judge_runtime` plans and resolves the judge round on desktop. Nine
-deterministic tests pin the contract and the run-context parsing. Smoke testing found that completed
+deterministic tests pin the contract and the run-context parsing.
+
+Smoke testing also reproduced a grounding death spiral: tasks requesting a
+workspace file that does not exist registered a workspace_grounding
+obligation that no successful tool call could ever satisfy, because evidence
+recording only counted succeeded calls. The kernel now records anchor-matched
+failed attempts as absent-target receipts that satisfy the obligation and are
+surfaced to the model context with a grounding_absent marker; two new
+deterministic tests pin the anchor-mandatory, epoch-checked, no-free-pass
+behavior. Smoke testing found that completed
 deliveries bypass the terminal finalizer (zero finalizer events in 312
 historical completions), so the gate now sits on the shared completion
 chokepoint (`finalize_agent_completion`), covering both direct completion and

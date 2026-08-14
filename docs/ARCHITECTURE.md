@@ -211,6 +211,14 @@ the exact permission request, checks a matching session capability or asks the
 user, executes the effect, and commits the canonical outcome. Effects use the
 physical attempt identity for replay and idempotency.
 
+Grounding obligations accept negative evidence: when a tool attempt fails
+against an input that matches the obligation's bound target anchors, the
+failure is recorded as an absent-target receipt and satisfies the obligation,
+stopping repair loops that could never succeed on a missing target. Anchor
+matching stays mandatory, so failures against unrelated inputs grant nothing;
+the absent receipt is surfaced to the model context so the answer can state
+the absence instead of fabricating content.
+
 ### 6. Completion and recovery
 
 Terminal selection cannot convert an unmet obligation into verified success. A
