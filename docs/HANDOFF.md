@@ -389,7 +389,13 @@ The workflow checkpoint now contracts one bounded verification-repair round:
 under one additional granted model turn, keeps the revision receipt readable
 for repair prompting, and caps the verification step at one repair round before
 its single recheck. Two deterministic contract tests cover the transition and
-its guards. The desktop wave driver does not schedule the repair round yet.
+its guards. The adaptive frontier driver now schedules the round: after each
+wave reconciliation it opens the repair transition, requeues the audited and
+verification candidates through `AnytimeController::requeue_for_repair`, keeps
+the revision receipt readable, and injects the unresolved findings into the
+repaired worker prompt before the single recheck. A desktop contract test
+pins the exactly-once requeue; a second revision verdict still exhausts the
+budget and falls through to the Owner.
 
 Chat request preparation also accepts an optional `generation_temperature`
 metadata override that is clamped into the provider range and carried on both

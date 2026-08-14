@@ -439,6 +439,29 @@ impl AnytimeController {
         self.finish_without_result(candidate_id, AnytimeCandidateState::Failed)
     }
 
+    pub fn requeue_for_repair(&mut self, candidate_ids: &[String]) -> Result<usize, String> {
+        let mut requeued = 0usize;
+        for candidate_id in candidate_ids {
+            let candidate = self
+                .candidates
+                .get_mut(candidate_id)
+                .ok_or_else(|| format!("unknown anytime candidate {candidate_id}"))?;
+            if !candidate.state.is_terminal() {
+                return Err(format!(
+                    "anytime candidate {candidate_id} cannot be requeued while {:?}",
+                    candidate.state
+                ));
+            }
+            candidate.state = AnytimeCandidateState::Pending;
+            requeued += 1;
+        }
+        if requeued > 0 {
+            self.recount_terminal_candidates();
+            self.recompute_best();
+        }
+        Ok(requeued)
+    }
+
     pub fn cancel(&mut self, candidate_id: &str) -> Result<(), String> {
         self.finish_without_result(candidate_id, AnytimeCandidateState::Cancelled)
     }
@@ -827,6 +850,45 @@ mod tests {
         assert_eq!(ready.len(), 2);
         assert!(ready.iter().any(|candidate| candidate.id == "worker_a"));
         assert!(ready.iter().any(|candidate| candidate.id == "worker_b"));
+    }
+
+    #[test]
+    fn verification_repair_requeues_terminal_candidates_and_keeps_gates() {
+        let mut controller = AnytimeController::new(config(ConductorStopPolicy::Quorum));
+        controller
+            .register(AnytimeCandidate::workflow("specialist", Vec::new(), 8_000))
+            .unwrap();
+        controller
+            .register(AnytimeCandidate::workflow(
+                "verify",
+                vec!["specialist".to_string()],
+                7_000,
+            ))
+            .unwrap();
+        controller.mark_running("specialist").unwrap();
+        controller
+            .observe("specialist", verdict(6_000, false))
+            .unwrap();
+        controller.mark_running("verify").unwrap();
+        controller.observe("verify", verdict(6_000, true)).unwrap();
+
+        let requeued = controller
+            .requeue_for_repair(&["specialist".to_string(), "verify".to_string()])
+            .unwrap();
+        assert_eq!(requeued, 2);
+        let ready = controller.ready_candidates();
+        assert!(ready.iter().any(|candidate| candidate.id == "specialist"));
+        assert!(ready.iter().all(|candidate| candidate.id != "verify"));
+
+        controller.mark_running("specialist").unwrap();
+        let rejected = controller
+            .requeue_for_repair(&["specialist".to_string()])
+            .expect_err("running candidates cannot be requeued");
+        assert!(rejected.contains("cannot be requeued"));
+        let unknown = controller
+            .requeue_for_repair(&["missing".to_string()])
+            .expect_err("unknown candidates are rejected");
+        assert!(unknown.contains("unknown anytime candidate"));
     }
 
     #[test]

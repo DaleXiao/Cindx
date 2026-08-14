@@ -328,6 +328,14 @@ pub(super) fn run_adaptive_frontier(
         if let AdaptiveWaveReconciliationOutcome::Commit(output) = reconciliation {
             return commit_adaptive_frontier(output, &workflow_checkpoint);
         }
+        trigger_verification_repair_round(
+            state,
+            task_id,
+            run_context,
+            collaboration_id,
+            &mut workflow_checkpoint,
+            &mut anytime_controller,
+        )?;
     }
 
     if collaboration_steer_pending(cancellation.as_ref()) {
@@ -408,6 +416,57 @@ fn commit_adaptive_frontier(
     checkpoint: &WorkflowExecutionCheckpoint,
 ) -> Result<AdaptiveFrontierOutcome, String> {
     adaptive_untrusted_partial_outcome(output, checkpoint).map(AdaptiveFrontierOutcome::Commit)
+}
+
+fn trigger_verification_repair_round(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    workflow_checkpoint: &mut WorkflowExecutionCheckpoint,
+    anytime_controller: &mut AnytimeController,
+) -> Result<(), String> {
+    let opened = open_verification_repair_round(workflow_checkpoint, anytime_controller)?;
+    let Some((verification_step_id, _audited_steps)) = opened else {
+        return Ok(());
+    };
+    append_workflow_checkpoint_event(
+        state,
+        task_id,
+        run_context,
+        collaboration_id,
+        "Collaboration verification repair round opened",
+        "degraded",
+        Some(&verification_step_id),
+        workflow_checkpoint,
+    )
+}
+
+fn open_verification_repair_round(
+    workflow_checkpoint: &mut WorkflowExecutionCheckpoint,
+    anytime_controller: &mut AnytimeController,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    let verification_step_id = workflow_checkpoint
+        .plan
+        .steps
+        .iter()
+        .filter(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
+        .find_map(|step| {
+            let verification_step = workflow_checkpoint.steps.get(&step.id)?;
+            (verification_step.status == WorkflowStepStatus::Completed
+                && verification_step.semantic.verification == orchestrator::WorkflowVerificationState::Degraded
+                && verification_step.verification_repair_rounds == 0)
+                .then(|| step.id.clone())
+        });
+    let Some(verification_step_id) = verification_step_id else {
+        return Ok(None);
+    };
+    let audited_steps = workflow_checkpoint
+        .begin_verification_repair(&verification_step_id, current_time_millis())?;
+    let mut requeue_ids = audited_steps.clone();
+    requeue_ids.push(verification_step_id.clone());
+    anytime_controller.requeue_for_repair(&requeue_ids)?;
+    Ok(Some((verification_step_id, audited_steps)))
 }
 
 pub(super) fn adaptive_untrusted_partial_outcome(
@@ -588,4 +647,148 @@ mod tests {
             .as_array()
             .is_some_and(|actions| !actions.is_empty()));
     }
+
+    #[test]
+    fn verification_repair_round_requeues_audited_steps_exactly_once() {
+        let plan = WorkflowPlanIr {
+            schema: WORKFLOW_IR_SCHEMA.to_string(),
+            workflow_id: "repair-round".to_string(),
+            objective: "repair a degraded verification".to_string(),
+            effort: "auto".to_string(),
+            policy: "adaptive".to_string(),
+            coordinator_model: "planner".to_string(),
+            prompt_profile: "baseline".to_string(),
+            steps: vec![
+                step(
+                    "specialist",
+                    "worker",
+                    Vec::new(),
+                    WorkflowOutputKind::Evidence,
+                ),
+                step(
+                    "verify",
+                    "reviewer",
+                    vec!["specialist".to_string()],
+                    WorkflowOutputKind::Verification,
+                ),
+            ],
+            budget: WorkflowBudget {
+                max_steps: 2,
+                max_models: 2,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 0,
+                max_output_tokens_per_step: 1_000,
+            },
+        };
+        let mut checkpoint = WorkflowExecutionCheckpoint::new("repair-round", plan, 1);
+        checkpoint
+            .complete_step(
+                "specialist",
+                "worker",
+                "draft work".to_string(),
+                "[]".to_string(),
+                2,
+            )
+            .unwrap();
+        let receipt = orchestrator::WorkflowVerificationReceipt {
+            schema: orchestrator::WORKFLOW_VERIFICATION_RECEIPT_SCHEMA.to_string(),
+            verdict: orchestrator::WorkflowVerificationVerdict::NeedsRevision,
+            reviewed_steps: vec!["specialist".to_string()],
+            evidence_refs: Vec::new(),
+            unresolved: vec!["missing boundary case".to_string()],
+        };
+        checkpoint
+            .complete_step_with_evidence(
+                "verify",
+                "reviewer",
+                "revision required".to_string(),
+                "[]".to_string(),
+                orchestrator::WorkflowEvidenceSummary::default(),
+                Some(receipt),
+                3,
+            )
+            .unwrap();
+        let mut controller = AnytimeController::new(orchestrator::AnytimeControllerConfig {
+            max_parallelism: 2,
+            min_successful_candidates: 1,
+            max_candidates: 4,
+            min_usable_quality_bps: 4_500,
+            stop_policy: orchestrator::ConductorStopPolicy::FirstVerified,
+            min_team_uplift_bps: 0,
+            min_distinct_contributions: 0,
+            requires_synthesis: false,
+            verification_required: true,
+        });
+        controller
+            .register(orchestrator::AnytimeCandidate::workflow(
+                "specialist",
+                Vec::new(),
+                8_000,
+            ))
+            .unwrap();
+        controller
+            .register(orchestrator::AnytimeCandidate::workflow(
+                "verify",
+                vec!["specialist".to_string()],
+                7_000,
+            ))
+            .unwrap();
+        controller.mark_running("specialist").unwrap();
+        controller
+            .observe(
+                "specialist",
+                orchestrator::AnytimeVerdict {
+                    quality_bps: 6_000,
+                    confidence_bps: 8_000,
+                    constraint_coverage_bps: 8_000,
+                    evidence_count: 1,
+                    safety_violations: 0,
+                    deliverable: true,
+                    verified: false,
+                    anchor_uplift_bps: None,
+                },
+            )
+            .unwrap();
+        controller.mark_running("verify").unwrap();
+        controller
+            .observe(
+                "verify",
+                orchestrator::AnytimeVerdict {
+                    quality_bps: 6_000,
+                    confidence_bps: 8_000,
+                    constraint_coverage_bps: 8_000,
+                    evidence_count: 1,
+                    safety_violations: 0,
+                    deliverable: true,
+                    verified: true,
+                    anchor_uplift_bps: None,
+                },
+            )
+            .unwrap();
+
+        let opened = open_verification_repair_round(&mut checkpoint, &mut controller)
+            .unwrap()
+            .expect("degraded verification should open its repair round");
+        assert_eq!(opened.0, "verify");
+        assert_eq!(opened.1, vec!["specialist".to_string()]);
+        assert_eq!(
+            checkpoint.steps["verify"].status,
+            WorkflowStepStatus::Pending
+        );
+        assert_eq!(
+            checkpoint.steps["specialist"].status,
+            WorkflowStepStatus::Pending
+        );
+        assert_eq!(checkpoint.steps["verify"].verification_repair_rounds, 1);
+        assert_eq!(checkpoint.additional_model_turns_per_step, 1);
+
+        let ready = controller.ready_candidates();
+        assert!(ready.iter().any(|candidate| candidate.id == "specialist"));
+        assert!(ready.iter().all(|candidate| candidate.id != "verify"));
+
+        let second = open_verification_repair_round(&mut checkpoint, &mut controller)
+            .unwrap();
+        assert!(second.is_none());
+    }
+
 }

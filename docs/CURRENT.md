@@ -361,10 +361,8 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   delete or restore every private control-plane file under the same user ID.
 - Current evidence does not establish general Auto/Pro superiority, successful
   GEPA self-improvement, or Fugu Ultra parity.
-- The one-repair verification round and the per-request `generation_temperature`
-  override are contracted in `orchestrator` and `model-provider` but not yet
-  consumed: no desktop driver schedules the repair round, and no producer sets
-  the temperature metadata per effort yet.
+- The per-request `generation_temperature` override is contracted in
+  `model-provider` but no producer sets the metadata per effort yet.
 - The installed `0.2.34` validation build and published `v0.2.30` archive are
   Apple Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution
   still needs the appropriate Apple signing and notarization path.
