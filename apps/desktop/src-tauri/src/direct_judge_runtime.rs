@@ -235,6 +235,35 @@ mod tests {
     }
 
     #[test]
+    fn direct_judge_context_parsing_reads_effort_and_verification_flag() {
+        let mut context = Metadata::new();
+        context.insert("agent_effort".to_string(), "auto".to_string());
+        context.insert(
+            "conductor_contract".to_string(),
+            "{\"verification_required\":true}".to_string(),
+        );
+        assert_eq!(effort_from_run_context(&context), "auto");
+        assert!(verification_required_from_run_context(&context));
+
+        let empty = Metadata::new();
+        assert_eq!(effort_from_run_context(&empty), "auto");
+        assert!(!verification_required_from_run_context(&empty));
+
+        let mut fast = Metadata::new();
+        fast.insert("agent_effort".to_string(), "fast".to_string());
+        fast.insert("conductor_contract".to_string(), "not json".to_string());
+        assert_eq!(effort_from_run_context(&fast), "fast");
+        assert!(!verification_required_from_run_context(&fast));
+
+        let mut no_flag = Metadata::new();
+        no_flag.insert(
+            "conductor_contract".to_string(),
+            "{\"verification_required\":false}".to_string(),
+        );
+        assert!(!verification_required_from_run_context(&no_flag));
+    }
+
+    #[test]
     fn direct_judge_output_resolution_enforces_the_receipt_contract() {
         let line = format!(
             "CINDX_DIRECT_JUDGE: {{\"schema\":\"{}\",\"verdict\":\"revise\",\"findings\":[\"gap\"]}}",
