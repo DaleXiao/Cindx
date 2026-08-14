@@ -26,6 +26,13 @@ pub enum PromptEvolutionStrategy {
 }
 
 impl AgentPolicy {
+    pub fn generation_temperature(self) -> Option<&'static str> {
+        match self {
+            Self::Pro => None,
+            Self::Fast | Self::Auto => Some("0"),
+        }
+    }
+
     pub fn parse_ingress(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "fast" => Self::Fast,
@@ -180,5 +187,12 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<AgentPolicy>("\"future\"").is_err());
+    }
+
+    #[test]
+    fn generation_temperature_pins_deterministic_sampling_below_pro() {
+        assert_eq!(AgentPolicy::Fast.generation_temperature(), Some("0"));
+        assert_eq!(AgentPolicy::Auto.generation_temperature(), Some("0"));
+        assert_eq!(AgentPolicy::Pro.generation_temperature(), None);
     }
 }
