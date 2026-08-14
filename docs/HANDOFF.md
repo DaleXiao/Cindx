@@ -402,8 +402,8 @@ Auto and Pro direct execution now contract a delivery judge:
 (`CINDX_DIRECT_JUDGE`, `pass`/`revise` with findings), the model-distinct
 reviewer selection, the eligibility gate (never Fast), the judge prompt, the
 repair directive, and the one-repair/one-recheck cap, while
-`direct_judge_runtime` plans and resolves the judge round on desktop. Eight
-deterministic tests pin the contract. Smoke testing found that completed
+`direct_judge_runtime` plans and resolves the judge round on desktop. Nine
+deterministic tests pin the contract and the run-context parsing. Smoke testing found that completed
 deliveries bypass the terminal finalizer (zero finalizer events in 312
 historical completions), so the gate now sits on the shared completion
 chokepoint (`finalize_agent_completion`), covering both direct completion and
