@@ -110,6 +110,7 @@ mod prompt_evolution_hot_state;
 mod prompt_evolution_models;
 mod prompt_evolution_projection_contract;
 mod prompt_evolution_read_model;
+mod prompt_evolution_admission_runtime;
 mod prompt_evolution_runtime;
 mod prompt_evolution_store_runtime;
 mod prompt_evolution_transfer_outbox;

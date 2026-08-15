@@ -558,11 +558,16 @@ paired/replay/execution credit, no latency/token/cost claims, judge reward as
 the quality proxy); the promotion gate never reads PromptFitness, so this
 path cannot reach production promotion through fitness alone. The ten
 deterministic `direct-judge-outcome-contract` tests join `ci-contract`,
-`control-plane`, and `full`. The channel stays shadow-only: recording is
-best-effort and provider-free, and no routing, prompt-evolution runtime loop,
-memory, canary, or serving behavior changed. Wiring admitted fitness into the
-prompt-evolution runtime loop remains future work; no provider evaluation was
-run.
+`control-plane`, and `full`. The prompt-evolution read path is wired
+best-effort through `prompt_evolution_admission_runtime`: the
+`prompt_evolution.json` configuration switch defaults off, resolution
+revalidates the journal, receipt, window digest, and approval at every read,
+any failure falls back to no admitted signal, and the admitted block rides on
+the evolution effort state without touching champion or convergence
+mathematics. The channel stays shadow-only: recording is best-effort and
+provider-free, and no routing, memory, canary, promotion, or serving behavior
+changed. Semantic consumption of admitted windows (per-profile attribution
+for mutation selection) remains future work; no provider evaluation was run.
 
 ## Blocking Fact
 
@@ -581,16 +586,16 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 One approved direction from the execution-grounded verification program
 remains (bounded read-only parallel exploration, the shadow judge-outcome
-plumbing, and the review-admission contract are complete in the current
-source and documented above):
+plumbing, the review-admission contract, and the default-off runtime read
+wiring are complete in the current source and documented above):
 
-1. Admitted-fitness runtime consumption. The review-admission contract and
-   the conservative PromptFitness mapping exist but the prompt-evolution
-   runtime loop reads nothing from them. The next step wires admitted
-   windows into the shadow champion/convergence path with an explicit
-   configuration flag that defaults off, keeps admission digests verifiable
-   at read time, and retains the promotion gate's scientific-evidence
-   requirement unchanged.
+1. Semantic consumption of admitted windows. The admitted fitness block is
+   resolved and exposed on the evolution effort state, but nothing selects on
+   it. Signals currently carry no prompt-profile attribution, so the next
+   step adds bounded per-profile attribution to the shadow signal schema (or
+   a censored aggregate policy), then consumes admitted windows in shadow
+   mutation reflection under the existing default-off switch — with its own
+   contract tests and no change to the promotion gate.
 
 Do not start the change in the middle of an unrelated session; it needs its
 own contract tests and documentation pass.
