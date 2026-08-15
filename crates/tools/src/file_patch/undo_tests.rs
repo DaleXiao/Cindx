@@ -77,6 +77,11 @@ fn patch_undo_capture_failure_does_not_block_the_patch() {
 
     assert_eq!(result.status, ToolOutcomeStatus::Succeeded);
     assert_eq!(fs::read_to_string(&path).unwrap(), "next content");
-    assert!(!result.metadata.contains_key("undo_action"));
+    assert_eq!(
+        result.metadata.get("undo_action").map(String::as_str),
+        Some("patched"),
+        "the change stays disclosed in the undo history even when capture failed"
+    );
     assert!(!result.metadata.contains_key("undo_before_path"));
+    assert!(!result.metadata.contains_key("undo_before_sha256"));
 }
