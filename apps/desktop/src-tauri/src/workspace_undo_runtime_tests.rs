@@ -259,6 +259,39 @@ fn undo_patch_restores_prior_content() {
 }
 
 #[test]
+fn patch_without_undo_snapshot_is_disclosed_not_undoable() {
+    let fixture = MutationFixture::new("patch-disclosed");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-patch",
+            tool: "file.patch",
+            path: "src/lib.rs",
+            action: "patched",
+            prior: None,
+            after: b"fn new() {}",
+        },
+    );
+
+    let state = get_workspace_undo_state_for_session(&store, &fixture.workspace, SESSION)
+        .expect("state should load");
+    assert_eq!(state.entries.len(), 1);
+    assert!(!state.entries[0].undoable);
+    assert!(!state.can_undo);
+
+    let error = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect_err("undo should be refused when the capture failed");
+    assert!(error.contains("no undo snapshot"));
+    assert_eq!(
+        fs::read(fixture.workspace.join("src/lib.rs")).unwrap(),
+        b"fn new() {}"
+    );
+}
+
+#[test]
 fn redo_reapplies_undone_change() {
     let fixture = MutationFixture::new("redo");
     let mut store = event_sequence_store(&fixture.database);
