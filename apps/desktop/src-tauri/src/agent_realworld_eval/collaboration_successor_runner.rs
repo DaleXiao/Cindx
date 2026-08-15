@@ -41,7 +41,9 @@ const AUTHORIZATION_ENV: &str = "CINDX_COLLABORATION_SUCCESSOR_AUTHORIZATION";
 const OUTPUT_ROOT_ENV: &str = "CINDX_COLLABORATION_SUCCESSOR_OUTPUT_ROOT";
 const AUTHORIZE_FLAG: &str = "--authorize-once";
 const AUTHORIZATION_TTL_MS: u64 = 15 * 60 * 1_000;
-const MAX_RUNNER_BYTES: u64 = 512 * 1024 * 1024;
+// Defensive load bound for a runner image, not an evidence parameter; real
+// runner binaries are far smaller and absurd images still fail closed.
+const MAX_RUNNER_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub(in super::super) fn run_authorize() -> Result<(), String> {
     require_authorize_arguments(std::env::args_os())?;

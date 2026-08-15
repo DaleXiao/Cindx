@@ -66,7 +66,9 @@ pub(super) fn evaluate_gate_a(
         .iter()
         .filter(|pair| {
             let receipt = &pair.receipt;
-            receipt.candidate.verification.passed < receipt.parent.verification.passed
+            let candidate_regressed_verification =
+                !receipt.candidate.verification.passed && receipt.parent.verification.passed;
+            candidate_regressed_verification
                 || receipt.candidate.deterministic_score + f64::EPSILON
                     < receipt.parent.deterministic_score
                 || receipt.reviewer_score_candidate + 0.05 < receipt.reviewer_score_parent
