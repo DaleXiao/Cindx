@@ -536,6 +536,24 @@ observation-to-scoring link only and admits no Fugu parity or product-quality
 claim. The consumed one-shot authorities (V12, Delivery Verification v1–v4,
 Goal 3E) remain unchanged.
 
+Real reward projection into prompt evolution has its shadow plumbing in the
+current source. At terminal finalization the recorded
+`direct_judge_disposition` plus the task contract's mutation count,
+post-mutation verification state, verification policy, and grounded basis are
+projected into a typed `cindx.agent.direct-judge-outcome.v1` receipt with a
+deterministic integer reward rule: only an explicit judge pass earns positive
+credit (halved when required post-mutation verification is missing), judged
+failures remain zero-score evidence, and unjudged completions are censored
+out of every denominator. Validated receipts feed
+`cindx.agent.direct-judge-fitness-signal.v1` entries appended to a private
+capped journal next to the app data root; the six deterministic
+`direct-judge-outcome-contract` tests join `ci-contract`, `control-plane`,
+and `full`. The channel stays shadow-only: the summary is permanently
+`promotion_eligible=false`, recording is best-effort and provider-free, and
+no routing, prompt-evolution consumer, memory, canary, or serving behavior
+changed. An independent review receipt that admits these records into fitness
+consumption remains future work; no provider evaluation was run.
+
 ## Blocking Fact
 
 V12 did not produce a causal result:
@@ -552,14 +570,15 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 ## Next High-Value Goal
 
 One approved direction from the execution-grounded verification program
-remains (bounded read-only parallel exploration is complete in the current
-source and documented above):
+remains (bounded read-only parallel exploration and the shadow judge-outcome
+plumbing are complete in the current source and documented above):
 
-1. Real reward into prompt evolution. The judge disposition is recorded on
-   the completion context (`direct_judge_disposition`); the next step is to
-   project it plus post-mutation verification success into outcome evidence
-   and use it as prompt-evolution fitness, keeping the shadow-only evidence
-   boundary until an independent review admits a record.
+1. Review-admitted fitness consumption. The shadow judge-outcome receipts and
+   fitness-signal journal exist but nothing consumes them. The next step is an
+   independently bound review receipt that admits a bounded journal window
+   into prompt-evolution fitness (fitness.rs), keeping the shadow boundary
+   until the receipt validates and retaining the permanently
+   promotion-ineligible summary for every unadmitted window.
 
 Do not start the change in the middle of an unrelated session; it needs its
 own contract tests and documentation pass.
