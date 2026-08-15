@@ -7,7 +7,7 @@ pub(crate) fn direct_judge_shadow_journal_path() -> PathBuf {
     direct_judge_shadow_journal_path_for(&app_data_root())
 }
 
-fn direct_judge_shadow_journal_path_for(data_root: &Path) -> PathBuf {
+pub(crate) fn direct_judge_shadow_journal_path_for(data_root: &Path) -> PathBuf {
     data_root
         .join("prompt-evolution")
         .join(DIRECT_JUDGE_SHADOW_JOURNAL_FILE)
@@ -99,7 +99,6 @@ fn read_direct_judge_shadow_journal_lines(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
 pub(crate) fn load_direct_judge_shadow_signals(
     path: &Path,
 ) -> Result<Vec<agent_application::DirectJudgeFitnessSignalV1>, String> {
@@ -115,9 +114,7 @@ pub(crate) fn load_direct_judge_shadow_signals(
 /// Admits the bounded journal window into prompt-evolution fitness when the
 /// approving review receipt binds exactly that window. Returns the admission
 /// record and its conservative PromptFitness mapping; both remain ineligible
-/// for production promotion. Runtime consumption wiring is future work, so
-/// the seam is contract-tested only.
-#[cfg(test)]
+/// for production promotion.
 pub(crate) fn admit_direct_judge_shadow_fitness(
     journal_path: &Path,
     review_receipt_json: &str,

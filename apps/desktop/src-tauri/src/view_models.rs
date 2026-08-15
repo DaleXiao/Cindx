@@ -517,6 +517,9 @@ pub(crate) struct PromptEvolutionEffortState {
     pub(crate) dataset_holdout_cases: usize,
     pub(crate) required_paired_runs: usize,
     pub(crate) required_replay_runs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) admitted_direct_judge_fitness:
+        Option<crate::prompt_evolution_admission_runtime::PromptEvolutionAdmissionState>,
 }
 
 #[derive(Debug, Clone, Serialize)]

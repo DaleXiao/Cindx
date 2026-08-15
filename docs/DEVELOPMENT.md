@@ -124,7 +124,13 @@ admission record hardcodes `production_eligible=false` and
 `promotion_eligible=false`. The desktop recorder appends signals to a private
 capped journal best-effort and never disturbs delivery; the desktop admission
 glue maps an admitted window into the conservative prompt-evolution fitness
-shape, and its contract tests run inside the desktop suite. It is included in
+shape, and its contract tests run inside the desktop suite. The
+prompt-evolution read path wires the admitted window through
+`prompt_evolution_admission_runtime`: a `prompt_evolution.json` configuration
+switch (off by default; corrupt configuration falls back to off) gates
+resolution of the journal plus review receipt, validates both at every read,
+and exposes the admitted fitness block on the evolution effort state;
+champion and convergence mathematics are unchanged. It is included in
 `ci-contract`, `control-plane`, and `full`.
 
 `fugu-pilot-contract` runs the provider-free `fugu_pilot_lab` selftest bound to

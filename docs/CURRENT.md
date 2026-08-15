@@ -91,7 +91,10 @@ provider call, and is not admitted to routing, promotion, memory, canary, or
 serving. An independent review receipt binds the exact journal-window digest
 and an explicit decision; only its admission maps the window into a
 conservative prompt-evolution fitness shape that remains production- and
-promotion-ineligible. Grounding obligations also accept anchor-matched failed tool attempts
+promotion-ineligible. The prompt-evolution read path resolves that admitted
+window best-effort when `prompt_evolution.json` in the app support directory
+enables it (off by default), revalidating the receipt and window digest at
+every read; any failure falls back to no admitted signal. Grounding obligations also accept anchor-matched failed tool attempts
 as absent-target evidence, so a task whose requested workspace file does not
 exist fails closed on content but no longer spins through unsatisfiable
 grounding repairs.
