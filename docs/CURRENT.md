@@ -60,6 +60,16 @@ exhausts the repair budget. Invalid candidates receive bounded repair; if
 planning still fails, execution falls back to the shared foreground Owner
 without manufacturing a workflow.
 
+One bounded read-only widening is available. When the prompt explicitly forbids
+all effects (`effect_authority=forbidden`), the Conductor may instead propose
+two read-only Specialist roots with distinct bounded subtasks and, optionally,
+one tool-free Verifier that is model-distinct from both and audits both roots.
+The owner-execution graph validator accepts the two-root shape only when the
+plan carries a harness-stamped read-only authorization, and it stays
+single-Specialist for every other authority or for any mutation-bearing graph.
+The widened graph remains read-only end to end; side effects still belong to the
+foreground Owner.
+
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
 effect authority does not.
