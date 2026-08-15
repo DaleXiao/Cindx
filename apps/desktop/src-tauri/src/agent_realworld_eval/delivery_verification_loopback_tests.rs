@@ -244,12 +244,22 @@ fn read_http_body(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| format!("failed to set loopback read timeout: {error}"))?;
+    // A per-read timeout alone fails closed the first time the shared test
+    // process starves the loopback dispatch thread. The journal contract under
+    // test is unaffected by retrying a slow read, so bound the whole exchange
+    // with an overall deadline instead of a single read attempt.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut received = Vec::new();
     let mut chunk = [0_u8; 4_096];
     let header_end = loop {
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|error| format!("failed to read loopback request headers: {error}"))?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => return Err(format!("failed to read loopback request headers: {error}")),
+        };
         if read == 0 {
             return Err("loopback request ended before its headers".into());
         }
@@ -276,9 +286,14 @@ fn read_http_body(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
         .checked_add(content_length)
         .ok_or_else(|| "loopback request length overflowed".to_string())?;
     while received.len() < total {
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|error| format!("failed to read loopback request body: {error}"))?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(error) => return Err(format!("failed to read loopback request body: {error}")),
+        };
         if read == 0 {
             return Err("loopback request ended before its full body".into());
         }

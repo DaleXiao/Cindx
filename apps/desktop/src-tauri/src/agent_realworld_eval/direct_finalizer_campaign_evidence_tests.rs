@@ -77,7 +77,11 @@ fn case_and_pair(
         DirectFinalizerCaseSplit::Holdout => "holdout",
     };
     let case_id = format!("{prefix}-{index}");
-    let task_class = if index % 2 == 0 { "coding" } else { "research" };
+    let task_class = if index.is_multiple_of(2) {
+        "coding"
+    } else {
+        "research"
+    };
     let parent_output = format!("parent output {case_id}");
     let candidate_output = format!("candidate output {case_id}");
     let evaluation_id = format!("evaluation-{case_id}");

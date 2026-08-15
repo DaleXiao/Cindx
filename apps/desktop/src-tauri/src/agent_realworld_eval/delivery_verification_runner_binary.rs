@@ -7,7 +7,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::process::Command;
 
-pub(super) const MAX_RUNNER_BYTES: u64 = 512 * 1024 * 1024;
+// Defensive load bound for a runner image, not an evidence parameter. Real
+// execute binaries are far smaller; the bound only fails closed absurd
+// images and must stay above the largest legitimate build artifact.
+pub(super) const MAX_RUNNER_BYTES: u64 = 1024 * 1024 * 1024;
 const CODESIGN_PATH: &str = "/usr/bin/codesign";
 const CODE_DIRECTORY_PREFIX: &str = "CandidateCDHashFull sha256=";
 
