@@ -111,3 +111,33 @@ pub(crate) fn load_direct_judge_shadow_signals(
     }
     Ok(signals)
 }
+
+/// Admits the bounded journal window into prompt-evolution fitness when the
+/// approving review receipt binds exactly that window. Returns the admission
+/// record and its conservative PromptFitness mapping; both remain ineligible
+/// for production promotion. Runtime consumption wiring is future work, so
+/// the seam is contract-tested only.
+#[cfg(test)]
+pub(crate) fn admit_direct_judge_shadow_fitness(
+    journal_path: &Path,
+    review_receipt_json: &str,
+) -> Result<
+    (
+        agent_application::DirectJudgeFitnessAdmissionV1,
+        orchestrator::PromptFitness,
+    ),
+    String,
+> {
+    let signals = load_direct_judge_shadow_signals(journal_path)?;
+    let receipt = agent_application::DirectJudgeReviewReceiptV1::from_json(review_receipt_json)
+        .map_err(|error| error.to_string())?;
+    let admission = agent_application::admit_direct_judge_fitness_window(&signals, &receipt)
+        .map_err(|error| error.to_string())?;
+    let admitted = orchestrator::AdmittedDirectJudgeFitness {
+        scored_runs: admission.scored_runs,
+        passed_runs: admission.passed_runs,
+        average_reward_bps: admission.average_reward_bps,
+    };
+    let fitness = orchestrator::admitted_direct_judge_fitness_into_prompt_fitness(&admitted);
+    Ok((admission, fitness))
+}

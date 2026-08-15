@@ -536,9 +536,9 @@ observation-to-scoring link only and admits no Fugu parity or product-quality
 claim. The consumed one-shot authorities (V12, Delivery Verification v1–v4,
 Goal 3E) remain unchanged.
 
-Real reward projection into prompt evolution has its shadow plumbing in the
-current source. At terminal finalization the recorded
-`direct_judge_disposition` plus the task contract's mutation count,
+Real reward projection into prompt evolution has its shadow plumbing and
+review-admission contract in the current source. At terminal finalization the
+recorded `direct_judge_disposition` plus the task contract's mutation count,
 post-mutation verification state, verification policy, and grounded basis are
 projected into a typed `cindx.agent.direct-judge-outcome.v1` receipt with a
 deterministic integer reward rule: only an explicit judge pass earns positive
@@ -546,13 +546,23 @@ credit (halved when required post-mutation verification is missing), judged
 failures remain zero-score evidence, and unjudged completions are censored
 out of every denominator. Validated receipts feed
 `cindx.agent.direct-judge-fitness-signal.v1` entries appended to a private
-capped journal next to the app data root; the six deterministic
-`direct-judge-outcome-contract` tests join `ci-contract`, `control-plane`,
-and `full`. The channel stays shadow-only: the summary is permanently
-`promotion_eligible=false`, recording is best-effort and provider-free, and
-no routing, prompt-evolution consumer, memory, canary, or serving behavior
-changed. An independent review receipt that admits these records into fitness
-consumption remains future work; no provider evaluation was run.
+capped journal next to the app data root. An independent
+`cindx.agent.direct-judge-review-receipt.v1` binds the exact signal-window
+digest in order plus an explicit decision; only an approving receipt matching
+that digest and window size admits the window into
+`cindx.agent.direct-judge-fitness-admission.v1`, whose counters stay
+consistent with the censor-aware summary and whose `production_eligible` and
+`promotion_eligible` flags are hardcoded false. Admission maps admitted
+statistics into the conservative prompt-evolution fitness shape (no
+paired/replay/execution credit, no latency/token/cost claims, judge reward as
+the quality proxy); the promotion gate never reads PromptFitness, so this
+path cannot reach production promotion through fitness alone. The ten
+deterministic `direct-judge-outcome-contract` tests join `ci-contract`,
+`control-plane`, and `full`. The channel stays shadow-only: recording is
+best-effort and provider-free, and no routing, prompt-evolution runtime loop,
+memory, canary, or serving behavior changed. Wiring admitted fitness into the
+prompt-evolution runtime loop remains future work; no provider evaluation was
+run.
 
 ## Blocking Fact
 
@@ -570,15 +580,17 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 ## Next High-Value Goal
 
 One approved direction from the execution-grounded verification program
-remains (bounded read-only parallel exploration and the shadow judge-outcome
-plumbing are complete in the current source and documented above):
+remains (bounded read-only parallel exploration, the shadow judge-outcome
+plumbing, and the review-admission contract are complete in the current
+source and documented above):
 
-1. Review-admitted fitness consumption. The shadow judge-outcome receipts and
-   fitness-signal journal exist but nothing consumes them. The next step is an
-   independently bound review receipt that admits a bounded journal window
-   into prompt-evolution fitness (fitness.rs), keeping the shadow boundary
-   until the receipt validates and retaining the permanently
-   promotion-ineligible summary for every unadmitted window.
+1. Admitted-fitness runtime consumption. The review-admission contract and
+   the conservative PromptFitness mapping exist but the prompt-evolution
+   runtime loop reads nothing from them. The next step wires admitted
+   windows into the shadow champion/convergence path with an explicit
+   configuration flag that defaults off, keeps admission digests verifiable
+   at read time, and retains the promotion gate's scientific-evidence
+   requirement unchanged.
 
 Do not start the change in the middle of an unrelated session; it needs its
 own contract tests and documentation pass.

@@ -5,6 +5,7 @@ mod collaboration_learning_policy;
 mod collaboration_learning_projection;
 #[cfg(feature = "collaboration-learning-offline")]
 mod collaboration_learning_replay;
+mod direct_judge_admission;
 mod direct_judge_fitness;
 mod direct_judge_outcome;
 mod loss_aware_work_queue;
@@ -79,6 +80,11 @@ pub use collaboration_learning_replay::{
     CollaborationLearningOfflineEntryV1, CollaborationLearningOfflineGenesisV1,
     CollaborationLearningOfflineReplayV1, COLLABORATION_LEARNING_OFFLINE_ENTRY_SCHEMA,
     COLLABORATION_LEARNING_OFFLINE_GENESIS_SCHEMA,
+};
+pub use direct_judge_admission::{
+    admit_direct_judge_fitness_window, direct_judge_fitness_window_digest,
+    DirectJudgeFitnessAdmissionV1, DirectJudgeReviewReceiptV1,
+    DIRECT_JUDGE_FITNESS_ADMISSION_SCHEMA, DIRECT_JUDGE_REVIEW_RECEIPT_SCHEMA,
 };
 pub use direct_judge_fitness::{
     summarize_direct_judge_fitness, DirectJudgeFitnessSignalV1, DirectJudgeFitnessSummaryV1,

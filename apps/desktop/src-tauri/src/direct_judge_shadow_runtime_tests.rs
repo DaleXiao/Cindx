@@ -1,7 +1,8 @@
 use super::*;
 use crate::direct_judge_shadow_runtime::{
-    load_direct_judge_shadow_signals, project_direct_judge_shadow_signal,
-    record_direct_judge_shadow_fitness_to, DIRECT_JUDGE_SHADOW_JOURNAL_CAPACITY,
+    admit_direct_judge_shadow_fitness, load_direct_judge_shadow_signals,
+    project_direct_judge_shadow_signal, record_direct_judge_shadow_fitness_to,
+    DIRECT_JUDGE_SHADOW_JOURNAL_CAPACITY,
 };
 use agent_core::TaskId;
 
@@ -137,4 +138,86 @@ fn shadow_fitness_journal_bounds_growth_and_reloads_for_summary() {
     assert_eq!(summary.scored_runs, agent_application::DIRECT_JUDGE_FITNESS_WINDOW);
     assert_eq!(summary.average_reward_bps, Some(10_000));
     assert!(!summary.promotion_eligible);
+}
+
+
+fn admit_window(path: &std::path::Path) -> Vec<agent_application::DirectJudgeFitnessSignalV1> {
+    for index in 0..2 {
+        let mut state = shadow_runtime_with_verified_mutation();
+        state.task_id = TaskId(format!("admit-pass-{index}"));
+        record_direct_judge_shadow_fitness_to(
+            path,
+            &state,
+            "direct_judge_passed",
+            "postcondition_verified",
+        )
+        .expect("append pass");
+    }
+    let mut state = shadow_runtime_with_verified_mutation();
+    state.task_id = TaskId("admit-censored".to_string());
+    record_direct_judge_shadow_fitness_to(path, &state, "direct_judge_not_applicable", "self_contained")
+        .expect("append censored");
+    load_direct_judge_shadow_signals(path).expect("journal loads")
+}
+
+#[test]
+fn shadow_fitness_admission_admits_only_a_bound_approving_window() {
+    let path = shadow_journal_path();
+    let signals = admit_window(&path);
+    let digest = agent_application::direct_judge_fitness_window_digest(&signals).expect("digest");
+    let receipt = agent_application::DirectJudgeReviewReceiptV1::new(
+        "a".repeat(64),
+        digest,
+        signals.len(),
+        true,
+    )
+    .expect("receipt");
+    let (admission, fitness) =
+        admit_direct_judge_shadow_fitness(&path, &receipt.to_json().expect("receipt json"))
+            .expect("admits");
+    assert_eq!(admission.window_size, 3);
+    assert_eq!(admission.scored_runs, 2);
+    assert_eq!(admission.censored_runs, 1);
+    assert_eq!(admission.average_reward_bps, 10_000);
+    assert!(!admission.production_eligible);
+    assert!(!admission.promotion_eligible);
+    assert_eq!(fitness.runs, 2);
+    assert_eq!(fitness.average_reward, 1.0);
+    assert_eq!(fitness.success_rate, 1.0);
+    assert_eq!(fitness.paired_runs, 0);
+    assert_eq!(fitness.execution_runs, 0);
+    assert_eq!(fitness.safety_violations, 0);
+}
+
+#[test]
+fn shadow_fitness_admission_fails_closed_without_approval_or_binding() {
+    let path = shadow_journal_path();
+    let signals = admit_window(&path);
+    let digest = agent_application::direct_judge_fitness_window_digest(&signals).expect("digest");
+
+    let rejecting = agent_application::DirectJudgeReviewReceiptV1::new(
+        "a".repeat(64),
+        digest.clone(),
+        signals.len(),
+        false,
+    )
+    .expect("receipt");
+    let error = admit_direct_judge_shadow_fitness(&path, &rejecting.to_json().expect("json"))
+        .expect_err("rejecting receipt must not admit");
+    assert!(error.contains("does not admit"));
+
+    let subset_digest =
+        agent_application::direct_judge_fitness_window_digest(&signals[..2]).expect("digest");
+    let foreign = agent_application::DirectJudgeReviewReceiptV1::new(
+        "a".repeat(64),
+        subset_digest,
+        2,
+        true,
+    )
+    .expect("receipt");
+    let error = admit_direct_judge_shadow_fitness(&path, &foreign.to_json().expect("json"))
+        .expect_err("foreign window must not admit");
+    assert!(error.contains("does not bind"));
+
+    assert!(admit_direct_judge_shadow_fitness(&path, "not json").is_err());
 }
