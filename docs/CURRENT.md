@@ -82,7 +82,13 @@ single-line receipt (`pass` or `revise` with findings). A `revise` verdict permi
 and one recheck; Fast runs and collaboration workflow products are never
 judged. Judge unavailability, inconclusive receipts, empty or ungrounded
 repairs, and fallback candidates keep the original answer and record a
-`direct_judge_disposition` instead of blocking delivery. Grounding obligations also accept anchor-matched failed tool attempts
+`direct_judge_disposition` instead of blocking delivery. At finalization the
+disposition plus the task contract's mutation and post-mutation verification
+facts are projected into a typed shadow outcome receipt
+(`cindx.agent.direct-judge-outcome.v1`) and appended to a private
+capped fitness-signal journal; the channel is shadow-only, consumes no
+provider call, and is not admitted to routing, promotion, memory, canary, or
+serving without an independent review receipt. Grounding obligations also accept anchor-matched failed tool attempts
 as absent-target evidence, so a task whose requested workspace file does not
 exist fails closed on content but no longer spins through unsatisfiable
 grounding repairs.

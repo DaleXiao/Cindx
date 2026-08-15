@@ -46,6 +46,7 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
@@ -96,6 +97,7 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
@@ -189,6 +191,7 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
@@ -668,6 +671,25 @@
       "required_output": [
         "test result: ok. 9 passed; 0 failed",
         "cindx.agent.externally-verified-outcome.v1"
+      ]
+    },
+    {
+      "id": "direct-judge-outcome-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-application",
+        "direct_judge_outcome_contract_",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 6 passed; 0 failed",
+        "cindx.agent.direct-judge-outcome.v1",
+        "cindx.agent.direct-judge-fitness-summary.v1"
       ]
     },
     {

@@ -109,6 +109,18 @@ integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
 
+`direct-judge-outcome-contract` runs six provider-free agent-application
+tests over the shadow outcome projection wired at terminal finalization. It
+pins all eleven recorded `direct_judge_disposition` values to their typed
+families with unknown values failing closed, checks the monotone integer
+reward rule (verified pass, pass with unverified mutations under a required
+verification policy, judged failure, censored unjudged), rejects tampered or
+schema-drifted receipts, and proves the fitness-signal summary window stays
+deduplicated, bounded, censor-aware, and permanently promotion-ineligible.
+The desktop recorder appends signals to a private capped journal best-effort
+and never disturbs delivery; its contract tests run inside the desktop suite.
+It is included in `ci-contract`, `control-plane`, and `full`.
+
 `fugu-pilot-contract` runs the provider-free `fugu_pilot_lab` selftest bound to
 `benchmarks/fugu/fugu-pilot-v1.json` and
 `benchmarks/fugu/fugu-pilot-protocol-v1.json`. It pins the pilot suite to the
