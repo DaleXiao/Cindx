@@ -34,6 +34,7 @@ Passing a lower level does not imply a higher-level result.
 | Delivery Verification v3 | frozen v3 authority, `0.2.34` | `INVALID_EVIDENCE`, `CENSORED`. Its first calibration Reviewer call made one provider attempt and returned empty content. Journal validation rejected the bound zero-byte response artifact before accepting a terminal call receipt, so no case completed, holdout never opened, and no matched pair or scientific conclusion exists. The protocol is consumed and cannot be retried. |
 | Delivery Verification v4 | `275868e`, `0.2.34` | `INVALID_EVIDENCE`, `INCONCLUSIVE`. The zero-byte artifact fix retained the first Reviewer response and its exact receipt, but the call was non-retryable `invalid_output` because it was not a complete tool-free answer. Case 1 became structural, the other 31 cases never started, and zero matched pairs exist. The one-shot authority is consumed and cannot be retried. |
 | GPQA matched diagnostic | `0.1.78` | On 12 frozen GPQA-Diamond questions, Direct scored `10/12`; Auto and Pro each scored `8/12`. This predates current code and is a reasoning diagnostic, not a current product baseline. |
+| Fugu pilot v1 | `556d952`, `0.2.42` | Harness-link verification over the frozen 12-case GPQA-Diamond matrix: 36 runs started, 35 completed with scored answers (cindx_auto 8/12, cindx_pro 9/12, cindx_fast 11/12); one direct run exhausted the 300-second treatment deadline, and the fail-closed projection marked the cindx_fast cell ineligible, leaving the pilot not ready. The raw report scored 66.7% / 75.0% / 91.7% descriptively only. This is pipeline verification plus a resource-boundary finding, not a parity, uplift, or model-quality claim, and the attempt is consumed; rerunning to rescue the ineligible cell is prohibited. |
 | DashScope thinking-default diagnostic | `f0511e2`, `0.2.36` | Level 3 provider diagnostic. The configured `qwen3.8-max`, `deepseek-v4-flash-0731`, and `glm-5.2-fast-preview` models spend the bounded output budget on provider-side reasoning by default and return empty content; explicit `enable_thinking: false` restores bounded responses. This matches the empty-content failures observed in the consumed Delivery Verification v3/v4 Reviewer calls and motivated the shipped request-builder and probe fix. Credential rotation during measurement also produced 401 responses that an earlier harness mis-scored as model output; transport/credential failures must stay classified apart from model answers. No quality or uplift claim. |
 | Verifier-repair narrow diagnostic | `8d6ce95`, `0.2.36` | Level 3 only. On a private 18-case frozen arithmetic suite, a deterministic fast generator produced clean output in 23/40 attempts; for the 17 deterministic defective samples, one independent fast-model repair round fixed 6/6 multi-case structural defects and only 3/11 single-case spec-ambiguity defects. Artifacts were not retained and the cases are not tracked, so this motivates the shipped bounded verification-repair round and the direct-judge contract but proves no product behavior change or uplift. |
 
@@ -90,6 +91,17 @@ pilot run is a separate explicit authorization step and must not revise the
 frozen case authority, prompt-profile digests, run order, or budgets to fit a
 result. `provider_backed_fugu_external_effect_pilot` remains the provider-backed
 harness surface and is still `#[ignore]`-gated.
+
+The pilot was then authorized and consumed once on source `556d952`. All 36
+runs started; 35 completed with scored answers. The single failure was one
+`direct_default` Chemistry run that exhausted the 300-second treatment
+deadline before producing a parseable answer, so the fail-closed projection
+marked the `cindx_fast` cell ineligible and the pilot not ready. The raw
+report and its execution record remain private outside the tracked tree. No
+parity, uplift, or model-quality claim is admitted; the pilot verifies the
+case-to-observation-to-scoring link and surfaces a real resource boundary.
+This attempt is consumed, and a rerun to rescue the ineligible cell is
+prohibited.
 
 ## GEPA and Self-Improvement
 

@@ -569,6 +569,20 @@ provider-free, and no routing, memory, canary, promotion, or serving behavior
 changed. Semantic consumption of admitted windows (per-profile attribution
 for mutation selection) remains future work; no provider evaluation was run.
 
+The Fugu pilot authority was then authorized and consumed once on source
+`556d952` after the user's explicit go. The pinned GPQA-Diamond file
+(`41d1213c...`) was verified against the suite case authority before
+execution. All 36 runs started and 35 completed with scored answers
+(cindx_auto 8/12, cindx_pro 9/12, cindx_fast 11/12); one `direct_default`
+Chemistry run exhausted the 300-second treatment deadline, the fail-closed
+projection marked the `cindx_fast` cell ineligible, and the pilot closed not
+ready. The raw report, observations rejection, authorization, and execution
+record remain private outside the tracked tree. This is harness-link
+verification plus a resource-boundary finding: direct single-model calls
+averaged far higher latency than the Auto and Pro paths on this provider. It
+admits no parity, uplift, or model-quality claim, and rerunning to rescue the
+ineligible cell is prohibited.
+
 ## Blocking Fact
 
 V12 did not produce a causal result:
