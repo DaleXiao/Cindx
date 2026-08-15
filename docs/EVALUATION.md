@@ -78,6 +78,19 @@ control, equivalent provider and tool access, position balancing, complete
 resource accounting, retained failures, safety qualification, and confidence
 intervals. No current retained run satisfies that bar.
 
+A bounded pilot authority is frozen but not executed. The suite is
+`benchmarks/fugu/fugu-pilot-v1.json` and the protocol manifest is
+`benchmarks/fugu/fugu-pilot-protocol-v1.json`, both validated by the
+provider-free `fugu-pilot-contract` gate. The pilot reuses the pinned 12-case
+GPQA-Diamond sample and the cindx_fast / cindx_auto / cindx_pro single-replicate
+matrix, and it verifies only the case-to-observation-to-scoring pipeline. Its
+purpose field is `harness_link_verification`; it forbids parity, uplift, and
+promotion claims and carries `execution_authorized=false`. A provider-backed
+pilot run is a separate explicit authorization step and must not revise the
+frozen case authority, prompt-profile digests, run order, or budgets to fit a
+result. `provider_backed_fugu_external_effect_pilot` remains the provider-backed
+harness surface and is still `#[ignore]`-gated.
+
 ## GEPA and Self-Improvement
 
 The product contains causal assignment, train/holdout gates, stable/canary

@@ -514,6 +514,28 @@ realworld-eval surface (one boolean comparison, one argument-count allow, one
 `is_multiple_of`, one empty-string comparison, and one dead branch in a test
 fixture); all of them were behavior-preserving.
 
+A bounded Fugu pilot authority is now frozen, provider-free, and unexecuted.
+`benchmarks/fugu/fugu-pilot-v1.json` pins the 12-case GPQA-Diamond matched
+sample (the same SHA-256-pinned source revision, baseline manifest, and prompt
+profiles used by the historical 0.1.78 diagnostic) and the cindx_fast /
+cindx_auto / cindx_pro single-replicate matrix;
+`benchmarks/fugu/fugu-pilot-protocol-v1.json` binds the exact suite SHA-256,
+case authority, prompt-profile digests, harness entrypoint and treatment
+bindings, run order, and bounded budgets, and keeps
+`execution_authorized=false` with parity, uplift, and promotion claims
+forbidden. `crates/orchestrator-eval` gains the pilot suite/protocol/plan/
+projection/evaluation contracts, the external-effect-report-to-cell projection
+(wire-contract mirror of the raw report v3 JSON), and a `fugu_pilot_lab`
+example whose `--selftest` mode powers the provider-free
+`fugu-pilot-contract` gate. The desktop crate stays free of research-crate
+dependencies per the integration boundary; the existing
+`provider_backed_fugu_external_effect_pilot` harness is unchanged and remains
+`#[ignore]`-gated. The gate joins `ci-contract`, `control-plane`, and `full`.
+No provider evaluation was run; the pilot verifies the
+observation-to-scoring link only and admits no Fugu parity or product-quality
+claim. The consumed one-shot authorities (V12, Delivery Verification v1–v4,
+Goal 3E) remain unchanged.
+
 ## Blocking Fact
 
 V12 did not produce a causal result:

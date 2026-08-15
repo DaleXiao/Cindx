@@ -109,6 +109,19 @@ integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
 
+`fugu-pilot-contract` runs the provider-free `fugu_pilot_lab` selftest bound to
+`benchmarks/fugu/fugu-pilot-v1.json` and
+`benchmarks/fugu/fugu-pilot-protocol-v1.json`. It pins the pilot suite to the
+frozen 12-case GPQA-Diamond sample and the cindx_fast / cindx_auto / cindx_pro
+single-replicate matrix, proves the protocol manifest binds the exact suite
+SHA-256 plus the pinned case authority and prompt-profile digests, keeps the
+run plan equal to the protocol run order, projects a bound synthetic
+external-effect report into a ready pilot with zero safety violations, and
+fails closed on a missing run, a drifted case authority, or an unknown
+treatment label. The tracked protocol stays `execution_authorized=false`, so
+the gate verifies the observation-to-scoring link, not parity, uplift, or
+promotion. It is included in `ci-contract`, `control-plane`, and `full`.
+
 `workspace-undo-contract` runs 10 provider-free desktop tests covering undo
 entry projection from tool events, undo/redo of created, overwritten, and
 patched files, disclosure of a capture failure as a not-undoable entry,
