@@ -212,10 +212,18 @@ pub(super) fn route_workflow_proposal_from_context(
             .ok_or_else(|| "run-decision workflow proposal is missing its decision".to_string())?,
     )
     .map_err(|error| format!("run-decision workflow proposal has an invalid decision: {error}"))?;
-    decision.validate(allowed_models, MAX_ADAPTIVE_WORKFLOW_AGENTS)?;
+    decision.validate(
+        allowed_models,
+        MAX_ADAPTIVE_WORKFLOW_AGENTS,
+        crate::adaptive_conductor_runtime::parallel_read_only_authorized(run_context),
+    )?;
     let proposal = serde_json::from_str::<WorkflowPlanProposal>(encoded)
         .map_err(|error| format!("run-decision workflow proposal is invalid: {error}"))?;
-    proposal.validate(&decision, allowed_models)?;
+    proposal.validate(
+        &decision,
+        allowed_models,
+        crate::adaptive_conductor_runtime::parallel_read_only_authorized(run_context),
+    )?;
     Ok(Some(proposal))
 }
 

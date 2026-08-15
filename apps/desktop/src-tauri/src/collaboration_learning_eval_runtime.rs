@@ -399,6 +399,12 @@ fn assignment_metadata(
             if collaboration_id.trim().is_empty() {
                 return Err("workflow assignment requires a collaboration id".to_string());
             }
+            if workflow_plan.parallel_read_only_specialists {
+                return Err(
+                    "OneReadOnlySpecialist assignments cannot use the two-specialist read-only graph"
+                        .to_string(),
+                );
+            }
             workflow_plan.validate_owner_execution_graph(plan_required_independent_verifier)?;
             if input.policy.verification == CollaborationVerificationV1::AlwaysIndependent
                 && !workflow_plan
@@ -628,6 +634,7 @@ mod tests {
             policy: "adaptive".to_string(),
             coordinator_model: "owner-model".to_string(),
             prompt_profile: "baseline".to_string(),
+            parallel_read_only_specialists: false,
             steps,
             budget: WorkflowBudget {
                 max_steps: 3,

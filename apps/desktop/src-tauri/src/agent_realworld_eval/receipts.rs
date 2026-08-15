@@ -1057,6 +1057,7 @@ mod tests {
             policy: "best_of_n".to_string(),
             coordinator_model: "configured-model".to_string(),
             prompt_profile: genome.id.clone(),
+            parallel_read_only_specialists: false,
             steps: proposal
                 .steps
                 .iter()

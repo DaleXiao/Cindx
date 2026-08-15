@@ -174,6 +174,7 @@ mod tests {
                 policy: "best_of_n".to_string(),
                 coordinator_model: "conductor".to_string(),
                 prompt_profile: "profile-1".to_string(),
+                parallel_read_only_specialists: false,
                 steps: vec![WorkflowPlanStep {
                     id: "research".to_string(),
                     role: "worker".to_string(),

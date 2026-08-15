@@ -45,8 +45,11 @@ impl MatchedRoutePlanAnchor {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        self.workflow_plan
-            .validate_owner_execution_graph(&self.conductor_candidate, &allowed_models)
+        self.workflow_plan.validate_owner_execution_graph(
+            &self.conductor_candidate,
+            &allowed_models,
+            false,
+        )
     }
 
     pub(crate) fn write_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {

@@ -519,6 +519,7 @@ mod tests {
             policy: "adaptive".to_string(),
             coordinator_model: "planner".to_string(),
             prompt_profile: "baseline".to_string(),
+            parallel_read_only_specialists: false,
             steps: vec![
                 step(
                     "candidate",
@@ -595,6 +596,7 @@ mod tests {
             policy: "adaptive".to_string(),
             coordinator_model: "planner".to_string(),
             prompt_profile: "baseline".to_string(),
+            parallel_read_only_specialists: false,
             steps: vec![
                 step(
                     "specialist",
@@ -658,6 +660,7 @@ mod tests {
             policy: "adaptive".to_string(),
             coordinator_model: "planner".to_string(),
             prompt_profile: "baseline".to_string(),
+            parallel_read_only_specialists: false,
             steps: vec![
                 step(
                     "specialist",
@@ -790,5 +793,4 @@ mod tests {
             .unwrap();
         assert!(second.is_none());
     }
-
 }
