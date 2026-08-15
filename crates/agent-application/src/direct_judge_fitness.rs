@@ -252,10 +252,7 @@ mod tests {
         assert_eq!(summary.passed_runs, 2);
         assert_eq!(summary.revise_exhausted_runs, 1);
         assert_eq!(summary.fail_open_runs, 1);
-        assert_eq!(
-            summary.average_reward_bps,
-            Some(15_000 / 4)
-        );
+        assert_eq!(summary.average_reward_bps, Some(15_000 / 4));
         assert_eq!(summary.mutation_verified_rate_bps, Some(3 * 10_000 / 4));
         assert!(!summary.promotion_eligible);
     }
