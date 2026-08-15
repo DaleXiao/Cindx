@@ -172,6 +172,20 @@ optionally one tool-free and model-distinct Independent Verifier, and one final
 compatibility sink. The Specialist receives only its admitted read-only catalog.
 Side effects remain with the foreground Owner.
 
+One bounded widening exists for the read-only request class. When preparation
+persisted a forbidden prompt effect authority (`route_effect_authority =
+forbidden`), the Conductor may propose two dependency-free read-only Specialist
+roots with distinct bounded subtasks, optionally one tool-free Verifier that is
+model-distinct from both and audits exactly both roots, and the same final
+tool-free sink depending on the Verifier or on both roots. The materializing
+harness stamps `parallel_read_only_specialists` on the plan only under that
+authorization and only when the materialized graph actually carries two roots;
+owner-graph validation reads the stamp from the plan itself, so checkpoint
+restore and Owner handoff stay fail-closed without external context. Any other
+authority, a missing receipt, or a graph carrying mutations keeps the
+single-Specialist invariant and rejects a second Specialist. Both roots
+schedule within the contract branch budget in the anytime controller.
+
 A completed verification verdict of `needs_revision` opens at most one bounded
 repair round through `WorkflowExecutionCheckpoint::begin_verification_repair`:
 the audited steps return to a pending state under one additional granted model

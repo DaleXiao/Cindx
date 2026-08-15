@@ -465,7 +465,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 6 passed; 0 failed"
+        "test result: ok. 7 passed; 0 failed"
       ]
     },
     {
@@ -1099,7 +1099,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 9 passed; 0 failed",
+        "test result: ok. 10 passed; 0 failed",
         "cindx.workspace-undo-registry.v1"
       ]
     },

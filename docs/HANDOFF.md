@@ -55,7 +55,9 @@ Never use `reset --hard` or force-push to synchronize this checkout.
   model-distinct Independent Verifier, then a deterministic checkpoint handoff
   to the Owner. It has no competing anchor, reviewer tournament, or model
   synthesis layer. A `needs_revision` verdict opens at most one bounded repair
-  round before a single recheck.
+  round before a single recheck. Under a forbidden effect authority only, the
+  graph may widen to two read-only Specialist roots audited by one
+  model-distinct Verifier; every other authority stays single-Specialist.
 - One shared kernel owns model/tool turns, permission suspension, steer,
   recovery, and terminal commit.
 - Workspace retrieval, durable memory, task graph, and prompt evolution are
@@ -346,7 +348,7 @@ Workspace undo/redo is wired into the file tools and the session surface:
 contract), and a per-session undo registry stored as a CAS-protected read
 model supports last-in-first-out undo/redo with content-hash conflict guards.
 Composer renders Undo/Redo controls when a session has recorded changes. The
-9-test `workspace-undo-contract` gate joins `quick`, `ci-contract`,
+10-test `workspace-undo-contract` gate joins `quick`, `ci-contract`,
 `control-plane`, and `full`. No provider evaluation was run; route selection,
 permission authority, budgets, learning consumers, and serving are unchanged.
 
@@ -466,6 +468,52 @@ the pure `composerSizingModel.ts` and `attachmentLimitsModel.ts` modules with
 is unchanged; this reduces untested logic inside components without touching
 the gate-pinned Composer assertions.
 
+`file.patch` now discloses a successful patch in the undo history even when
+its before-snapshot capture fails: `undo_action=patched` is always emitted,
+and only `undo_before_path`/`undo_before_sha256` are withheld, matching the
+`file.write` disclosure model. Previously the whole entry vanished from the
+undo projection. The projected entry is reported `undoable=false`, and an
+undo attempt fails closed with the no-snapshot error. One tool contract
+assertion was updated and one runtime test added, bringing
+`workspace-undo-contract` to 10 tests. No provider evaluation was run;
+routing, budgets, permissions, and serving are unchanged.
+
+Bounded read-only parallel exploration is complete in the current source.
+Under a forbidden prompt effect authority only, the owner-execution graph now
+accepts two dependency-free read-only Specialist roots with distinct subtasks,
+optionally one tool-free Verifier that is model-distinct from both and audits
+exactly both roots, and the same final tool-free sink. The materializing
+harness stamps `parallel_read_only_specialists` on the plan only under that
+authorization and only for an actual two-root graph; the validator reads the
+stamp from the plan itself, so checkpoint restore and Owner handoff stay
+fail-closed without external context. Conductor prompts advertise the widened
+shape only under the forbidden authority; decision and proposal validation,
+the execution contract, and the anytime branch budget carry `max_parallelism=2`
+end to end, and one orchestrator test pins both roots fanning out in the same
+scheduling round. The single-Specialist invariant is unchanged for every other
+authority and for mutation-bearing graphs; matched-route evaluation anchors,
+grounded-direct, and collaboration-learning capture remain pinned to
+single-specialist. `agent-execution-graph-contract` now runs seven
+deterministic tests. No provider evaluation was run; routing semantics,
+permission authority, budgets, learning consumers, and serving are unchanged
+outside the read-only widening.
+
+Two evaluation-harness repairs keep the deterministic suite honest without
+touching any consumed protocol result. The delivery-verification loopback
+reader retries a slow read within a bounded deadline instead of failing closed
+on the first per-read timeout under full-suite load; the journal contract it
+exercises is unchanged. The runner-image load bound (`MAX_RUNNER_BYTES`) moved
+from 512 MiB to 1 GiB in both the delivery-verification and
+collaboration-successor loaders: it is a defensive load cap, not an evidence
+parameter, real execute binaries are far smaller, and the old bound no longer
+covered legitimate debug build artifacts. No case, order, oracle, seed, model
+input, output contract, budget, threshold, or no-retry behavior was revised,
+and no consumed one-shot protocol was rerun or reinterpreted. The same pass
+also cleared pre-existing clippy `-D warnings` findings in the ungated
+realworld-eval surface (one boolean comparison, one argument-count allow, one
+`is_multiple_of`, one empty-string comparison, and one dead branch in a test
+fixture); all of them were behavior-preserving.
+
 ## Blocking Fact
 
 V12 did not produce a causal result:
@@ -481,25 +529,18 @@ Do not authorize or run V12 again. The instrumentation defect is the result.
 
 ## Next High-Value Goal
 
-Two approved directions from the execution-grounded verification program
-remain, each deliberately scoped to its own session:
+One approved direction from the execution-grounded verification program
+remains (bounded read-only parallel exploration is complete in the current
+source and documented above):
 
-1. Bounded read-only parallel exploration. The owner-execution graph pins
-   exactly one Specialist (owner_execution_graph validation plus contract
-   tests pin it); widening to at most two Analysis specialists for
-   read-only exploration tasks requires a deliberate invariant change:
-   a graph-shape variant, conductor contract selection for read-only
-   task classes, anytime candidate fan-out under the existing branch
-   budget, and verifier audit of both branches. Do not loosen the
-   single-Specialist invariant for mutation-bearing graphs.
-2. Real reward into prompt evolution. The judge disposition is recorded on
+1. Real reward into prompt evolution. The judge disposition is recorded on
    the completion context (`direct_judge_disposition`); the next step is to
    project it plus post-mutation verification success into outcome evidence
    and use it as prompt-evolution fitness, keeping the shadow-only evidence
    boundary until an independent review admits a record.
 
-Do not start either change in the middle of an unrelated session; each needs
-its own contract tests and documentation pass.
+Do not start the change in the middle of an unrelated session; it needs its
+own contract tests and documentation pass.
 
 
 

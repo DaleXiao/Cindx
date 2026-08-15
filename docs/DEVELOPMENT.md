@@ -91,8 +91,11 @@ The `ci-contract`, `control-plane`, and `full` profiles include the
 prove that matched Direct exposes no workflow worker while matched Workflow
 completes exactly one read-only Specialist and its optional planned Independent
 Verifier. When present, the actual Verifier attribution must use a different
-configured model from the Specialist. The gate retains the existing total
-model-call boundary. Together these checks cover preparation and start
+configured model from the Specialist. The gate also proves the read-only
+widening: a forbidden effect authority materializes a two-Specialist graph whose
+Verifier audits both roots, and the same graph without the authorization stamp
+fails closed. The seven deterministic tests retain the existing total model-call
+boundary. Together these checks cover preparation and start
 linearization, selected-decision recovery, success/failure/cancellation terminal
 linkage, exactly-once replay, and evaluation fail-closed behavior without
 contacting a provider.
@@ -106,11 +109,12 @@ integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
 
-`workspace-undo-contract` runs 9 provider-free desktop tests covering undo
+`workspace-undo-contract` runs 10 provider-free desktop tests covering undo
 entry projection from tool events, undo/redo of created, overwritten, and
-patched files, external-edit conflict blocking, LIFO ordering, and undo
-registry persistence. It is included in `quick`, `ci-contract`,
-`control-plane`, and `full`.
+patched files, disclosure of a capture failure as a not-undoable entry,
+external-edit conflict blocking, LIFO ordering, and undo registry
+persistence. It is included in `quick`, `ci-contract`, `control-plane`, and
+`full`.
 
 `project-instructions-contract` runs 17 provider-free desktop tests covering
 bounded discovery of workspace instruction files (`AGENTS.md` from the
