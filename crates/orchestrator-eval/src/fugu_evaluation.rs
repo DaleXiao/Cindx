@@ -346,7 +346,7 @@ impl FuguEvaluationSuite {
     }
 }
 
-fn validate_safety_policy(policy: &FuguSafetyPolicy, errors: &mut Vec<String>) {
+pub(crate) fn validate_safety_policy(policy: &FuguSafetyPolicy, errors: &mut Vec<String>) {
     if policy.default_mode != FuguExecutionMode::PlanOnly
         || !policy.requires_explicit_execution
         || policy.source_workspace_access != FuguWorkspaceAccess::ReadOnly
@@ -1270,11 +1270,11 @@ fn wilson_lower_bound(successes: f64, trials: usize) -> f64 {
     ((center - margin) / denominator).clamp(0.0, 1.0)
 }
 
-fn is_sha256(value: &str) -> bool {
+pub(crate) fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn sha256_hex(value: &[u8]) -> String {
+pub(crate) fn sha256_hex(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
 }
 

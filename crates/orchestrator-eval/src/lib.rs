@@ -1,10 +1,12 @@
 mod arena;
 mod benchmark;
 mod fugu_evaluation;
+mod fugu_pilot;
 
 pub use arena::*;
 pub use benchmark::*;
 pub use fugu_evaluation::*;
+pub use fugu_pilot::*;
 pub use orchestrator::{
     build_agent_evaluation_foundation_report, build_agent_evaluation_promotion_report,
     parse_agent_evaluation_baseline, parse_agent_evaluation_dataset,
