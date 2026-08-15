@@ -187,6 +187,7 @@ pub(super) fn plan_adaptive_workflow(
         prior_hint: prior.map(WorkflowTopologyPrior::prompt_hint),
         prompt_evolution_enabled: config.prompt_evolution_enabled,
         prompt_genome: prompt_genome.clone(),
+        parallel_read_only_authorized: parallel_read_only_authorized(run_context),
     });
     match harness
         .plan_from_proposal(proposal)
@@ -229,6 +230,17 @@ fn validate_runtime_workflow_model_profiles(
         )?;
     }
     Ok(())
+}
+
+/// The only authority that widens the owner execution graph to two read-only
+/// specialists: preparation persisted a forbidden prompt effect authority.
+/// Any other value (including a missing receipt) fails closed to the
+/// single-specialist topology.
+pub(crate) fn parallel_read_only_authorized(run_context: &Metadata) -> bool {
+    run_context
+        .get("route_effect_authority")
+        .map(String::as_str)
+        == Some(orchestrator::AgentEffectAuthority::Forbidden.label())
 }
 
 pub(super) fn route_workflow_capacity(proposal: &WorkflowPlanProposal) -> (usize, usize) {

@@ -75,7 +75,6 @@ impl WorkflowToolPolicy {
         }
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowBudget {
     pub max_steps: usize,
@@ -189,6 +188,8 @@ pub struct WorkflowPlanIr {
     pub coordinator_model: String,
     #[serde(default = "default_prompt_profile")]
     pub prompt_profile: String,
+    #[serde(default)]
+    pub parallel_read_only_specialists: bool,
     pub steps: Vec<WorkflowPlanStep>,
     pub budget: WorkflowBudget,
 }
@@ -266,6 +267,7 @@ impl WorkflowPlanIr {
             policy: policy.into(),
             coordinator_model: coordinator_model.into(),
             prompt_profile: prompt_profile.into(),
+            parallel_read_only_specialists: false,
             steps,
             budget,
         }

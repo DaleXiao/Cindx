@@ -375,7 +375,7 @@ pub(crate) fn plan_agent_run(
     if execution_constraint.is_grounded_direct() {
         decision_reason = ExecutionPlanDecisionReason::RuntimeGroundedDirect;
         decision
-            .validate(&allowed_models, max_parallelism)
+            .validate(&allowed_models, max_parallelism, false)
             .map_err(CollaborationStageError::Failed)?;
     } else if execution_constraint.is_matched_route() {
         decision_reason = ExecutionPlanDecisionReason::MatchedRouteEvaluation;

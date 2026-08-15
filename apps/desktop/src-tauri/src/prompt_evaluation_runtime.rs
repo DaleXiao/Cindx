@@ -47,6 +47,7 @@ pub(crate) fn evaluate_conductor_prompt_profile(
         prior_hint: None,
         prompt_evolution_enabled: true,
         prompt_genome: effective_genome.clone(),
+        parallel_read_only_authorized: false,
     });
     let system_prompt =
         collaboration_system_prompt_for_run(&config.agent_system_prompt, &Metadata::new());
