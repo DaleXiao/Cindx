@@ -203,6 +203,7 @@ fn empty_agent_state(session_id: &str, error: &str) -> AgentState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_event_metrics(
     state: &tauri::State<'_, AppState>,
     session_id: &str,

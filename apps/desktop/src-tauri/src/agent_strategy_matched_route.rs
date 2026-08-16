@@ -49,7 +49,9 @@ pub(super) fn plan_from_shared_anchor(
     let conductor_candidate = input.anchor.conductor_candidate;
     let decision = input
         .execution_constraint
-        .apply(conductor_candidate.clone(), input.effort)
+        // Matched-route evaluation arms keep workflow authority; quarantine
+        // applies to production Native runs only.
+        .apply(conductor_candidate.clone(), input.effort, false)
         .map_err(CollaborationStageError::Failed)?;
     let planned = finalize_planned_run(
         input.prompt,

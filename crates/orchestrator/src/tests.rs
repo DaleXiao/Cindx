@@ -226,6 +226,7 @@ fn owner_execution_plan(required_verification: bool) -> WorkflowPlanIr {
         policy: "owner_execution".to_string(),
         coordinator_model: "planner".to_string(),
         prompt_profile: "test-profile".to_string(),
+        parallel_read_only_specialists: false,
         budget: WorkflowBudget {
             max_steps: steps.len(),
             max_models: 2,
@@ -315,6 +316,128 @@ fn owner_execution_graph_rejects_competition_and_incomplete_handoff_edges() {
             "owner execution graph verifier must use a different configured model and depend only on the specialist without tools"
                 .to_string()
         )
+    );
+}
+
+fn owner_execution_parallel_plan(required_verification: bool) -> WorkflowPlanIr {
+    let mut plan = owner_execution_plan(required_verification);
+    plan.parallel_read_only_specialists = true;
+    let second_specialist = WorkflowPlanStep {
+        id: "specialist_two".to_string(),
+        role: "worker".to_string(),
+        model: "executor".to_string(),
+        subtask: "explore a distinct read-only angle".to_string(),
+        access: Vec::new(),
+        tool_policy: WorkflowToolPolicy::ReadOnlyExploration,
+        contract: WorkflowStepContract {
+            input_steps: Vec::new(),
+            output_kind: WorkflowOutputKind::Analysis,
+            completion: WorkflowCompletionCriteria::default(),
+        },
+    };
+    plan.steps.insert(1, second_specialist);
+    if required_verification {
+        let verification = plan
+            .steps
+            .iter_mut()
+            .find(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
+            .expect("fixture must carry the verifier");
+        verification.access = vec!["specialist".to_string(), "specialist_two".to_string()];
+        verification.contract.input_steps = verification.access.clone();
+    }
+    let handoff_inputs = if required_verification {
+        vec![plan.steps[plan.steps.len() - 2].id.clone()]
+    } else {
+        vec!["specialist".to_string(), "specialist_two".to_string()]
+    };
+    let handoff = plan.steps.last_mut().unwrap();
+    handoff.access = handoff_inputs.clone();
+    handoff.contract.input_steps = handoff_inputs;
+    plan.budget.max_steps = plan.steps.len();
+    plan.budget.max_models = 3;
+    plan
+}
+
+#[test]
+fn owner_execution_graph_allows_two_read_only_specialists_only_under_authorization() {
+    let with_verifier = owner_execution_parallel_plan(true);
+    assert_eq!(with_verifier.validate_owner_execution_graph(true), Ok(()));
+    let without_verifier = owner_execution_parallel_plan(false);
+    assert_eq!(
+        without_verifier.validate_owner_execution_graph(false),
+        Ok(())
+    );
+
+    let mut unauthorized = owner_execution_parallel_plan(false);
+    unauthorized.parallel_read_only_specialists = false;
+    assert_eq!(
+        unauthorized.validate_owner_execution_graph(false),
+        Err(
+            "owner execution graph requires exactly one analysis or evidence specialist step"
+                .to_string()
+        )
+    );
+
+    let mut triple = owner_execution_parallel_plan(false);
+    let third = triple.steps[1].clone();
+    triple.steps.insert(
+        2,
+        WorkflowPlanStep {
+            id: "specialist_three".to_string(),
+            subtask: "a third competitor".to_string(),
+            ..third
+        },
+    );
+    triple.budget.max_steps = triple.steps.len();
+    assert_eq!(
+        triple.validate_owner_execution_graph(false),
+        Err(
+            "owner execution graph permits at most two analysis or evidence specialist steps"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn owner_execution_graph_dual_verifier_must_audit_both_specialists_from_a_third_model() {
+    let mut partial_audit = owner_execution_parallel_plan(true);
+    let verification = partial_audit
+        .steps
+        .iter_mut()
+        .find(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
+        .expect("fixture must carry the verifier");
+    verification.access = vec!["specialist".to_string()];
+    verification.contract.input_steps = verification.access.clone();
+    assert_eq!(
+        partial_audit.validate_owner_execution_graph(true),
+        Err(
+            "owner execution graph verifier must use a different configured model and depend only on the specialist without tools"
+                .to_string()
+        )
+    );
+
+    let mut shared_model = owner_execution_parallel_plan(true);
+    let verification = shared_model
+        .steps
+        .iter_mut()
+        .find(|step| step.contract.output_kind == WorkflowOutputKind::Verification)
+        .expect("fixture must carry the verifier");
+    verification.model = "executor".to_string();
+    assert_eq!(
+        shared_model.validate_owner_execution_graph(true),
+        Err(
+            "owner execution graph verifier must use a different configured model and depend only on the specialist without tools"
+                .to_string()
+        )
+    );
+
+    let mut dependent_specialist = owner_execution_parallel_plan(false);
+    dependent_specialist.steps[1].access = vec!["specialist".to_string()];
+    dependent_specialist.steps[1].contract.input_steps =
+        dependent_specialist.steps[1].access.clone();
+    assert_eq!(
+        dependent_specialist.validate_owner_execution_graph(false),
+        Err("owner execution graph specialist must be the dependency-free first step".to_string())
     );
 }
 
@@ -758,6 +881,7 @@ fn conductor_request() -> ConductorRequest {
         prior_hint: Some("Prefer two independent branches.".to_string()),
         prompt_evolution_enabled: true,
         prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
+        parallel_read_only_authorized: false,
     }
 }
 

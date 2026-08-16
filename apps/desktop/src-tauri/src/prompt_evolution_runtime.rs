@@ -857,6 +857,10 @@ pub(crate) fn prompt_evolution_state(
             dataset_holdout_cases,
             required_paired_runs: PROMPT_EVOLUTION_MIN_TRAIN_RUNS,
             required_replay_runs: PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS,
+            admitted_direct_judge_fitness:
+                crate::prompt_evolution_admission_runtime::admitted_direct_judge_fitness_state(
+                    &app_data_root(),
+                ),
         });
         generation = generation.max(
             evaluation

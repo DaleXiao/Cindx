@@ -18,6 +18,7 @@ mod agent_execution_constraint;
 mod agent_failure_terminal_runtime;
 mod agent_finalizer_runtime;
 mod direct_judge_runtime;
+mod direct_judge_shadow_runtime;
 mod agent_grounded_response_runtime;
 mod agent_loop_runtime;
 mod agent_model_turn_runtime;
@@ -109,6 +110,7 @@ mod prompt_evolution_hot_state;
 mod prompt_evolution_models;
 mod prompt_evolution_projection_contract;
 mod prompt_evolution_read_model;
+mod prompt_evolution_admission_runtime;
 mod prompt_evolution_runtime;
 mod prompt_evolution_store_runtime;
 mod prompt_evolution_transfer_outbox;
@@ -228,6 +230,8 @@ use view_models::*;
 use voice_commands::*;
 use workflow_checkpoint_runtime::*;
 use workflow_routing_runtime::*;
+#[cfg(test)]
+mod direct_judge_shadow_runtime_tests;
 #[cfg(test)]
 mod external_effect_eval_tests;
 #[cfg(test)]

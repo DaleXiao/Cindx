@@ -24,6 +24,10 @@ pub struct ConductorRequest {
     pub prior_hint: Option<String>,
     pub prompt_evolution_enabled: bool,
     pub prompt_genome: ConductorPromptGenome,
+    /// True only when the prompt effect authority is forbidden; the harness
+    /// stamps the materialized plan with a two-specialist read-only shape
+    /// only under this authorization.
+    pub parallel_read_only_authorized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +453,21 @@ impl ConductorHarness {
             }
         }
         plan.validate(&self.request.worker_models)?;
+        if self.request.parallel_read_only_authorized {
+            let specialist_roots = plan
+                .steps
+                .iter()
+                .take(plan.steps.len().saturating_sub(1))
+                .filter(|step| {
+                    step.access.is_empty()
+                        && matches!(
+                            step.contract.output_kind,
+                            WorkflowOutputKind::Analysis | WorkflowOutputKind::Evidence
+                        )
+                })
+                .count();
+            plan.parallel_read_only_specialists = specialist_roots >= 2;
+        }
         if self.request.execution_contract.verification_required {
             let root_ids = plan
                 .steps
@@ -564,11 +583,25 @@ impl ConductorHarness {
                 );
             }
         }
-        if workflow
-            .steps
-            .last()
-            .is_some_and(|step| required_branches >= 2 && step.access.len() < 2)
-        {
+        let final_step_consolidates = workflow.steps.last().is_some_and(|step| {
+            if step.access.len() >= 2 {
+                return true;
+            }
+            // A single verifier that directly audits every independent branch
+            // consolidates those branches before the owner handoff.
+            step.access.len() == 1
+                && workflow.steps.iter().enumerate().any(|(index, candidate)| {
+                    candidate.id == step.access[0]
+                        && semantics
+                            .and_then(|values| values.get(index))
+                            .and_then(|value| value.output_kind.as_ref())
+                            == Some(&WorkflowOutputKind::Verification)
+                        && independent_branches
+                            .iter()
+                            .all(|branch| candidate.access.iter().any(|id| id == &branch.id))
+                })
+        });
+        if required_branches >= 2 && !final_step_consolidates {
             return Err("conductor synthesis must access at least two prior branches".to_string());
         }
         Ok(())

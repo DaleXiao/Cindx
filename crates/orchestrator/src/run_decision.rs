@@ -117,6 +117,14 @@ pub struct AgentRouteRequirements {
 }
 
 impl AgentRouteRequirements {
+    /// The only authority under which the owner execution graph may widen to
+    /// two read-only specialist roots: the prompt explicitly forbids every
+    /// effect, so the whole run (workers and Owner) is read-only. Allowed and
+    /// Required authorities keep the single-specialist invariant fail-closed.
+    pub fn parallel_read_only_exploration_authorized(self) -> bool {
+        self.effect_authority == AgentEffectAuthority::Forbidden
+    }
+
     pub fn apply_to_direct(self, mut decision: AgentRunDecision) -> AgentRunDecision {
         if !decision
             .tool_requirement
@@ -344,6 +352,7 @@ impl AgentRunDecision {
         &self,
         allowed_models: &[String],
         max_parallelism: usize,
+        parallel_read_only_authorized: bool,
     ) -> Result<(), String> {
         if self.schema != AGENT_RUN_DECISION_SCHEMA {
             return Err(format!(
@@ -417,24 +426,35 @@ impl AgentRunDecision {
                 }
             }
             AgentExecutionMode::Workflow => {
-                if max_parallelism == 0
-                    || self.max_parallelism != 1
+                let parallel_read_only = parallel_read_only_authorized
+                    && self.tool_requirement != AgentToolRequirement::Effects
+                    && self.max_parallelism == 2;
+                let specialist_count = if parallel_read_only { 2 } else { 1 };
+                if !(1..=2).contains(&self.max_parallelism)
+                    || self.max_parallelism != specialist_count
+                    || max_parallelism == 0
                     || self.min_successful_branches != 1
-                    || self.distinct_contributions != 1
-                    || !(2..=3).contains(&self.estimated_steps)
+                    || self.distinct_contributions != specialist_count
                 {
-                    return Err("workflow execution must use one specialist contribution and a two- or three-step owner handoff graph".to_string());
+                    return Err("workflow execution must use one specialist contribution, or two read-only specialist contributions under a forbidden effect authority".to_string());
+                }
+                let expected_steps = specialist_count
+                    + usize::from(self.verification == AgentVerificationPolicy::Independent)
+                    + 1;
+                if self.estimated_steps != expected_steps {
+                    return Err(format!(
+                        "workflow estimated_steps must be {expected_steps} for this owner handoff graph"
+                    ));
                 }
                 match self.verification {
                     AgentVerificationPolicy::None
-                        if self.estimated_steps == 2
-                            && self.stop_policy != ConductorStopPolicy::FirstVerified => {}
-                    AgentVerificationPolicy::Independent if self.estimated_steps == 3 => {}
+                        if self.stop_policy != ConductorStopPolicy::FirstVerified => {}
+                    AgentVerificationPolicy::Independent => {}
                     AgentVerificationPolicy::None => {
-                        return Err("workflow without an independent verifier must use two steps and cannot use first_verified".to_string());
-                    }
-                    AgentVerificationPolicy::Independent => {
-                        return Err("independent workflow verification requires exactly one verifier in a three-step graph".to_string());
+                        return Err(
+                            "workflow without an independent verifier cannot use first_verified"
+                                .to_string(),
+                        );
                     }
                     AgentVerificationPolicy::SelfCheck => {
                         return Err("workflow execution supports only no verifier or one independent verifier".to_string());
@@ -606,6 +626,10 @@ pub struct AgentRunDecisionRequest {
     pub route_requirements: AgentRouteRequirements,
     pub budget_fingerprint: Option<String>,
     pub prompt_profile_sha256: String,
+    /// Configured default model for the requested effort tier, when the user
+    /// pinned one. Anchors the conductor's primary_model choice without
+    /// removing its authority to pick another configured model.
+    pub preferred_primary_model: Option<String>,
     /// Evaluation-only treatment constraint. Production requests leave this
     /// unset and retain Conductor authority.
     pub required_execution: Option<AgentExecutionMode>,
@@ -775,6 +799,7 @@ impl WorkflowPlanProposal {
         &self,
         decision: &AgentRunDecision,
         allowed_models: &[String],
+        parallel_read_only_authorized: bool,
     ) -> Result<(), String> {
         self.validate_v1(decision, allowed_models)?;
         let specialist_steps = self
@@ -792,22 +817,43 @@ impl WorkflowPlanProposal {
             .iter()
             .filter(|step| step.output_kind == WorkflowOutputKind::Verification)
             .collect::<Vec<_>>();
-        if specialist_steps.len() != 1
-            || !specialist_steps[0].access.is_empty()
+        let parallel_read_only = parallel_read_only_authorized
+            && decision.max_parallelism == 2
+            && decision.tool_requirement != AgentToolRequirement::Effects;
+        let expected_specialists = if parallel_read_only { 2 } else { 1 };
+        if specialist_steps.len() != expected_specialists
+            || specialist_steps.iter().any(|step| !step.access.is_empty())
             || verification_steps.len()
                 != usize::from(decision.verification == AgentVerificationPolicy::Independent)
         {
             return Err(
-                "workflow proposal must contain one specialist and at most one required independent verifier"
-                    .to_string(),
+                if parallel_read_only {
+                    "workflow proposal must contain two read-only specialists and at most one required independent verifier"
+                } else {
+                    "workflow proposal must contain one specialist and at most one required independent verifier"
+                }
+                .to_string(),
             );
         }
-        let specialist_id = specialist_steps[0].id.trim();
+        let specialist_ids = specialist_steps
+            .iter()
+            .map(|step| step.id.trim().to_string())
+            .collect::<BTreeSet<_>>();
+        if specialist_ids.len() != specialist_steps.len() {
+            return Err("workflow proposal specialists must have distinct step ids".to_string());
+        }
         if verification_steps.first().is_some_and(|verification| {
+            let audited = verification
+                .access
+                .iter()
+                .map(|dependency| dependency.trim().to_string())
+                .collect::<BTreeSet<_>>();
             verification.tool_policy != WorkflowToolPolicy::None
-                || verification.access.len() != 1
-                || verification.access[0].trim() != specialist_id
-                || verification.model == specialist_steps[0].model
+                || verification.access.len() != specialist_ids.len()
+                || audited != specialist_ids
+                || specialist_steps
+                    .iter()
+                    .any(|specialist| specialist.model == verification.model)
         }) {
             return Err(
                 "independent verifier must use a different configured model and audit only the specialist output without tools"
@@ -818,16 +864,16 @@ impl WorkflowPlanProposal {
             .steps
             .last()
             .expect("v1 validation requires a final synthesis step");
-        let required_final_inputs = verification_steps.first().map_or_else(
-            || vec![specialist_id],
-            |verification| vec![verification.id.trim()],
-        );
+        let required_final_inputs: Vec<String> = match verification_steps.first() {
+            Some(verification) => vec![verification.id.trim().to_string()],
+            None => specialist_ids.into_iter().collect(),
+        };
         if final_step.access.len() != required_final_inputs.len()
             || !required_final_inputs.iter().all(|required| {
                 final_step
                     .access
                     .iter()
-                    .any(|dependency| dependency.trim() == *required)
+                    .any(|dependency| dependency.trim() == required)
             })
         {
             return Err(
@@ -842,8 +888,9 @@ impl WorkflowPlanProposal {
         &self,
         decision: &AgentRunDecision,
         allowed_models: &[String],
+        parallel_read_only_authorized: bool,
     ) -> Result<(), String> {
-        self.validate_owner_execution_graph(decision, allowed_models)
+        self.validate_owner_execution_graph(decision, allowed_models, parallel_read_only_authorized)
     }
 }
 
@@ -936,6 +983,22 @@ impl AgentRunDecisionHarness {
             }
             None => "No evaluation treatment is active; choose Direct or Workflow autonomously.",
         };
+        let read_only_parallel_guidance = if request
+            .route_requirements
+            .parallel_read_only_exploration_authorized()
+        {
+            "This request forbids all effects, so the whole run is read-only. For this read-only request class one bounded widening is permitted: max_parallelism=2, min_successful_branches=1, distinct_contributions=2, and estimated_steps=3 without a verifier or estimated_steps=4 with a model-distinct independent verifier. workflow_plan then carries two dependency-free Specialist roots with genuinely distinct bounded subtasks, the optional Verifier depending on both roots, and the final tool-free synthesis compatibility node depending on the Verifier or on both Specialist roots. Both specialists still use read-only tool policy only. Choose this shape only when two distinct read-only investigations plausibly beat both the single-Specialist graph and the direct baseline; otherwise keep the single-Specialist graph or choose direct.\n"
+        } else {
+            ""
+        };
+        let preferred_model_guidance = match request.preferred_primary_model.as_deref() {
+            Some(model) if !model.trim().is_empty() => {
+                format!(
+                    "Preferred primary model for this effort tier: {model}. Use it for primary_model unless the task evidence clearly favors another configured model.\n"
+                )
+            }
+            _ => String::new(),
+        };
         format!(
             concat!(
                 "You are the Cindx runtime Conductor. Decide how to execute the request; do not answer it. Return only one strict JSON object.\n",
@@ -945,6 +1008,8 @@ impl AgentRunDecisionHarness {
                 "Configured roles are capability boundaries: primary_model and Specialist work must use a planner or executor role; an Independent Verifier must use a reviewer role. A summarizer role is utility-only and cannot act in the execution graph. The final synthesis compatibility node is a deterministic non-model Owner handoff, so its model field is not dispatched.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. A workflow uses max_parallelism=1, min_successful_branches=1, and distinct_contributions=1: one bounded Specialist, optionally followed by one Independent Verifier using a different configured model. Without a verifier use verification=none, estimated_steps=2, and stop_policy=exhaustive. With a genuinely model-distinct verifier use verification=independent and estimated_steps=3; if no second suitable configured model exists, do not manufacture independence.\n",
                 "A workflow decision is valid only when you can name that executable graph now. Include workflow_plan with one Specialist root, the optional Verifier depending only on that root, and a final tool-free synthesis compatibility node depending on the Specialist or Verifier. The runtime materializes that final node as a deterministic handoff to the foreground Owner; it is not another model actor. Use output_kind=analysis|evidence for the Specialist, verification for the optional Verifier, synthesis for the final handoff, and tool_policy=none|read_only_evidence|read_only_exploration. Isolated workers may inspect supplied or read-only evidence and advise the foreground Owner even when only the Owner can perform writes or final delivery. If this bounded graph is unlikely to beat Direct, choose direct and set workflow_plan to null.\n",
+                "{preferred_model_guidance}",
+                "{read_only_parallel_guidance}",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
                 "You own the final quality and collaboration decision. Auto should require at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence before choosing workflow; Pro should require at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 records a read-only counterfactual observation from your estimate and independently scored matched team-versus-direct evidence; it cannot downshift or replace a valid decision. Runtime may override only explicit safety, capability, resource, or evaluation constraints, and records every override. If you cannot justify collaboration, choose direct.\n",
                 "Historical evidence is observational, not a routing command. matched_direct_team rows compare team and direct anchor on the same run and are stronger than independent route_observation rows. Use evidence only when its task class and execution shape fit the current request; support=insufficient, low-sample, or mismatched evidence must not override current reasoning. Ready matched evidence with negative average uplift or frequent anchor selection is evidence against collaboration unless this request has a concrete independent-work or verification need absent from those observations:\n{historical_evidence}\n\n",
@@ -969,6 +1034,8 @@ impl AgentRunDecisionHarness {
             historical_evidence = historical_evidence,
             execution_constraints = execution_constraints,
             required_execution = required_execution,
+            read_only_parallel_guidance = read_only_parallel_guidance,
+            preferred_model_guidance = preferred_model_guidance,
             minimum_tool_requirement = request.route_requirements.minimum_tool_requirement.label(),
             effect_authority = request.route_requirements.effect_authority.label(),
             image_input_required = request.route_requirements.image_input_required,
@@ -1007,7 +1074,15 @@ impl AgentRunDecisionHarness {
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
         let mut decision = serde_json::from_value::<AgentRunDecision>(payload.clone())
             .map_err(|error| format!("run decision JSON is invalid: {error}"))?;
-        decision.validate(&self.request.allowed_models, self.request.max_parallelism)?;
+        let parallel_read_only_authorized = self
+            .request
+            .route_requirements
+            .parallel_read_only_exploration_authorized();
+        decision.validate(
+            &self.request.allowed_models,
+            self.request.max_parallelism,
+            parallel_read_only_authorized,
+        )?;
         if self
             .request
             .required_execution
@@ -1034,8 +1109,11 @@ impl AgentRunDecisionHarness {
                 let workflow_plan = workflow_plan
                     .as_ref()
                     .ok_or_else(|| "workflow execution requires workflow_plan".to_string())?;
-                workflow_plan
-                    .validate_owner_execution_graph(&decision, &self.request.allowed_models)?;
+                workflow_plan.validate_owner_execution_graph(
+                    &decision,
+                    &self.request.allowed_models,
+                    parallel_read_only_authorized,
+                )?;
                 validate_workflow_model_profiles(workflow_plan, &self.request.model_candidates)?;
             }
             AgentExecutionMode::Direct => {}
@@ -1200,6 +1278,7 @@ mod tests {
             route_requirements: AgentRouteRequirements::default(),
             budget_fingerprint: Some("0".repeat(64)),
             prompt_profile_sha256: "1".repeat(64),
+            preferred_primary_model: None,
             required_execution: None,
         }
     }
@@ -1256,6 +1335,123 @@ mod tests {
                 .min_distinct_contributions,
             1
         );
+    }
+
+    fn forbidden_route_request() -> AgentRunDecisionRequest {
+        let mut request = request();
+        request.route_requirements = AgentRouteRequirements {
+            minimum_tool_requirement: AgentToolRequirement::ReadOnly,
+            effect_authority: AgentEffectAuthority::Forbidden,
+            image_input_required: false,
+        };
+        request
+    }
+
+    const PARALLEL_READ_ONLY_DECISION: &str = r#"{
+        "schema":"cindx.agent-run-decision.v1",
+        "task_class":"research",
+        "execution":"workflow",
+        "primary_model":"executor",
+        "tool_requirement":"read_only",
+        "vision_required":false,
+        "risk_level":"low",
+        "retrieval":{"query":"read-only survey evidence","channels":["file_search"],"max_results":6},
+        "memory":{"policy":"none","query":""},
+        "verification":"independent",
+        "max_parallelism":2,
+        "min_successful_branches":1,
+        "distinct_contributions":2,
+        "estimated_steps":4,
+        "expected_uplift_bps":6000,
+        "confidence_bps":8000,
+        "stop_policy":"exhaustive",
+        "rationale":"two distinct read-only investigations under a forbidden effect authority",
+        "workflow_plan":{"steps":[
+            {"id":"specialist","role":"survey_specialist","model":"executor","subtask":"survey the public module surface","access":[],"output_kind":"analysis","tool_policy":"read_only_exploration"},
+            {"id":"specialist_two","role":"survey_specialist","model":"executor","subtask":"survey the internal test surface","access":[],"output_kind":"analysis","tool_policy":"read_only_exploration"},
+            {"id":"verify","role":"independent_verifier","model":"reviewer","subtask":"audit both survey branches","access":["specialist","specialist_two"],"output_kind":"verification","tool_policy":"none"},
+            {"id":"owner_handoff","role":"synthesizer","model":"executor","subtask":"hand the verified survey to the foreground Owner","access":["verify"],"output_kind":"synthesis","tool_policy":"none"}
+        ]}
+    }"#;
+
+    #[test]
+    fn forbidden_effect_authority_allows_a_two_specialist_read_only_workflow() {
+        let harness = AgentRunDecisionHarness::new(forbidden_route_request());
+        let decision = harness.parse(PARALLEL_READ_ONLY_DECISION).unwrap();
+        assert_eq!(
+            decision.policy(),
+            OrchestrationPolicy::BestOfN { candidates: 2 }
+        );
+        assert_eq!(decision.max_parallelism, 2);
+        assert_eq!(decision.distinct_contributions, 2);
+        let parallel = harness
+            .parse_draft(PARALLEL_READ_ONLY_DECISION)
+            .expect("parallel draft parses");
+        let plan = parallel.workflow_plan.expect("dual proposal is retained");
+        assert_eq!(plan.steps.len(), 4);
+    }
+
+    #[test]
+    fn allowed_effect_authority_rejects_the_two_specialist_read_only_workflow() {
+        let harness = AgentRunDecisionHarness::new(request());
+        let error = harness
+            .parse(PARALLEL_READ_ONLY_DECISION)
+            .expect_err("dual specialists require a forbidden effect authority");
+        assert!(error.contains("forbidden effect authority"), "{error}");
+
+        let forbidden = AgentRunDecisionHarness::new(forbidden_route_request());
+        let mut payload: serde_json::Value =
+            serde_json::from_str(PARALLEL_READ_ONLY_DECISION).unwrap();
+        payload["tool_requirement"] = serde_json::json!("effects");
+        payload["workflow_plan"] = serde_json::json!(null);
+        let error = forbidden
+            .parse(&payload.to_string())
+            .expect_err("effects exceed the forbidden authority");
+        assert!(error.contains("effect authority"), "{error}");
+    }
+
+    #[test]
+    fn dual_read_only_decision_budgets_are_enforced_with_the_authorization() {
+        let allowed_models = vec!["executor".to_string(), "reviewer".to_string()];
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.execution = AgentExecutionMode::Workflow;
+        decision.tool_requirement = AgentToolRequirement::ReadOnly;
+        decision.verification = AgentVerificationPolicy::Independent;
+        decision.max_parallelism = 2;
+        decision.min_successful_branches = 1;
+        decision.distinct_contributions = 2;
+        decision.estimated_steps = 4;
+        decision.stop_policy = ConductorStopPolicy::Exhaustive;
+        decision
+            .validate(&allowed_models, 3, true)
+            .expect("authorized dual shape is valid");
+
+        let mut underdeclared = decision.clone();
+        underdeclared.distinct_contributions = 1;
+        assert!(underdeclared.validate(&allowed_models, 3, true).is_err());
+
+        let mut wrong_steps = decision.clone();
+        wrong_steps.estimated_steps = 3;
+        assert!(wrong_steps.validate(&allowed_models, 3, true).is_err());
+
+        assert!(decision.validate(&allowed_models, 3, false).is_err());
+
+        let mut triple = decision.clone();
+        triple.max_parallelism = 3;
+        triple.distinct_contributions = 3;
+        assert!(triple.validate(&allowed_models, 3, true).is_err());
+    }
+
+    #[test]
+    fn planning_prompt_offers_the_dual_read_only_shape_only_under_forbidden_authority() {
+        let authorized = AgentRunDecisionHarness::new(forbidden_route_request());
+        let prompt = authorized.planning_prompt();
+        assert!(prompt.contains("max_parallelism=2"));
+        assert!(prompt.contains("two dependency-free Specialist roots"));
+
+        let baseline = AgentRunDecisionHarness::new(request());
+        let prompt = baseline.planning_prompt();
+        assert!(!prompt.contains("two dependency-free Specialist roots"));
     }
 
     #[test]
@@ -1408,7 +1604,7 @@ mod tests {
             .validate_v1(&legacy, &models)
             .expect("persisted v1 proposal topology must remain readable");
         assert!(proposal
-            .validate_owner_execution_graph(&legacy, &models)
+            .validate_owner_execution_graph(&legacy, &models, false)
             .expect_err("legacy competition must not re-enter the current production graph")
             .contains("one specialist"));
     }
@@ -1558,6 +1754,24 @@ mod tests {
     }
 
     #[test]
+    fn planning_prompt_anchors_configured_effort_model_only_when_pinned() {
+        let prompt = AgentRunDecisionHarness::new(request()).planning_prompt();
+        assert!(!prompt.contains("Preferred primary model"));
+
+        let mut pinned = request();
+        pinned.preferred_primary_model = Some("deepseek-v4-pro-0813".to_string());
+        let prompt = AgentRunDecisionHarness::new(pinned).planning_prompt();
+        assert!(
+            prompt.contains("Preferred primary model for this effort tier: deepseek-v4-pro-0813")
+        );
+
+        let mut blank = request();
+        blank.preferred_primary_model = Some("   ".to_string());
+        let prompt = AgentRunDecisionHarness::new(blank).planning_prompt();
+        assert!(!prompt.contains("Preferred primary model"));
+    }
+
+    #[test]
     fn runtime_requirements_reject_tool_and_vision_downgrades() {
         let mut request = request();
         request.route_requirements = AgentRouteRequirements {
@@ -1671,14 +1885,16 @@ mod tests {
             ..AgentRunDecision::direct("executor")
         };
         assert!(invalid
-            .validate(&harness.request.allowed_models, 3)
+            .validate(&harness.request.allowed_models, 3, false)
             .is_err());
     }
 
     #[test]
     fn direct_fallback_never_spawns_or_retrieves() {
         let decision = AgentRunDecision::direct("executor");
-        decision.validate(&["executor".to_string()], 3).unwrap();
+        decision
+            .validate(&["executor".to_string()], 3, false)
+            .unwrap();
         assert_eq!(decision.execution, AgentExecutionMode::Direct);
         assert!(!decision.retrieval.enabled());
         assert!(!decision.memory.enabled());
@@ -1721,6 +1937,7 @@ mod tests {
                     "planner".to_string(),
                 ],
                 3,
+                false,
             )
             .unwrap();
         assert_eq!(decision.execution, AgentExecutionMode::Direct);
@@ -1950,7 +2167,9 @@ mod tests {
         decision.expected_uplift_bps = AUTO_COLLABORATION_MIN_UPLIFT_BPS;
         decision.confidence_bps = AUTO_COLLABORATION_MIN_CONFIDENCE_BPS;
 
-        let error = decision.validate(&["executor".to_string()], 2).unwrap_err();
+        let error = decision
+            .validate(&["executor".to_string()], 2, false)
+            .unwrap_err();
 
         assert!(error.contains("cannot use first_verified"));
     }

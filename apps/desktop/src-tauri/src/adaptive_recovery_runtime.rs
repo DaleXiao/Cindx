@@ -402,6 +402,7 @@ mod tests {
             policy: "adaptive".to_string(),
             coordinator_model: "planner".to_string(),
             prompt_profile: "baseline".to_string(),
+            parallel_read_only_specialists: false,
             steps: vec![
                 plan_step(
                     "specialist",

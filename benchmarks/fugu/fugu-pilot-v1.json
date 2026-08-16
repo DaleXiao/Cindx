@@ -1,0 +1,74 @@
+{
+  "schema": "cindx.fugu-pilot-suite.v1",
+  "id": "fugu-pilot-v1",
+  "version": 1,
+  "description": "Frozen bounded Fugu pilot over the pinned 12-case GPQA-Diamond sample. Harness-link verification of the observation-to-scoring pipeline only; not a parity, uplift, or promotion experiment.",
+  "frozen_source": {
+    "title": "Fugu: A Model Family for Agentic Intelligence",
+    "version": "v1",
+    "url": "https://arxiv.org/html/2606.21228v1",
+    "results_table": "Technical Report v1, Table 1 and Appendix A",
+    "frozen_on": "2026-07-23",
+    "interpretation": "Fugu Ultra values are historical anchors, not direct claims, until the complete protocol-equivalent matrix is present. The pilot does not change that rule."
+  },
+  "safety_policy": {
+    "default_mode": "plan_only",
+    "requires_explicit_execution": true,
+    "sandbox_root_template": "${TMPDIR}/cindx-fugu-eval/{run_id}",
+    "source_workspace_access": "read_only",
+    "network_default": "disabled",
+    "network_allowlist": [],
+    "allow_destructive_tools": false,
+    "allow_privileged_processes": false,
+    "allow_symlink_escape": false,
+    "max_parallel_processes": 2,
+    "max_disk_bytes_per_run": 10737418240
+  },
+  "benchmark": {
+    "id": "gpqa_diamond",
+    "display_name": "GPQA-Diamond",
+    "capability": "graduate_science",
+    "metric": "accuracy_percent",
+    "metric_min": 0.0,
+    "metric_max": 100.0,
+    "adapter": "evalscope_gpqa_diamond",
+    "case_authority": {
+      "source_url": "https://github.com/idavidrein/gpqa",
+      "revision": "56686c06f5e19865c153de0fdb11be3890014df7",
+      "file_sha256": "41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305",
+      "baseline_manifest_sha256": "203d665f53e6ecdd1e07fb325792bd4a48c6ac954a4a144b3114f26a4efea02d",
+      "cases_per_domain": 4,
+      "case_count": 12,
+      "selection_rule": "First four deterministic-rank cases per high-level domain under the frozen baseline seed, exactly matching the pinned 0.1.78 matched-diagnostic manifest."
+    }
+  },
+  "treatments": [
+    {
+      "id": "cindx_fast",
+      "label": "Cindx Fast",
+      "kind": "cindx_fast",
+      "control": true,
+      "description": "Direct single-model control. The configured compatibility model answers zero-shot under the frozen direct baseline prompt profile; no tools."
+    },
+    {
+      "id": "cindx_auto",
+      "label": "Cindx Auto",
+      "kind": "cindx_auto",
+      "control": false,
+      "description": "Deterministic Auto evaluation plan over configured models under the frozen auto prompt profile; no tools, one final answer per case."
+    },
+    {
+      "id": "cindx_pro",
+      "label": "Cindx Pro",
+      "kind": "cindx_pro",
+      "control": false,
+      "description": "Conductor-planned best-of-n evaluation workflow under the frozen pro prompt profile; no tools, one final delivery per case."
+    }
+  ],
+  "track": {
+    "id": "fugu_pilot_quality_first",
+    "kind": "quality_first",
+    "description": "Matched quality comparison on the frozen 12-case sample; single replicate, position-balanced treatment rotation per case.",
+    "seeds": [0]
+  }
+}

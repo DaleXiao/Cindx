@@ -1,3 +1,4 @@
+mod admitted_fitness;
 mod auto_teacher_source;
 mod direct_finalizer_evolution;
 mod distillation;
@@ -17,6 +18,7 @@ mod reflection_selection;
 mod search;
 mod snapshot;
 
+pub use admitted_fitness::*;
 pub use auto_teacher_source::*;
 pub use direct_finalizer_evolution::*;
 pub use distillation::*;

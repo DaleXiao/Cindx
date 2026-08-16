@@ -93,10 +93,10 @@ impl PatchFileTool {
                         );
                     }
                 }
+                result.metadata.insert("undo_action".to_string(), "patched".to_string());
                 if self.workspace_root.join(&undo_relative).exists() {
                     let before_sha256 =
                         result.metadata.get("before_sha256").cloned().unwrap_or_default();
-                    result.metadata.insert("undo_action".to_string(), "patched".to_string());
                     result.metadata.insert(
                         "undo_before_path".to_string(),
                         undo_relative.display().to_string(),

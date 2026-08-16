@@ -517,6 +517,9 @@ pub(crate) struct PromptEvolutionEffortState {
     pub(crate) dataset_holdout_cases: usize,
     pub(crate) required_paired_runs: usize,
     pub(crate) required_replay_runs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) admitted_direct_judge_fitness:
+        Option<crate::prompt_evolution_admission_runtime::PromptEvolutionAdmissionState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1103,6 +1106,8 @@ pub(crate) struct ProviderConfigInput {
     pub(crate) collaboration_policy: String,
     #[serde(default = "default_prompt_evolution_enabled")]
     pub(crate) prompt_evolution_enabled: bool,
+    #[serde(default)]
+    pub(crate) workflow_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
 }

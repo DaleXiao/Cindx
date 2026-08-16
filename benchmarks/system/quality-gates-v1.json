@@ -37,6 +37,7 @@
       "agent-arena-contract",
       "agent-realworld-contract",
       "agent-execution-graph-contract",
+      "fugu-pilot-contract",
       "direct-finalizer-causal-contract",
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
@@ -45,6 +46,7 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
@@ -86,6 +88,7 @@
       "agent-arena-contract",
       "agent-realworld-contract",
       "agent-execution-graph-contract",
+      "fugu-pilot-contract",
       "direct-finalizer-causal-contract",
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
@@ -94,6 +97,7 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
@@ -178,6 +182,7 @@
       "agent-arena-contract",
       "agent-realworld-contract",
       "agent-execution-graph-contract",
+      "fugu-pilot-contract",
       "direct-finalizer-causal-contract",
       "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
@@ -186,6 +191,7 @@
       "agent-strategy-control-contract",
       "agent-terminal-lifecycle-contract",
       "agent-outcome-evidence-contract",
+      "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
       "agent-delivery-verification-contract",
       "agent-delivery-verification-protocol-contract",
@@ -465,7 +471,48 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 6 passed; 0 failed"
+        "test result: ok. 7 passed; 0 failed"
+      ]
+    },
+    {
+      "id": "fugu-pilot-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "orchestrator-eval",
+        "--example",
+        "fugu_pilot_lab",
+        "--",
+        "--selftest",
+        "--report",
+        "target/fugu-pilot-gate-report.json"
+      ],
+      "report": "target/fugu-pilot-gate-report.json",
+      "assertions": [
+        {
+          "path": "planned_runs",
+          "equals": 3
+        },
+        {
+          "path": "observed_runs",
+          "equals": 3
+        },
+        {
+          "path": "ready",
+          "equals": true
+        },
+        {
+          "path": "claim_guard",
+          "equals": "harness_link_verification_only"
+        }
+      ],
+      "required_output": [
+        "cindx.fugu-pilot-suite.v1",
+        "cindx.fugu-pilot-protocol.v1",
+        "pilot selftest ok"
       ]
     },
     {
@@ -624,6 +671,27 @@
       "required_output": [
         "test result: ok. 9 passed; 0 failed",
         "cindx.agent.externally-verified-outcome.v1"
+      ]
+    },
+    {
+      "id": "direct-judge-outcome-contract",
+      "category": "evaluation_contract",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-application",
+        "direct_judge_outcome_contract_",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 10 passed; 0 failed",
+        "cindx.agent.direct-judge-outcome.v1",
+        "cindx.agent.direct-judge-fitness-summary.v1",
+        "cindx.agent.direct-judge-review-receipt.v1",
+        "cindx.agent.direct-judge-fitness-admission.v1"
       ]
     },
     {
@@ -1099,7 +1167,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 9 passed; 0 failed",
+        "test result: ok. 10 passed; 0 failed",
         "cindx.workspace-undo-registry.v1"
       ]
     },

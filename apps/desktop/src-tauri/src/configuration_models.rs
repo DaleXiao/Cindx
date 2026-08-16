@@ -84,6 +84,9 @@ pub(crate) struct ProviderConfig {
     pub(crate) executor_model: String,
     pub(crate) reviewer_model: String,
     pub(crate) summarizer_model: String,
+    pub(crate) fast_model: String,
+    pub(crate) auto_model: String,
+    pub(crate) pro_model: String,
     pub(crate) embedding_model: String,
     pub(crate) image_model: String,
     pub(crate) image_endpoint: String,
@@ -91,6 +94,7 @@ pub(crate) struct ProviderConfig {
     pub(crate) auth_verified_at_ms: Option<u64>,
     pub(crate) collaboration_policy: String,
     pub(crate) prompt_evolution_enabled: bool,
+    pub(crate) workflow_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
 }
@@ -141,13 +145,17 @@ impl Default for ProviderConfig {
             executor_model: defaults.executor.clone(),
             reviewer_model: defaults.reviewer.clone(),
             summarizer_model: defaults.summarizer.clone(),
+            fast_model: String::new(),
+            auto_model: String::new(),
+            pro_model: String::new(),
             embedding_model: defaults.embedding.clone(),
             image_model: defaults.image.clone(),
             image_endpoint: profile.image_endpoint,
             voice_model: defaults.voice.clone(),
             auth_verified_at_ms: None,
             collaboration_policy: "auto_router".to_string(),
-            prompt_evolution_enabled: true,
+            prompt_evolution_enabled: false,
+            workflow_enabled: false,
             context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),
         }
@@ -184,6 +192,15 @@ impl ProviderConfig {
     #[cfg(test)]
     pub(crate) fn supports_webrtc_voice(&self) -> bool {
         provider_supports_webrtc_voice(&self.provider_id, &self.base_url)
+    }
+
+    pub(crate) fn effort_default_model(&self, effort_label: &str) -> String {
+        match effort_label {
+            "fast" => self.fast_model.trim().to_string(),
+            "auto" => self.auto_model.trim().to_string(),
+            "pro" => self.pro_model.trim().to_string(),
+            _ => String::new(),
+        }
     }
 
     pub(crate) fn model_for_role(&self, role: &ModelRole) -> String {

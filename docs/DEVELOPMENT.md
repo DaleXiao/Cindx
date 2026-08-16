@@ -91,8 +91,11 @@ The `ci-contract`, `control-plane`, and `full` profiles include the
 prove that matched Direct exposes no workflow worker while matched Workflow
 completes exactly one read-only Specialist and its optional planned Independent
 Verifier. When present, the actual Verifier attribution must use a different
-configured model from the Specialist. The gate retains the existing total
-model-call boundary. Together these checks cover preparation and start
+configured model from the Specialist. The gate also proves the read-only
+widening: a forbidden effect authority materializes a two-Specialist graph whose
+Verifier audits both roots, and the same graph without the authorization stamp
+fails closed. The seven deterministic tests retain the existing total model-call
+boundary. Together these checks cover preparation and start
 linearization, selected-decision recovery, success/failure/cancellation terminal
 linkage, exactly-once replay, and evaluation fail-closed behavior without
 contacting a provider.
@@ -106,11 +109,52 @@ integer positive, partial, and negative scoring from external postconditions;
 zero-score retention for valid safety or preservation failures; tamper
 censoring; and isolation from production learning consumers.
 
-`workspace-undo-contract` runs 9 provider-free desktop tests covering undo
+`direct-judge-outcome-contract` runs ten provider-free agent-application
+tests over the shadow outcome projection wired at terminal finalization and
+its review-admission contract. It pins all eleven recorded
+`direct_judge_disposition` values to their typed families with unknown values
+failing closed, checks the monotone integer reward rule (verified pass, pass
+with unverified mutations under a required verification policy, judged
+failure, censored unjudged), rejects tampered or schema-drifted receipts, and
+proves the fitness-signal summary window stays deduplicated, bounded,
+censor-aware, and permanently promotion-ineligible. It also pins the
+independent review receipt: admission requires an approving receipt whose
+window digest binds the exact signal window in order, and the resulting
+admission record hardcodes `production_eligible=false` and
+`promotion_eligible=false`. The desktop recorder appends signals to a private
+capped journal best-effort and never disturbs delivery; the desktop admission
+glue maps an admitted window into the conservative prompt-evolution fitness
+shape, and its contract tests run inside the desktop suite. The
+prompt-evolution read path wires the admitted window through
+`prompt_evolution_admission_runtime`: a `prompt_evolution.json` configuration
+switch (off by default; corrupt configuration falls back to off) gates
+resolution of the journal plus review receipt, validates both at every read,
+and exposes the admitted fitness block on the evolution effort state;
+champion and convergence mathematics are unchanged. It is included in
+`ci-contract`, `control-plane`, and `full`.
+
+`fugu-pilot-contract` runs the provider-free `fugu_pilot_lab` selftest bound to
+`benchmarks/fugu/fugu-pilot-v1.json` and
+`benchmarks/fugu/fugu-pilot-protocol-v1.json`. Its benchmark is GPQA-Diamond,
+which had been retired as an evaluation direction before the pilot; the suite
+remains tracked solely as a harness-link artifact and must not be read as
+reinstating GPQA as an evaluation direction. It pins the pilot suite to the
+frozen 12-case GPQA-Diamond sample and the cindx_fast / cindx_auto / cindx_pro
+single-replicate matrix, proves the protocol manifest binds the exact suite
+SHA-256 plus the pinned case authority and prompt-profile digests, keeps the
+run plan equal to the protocol run order, projects a bound synthetic
+external-effect report into a ready pilot with zero safety violations, and
+fails closed on a missing run, a drifted case authority, or an unknown
+treatment label. The tracked protocol stays `execution_authorized=false`, so
+the gate verifies the observation-to-scoring link, not parity, uplift, or
+promotion. It is included in `ci-contract`, `control-plane`, and `full`.
+
+`workspace-undo-contract` runs 10 provider-free desktop tests covering undo
 entry projection from tool events, undo/redo of created, overwritten, and
-patched files, external-edit conflict blocking, LIFO ordering, and undo
-registry persistence. It is included in `quick`, `ci-contract`,
-`control-plane`, and `full`.
+patched files, disclosure of a capture failure as a not-undoable entry,
+external-edit conflict blocking, LIFO ordering, and undo registry
+persistence. It is included in `quick`, `ci-contract`, `control-plane`, and
+`full`.
 
 `project-instructions-contract` runs 17 provider-free desktop tests covering
 bounded discovery of workspace instruction files (`AGENTS.md` from the

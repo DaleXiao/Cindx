@@ -39,16 +39,34 @@ The desktop app currently includes:
 
 ## Execution Modes
 
-- **Fast** bypasses the Conductor and selects one configured model for direct
-  execution.
-- **Auto** asks the Conductor for one typed direct-or-workflow candidate under
-  its bounded planning budget.
-- **Pro** uses the same decision contract with a larger bounded planning and
-  execution budget.
+The three effort tiers form a compute ladder over one kernel and one
+quality spine; they differ by budget, iteration depth, and verification
+strength, not by permission authority:
+
+- **Fast** (quick direct answer): bypasses the Conductor and runs one direct
+  model call with a small budget and no delivery judge.
+- **Auto** (verified answer, default): the Conductor produces one typed plan;
+  execution is adaptive direct work followed by the independent delivery
+  judge with one bounded repair round when eligible.
+- **Pro** (deep mission): the same decision contract with a much larger
+  budget for deep, multi-iteration work, plus the most capable prompt
+  genome.
+
+Each tier can pin a configured default model (`fast_model`, `auto_model`,
+`pro_model` in the provider configuration, empty by default). A pinned model
+anchors Fast's direct route and the Conductor's `primary_model` choice for
+Auto/Pro without removing routing authority; when empty, the legacy role-slot
+behavior applies.
 
 Auto and Pro do not automatically run every configured model. The Conductor
 selects the route, model roles, retrieval needs, decomposition, and verification
-requirements in one validated execution plan. A production Workflow contains
+requirements in one validated execution plan. **Workflow execution is currently
+quarantined**: every multi-model collaboration experiment to date closed with
+no-go, invalid, or censored evidence, so production runs clamp any conductor
+workflow decision to adaptive direct execution (`workflow_enabled=false`,
+opt-in via provider configuration) and the planning prompt states the
+quarantine explicitly. The workflow machinery remains in the tree for future,
+evidence-first reconsideration. A production Workflow (when enabled) contains
 exactly one bounded Specialist, optionally one Independent Verifier, and a
 deterministic handoff to the foreground Owner. It does not run competing
 anchors, reviewer tournaments, repair syntheses, or a model-authored final
@@ -59,6 +77,16 @@ repair round on the audited steps before one recheck; a second revision verdict
 exhausts the repair budget. Invalid candidates receive bounded repair; if
 planning still fails, execution falls back to the shared foreground Owner
 without manufacturing a workflow.
+
+One bounded read-only widening is available. When the prompt explicitly forbids
+all effects (`effect_authority=forbidden`), the Conductor may instead propose
+two read-only Specialist roots with distinct bounded subtasks and, optionally,
+one tool-free Verifier that is model-distinct from both and audits both roots.
+The owner-execution graph validator accepts the two-root shape only when the
+plan carries a harness-stamped read-only authorization, and it stays
+single-Specialist for every other authority or for any mutation-bearing graph.
+The widened graph remains read-only end to end; side effects still belong to the
+foreground Owner.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
@@ -72,7 +100,19 @@ single-line receipt (`pass` or `revise` with findings). A `revise` verdict permi
 and one recheck; Fast runs and collaboration workflow products are never
 judged. Judge unavailability, inconclusive receipts, empty or ungrounded
 repairs, and fallback candidates keep the original answer and record a
-`direct_judge_disposition` instead of blocking delivery. Grounding obligations also accept anchor-matched failed tool attempts
+`direct_judge_disposition` instead of blocking delivery. At finalization the
+disposition plus the task contract's mutation and post-mutation verification
+facts are projected into a typed shadow outcome receipt
+(`cindx.agent.direct-judge-outcome.v1`) and appended to a private
+capped fitness-signal journal; the channel is shadow-only, consumes no
+provider call, and is not admitted to routing, promotion, memory, canary, or
+serving. An independent review receipt binds the exact journal-window digest
+and an explicit decision; only its admission maps the window into a
+conservative prompt-evolution fitness shape that remains production- and
+promotion-ineligible. The prompt-evolution read path resolves that admitted
+window best-effort when `prompt_evolution.json` in the app support directory
+enables it (off by default), revalidating the receipt and window digest at
+every read; any failure falls back to no admitted signal. Grounding obligations also accept anchor-matched failed tool attempts
 as absent-target evidence, so a task whose requested workspace file does not
 exist fails closed on content but no longer spins through unsatisfiable
 grounding repairs.

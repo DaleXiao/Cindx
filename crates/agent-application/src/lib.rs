@@ -5,6 +5,9 @@ mod collaboration_learning_policy;
 mod collaboration_learning_projection;
 #[cfg(feature = "collaboration-learning-offline")]
 mod collaboration_learning_replay;
+mod direct_judge_admission;
+mod direct_judge_fitness;
+mod direct_judge_outcome;
 mod loss_aware_work_queue;
 mod outcome_evidence;
 mod outcome_projection;
@@ -77,6 +80,27 @@ pub use collaboration_learning_replay::{
     CollaborationLearningOfflineEntryV1, CollaborationLearningOfflineGenesisV1,
     CollaborationLearningOfflineReplayV1, COLLABORATION_LEARNING_OFFLINE_ENTRY_SCHEMA,
     COLLABORATION_LEARNING_OFFLINE_GENESIS_SCHEMA,
+};
+pub use direct_judge_admission::{
+    admit_direct_judge_fitness_window, direct_judge_fitness_window_digest,
+    DirectJudgeFitnessAdmissionV1, DirectJudgeReviewReceiptV1,
+    DIRECT_JUDGE_FITNESS_ADMISSION_SCHEMA, DIRECT_JUDGE_REVIEW_RECEIPT_SCHEMA,
+};
+pub use direct_judge_fitness::{
+    summarize_direct_judge_fitness, DirectJudgeFitnessSignalV1, DirectJudgeFitnessSummaryV1,
+    DIRECT_JUDGE_FITNESS_SIGNAL_SCHEMA, DIRECT_JUDGE_FITNESS_SUMMARY_SCHEMA,
+    DIRECT_JUDGE_FITNESS_WINDOW,
+};
+pub use direct_judge_outcome::{
+    disposition_family, disposition_used_repair_round, DirectJudgeCompletionFacts,
+    DirectJudgeDispositionFamilyV1, DirectJudgeMutationVerificationV1, DirectJudgeOutcomeError,
+    DirectJudgeOutcomeV1, DIRECT_JUDGE_DISPOSITION_INCONCLUSIVE,
+    DIRECT_JUDGE_DISPOSITION_NOT_APPLICABLE, DIRECT_JUDGE_DISPOSITION_NOT_ELIGIBLE,
+    DIRECT_JUDGE_DISPOSITION_PASSED, DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+    DIRECT_JUDGE_DISPOSITION_RECHECK_INCONCLUSIVE, DIRECT_JUDGE_DISPOSITION_RECHECK_PASSED,
+    DIRECT_JUDGE_DISPOSITION_REPAIR_EMPTY, DIRECT_JUDGE_DISPOSITION_REPAIR_UNAVAILABLE,
+    DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED, DIRECT_JUDGE_DISPOSITION_UNAVAILABLE,
+    DIRECT_JUDGE_OUTCOME_SCHEMA,
 };
 pub use loss_aware_work_queue::{
     ClaimedWork, LossAwareWorkQueue, WorkEnqueueOutcome, WorkEnqueueResult, WorkQueueMetrics,

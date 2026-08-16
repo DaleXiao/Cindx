@@ -636,7 +636,7 @@ mod tests {
         let candidate = ConductorPromptGenome::seed_for_effort("pro")
             .mutations()
             .into_iter()
-            .find(|profile| profile.custom_directive != "")
+            .find(|profile| !profile.custom_directive.is_empty())
             .unwrap_or_else(|| {
                 let mut profile = ConductorPromptGenome::seed_for_effort("pro");
                 profile.id = "learned-test".to_string();
@@ -658,11 +658,7 @@ mod tests {
             {
                 let mut seed = run(case_id, category, 1.0, 100, &candidate, index == 0);
                 seed.profile_id = Some("seed-pro-v1".to_string());
-                let candidate_score = if index < 2 && replicate == 1 {
-                    1.0
-                } else {
-                    1.0
-                };
+                let candidate_score = 1.0;
                 let candidate_run = run(
                     case_id,
                     category,

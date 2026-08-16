@@ -261,6 +261,7 @@ fn test_conductor_harness(models: Vec<String>, agent_budget: usize) -> Conductor
         prior_hint: None,
         prompt_evolution_enabled: true,
         prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
+        parallel_read_only_authorized: false,
     })
 }
 
@@ -464,6 +465,7 @@ fn agent_execution_graph_contract_adaptive_capacity_is_independent_from_parallel
             prior_hint: None,
             prompt_evolution_enabled: false,
             prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
+            parallel_read_only_authorized: false,
         });
 
         assert_eq!(harness.request().execution_contract.max_parallelism, 1);
@@ -484,6 +486,127 @@ fn agent_execution_graph_contract_adaptive_capacity_is_independent_from_parallel
             .expect("owner handoff checkpoint");
         assert_eq!(handoff.attempts, 0);
     }
+}
+
+fn dual_read_only_proposal() -> WorkflowPlanProposal {
+    WorkflowPlanProposal {
+        steps: vec![
+            WorkflowPlanProposalStep {
+                id: "analysis".to_string(),
+                role: "survey_specialist".to_string(),
+                model: "specialist-a".to_string(),
+                subtask: "survey the public module surface".to_string(),
+                access: Vec::new(),
+                output_kind: WorkflowOutputKind::Analysis,
+                tool_policy: WorkflowToolPolicy::ReadOnlyExploration,
+            },
+            WorkflowPlanProposalStep {
+                id: "analysis_two".to_string(),
+                role: "test_survey_specialist".to_string(),
+                model: "specialist-a".to_string(),
+                subtask: "survey the internal test surface".to_string(),
+                access: Vec::new(),
+                output_kind: WorkflowOutputKind::Analysis,
+                tool_policy: WorkflowToolPolicy::ReadOnlyExploration,
+            },
+            WorkflowPlanProposalStep {
+                id: "verify".to_string(),
+                role: "independent_verifier".to_string(),
+                model: "verifier-b".to_string(),
+                subtask: "audit both survey branches".to_string(),
+                access: vec!["analysis".to_string(), "analysis_two".to_string()],
+                output_kind: WorkflowOutputKind::Verification,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+            WorkflowPlanProposalStep {
+                id: "owner_handoff".to_string(),
+                role: "owner_handoff".to_string(),
+                model: "utility-c".to_string(),
+                subtask: "hand the verified survey to the foreground Owner".to_string(),
+                access: vec!["verify".to_string()],
+                output_kind: WorkflowOutputKind::Synthesis,
+                tool_policy: WorkflowToolPolicy::None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn agent_execution_graph_contract_read_only_parallel_exploration_stays_authorized() {
+    let mut decision = AgentRunDecision::direct("specialist-a");
+    decision.execution = AgentExecutionMode::Workflow;
+    decision.tool_requirement = orchestrator::AgentToolRequirement::ReadOnly;
+    decision.verification = AgentVerificationPolicy::Independent;
+    decision.max_parallelism = 2;
+    decision.min_successful_branches = 1;
+    decision.distinct_contributions = 2;
+    decision.estimated_steps = 4;
+    decision.stop_policy = ConductorStopPolicy::Exhaustive;
+    let execution_contract = decision.execution_contract("pro");
+    assert_eq!(execution_contract.max_parallelism, 2);
+
+    let build_harness = |authorized: bool| {
+        let models = vec![
+            "specialist-a".to_string(),
+            "verifier-b".to_string(),
+            "utility-c".to_string(),
+        ];
+        ConductorHarness::new(ConductorRequest {
+            workflow_id: "read-only-parallel".to_string(),
+            objective: "survey the workspace without changes".to_string(),
+            recent_context: String::new(),
+            effort: "pro".to_string(),
+            policy: "best_of_n".to_string(),
+            conductor_model: "conductor".to_string(),
+            primary_model: "specialist-a".to_string(),
+            worker_models: models,
+            role_hints: ConductorRoleHints {
+                planner: "specialist-a".to_string(),
+                executor: "specialist-a".to_string(),
+                reviewer: "verifier-b".to_string(),
+                synthesizer: "specialist-a".to_string(),
+            },
+            budget: WorkflowBudget {
+                max_steps: 4,
+                max_models: 2,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 6,
+                max_output_tokens_per_step: 2_048,
+            },
+            execution_contract: execution_contract.clone(),
+            prior_hint: None,
+            prompt_evolution_enabled: false,
+            prompt_genome: ConductorPromptGenome::seed_for_effort("pro"),
+            parallel_read_only_authorized: authorized,
+        })
+    };
+
+    let plan = build_harness(true)
+        .plan_from_proposal(&dual_read_only_proposal())
+        .expect("authorized read-only proposal should materialize");
+    assert!(plan.parallel_read_only_specialists);
+    plan.validate_owner_execution_graph(true)
+        .expect("authorized dual specialist graph must validate");
+    let checkpoint = WorkflowExecutionCheckpoint::new("parallel-read-only", plan, 1);
+    let schedule =
+        adaptive_delivery_schedule(&checkpoint, 2).expect("dual root graph must schedule");
+    assert!(schedule.runnable_steps.contains("analysis"));
+    assert!(schedule.runnable_steps.contains("analysis_two"));
+    assert_eq!(schedule.target_step_id, "owner_handoff");
+    assert!(!schedule.complete);
+
+    let unauthorized_plan = build_harness(false)
+        .plan_from_proposal(&dual_read_only_proposal())
+        .expect("materialization itself does not depend on the authorization");
+    assert!(!unauthorized_plan.parallel_read_only_specialists);
+    assert_eq!(
+        unauthorized_plan.validate_owner_execution_graph(true),
+        Err(
+            "owner execution graph requires exactly one analysis or evidence specialist step"
+                .to_string()
+        ),
+        "a dual graph without the authorization stamp must fail closed"
+    );
 }
 
 #[test]
@@ -655,7 +778,7 @@ fn conductor_verification_policies_reach_the_persistent_task_contract() {
     independent.confidence_bps = 7_000;
     independent.stop_policy = ConductorStopPolicy::Exhaustive;
     independent
-        .validate(&["executor".to_string(), "reviewer".to_string()], 2)
+        .validate(&["executor".to_string(), "reviewer".to_string()], 2, false)
         .expect("independent fallback should remain valid");
 
     for (decision, effort, expected) in [
@@ -1390,7 +1513,8 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             evolved_directive: String::new(),
             historical_evidence: String::new(),
             matched_collaboration_evidence: Arc::new(Default::default()),
-            required_execution: None,
+            preferred_primary_model: None,
+        required_execution: None,
             execution_constraints: "isolated workers are read-only".to_string(),
             route_requirements: AgentRouteRequirements::default(),
             budget_fingerprint: None,
@@ -5047,6 +5171,7 @@ fn provider_config_input_preserves_existing_key_when_blank() {
             voice_model: "gpt-realtime".to_string(),
             collaboration_policy: "auto_router".to_string(),
             prompt_evolution_enabled: true,
+            workflow_enabled: false,
             context_window_tokens: 128_000,
             agent_system_prompt: "Be concise.\nUse Chinese when asked.".to_string(),
         },
@@ -5084,6 +5209,7 @@ fn provider_input_from_config(config: &ProviderConfig) -> ProviderConfigInput {
         voice_model: config.voice_model.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
         prompt_evolution_enabled: config.prompt_evolution_enabled,
+        workflow_enabled: config.workflow_enabled,
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
     }
@@ -5160,6 +5286,35 @@ fn provider_profiles_resolve_fixed_and_resource_scoped_endpoints() {
     );
     let invalid_boundary = resolve_provider_profile(PROVIDER_AZURE_OPENAI, &"a".repeat(64), "", "");
     assert!(invalid_boundary.base_url.is_empty());
+}
+
+#[test]
+fn effort_default_models_parse_and_anchor_per_tier() {
+    let config = provider_config_from_text(
+        "base_url=https://example.test/v1\napi_key=secret\nmodel=base-model\nfast_model=fast-model\nauto_model=auto-model\npro_model=pro-model\n",
+    );
+    assert_eq!(config.fast_model, "fast-model");
+    assert_eq!(config.auto_model, "auto-model");
+    assert_eq!(config.pro_model, "pro-model");
+    assert_eq!(config.effort_default_model("fast"), "fast-model");
+    assert_eq!(config.effort_default_model("auto"), "auto-model");
+    assert_eq!(config.effort_default_model("pro"), "pro-model");
+    assert_eq!(config.effort_default_model("other"), "");
+
+    let empty = provider_config_from_text("base_url=https://example.test/v1\nmodel=base-model\n");
+    assert_eq!(empty.effort_default_model("auto"), "");
+    assert_eq!(empty.model, "base-model");
+
+    let pinned = effort_model_candidates(&config, "auto");
+    assert!(pinned.iter().any(|candidate| candidate.name == "auto-model"));
+
+    let candidates = model_candidates_for_config(&config);
+    assert!(!candidates.iter().any(|candidate| candidate.name == "auto-model"));
+
+    let text = provider_config_text(&config);
+    assert!(text.contains("fast_model=fast-model"));
+    assert!(text.contains("auto_model=auto-model"));
+    assert!(text.contains("pro_model=pro-model"));
 }
 
 #[test]
@@ -8002,6 +8157,7 @@ fn workflow_checkpoint_owner_plan(prompt: &str, model: &str) -> WorkflowPlanIr {
         policy: "best_of_n".to_string(),
         coordinator_model: model.to_string(),
         prompt_profile: "checkpoint-test-profile".to_string(),
+        parallel_read_only_specialists: false,
         steps: vec![
             WorkflowPlanStep {
                 id: "specialist".to_string(),
@@ -10953,6 +11109,7 @@ fn conductor_evaluation_repairs_invalid_structure_before_scoring() {
         prior_hint: None,
         prompt_evolution_enabled: true,
         prompt_genome: genome.clone(),
+        parallel_read_only_authorized: false,
     });
     let mut calls = 0usize;
     let mut prompts = Vec::new();
@@ -11026,6 +11183,7 @@ fn conductor_evaluation_uses_a_collaborative_fallback_after_failed_repair() {
         prior_hint: None,
         prompt_evolution_enabled: true,
         prompt_genome: genome.clone(),
+        parallel_read_only_authorized: false,
     });
     let mut calls = 0usize;
 

@@ -171,7 +171,12 @@ pub(crate) fn finalize_agent_completion(
     let mut direct_judge_run_context = run_context.clone();
     direct_judge_run_context.insert(
         "direct_judge_disposition".to_string(),
-        judge_disposition,
+        judge_disposition.clone(),
+    );
+    crate::direct_judge_shadow_runtime::record_direct_judge_shadow_fitness(
+        runtime,
+        &judge_disposition,
+        grounded_completion_basis_label(grounded_completion_receipt.basis),
     );
     let run_context = &direct_judge_run_context;
     let (completion_evidence, routing_learning_eligible) = completion_learning_signal(runtime);

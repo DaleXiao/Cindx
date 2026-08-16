@@ -46,7 +46,7 @@ use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::conductor_health_runtime;
 use crate::configuration_models::ProviderConfig;
 use crate::routing_learning_runtime::learning_budget_fingerprint;
-use crate::workflow_routing_runtime::{conductor_historical_evidence, model_candidates_for_config};
+use crate::workflow_routing_runtime::{conductor_historical_evidence, effort_model_candidates};
 use agent_core::{Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
@@ -114,7 +114,7 @@ pub(crate) fn plan_agent_run(
     run_context
         .entry("effective_prompt_objective".to_string())
         .or_insert(default_effective_objective);
-    let candidates = model_candidates_for_config(config);
+    let candidates = effort_model_candidates(config, effort.label());
     let budget_fingerprint = learning_budget_fingerprint(run_context);
     let allowed_models = unique_configured_models(&candidates);
     let preferred_fallback_model = preferred_fallback_model(config, effort, &allowed_models);
@@ -157,7 +157,7 @@ pub(crate) fn plan_agent_run(
         )
         .map_err(CollaborationStageError::Failed)?;
         let decision = execution_constraint
-            .apply(decision, effort)
+            .apply(decision, effort, !config.workflow_enabled)
             .map_err(CollaborationStageError::Failed)?;
         let planned = finalize_planned_run(
             prompt,
@@ -200,7 +200,7 @@ pub(crate) fn plan_agent_run(
         )
         .map_err(CollaborationStageError::Failed)?;
         let decision = execution_constraint
-            .apply(decision, effort)
+            .apply(decision, effort, !config.workflow_enabled)
             .map_err(CollaborationStageError::Failed)?;
         let planned = finalize_planned_run(
             prompt,
@@ -267,10 +267,10 @@ pub(crate) fn plan_agent_run(
         matched_collaboration_evidence,
         required_execution: execution_constraint.conductor_required_execution(),
         route_requirements,
-        execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
-            .to_string(),
+        execution_constraints: crate::agent_execution_constraint::execution_constraints_text(config.workflow_enabled),
         budget_fingerprint: budget_fingerprint.clone(),
         prompt_profile_sha256: route_prompt_profile_sha256.clone(),
+        preferred_primary_model: crate::workflow_routing_runtime::effort_primary_model(config, effort.label()),
     };
     let decision_id = format!(
         "{}-run-decision",
@@ -370,12 +370,12 @@ pub(crate) fn plan_agent_run(
         }
     };
     let decision = execution_constraint
-        .apply(decision, effort)
+        .apply(decision, effort, !config.workflow_enabled)
         .map_err(CollaborationStageError::Failed)?;
     if execution_constraint.is_grounded_direct() {
         decision_reason = ExecutionPlanDecisionReason::RuntimeGroundedDirect;
         decision
-            .validate(&allowed_models, max_parallelism)
+            .validate(&allowed_models, max_parallelism, false)
             .map_err(CollaborationStageError::Failed)?;
     } else if execution_constraint.is_matched_route() {
         decision_reason = ExecutionPlanDecisionReason::MatchedRouteEvaluation;

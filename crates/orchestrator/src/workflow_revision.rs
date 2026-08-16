@@ -435,6 +435,7 @@ mod tests {
                 policy: "auto_router".to_string(),
                 coordinator_model: "model-a".to_string(),
                 prompt_profile: "baseline".to_string(),
+                parallel_read_only_specialists: false,
                 steps: vec![
                     step("inspect", "model-a", &[], WorkflowOutputKind::Evidence),
                     step(

@@ -396,4 +396,83 @@ mod tests {
         assert!(best.verdict.deliverable);
         assert!(best.verdict.verified);
     }
+
+    #[test]
+    fn dual_read_only_roots_fan_out_within_the_two_branch_budget() {
+        let workflow = AdaptiveWorkflow {
+            steps: vec![
+                AdaptiveWorkflowStep {
+                    id: "survey_a".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-model".to_string(),
+                    subtask: "Survey the public module surface".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "survey_b".to_string(),
+                    role: "worker".to_string(),
+                    model: "worker-model".to_string(),
+                    subtask: "Survey the internal test surface".to_string(),
+                    access: Vec::new(),
+                },
+                AdaptiveWorkflowStep {
+                    id: "verify".to_string(),
+                    role: "verifier".to_string(),
+                    model: "reviewer-model".to_string(),
+                    subtask: "Audit both survey branches".to_string(),
+                    access: vec!["survey_a".to_string(), "survey_b".to_string()],
+                },
+                AdaptiveWorkflowStep {
+                    id: "final".to_string(),
+                    role: "synthesizer".to_string(),
+                    model: "synthesis-model".to_string(),
+                    subtask: "Hand the audited survey to the Owner".to_string(),
+                    access: vec!["verify".to_string()],
+                },
+            ],
+        };
+        let mut plan = WorkflowPlanIr::from_adaptive(
+            "read-only-parallel",
+            "Survey the workspace without changes",
+            "pro",
+            "best_of_n",
+            "conductor",
+            &workflow,
+            WorkflowBudget {
+                max_steps: 5,
+                max_models: 3,
+                max_model_turns_per_step: 2,
+                max_tool_calls_per_step: 6,
+                max_output_tokens_per_step: 2_048,
+            },
+        );
+        plan.parallel_read_only_specialists = true;
+        let verification = plan
+            .steps
+            .iter_mut()
+            .find(|step| step.contract.output_kind == crate::WorkflowOutputKind::Verification)
+            .expect("verifier step exists");
+        verification.tool_policy = crate::WorkflowToolPolicy::None;
+        plan.validate_owner_execution_graph(true).unwrap();
+        let checkpoint = WorkflowExecutionCheckpoint::new("fan-out", plan, 1);
+
+        let session = AgentEngineSession::restore(&contract(), checkpoint).unwrap();
+        let mut snapshot = session.anytime().snapshot();
+        assert_eq!(snapshot.config.max_parallelism, 2);
+        // The desktop foreground path drops the legacy direct anchor before
+        // scheduling; mirror that so the branch budget is measured alone.
+        snapshot
+            .candidates
+            .retain(|candidate| candidate.id != DIRECT_ANCHOR_CANDIDATE_ID);
+        let controller = AnytimeController::from_snapshot(snapshot).unwrap();
+
+        let ready: Vec<String> = controller
+            .ready_candidates()
+            .into_iter()
+            .map(|candidate| candidate.id.clone())
+            .collect();
+        assert!(ready.iter().any(|id| id == "survey_a"), "{ready:?}");
+        assert!(ready.iter().any(|id| id == "survey_b"), "{ready:?}");
+        assert!(!ready.iter().any(|id| id == "verify"), "{ready:?}");
+    }
 }
