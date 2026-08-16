@@ -50,6 +50,7 @@ fn run_decision_prompt_applies_only_the_learned_route_directive() {
         evolved_directive: run_decision_evolved_directive(&profile, AgentPolicy::Auto).unwrap(),
         historical_evidence: String::new(),
         matched_collaboration_evidence: std::sync::Arc::new(Default::default()),
+        preferred_primary_model: None,
         required_execution: None,
         execution_constraints: String::new(),
         route_requirements: AgentRouteRequirements::default(),

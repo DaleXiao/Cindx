@@ -58,17 +58,17 @@ const EFFORT_OPTIONS: Array<{
   {
     value: "fast",
     label: "Cindx Fast",
-    description: "Direct single-model execution for quick, focused tasks"
+    description: "Quick direct answer; lowest latency"
   },
   {
     value: "auto",
     label: "Cindx Auto",
-    description: "Plans each request; adds collaboration and verification when valuable"
+    description: "Adaptive execution with independent delivery verification"
   },
   {
     value: "pro",
     label: "Cindx Pro",
-    description: "Larger planning and execution budget for demanding tasks"
+    description: "Deep iterative execution with the largest budget"
   }
 ];
 

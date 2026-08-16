@@ -626,6 +626,10 @@ pub struct AgentRunDecisionRequest {
     pub route_requirements: AgentRouteRequirements,
     pub budget_fingerprint: Option<String>,
     pub prompt_profile_sha256: String,
+    /// Configured default model for the requested effort tier, when the user
+    /// pinned one. Anchors the conductor's primary_model choice without
+    /// removing its authority to pick another configured model.
+    pub preferred_primary_model: Option<String>,
     /// Evaluation-only treatment constraint. Production requests leave this
     /// unset and retain Conductor authority.
     pub required_execution: Option<AgentExecutionMode>,
@@ -987,6 +991,14 @@ impl AgentRunDecisionHarness {
         } else {
             ""
         };
+        let preferred_model_guidance = match request.preferred_primary_model.as_deref() {
+            Some(model) if !model.trim().is_empty() => {
+                format!(
+                    "Preferred primary model for this effort tier: {model}. Use it for primary_model unless the task evidence clearly favors another configured model.\n"
+                )
+            }
+            _ => String::new(),
+        };
         format!(
             concat!(
                 "You are the Cindx runtime Conductor. Decide how to execute the request; do not answer it. Return only one strict JSON object.\n",
@@ -996,6 +1008,7 @@ impl AgentRunDecisionHarness {
                 "Configured roles are capability boundaries: primary_model and Specialist work must use a planner or executor role; an Independent Verifier must use a reviewer role. A summarizer role is utility-only and cannot act in the execution graph. The final synthesis compatibility node is a deterministic non-model Owner handoff, so its model field is not dispatched.\n",
                 "For direct execution use max_parallelism=1, min_successful_branches=1, distinct_contributions=0, stop_policy=first_verified, and verification none or self_check. A workflow uses max_parallelism=1, min_successful_branches=1, and distinct_contributions=1: one bounded Specialist, optionally followed by one Independent Verifier using a different configured model. Without a verifier use verification=none, estimated_steps=2, and stop_policy=exhaustive. With a genuinely model-distinct verifier use verification=independent and estimated_steps=3; if no second suitable configured model exists, do not manufacture independence.\n",
                 "A workflow decision is valid only when you can name that executable graph now. Include workflow_plan with one Specialist root, the optional Verifier depending only on that root, and a final tool-free synthesis compatibility node depending on the Specialist or Verifier. The runtime materializes that final node as a deterministic handoff to the foreground Owner; it is not another model actor. Use output_kind=analysis|evidence for the Specialist, verification for the optional Verifier, synthesis for the final handoff, and tool_policy=none|read_only_evidence|read_only_exploration. Isolated workers may inspect supplied or read-only evidence and advise the foreground Owner even when only the Owner can perform writes or final delivery. If this bounded graph is unlikely to beat Direct, choose direct and set workflow_plan to null.\n",
+                "{preferred_model_guidance}",
                 "{read_only_parallel_guidance}",
                 "expected_uplift_bps and confidence_bps are calibrated estimates from 0 to 10000, not advocacy. The harness will reject inconsistent budgets.\n",
                 "You own the final quality and collaboration decision. Auto should require at least {auto_uplift_floor}bps expected uplift and {auto_confidence_floor}bps confidence before choosing workflow; Pro should require at least {pro_uplift_floor}bps expected uplift over the direct anchor. Router v2 records a read-only counterfactual observation from your estimate and independently scored matched team-versus-direct evidence; it cannot downshift or replace a valid decision. Runtime may override only explicit safety, capability, resource, or evaluation constraints, and records every override. If you cannot justify collaboration, choose direct.\n",
@@ -1022,6 +1035,7 @@ impl AgentRunDecisionHarness {
             execution_constraints = execution_constraints,
             required_execution = required_execution,
             read_only_parallel_guidance = read_only_parallel_guidance,
+            preferred_model_guidance = preferred_model_guidance,
             minimum_tool_requirement = request.route_requirements.minimum_tool_requirement.label(),
             effect_authority = request.route_requirements.effect_authority.label(),
             image_input_required = request.route_requirements.image_input_required,
@@ -1264,6 +1278,7 @@ mod tests {
             route_requirements: AgentRouteRequirements::default(),
             budget_fingerprint: Some("0".repeat(64)),
             prompt_profile_sha256: "1".repeat(64),
+            preferred_primary_model: None,
             required_execution: None,
         }
     }
@@ -1736,6 +1751,24 @@ mod tests {
         assert!(prompt.contains("minimum_tool_requirement=effects"));
         assert!(prompt.contains("image_input_required=true"));
         assert!(prompt.contains("must satisfy them"));
+    }
+
+    #[test]
+    fn planning_prompt_anchors_configured_effort_model_only_when_pinned() {
+        let prompt = AgentRunDecisionHarness::new(request()).planning_prompt();
+        assert!(!prompt.contains("Preferred primary model"));
+
+        let mut pinned = request();
+        pinned.preferred_primary_model = Some("deepseek-v4-pro-0813".to_string());
+        let prompt = AgentRunDecisionHarness::new(pinned).planning_prompt();
+        assert!(
+            prompt.contains("Preferred primary model for this effort tier: deepseek-v4-pro-0813")
+        );
+
+        let mut blank = request();
+        blank.preferred_primary_model = Some("   ".to_string());
+        let prompt = AgentRunDecisionHarness::new(blank).planning_prompt();
+        assert!(!prompt.contains("Preferred primary model"));
     }
 
     #[test]
