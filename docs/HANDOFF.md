@@ -581,7 +581,10 @@ record remain private outside the tracked tree. This is harness-link
 verification plus a resource-boundary finding: direct single-model calls
 averaged far higher latency than the Auto and Pro paths on this provider. It
 admits no parity, uplift, or model-quality claim, and rerunning to rescue the
-ineligible cell is prohibited.
+ineligible cell is prohibited. GPQA-Diamond had been retired as an evaluation
+direction before this pilot and was used only as the minimum-infrastructure
+harness-link vehicle; the pilot does not reinstate it, and any successor
+authority must bind genuine agentic benchmarks.
 
 ## Blocking Fact
 

@@ -135,7 +135,10 @@ champion and convergence mathematics are unchanged. It is included in
 
 `fugu-pilot-contract` runs the provider-free `fugu_pilot_lab` selftest bound to
 `benchmarks/fugu/fugu-pilot-v1.json` and
-`benchmarks/fugu/fugu-pilot-protocol-v1.json`. It pins the pilot suite to the
+`benchmarks/fugu/fugu-pilot-protocol-v1.json`. Its benchmark is GPQA-Diamond,
+which had been retired as an evaluation direction before the pilot; the suite
+remains tracked solely as a harness-link artifact and must not be read as
+reinstating GPQA as an evaluation direction. It pins the pilot suite to the
 frozen 12-case GPQA-Diamond sample and the cindx_fast / cindx_auto / cindx_pro
 single-replicate matrix, proves the protocol manifest binds the exact suite
 SHA-256 plus the pinned case authority and prompt-profile digests, keeps the
