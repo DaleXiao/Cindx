@@ -188,6 +188,98 @@ pub(super) fn run() -> Result<(), String> {
         train_route_pairs.push((pair_index + 1, pair));
     }
 
+    if std::env::var_os("CINDX_WORKFLOW_GEPA_PAIRS_ONLY").is_some() {
+        for split in [CampaignSplit::Validation, CampaignSplit::Test] {
+            for (pair_index, case) in cases_for_split(&suite, split)?
+                .into_iter()
+                .enumerate()
+            {
+                eprintln!(
+                    "[workflow-gepa pairs-only] matched route {} pair: {}",
+                    split.label(),
+                    case.id
+                );
+                let pair = execute_matched_route_pair(
+                    &app,
+                    &state,
+                    &runtime_provider,
+                    &evaluation_database,
+                    suite_root,
+                    case,
+                    split,
+                    1,
+                    pair_index,
+                    &mut execution_index,
+                    &suite_sha256,
+                    &mut journal,
+                )?;
+                train_runs.push(pair.pair.seed.clone());
+                train_runs.push(pair.pair.candidate.clone());
+                train_route_pairs.push((train_route_pairs.len() + 1, pair));
+            }
+        }
+        let route_treatment_pairs = train_route_pairs
+            .iter()
+            .map(|(_, pair)| pair.pair.clone())
+            .collect::<Vec<_>>();
+        let route_treatment_signal = route_treatment_pairs
+            .iter()
+            .any(|pair| pair.outcome == "candidate_win");
+        let reflection_packets =
+            route_treatment_reflection_packets(&suite, &seed_profile, &train_route_pairs)?;
+        let reflection_evidence_sha256 = sha256_hex(
+            &serde_json::to_vec(&reflection_packets)
+                .map_err(|error| format!("failed to encode reflection evidence: {error}"))?,
+        );
+        let diagnostic_plans = train_runs
+            .iter()
+            .map(ProductRunReceipt::execution_diagnostic)
+            .collect::<Result<Vec<_>, String>>()?;
+        let seed_route_profile_sha256 =
+            seed_profile.route_decision_profile_sha256(policy.label())?;
+        let learning_readiness = assess_prompt_learning_readiness(
+            PromptLearningLayer::RouteDecision,
+            Some(&seed_route_profile_sha256),
+            None,
+            &diagnostic_plans,
+        )?;
+        let receipt = WorkflowGepaCampaignReceipt {
+            schema: REPORT_SCHEMA,
+            source_commit,
+            suite_id: suite.id,
+            suite_sha256,
+            training_dataset_sha256,
+            provider_id: provider.provider_id,
+            provider_endpoint_sha256,
+            configured_model_sha256,
+            campaign_budget: journal.budget(),
+            campaign_usage: journal.usage(),
+            train_runs,
+            route_treatment_pairs,
+            route_treatment_signal,
+            learning_readiness,
+            reflection_evidence_sha256,
+            candidate_population: Vec::new(),
+            selected_candidate: None,
+            validation_pairs: Vec::new(),
+            validation: None,
+            validation_gate_passed: false,
+            test_pairs: Vec::new(),
+            test: None,
+            test_gate_passed: false,
+            grounded_direct_control: None,
+            grounded_direct_control_passed: false,
+            final_test_was_untouched_during_learning: true,
+            candidate_selected_from_train_only: false,
+            candidate_snapshot_published: false,
+            production_promotion_claimed: false,
+            status: "pairs_only_route_evidence".to_string(),
+        };
+        let report_sha256 = write_report(&report_path, &receipt)?;
+        journal.finish(&receipt.status, report_sha256)?;
+        return Ok(());
+    }
+
     let reflection_packets =
         route_treatment_reflection_packets(&suite, &seed_profile, &train_route_pairs)?;
     let route_treatment_pairs = train_route_pairs
