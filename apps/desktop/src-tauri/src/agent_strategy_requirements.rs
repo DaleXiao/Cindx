@@ -1,6 +1,9 @@
 use super::PlannedAgentRun;
 use agent_core::Metadata;
-use orchestrator::{AgentExecutionMode, AgentRouteRequirements, AgentRunDecision, ModelCandidate};
+use orchestrator::{
+    AgentExecutionMode, AgentRouteRequirements, AgentRunDecision, MemoryRecallPlan,
+    MemoryRecallPolicy, ModelCandidate, MAX_RUN_DECISION_QUERY_CHARS,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentPlanningSource {
@@ -141,4 +144,69 @@ pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
             .route_observability_metadata(),
     );
     metadata
+}
+
+/// Auto/Pro default memory recall for production (Native) runs: when the
+/// conductor declines memory entirely, upgrade the policy to relevant recall
+/// keyed on the run prompt so durable project memory participates in every
+/// non-trivial task. Fast returns before this point; explicit
+/// Relevant/Comprehensive choices are kept; evaluation arms are exempt.
+pub(super) fn apply_default_memory_recall(
+    constraint: &crate::agent_execution_constraint::AgentExecutionConstraint,
+    decision: &mut AgentRunDecision,
+    prompt: &str,
+) {
+    if constraint.is_native() && decision.memory.policy == MemoryRecallPolicy::None {
+        decision.memory = MemoryRecallPlan {
+            policy: MemoryRecallPolicy::Relevant,
+            query: crate::collaboration_service::truncate_for_collaboration(
+                prompt,
+                MAX_RUN_DECISION_QUERY_CHARS.saturating_sub(12),
+            ),
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_memory_recall_upgrades_none_and_preserves_explicit_policies() {
+        let native = crate::agent_execution_constraint::AgentExecutionConstraint::Native;
+        let mut decision = AgentRunDecision::direct("executor");
+        assert_eq!(decision.memory.policy, MemoryRecallPolicy::None);
+        apply_default_memory_recall(&native, &mut decision, "Summarize the project memory needs");
+        assert_eq!(decision.memory.policy, MemoryRecallPolicy::Relevant);
+        assert_eq!(decision.memory.query, "Summarize the project memory needs");
+
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.memory = MemoryRecallPlan {
+            policy: MemoryRecallPolicy::Comprehensive,
+            query: "existing".to_string(),
+        };
+        apply_default_memory_recall(&native, &mut decision, "ignored");
+        assert_eq!(decision.memory.policy, MemoryRecallPolicy::Comprehensive);
+        assert_eq!(decision.memory.query, "existing");
+    }
+
+    #[test]
+    fn default_memory_recall_skips_matched_evaluation_arms() {
+        let grounded = crate::agent_execution_constraint::AgentExecutionConstraint::GroundedDirect;
+        let mut decision = AgentRunDecision::direct("executor");
+        apply_default_memory_recall(&grounded, &mut decision, "prompt");
+        assert_eq!(decision.memory.policy, MemoryRecallPolicy::None);
+    }
+
+    #[test]
+    fn default_memory_recall_truncates_long_prompts_to_the_query_budget() {
+        let native = crate::agent_execution_constraint::AgentExecutionConstraint::Native;
+        let mut decision = AgentRunDecision::direct("executor");
+        let long_prompt = "x".repeat(MAX_RUN_DECISION_QUERY_CHARS + 500);
+        apply_default_memory_recall(&native, &mut decision, &long_prompt);
+        assert_eq!(
+            decision.memory.query.chars().count(),
+            MAX_RUN_DECISION_QUERY_CHARS
+        );
+    }
 }

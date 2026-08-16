@@ -90,7 +90,11 @@ foreground Owner.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
-effect authority does not.
+effect authority does not. Auto and Pro additionally default memory recall to
+`relevant` (keyed on the run prompt) whenever the Conductor declines memory
+entirely, so durable project memory participates in every non-trivial task;
+Fast keeps the Conductor's choice, and explicit Relevant/Comprehensive
+decisions are preserved.
 
 Auto and Pro direct execution carry a contracted delivery judge at the
 shared completion point: a model-distinct Reviewer audits the final answer

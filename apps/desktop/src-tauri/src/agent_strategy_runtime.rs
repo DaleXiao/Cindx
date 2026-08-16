@@ -369,9 +369,10 @@ pub(crate) fn plan_agent_run(
             )
         }
     };
-    let decision = execution_constraint
+    let mut decision = execution_constraint
         .apply(decision, effort, !config.workflow_enabled)
         .map_err(CollaborationStageError::Failed)?;
+    requirements::apply_default_memory_recall(&execution_constraint, &mut decision, prompt);
     if execution_constraint.is_grounded_direct() {
         decision_reason = ExecutionPlanDecisionReason::RuntimeGroundedDirect;
         decision

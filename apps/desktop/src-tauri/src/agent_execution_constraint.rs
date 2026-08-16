@@ -94,6 +94,10 @@ impl AgentExecutionConstraint {
         matches!(self, Self::MatchedDirect | Self::MatchedWorkflow)
     }
 
+    pub(crate) const fn is_native(self) -> bool {
+        matches!(self, Self::Native)
+    }
+
     pub(crate) const fn conductor_required_execution(self) -> Option<AgentExecutionMode> {
         match self {
             // Both arms start from the same workflow-capable conductor plan. The
