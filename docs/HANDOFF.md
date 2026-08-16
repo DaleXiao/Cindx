@@ -574,12 +574,20 @@ The Fugu pilot authority was then authorized and consumed once on source
 (`41d1213c...`) was verified against the suite case authority before
 execution. All 36 runs started and 35 completed with scored answers
 (cindx_auto 8/12, cindx_pro 9/12, cindx_fast 11/12); one `direct_default`
-Chemistry run exhausted the 300-second treatment deadline, the fail-closed
+Chemistry run was corrupted by host power management, the fail-closed
 projection marked the `cindx_fast` cell ineligible, and the pilot closed not
 ready. The raw report, observations rejection, authorization, and execution
 record remain private outside the tracked tree. This is harness-link
-verification plus a resource-boundary finding: direct single-model calls
-averaged far higher latency than the Auto and Pro paths on this provider. It
+verification plus a host-suspend instrumentation finding, not a model or
+resource conclusion: post-run diagnosis showed the machine entered Deep Idle
+mid-run (wall-clock 4,995 seconds against 556 seconds of active time; the
+power log confirms a recurring Deep Idle cadence), the SystemTime-based
+latency accounting read 1,698,038 ms across the suspension while the
+monotonic deadlines stayed paused, and the corrupted run closed
+`collaboration stage deadline exhausted` after wake. Successor provider
+campaigns need suspend defenses: monotonic-plus-wall latency accounting,
+sleep-interrupted runs censored as structural-invalid, and power assertions
+during execution. It
 admits no parity, uplift, or model-quality claim, and rerunning to rescue the
 ineligible cell is prohibited. GPQA-Diamond had been retired as an evaluation
 direction before this pilot and was used only as the minimum-infrastructure
