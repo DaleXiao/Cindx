@@ -60,23 +60,14 @@ behavior applies.
 
 Auto and Pro do not automatically run every configured model. The Conductor
 selects the route, model roles, retrieval needs, decomposition, and verification
-requirements in one validated execution plan. **Workflow execution is currently
-quarantined**: every multi-model collaboration experiment to date closed with
-no-go, invalid, or censored evidence, so production runs clamp any conductor
-workflow decision to adaptive direct execution (`workflow_enabled=false`,
-opt-in via provider configuration) and the planning prompt states the
-quarantine explicitly. The workflow machinery remains in the tree for future,
-evidence-first reconsideration. A production Workflow (when enabled) contains
-exactly one bounded Specialist, optionally one Independent Verifier, and a
-deterministic handoff to the foreground Owner. It does not run competing
-anchors, reviewer tournaments, repair syntheses, or a model-authored final
-synthesis. An Independent Verifier must use a different configured model from
-the Specialist; a second prompt to the same model is not treated as
-independence. A `needs_revision` verification verdict opens at most one bounded
-repair round on the audited steps before one recheck; a second revision verdict
-exhausts the repair budget. Invalid candidates receive bounded repair; if
-planning still fails, execution falls back to the shared foreground Owner
-without manufacturing a workflow.
+requirements in one validated execution plan. **Multi-model workflow collaboration is retired.** Natural workflow routing
+never triggered in production, every historical forced collaboration campaign
+closed no-go, invalid, or censored, and the owner decision is permanent
+retirement, not evidence-gated reconsideration. Production runs clamp any
+conductor workflow decision to adaptive direct execution
+(`workflow_enabled=false`) and the planning prompt states this explicitly.
+The workflow execution machinery is being physically removed from the tree;
+during the removal window the clamp guarantees no workflow can run.
 
 One bounded read-only widening is available. When the prompt explicitly forbids
 all effects (`effect_authority=forbidden`), the Conductor may instead propose
