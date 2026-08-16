@@ -94,6 +94,7 @@ pub(crate) struct ProviderConfig {
     pub(crate) auth_verified_at_ms: Option<u64>,
     pub(crate) collaboration_policy: String,
     pub(crate) prompt_evolution_enabled: bool,
+    pub(crate) workflow_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
 }
@@ -153,7 +154,8 @@ impl Default for ProviderConfig {
             voice_model: defaults.voice.clone(),
             auth_verified_at_ms: None,
             collaboration_policy: "auto_router".to_string(),
-            prompt_evolution_enabled: true,
+            prompt_evolution_enabled: false,
+            workflow_enabled: false,
             context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),
         }

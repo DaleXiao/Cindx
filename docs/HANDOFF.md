@@ -51,7 +51,11 @@ Never use `reset --hard` or force-push to synchronize this checkout.
 - Fast is a direct single-model route.
 - Auto and Pro use one Conductor-owned typed execution plan. Pro has larger
   bounded planning capacity; it does not blindly activate all models.
-- A production Workflow runs exactly one read-only Specialist, optionally one
+- Workflow execution is quarantined by default (`workflow_enabled=false`):
+  every collaboration experiment closed no-go, invalid, or censored, so
+  production clamps conductor workflow decisions to adaptive direct
+  execution; matched-route evaluation arms and the offline campaign tooling
+  are exempt. A production Workflow (when enabled) runs exactly one read-only Specialist, optionally one
   model-distinct Independent Verifier, then a deterministic checkpoint handoff
   to the Owner. It has no competing anchor, reviewer tournament, or model
   synthesis layer. A `needs_revision` verdict opens at most one bounded repair
@@ -62,7 +66,11 @@ Never use `reset --hard` or force-push to synchronize this checkout.
   recovery, and terminal commit.
 - Workspace retrieval, durable memory, task graph, and prompt evolution are
   implemented and contract-tested.
-- Prompt evolution runs in the background and cannot modify an in-flight run or
+- Prompt evolution defaults off (`prompt_evolution_enabled=false`): the
+  continuous background pairwise-evaluation loop no longer spends provider
+  calls; the machinery, read model, and rollout state machine remain in the
+  tree and re-enable through configuration. When enabled it runs in the
+  background and cannot modify an in-flight run or
   broaden tool/permission authority.
 - No recent workflow candidate was promoted. Current evidence does not prove
   general Auto/Pro superiority or Fugu Ultra parity.
@@ -610,6 +618,19 @@ not exercised. Ten non-completed runs stay in the denominator. This is a
 matched mechanism claim over agentic cases with workspace effects and tool
 use, not an intelligence or parity claim; the raw evidence remains private
 outside the tracked tree.
+
+Workflow quarantine and continuous-learning shutoff landed in the current
+source. A `workflow_enabled` provider-configuration flag defaults false; the
+execution constraint clamps any production (Native) conductor workflow
+decision to adaptive direct execution through the existing grounded-direct
+normalization, matched-route evaluation arms and offline campaign tooling are
+exempt, and the planning prompt states the quarantine explicitly. Provider
+prompt evolution defaults off (`prompt_evolution_enabled=false`), stopping
+the continuous background pairwise-evaluation loop while retaining the
+machinery for opt-in re-enablement. A contract test pins the quarantine
+clamp. No production behavior changes for Fast or direct Auto/Pro runs; the
+delivery judge, grounding obligations, memory, and routing learning are
+unaffected.
 
 ## Blocking Fact
 

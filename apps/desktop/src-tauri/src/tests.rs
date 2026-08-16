@@ -5171,6 +5171,7 @@ fn provider_config_input_preserves_existing_key_when_blank() {
             voice_model: "gpt-realtime".to_string(),
             collaboration_policy: "auto_router".to_string(),
             prompt_evolution_enabled: true,
+            workflow_enabled: false,
             context_window_tokens: 128_000,
             agent_system_prompt: "Be concise.\nUse Chinese when asked.".to_string(),
         },
@@ -5208,6 +5209,7 @@ fn provider_input_from_config(config: &ProviderConfig) -> ProviderConfigInput {
         voice_model: config.voice_model.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
         prompt_evolution_enabled: config.prompt_evolution_enabled,
+        workflow_enabled: config.workflow_enabled,
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
     }

@@ -60,7 +60,13 @@ behavior applies.
 
 Auto and Pro do not automatically run every configured model. The Conductor
 selects the route, model roles, retrieval needs, decomposition, and verification
-requirements in one validated execution plan. A production Workflow contains
+requirements in one validated execution plan. **Workflow execution is currently
+quarantined**: every multi-model collaboration experiment to date closed with
+no-go, invalid, or censored evidence, so production runs clamp any conductor
+workflow decision to adaptive direct execution (`workflow_enabled=false`,
+opt-in via provider configuration) and the planning prompt states the
+quarantine explicitly. The workflow machinery remains in the tree for future,
+evidence-first reconsideration. A production Workflow (when enabled) contains
 exactly one bounded Specialist, optionally one Independent Verifier, and a
 deterministic handoff to the foreground Owner. It does not run competing
 anchors, reviewer tournaments, repair syntheses, or a model-authored final
