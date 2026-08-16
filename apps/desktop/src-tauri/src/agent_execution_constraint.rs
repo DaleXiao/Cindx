@@ -149,8 +149,18 @@ impl AgentExecutionConstraint {
         self,
         decision: AgentRunDecision,
         effort: AgentPolicy,
+        workflow_quarantined: bool,
     ) -> Result<AgentRunDecision, String> {
         match self {
+            Self::Native
+                if workflow_quarantined
+                    && decision.execution == AgentExecutionMode::Workflow =>
+            {
+                let mut decision = decision.constrained_to_grounded_direct();
+                decision.rationale =
+                    format!("{} (workflow quarantined)", decision.rationale);
+                Ok(decision)
+            }
             Self::Native => Ok(decision),
             Self::GroundedDirect if effort != AgentPolicy::Auto => {
                 Err("grounded-direct execution requires the Auto policy and budget".to_string())
@@ -197,6 +207,15 @@ const fn execution_mode_label(mode: AgentExecutionMode) -> &'static str {
     }
 }
 
+pub(crate) fn execution_constraints_text(workflow_enabled: bool) -> String {
+    let base = "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution.";
+    if workflow_enabled {
+        base.to_string()
+    } else {
+        format!("{base} Workflow is quarantined in this deployment: execution must be direct and workflow_plan must be null.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,18 +254,18 @@ mod tests {
         let decision = AgentRunDecision::direct("executor");
         assert_eq!(
             AgentExecutionConstraint::Native
-                .apply(decision.clone(), AgentPolicy::Pro)
+                .apply(decision.clone(), AgentPolicy::Pro, false)
                 .expect("native execution should remain unchanged"),
             decision
         );
         assert!(AgentExecutionConstraint::GroundedDirect
-            .apply(decision.clone(), AgentPolicy::Fast)
+            .apply(decision.clone(), AgentPolicy::Fast, false)
             .is_err());
         assert!(AgentExecutionConstraint::GroundedDirect
-            .apply(decision.clone(), AgentPolicy::Pro)
+            .apply(decision.clone(), AgentPolicy::Pro, false)
             .is_err());
         assert!(AgentExecutionConstraint::GroundedDirect
-            .apply(decision, AgentPolicy::Auto)
+            .apply(decision, AgentPolicy::Auto, false)
             .is_ok());
     }
 
@@ -259,10 +278,10 @@ mod tests {
         second.rationale = "different provider rationale".to_string();
         second.max_parallelism = 4;
         let first = AgentExecutionConstraint::MatchedMemoryEffect
-            .apply(first, AgentPolicy::Auto)
+            .apply(first, AgentPolicy::Auto, false)
             .expect("matched-memory route");
         let second = AgentExecutionConstraint::MatchedMemoryEffect
-            .apply(second, AgentPolicy::Auto)
+            .apply(second, AgentPolicy::Auto, false)
             .expect("matched-memory route");
 
         assert_eq!(first, second);
@@ -274,7 +293,7 @@ mod tests {
             "durable project requirements and prior-session facts"
         );
         assert!(AgentExecutionConstraint::MatchedMemoryEffect
-            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro)
+            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro, false)
             .is_err());
     }
 
@@ -286,13 +305,13 @@ mod tests {
         workflow.min_successful_branches = 2;
         workflow.distinct_contributions = 2;
         let direct = AgentExecutionConstraint::MatchedDirect
-            .apply(workflow.clone(), AgentPolicy::Pro)
+            .apply(workflow.clone(), AgentPolicy::Pro, false)
             .expect("matched direct should project the shared workflow anchor");
         assert_eq!(direct.execution, AgentExecutionMode::Direct);
         assert_eq!(direct.primary_model, workflow.primary_model);
         assert_eq!(
             AgentExecutionConstraint::MatchedWorkflow
-                .apply(workflow.clone(), AgentPolicy::Pro)
+                .apply(workflow.clone(), AgentPolicy::Pro, false)
                 .expect("matched workflow should retain the shared anchor"),
             workflow
         );
@@ -305,10 +324,36 @@ mod tests {
             Some(AgentExecutionMode::Workflow)
         );
         assert!(AgentExecutionConstraint::MatchedDirect
-            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Auto)
+            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Auto, false)
             .is_err());
         assert!(AgentExecutionConstraint::MatchedWorkflow
-            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro)
+            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro, false)
             .is_err());
+    }
+
+    #[test]
+    fn native_quarantine_clamps_workflow_to_direct_and_keeps_evaluation_arms() {
+        let mut workflow = AgentRunDecision::direct("executor");
+        workflow.execution = AgentExecutionMode::Workflow;
+        let clamped = AgentExecutionConstraint::Native
+            .apply(workflow.clone(), AgentPolicy::Auto, true)
+            .expect("quarantine clamps");
+        assert_eq!(clamped.execution, AgentExecutionMode::Direct);
+        assert_eq!(clamped.max_parallelism, 1);
+        assert!(clamped.rationale.contains("workflow quarantined"));
+
+        let untouched = AgentExecutionConstraint::Native
+            .apply(workflow.clone(), AgentPolicy::Auto, false)
+            .expect("no quarantine keeps workflow");
+        assert_eq!(untouched.execution, AgentExecutionMode::Workflow);
+
+        let direct = AgentRunDecision::direct("executor");
+        let kept = AgentExecutionConstraint::Native
+            .apply(direct, AgentPolicy::Auto, true)
+            .expect("direct survives quarantine");
+        assert_eq!(kept.execution, AgentExecutionMode::Direct);
+
+        assert!(!execution_constraints_text(true).contains("quarantined"));
+        assert!(execution_constraints_text(false).contains("quarantined"));
     }
 }

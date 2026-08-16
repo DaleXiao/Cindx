@@ -1106,6 +1106,8 @@ pub(crate) struct ProviderConfigInput {
     pub(crate) collaboration_policy: String,
     #[serde(default = "default_prompt_evolution_enabled")]
     pub(crate) prompt_evolution_enabled: bool,
+    #[serde(default)]
+    pub(crate) workflow_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
 }

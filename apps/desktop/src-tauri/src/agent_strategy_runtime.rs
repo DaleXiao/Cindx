@@ -157,7 +157,7 @@ pub(crate) fn plan_agent_run(
         )
         .map_err(CollaborationStageError::Failed)?;
         let decision = execution_constraint
-            .apply(decision, effort)
+            .apply(decision, effort, !config.workflow_enabled)
             .map_err(CollaborationStageError::Failed)?;
         let planned = finalize_planned_run(
             prompt,
@@ -200,7 +200,7 @@ pub(crate) fn plan_agent_run(
         )
         .map_err(CollaborationStageError::Failed)?;
         let decision = execution_constraint
-            .apply(decision, effort)
+            .apply(decision, effort, !config.workflow_enabled)
             .map_err(CollaborationStageError::Failed)?;
         let planned = finalize_planned_run(
             prompt,
@@ -267,8 +267,7 @@ pub(crate) fn plan_agent_run(
         matched_collaboration_evidence,
         required_execution: execution_constraint.conductor_required_execution(),
         route_requirements,
-        execution_constraints: "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution."
-            .to_string(),
+        execution_constraints: crate::agent_execution_constraint::execution_constraints_text(config.workflow_enabled),
         budget_fingerprint: budget_fingerprint.clone(),
         prompt_profile_sha256: route_prompt_profile_sha256.clone(),
         preferred_primary_model: crate::workflow_routing_runtime::effort_primary_model(config, effort.label()),
@@ -371,7 +370,7 @@ pub(crate) fn plan_agent_run(
         }
     };
     let decision = execution_constraint
-        .apply(decision, effort)
+        .apply(decision, effort, !config.workflow_enabled)
         .map_err(CollaborationStageError::Failed)?;
     if execution_constraint.is_grounded_direct() {
         decision_reason = ExecutionPlanDecisionReason::RuntimeGroundedDirect;
