@@ -111,6 +111,59 @@ pub(crate) fn parse_task_class_label(value: &str) -> Option<TaskClass> {
 }
 
 pub(crate) fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelCandidate> {
+    effort_model_candidates(config, "")
+}
+
+pub(crate) fn effort_primary_model(config: &ProviderConfig, effort_label: &str) -> Option<String> {
+    let pinned = config.effort_default_model(effort_label);
+    (!pinned.is_empty()).then_some(pinned)
+}
+
+pub(crate) fn effort_model_candidates(
+    config: &ProviderConfig,
+    effort_label: &str,
+) -> Vec<ModelCandidate> {
+    let mut candidates = base_model_candidates_for_config(config);
+    let pinned = config.effort_default_model(effort_label);
+    if !pinned.is_empty()
+        && !candidates
+            .iter()
+            .any(|candidate| candidate.name == pinned)
+    {
+        let (cost_tier, latency_tier) = match effort_label {
+            "fast" => (1, 1),
+            "pro" => (3, 1),
+            _ => (2, 1),
+        };
+        let name = pinned;
+        let catalog_vision = provider_model_supports_vision(&config.provider_id, &name);
+        let catalog_tools = provider_model_supports_tools(&config.provider_id, &name);
+        let supports_vision =
+            catalog_vision.unwrap_or_else(|| model_supports_vision_content(&name));
+        let supports_tools = catalog_tools.unwrap_or(true);
+        candidates.push(ModelCandidate {
+            name,
+            role: ModelRole::Executor,
+            supports_tools,
+            supports_vision,
+            tools_capability_source: if catalog_tools.is_some() {
+                ModelCapabilitySource::ProviderCatalog
+            } else {
+                ModelCapabilitySource::CompatibilityAssumption
+            },
+            vision_capability_source: if catalog_vision.is_some() {
+                ModelCapabilitySource::ProviderCatalog
+            } else {
+                ModelCapabilitySource::CompatibilityAssumption
+            },
+            cost_tier,
+            latency_tier,
+        });
+    }
+    candidates
+}
+
+fn base_model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelCandidate> {
     [
         (ModelRole::Executor, config.model.clone(), 1, 1),
         (

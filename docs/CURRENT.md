@@ -39,12 +39,24 @@ The desktop app currently includes:
 
 ## Execution Modes
 
-- **Fast** bypasses the Conductor and selects one configured model for direct
-  execution.
-- **Auto** asks the Conductor for one typed direct-or-workflow candidate under
-  its bounded planning budget.
-- **Pro** uses the same decision contract with a larger bounded planning and
-  execution budget.
+The three effort tiers form a compute ladder over one kernel and one
+quality spine; they differ by budget, iteration depth, and verification
+strength, not by permission authority:
+
+- **Fast** (quick direct answer): bypasses the Conductor and runs one direct
+  model call with a small budget and no delivery judge.
+- **Auto** (verified answer, default): the Conductor produces one typed plan;
+  execution is adaptive direct work followed by the independent delivery
+  judge with one bounded repair round when eligible.
+- **Pro** (deep mission): the same decision contract with a much larger
+  budget for deep, multi-iteration work, plus the most capable prompt
+  genome.
+
+Each tier can pin a configured default model (`fast_model`, `auto_model`,
+`pro_model` in the provider configuration, empty by default). A pinned model
+anchors Fast's direct route and the Conductor's `primary_model` choice for
+Auto/Pro without removing routing authority; when empty, the legacy role-slot
+behavior applies.
 
 Auto and Pro do not automatically run every configured model. The Conductor
 selects the route, model roles, retrieval needs, decomposition, and verification

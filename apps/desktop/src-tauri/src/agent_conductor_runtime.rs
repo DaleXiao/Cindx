@@ -120,7 +120,10 @@ pub(crate) fn preferred_fallback_model(
     effort: AgentPolicy,
     allowed_models: &[String],
 ) -> String {
-    let preferred = if effort.uses_default_model() && !config.model.trim().is_empty() {
+    let effort_pinned = config.effort_default_model(effort.label());
+    let preferred = if !effort_pinned.is_empty() {
+        effort_pinned.as_str()
+    } else if effort.uses_default_model() && !config.model.trim().is_empty() {
         config.model.trim()
     } else {
         config.executor_model.trim()

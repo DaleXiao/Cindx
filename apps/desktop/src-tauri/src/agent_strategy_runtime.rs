@@ -46,7 +46,7 @@ use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::conductor_health_runtime;
 use crate::configuration_models::ProviderConfig;
 use crate::routing_learning_runtime::learning_budget_fingerprint;
-use crate::workflow_routing_runtime::{conductor_historical_evidence, model_candidates_for_config};
+use crate::workflow_routing_runtime::{conductor_historical_evidence, effort_model_candidates};
 use agent_core::{Message, Metadata, TaskId};
 use agent_runtime::AgentRunControl;
 use orchestrator::{
@@ -114,7 +114,7 @@ pub(crate) fn plan_agent_run(
     run_context
         .entry("effective_prompt_objective".to_string())
         .or_insert(default_effective_objective);
-    let candidates = model_candidates_for_config(config);
+    let candidates = effort_model_candidates(config, effort.label());
     let budget_fingerprint = learning_budget_fingerprint(run_context);
     let allowed_models = unique_configured_models(&candidates);
     let preferred_fallback_model = preferred_fallback_model(config, effort, &allowed_models);
@@ -271,6 +271,7 @@ pub(crate) fn plan_agent_run(
             .to_string(),
         budget_fingerprint: budget_fingerprint.clone(),
         prompt_profile_sha256: route_prompt_profile_sha256.clone(),
+        preferred_primary_model: crate::workflow_routing_runtime::effort_primary_model(config, effort.label()),
     };
     let decision_id = format!(
         "{}-run-decision",

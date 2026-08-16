@@ -214,6 +214,9 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
                 loaded_model_fields.insert("image_model");
             }
             "image_endpoint" => config.image_endpoint = value.to_string(),
+            "fast_model" => config.fast_model = value.to_string(),
+            "auto_model" => config.auto_model = value.to_string(),
+            "pro_model" => config.pro_model = value.to_string(),
             "voice_model" => {
                 config.voice_model = value.to_string();
                 loaded_model_fields.insert("voice_model");
@@ -353,7 +356,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
 
 pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
     format!(
-        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\nprompt_evolution_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\nprompt_evolution_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
         sanitize_config_value(&config.provider_id),
         sanitize_config_value(&config.provider_resource),
         sanitize_config_value(&config.base_url),
@@ -364,6 +367,9 @@ pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
         sanitize_config_value(&config.executor_model),
         sanitize_config_value(&config.reviewer_model),
         sanitize_config_value(&config.summarizer_model),
+        sanitize_config_value(&config.fast_model),
+        sanitize_config_value(&config.auto_model),
+        sanitize_config_value(&config.pro_model),
         sanitize_config_value(&config.embedding_model),
         sanitize_config_value(&config.image_model),
         sanitize_config_value(&config.image_endpoint),
