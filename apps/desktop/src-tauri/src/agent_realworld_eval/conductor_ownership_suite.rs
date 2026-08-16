@@ -1,5 +1,16 @@
 use super::treatments::SUITE_SCHEMA;
-use super::workflow_gepa_campaign_suite::leaks_route_answer;
+fn leaks_route_answer(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    [
+        "multi-model",
+        "multi model",
+        "workflow",
+        "solve this directly",
+        "single model",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
 use super::{RealworldCase, RealworldSuite};
 use std::collections::BTreeSet;
 

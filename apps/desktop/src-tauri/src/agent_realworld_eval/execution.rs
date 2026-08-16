@@ -183,9 +183,6 @@ pub(super) fn execute_case(
             output,
             error: completion.error,
             evidence_error,
-            outcome_trace: None,
-            outcome_trace_error: None,
-            collaboration_learning_events: Vec::new(),
             setup_failure: None,
             resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
             strategy_receipt: None,
@@ -400,9 +397,6 @@ pub(super) fn execute_case(
     ) {
         Ok(metrics) => metrics,
         Err(error) => EventMetrics {
-            outcome_trace_error: Some(format!(
-                "outcome trace collection failed before projection: {error}"
-            )),
             evidence_errors: vec![error],
             ..EventMetrics::default()
         },
@@ -447,11 +441,6 @@ pub(super) fn execute_case(
         output,
         error: product.error.or(product.state.last_error.clone()),
         evidence_error,
-        outcome_trace: event_metrics.outcome_trace,
-        outcome_trace_error: event_metrics.outcome_trace_error,
-        collaboration_learning_events: std::mem::take(
-            &mut event_metrics.collaboration_learning_events,
-        ),
         setup_failure: None,
         resolved_budget: event_metrics.resolved_budget.unwrap_or_else(|| {
             run_budget

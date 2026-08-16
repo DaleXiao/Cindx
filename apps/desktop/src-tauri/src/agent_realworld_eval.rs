@@ -8,43 +8,13 @@ use std::process::Command;
 use std::time::Instant;
 use tauri::Manager;
 
-mod collaboration_learning_capture;
-#[allow(dead_code)]
-mod collaboration_learning_journal;
-mod collaboration_successor_protocol;
 mod conductor_ownership_suite;
-#[allow(dead_code)]
-mod delivery_verification;
-mod delivery_verification_authorization;
-mod delivery_verification_campaign;
-mod delivery_verification_execution_journal;
-#[cfg(test)]
-mod delivery_verification_execution_tests;
-mod delivery_verification_preflight;
-mod delivery_verification_protocol;
-#[allow(dead_code)]
-mod delivery_verification_requests;
-mod delivery_verification_runner;
-mod delivery_verification_runner_binary;
-#[cfg(test)]
-mod delivery_verification_tests;
-mod direct_finalizer;
-mod direct_finalizer_campaign;
-mod direct_finalizer_campaign_contract;
-mod direct_finalizer_campaign_evidence;
-mod direct_finalizer_campaign_execution;
-mod direct_finalizer_campaign_support;
-#[path = "direct_finalizer_evaluation_feedback.rs"]
-mod direct_finalizer_evaluation_feedback;
 mod direct_finalizer_receipts;
 #[cfg(test)]
 mod direct_finalizer_receipts_tests;
-#[cfg(test)]
-mod direct_finalizer_tests;
 mod execution;
 mod http_fixture;
 mod memory_receipts;
-mod outcome_shadow;
 mod receipts;
 mod runtime;
 mod setup;
@@ -53,14 +23,6 @@ mod tests;
 mod tool_receipts;
 mod treatments;
 mod verification;
-mod workflow_gepa_campaign;
-mod workflow_gepa_campaign_contract;
-mod workflow_gepa_campaign_evidence;
-mod workflow_gepa_campaign_execution;
-mod workflow_gepa_campaign_journal;
-mod workflow_gepa_campaign_suite;
-mod workflow_gepa_candidate_probe;
-mod workflow_gepa_candidate_search;
 
 use direct_finalizer_receipts::DirectFinalizerExecutionReceipt;
 use execution::{execute_case, CaseExecutionInput};
@@ -68,8 +30,7 @@ use http_fixture::HttpFixtureReceipt;
 use memory_receipts::{
     validate_memory_effect_suite, MemoryEffectCaseContract, MemoryEvaluationReceipt,
 };
-use outcome_shadow::ShadowOutcomeTraceV1;
-pub(crate) use receipts::{model_receipts_from_metadata, ModelReceipt};
+pub(crate) use receipts::ModelReceipt;
 use receipts::{ResolvedBudgetReceipt, StrategyReceipt};
 use setup::{activate_evaluation_data_root, build_evaluation_app, SetupFailure};
 use tool_receipts::ToolAttemptReceipt;
@@ -252,12 +213,6 @@ struct RawRun {
     output: String,
     error: Option<String>,
     evidence_error: Option<String>,
-    #[serde(skip)]
-    outcome_trace: Option<ShadowOutcomeTraceV1>,
-    #[serde(skip)]
-    outcome_trace_error: Option<String>,
-    #[serde(skip)]
-    collaboration_learning_events: Vec<Event>,
     setup_failure: Option<SetupFailure>,
     resolved_budget: ResolvedBudgetReceipt,
     strategy_receipt: Option<StrategyReceipt>,
@@ -319,9 +274,6 @@ struct EventMetrics {
     memory_evaluation_receipt: Option<MemoryEvaluationReceipt>,
     model_receipts: Vec<ModelReceipt>,
     evidence_errors: Vec<String>,
-    outcome_trace: Option<ShadowOutcomeTraceV1>,
-    outcome_trace_error: Option<String>,
-    collaboration_learning_events: Vec<Event>,
 }
 
 #[derive(Debug, Clone)]
@@ -536,95 +488,23 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_direct_finalizer_gepa_eval() -> Result<(), String> {
-    direct_finalizer_campaign::run()
-}
 
-pub fn run_workflow_gepa_eval() -> Result<(), String> {
-    workflow_gepa_campaign::run()
-}
 
-pub fn run_workflow_gepa_candidate_probe() -> Result<(), String> {
-    workflow_gepa_candidate_probe::run()
-}
 
-pub fn run_collaboration_successor_preflight() -> Result<(), String> {
-    collaboration_successor_protocol::run_preflight()
-}
 
-pub fn run_collaboration_successor_authorize() -> Result<(), String> {
-    collaboration_successor_protocol::run_authorize()
-}
 
-pub fn run_collaboration_successor_execute() -> Result<(), String> {
-    collaboration_successor_protocol::run_execute()
-}
 
-pub fn run_delivery_verification_preflight() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
-    )
-}
 
-pub fn run_delivery_verification_authorize() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
-    )
-}
 
-pub fn run_delivery_verification_execute() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V1_ID,
-    )
-}
 
-pub fn run_delivery_verification_v2_preflight() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
-    )
-}
 
-pub fn run_delivery_verification_v2_authorize() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
-    )
-}
 
-pub fn run_delivery_verification_v2_execute() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V2_ID,
-    )
-}
 
-pub fn run_delivery_verification_v3_preflight() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
-    )
-}
 
-pub fn run_delivery_verification_v3_authorize() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
-    )
-}
 
-pub fn run_delivery_verification_v3_execute() -> Result<(), String> {
-    delivery_verification_runner::reject_consumed_delivery_protocol(
-        delivery_verification_protocol::CONSUMED_DELIVERY_VERIFICATION_PROTOCOL_V3_ID,
-    )
-}
 
-pub fn run_delivery_verification_v4_preflight() -> Result<(), String> {
-    delivery_verification_preflight::run_preflight()
-}
 
-pub fn run_delivery_verification_v4_authorize() -> Result<(), String> {
-    delivery_verification_runner::run_authorize()
-}
 
-pub fn run_delivery_verification_v4_execute() -> Result<(), String> {
-    delivery_verification_runner::run_execute()
-}
 
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
     let expected = expected_treatments(&suite.schema)
@@ -992,9 +872,6 @@ fn interrupted_run(
         output: String::new(),
         error: Some("evaluation process exited before verification".to_string()),
         evidence_error: Some("run did not reach provider evidence collection".to_string()),
-        outcome_trace: None,
-        outcome_trace_error: Some("run did not reach outcome trace collection".to_string()),
-        collaboration_learning_events: Vec::new(),
         setup_failure: None,
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,
@@ -1039,9 +916,6 @@ fn failed_run(
         output: String::new(),
         error: Some(details.error),
         evidence_error: None,
-        outcome_trace: None,
-        outcome_trace_error: Some("run did not reach outcome trace collection".to_string()),
-        collaboration_learning_events: Vec::new(),
         setup_failure: Some(details.setup_failure),
         resolved_budget: ResolvedBudgetReceipt::for_treatment(treatment),
         strategy_receipt: None,

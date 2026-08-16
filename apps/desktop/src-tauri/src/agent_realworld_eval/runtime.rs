@@ -1,6 +1,5 @@
 use super::direct_finalizer_receipts::direct_finalizer_receipt_from_events;
 use super::memory_receipts::memory_evaluation_receipt_from_events;
-use super::outcome_shadow::ShadowOutcomeTraceV1;
 use super::receipts::{
     is_receipt_bearing_event, model_receipts_from_metadata, resolved_budget_from_events,
     strategy_receipt_from_events_with_constraint, successful_response_count,
@@ -228,14 +227,7 @@ pub(super) fn collect_event_metrics(
             )
             .map_err(|error| error.to_string())?
     };
-    let mut metrics = EventMetrics {
-        collaboration_learning_events: events.clone(),
-        ..EventMetrics::default()
-    };
-    match ShadowOutcomeTraceV1::from_events(&events) {
-        Ok(trace) => metrics.outcome_trace = Some(trace),
-        Err(error) => metrics.outcome_trace_error = Some(error),
-    }
+    let mut metrics = EventMetrics::default();
     for event in &events {
         match event.kind {
             EventKind::ModelRequestStarted => metrics.model_calls += 1,

@@ -56,6 +56,7 @@ struct PersistedEvalPolicyInput {
 }
 
 impl CollaborationLearningEvalPolicyInput {
+    #[cfg(test)]
     pub(crate) fn matched_direct(case_binding_sha256: impl Into<String>) -> Result<Self, String> {
         Self::new(
             CollaborationLearningPolicyV1::seed(
@@ -83,6 +84,7 @@ impl CollaborationLearningEvalPolicyInput {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn matched_workflow_policy(
         policy: CollaborationLearningPolicyV1,
         case_binding_sha256: impl Into<String>,
@@ -97,6 +99,7 @@ impl CollaborationLearningEvalPolicyInput {
         Self::new(policy, case_binding_sha256)
     }
 
+    #[cfg(test)]
     fn new(
         policy: CollaborationLearningPolicyV1,
         case_binding_sha256: impl Into<String>,

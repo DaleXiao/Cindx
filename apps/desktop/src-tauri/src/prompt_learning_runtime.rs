@@ -674,22 +674,6 @@ pub(crate) fn prompt_workspace_revision_sha256(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-#[cfg(feature = "realworld-eval")]
-pub(crate) fn prompt_workspace_content_sha256(
-    workspace_root: &Path,
-    control: &AgentRunControl,
-) -> Result<String, String> {
-    let guard = WorkspaceFingerprintGuard::new(control);
-    guard.check()?;
-    let canonical = workspace_root
-        .canonicalize()
-        .map_err(|error| format!("prompt workspace cannot be canonicalized: {error}"))?;
-    Ok(format!(
-        "{:x}",
-        prompt_workspace_content_digest(&canonical, &guard)?
-    ))
-}
-
 fn prompt_workspace_content_digest(
     canonical: &Path,
     guard: &WorkspaceFingerprintGuard<'_>,
