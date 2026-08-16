@@ -500,6 +500,16 @@ and a bounded output directory outside the tracked tree. Sanitized summaries
 must record version, commit, provider, cases, treatment, budgets, failures,
 receipts, evidence digest, confounds, and decision.
 
+Provider campaigns must also run under a host power assertion (for example
+`caffeinate -i` wrapping the cargo invocation) so the machine cannot suspend
+mid-run. The Fugu pilot v1 consumed one attempt to discover this: a Deep Idle
+suspension corrupted a run's wall-clock latency while the monotonic deadlines
+stayed paused. The external-effect harness now records a `suspend_skew_ms`
+diagnostic (wall-minus-monotonic clock skew) around every GPQA treatment, and
+the pilot projection censors any run whose skew meets the 10-second threshold
+as structural-invalid environmental corruption rather than scoring it as a
+treatment failure; a cell containing such a run stays fail-closed ineligible.
+
 Historical report retrieval example:
 
 ```sh

@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const FUGU_PILOT_SUITE_SCHEMA: &str = "cindx.fugu-pilot-suite.v1";
 pub const FUGU_PILOT_PROTOCOL_SCHEMA: &str = "cindx.fugu-pilot-protocol.v1";
 pub const FUGU_PILOT_BENCHMARK_ID: &str = "gpqa_diamond";
+pub const FUGU_PILOT_SUSPEND_SKEW_THRESHOLD_MS: u64 = 10_000;
+pub const FUGU_PILOT_SUSPEND_SKEW_KEY: &str = "suspend_skew_ms";
 pub const FUGU_PILOT_REPORT_SCHEMA: &str = "cindx.fugu-pilot-report.v1";
 pub const FUGU_PILOT_EXTERNAL_REPORT_SCHEMA: &str = "cindx.external_effect_eval.raw.v3";
 
@@ -200,6 +202,24 @@ pub struct FuguPilotExternalRun {
     pub total_tokens: u64,
     pub exact_score: Option<f64>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub diagnostics: BTreeMap<String, String>,
+}
+
+impl FuguPilotExternalRun {
+    /// Wall-minus-monotonic clock skew recorded around the run. A value at or
+    /// above the threshold means the host suspended mid-run, so the run is
+    /// structural-invalid environmental corruption, never a treatment signal.
+    pub fn suspend_skew_ms(&self) -> Option<u64> {
+        self.diagnostics
+            .get(FUGU_PILOT_SUSPEND_SKEW_KEY)
+            .and_then(|value| value.parse::<u64>().ok())
+    }
+
+    pub fn host_suspended(&self) -> bool {
+        self.suspend_skew_ms()
+            .is_some_and(|skew| skew >= FUGU_PILOT_SUSPEND_SKEW_THRESHOLD_MS)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -543,8 +563,14 @@ pub fn project_fugu_pilot_cells(
         }
         if cell.safety_violations != 0 || !cell.completed {
             errors.push(format!(
-                "pilot cell {} is ineligible: completed={} safety_violations={}",
-                cell.run_id, cell.completed, cell.safety_violations
+                "pilot cell {} is ineligible: {}completed={} safety_violations={}",
+                cell.run_id,
+                cell.failure_reason
+                    .as_deref()
+                    .map(|reason| format!("{reason}; "))
+                    .unwrap_or_default(),
+                cell.completed,
+                cell.safety_violations
             ));
         }
         let score_percent = if cell.completed && cell.safety_violations == 0 {
@@ -831,11 +857,20 @@ pub fn fugu_pilot_cells_from_external_effect_report(
         }
         let cases_correct = runs
             .iter()
-            .filter(|run| run.succeeded && run.exact_score == Some(1.0) && run.error.is_none())
+            .filter(|run| {
+                run.succeeded
+                    && run.exact_score == Some(1.0)
+                    && run.error.is_none()
+                    && !run.host_suspended()
+            })
             .count() as u32;
-        let failed = runs
-            .iter()
-            .find(|run| !run.succeeded || run.error.is_some() || run.exact_score.is_none());
+        let failed = runs.iter().find(|run| {
+            !run.succeeded
+                || run.error.is_some()
+                || run.exact_score.is_none()
+                || run.host_suspended()
+        });
+        let max_suspend_skew = runs.iter().filter_map(|run| run.suspend_skew_ms()).max();
         let wall_time_ms = runs.iter().map(|run| run.latency_ms).sum();
         let total_tokens = runs.iter().map(|run| run.total_tokens).sum();
         let model_calls = runs.iter().filter(|run| run.total_tokens > 0).count() as u64;
@@ -846,6 +881,21 @@ pub fn fugu_pilot_cells_from_external_effect_report(
             ));
             continue;
         }
+        let failure_reason = match max_suspend_skew
+            .filter(|skew| *skew >= FUGU_PILOT_SUSPEND_SKEW_THRESHOLD_MS)
+        {
+            Some(skew) => Some(format!(
+                "structural_invalid: host suspended during run (skew {skew} ms); environmental corruption, not a treatment signal"
+            )),
+            None => failed.and_then(|run| {
+                run.error.clone().or_else(|| {
+                    Some(format!(
+                        "case {} did not yield a scored answer",
+                        run.case_id
+                    ))
+                })
+            }),
+        };
         cells.push(FuguPilotCellAggregate {
             run_id,
             treatment_id: treatment_id.to_string(),
@@ -859,14 +909,7 @@ pub fn fugu_pilot_cells_from_external_effect_report(
             total_tokens,
             recoveries: 0,
             safety_violations: 0,
-            failure_reason: failed.and_then(|run| {
-                run.error.clone().or_else(|| {
-                    Some(format!(
-                        "case {} did not yield a scored answer",
-                        run.case_id
-                    ))
-                })
-            }),
+            failure_reason,
             evidence: evidence.clone(),
             safety: safety.clone(),
         });
@@ -1217,6 +1260,31 @@ mod tests {
                 .abs()
                 < 1e-9
         );
+    }
+
+    #[test]
+    fn fugu_pilot_projection_censors_host_suspended_runs_as_structural_invalid() {
+        let pilot = suite();
+        let manifest = protocol();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fugu_pilot_synthetic_external_report_json()).expect("value");
+        value["runs"][0]["diagnostics"]["suspend_skew_ms"] = serde_json::json!("4439000");
+        let drifted = serde_json::to_vec(&value).expect("encode");
+        let cells = fugu_pilot_cells_from_external_effect_report(&pilot, &manifest, &drifted)
+            .expect("cells convert");
+        let fast = cells
+            .iter()
+            .find(|cell| cell.treatment_id == "cindx_fast")
+            .expect("fast cell");
+        assert!(!fast.completed);
+        assert!(fast
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("structural_invalid")));
+        let error = project_fugu_pilot_cells(&pilot, &cells).unwrap_err();
+        assert!(error
+            .iter()
+            .any(|message| message.contains("structural_invalid")));
     }
 
     #[test]

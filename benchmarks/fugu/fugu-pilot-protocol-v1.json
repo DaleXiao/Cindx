@@ -65,6 +65,7 @@
       "It admits no Fugu parity, product-quality, latency, token, or intelligence claim.",
       "GPQA-Diamond was retired as an evaluation direction long before this pilot; it is bound here solely because it carried pre-pinned, license-clean case provenance and a no-tool exact-match judge, making it the minimum-infrastructure harness-link vehicle. It must not be read as reinstating GPQA as an evaluation direction, and any successor authority must bind genuine agentic benchmarks.",
       "Per-run model-call accounting is a best-effort lower bound derived from recorded usage because the external-effect report does not persist per-call counts.",
+      "Provider execution must run under a host power assertion (for example caffeinate -i) so the machine cannot suspend mid-run; suspend-interrupted runs are censored as structural-invalid by the projection, never scored as treatment failures.",
       "The consumed one-shot authorities (V12, Delivery Verification v1-v4, Goal 3E) remain unchanged and are not rerun by this protocol."
     ]
   }
