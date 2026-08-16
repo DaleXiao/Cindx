@@ -23,6 +23,7 @@ Passing a lower level does not imply a higher-level result.
 | Evidence | Revision/version | Result and admitted claim |
 | --- | --- | --- |
 | Agent Real-World V5 | `a0000fa`, `0.2.22` | `VALID_BASELINE`. In the iso-budget adaptive-direct subset Auto gained one matched quality pass, preserved completion, reduced median paired latency by `3,585 ms`, and used about `10.0%` fewer total tokens. Workflow, learned profile, and distillation were not exercised; Pro is descriptive. |
+| Agent Real-World V5 (0.2.42 rerun) | `15702a7`, `0.2.42` | `VALID_BASELINE` over the full 6-case × 4-treatment × 3-replicate matrix executed under a host power assertion with zero structurally missing cells. In 18/18 complete iso-budget pairs Auto improved matched quality by `+11.1 pp` (83.3% vs 72.2%), preserved completion (83.3% both), and stayed inside the claim-contract resource bounds (median latency ratio `1.01x` against the `3x` cap; total token ratio `0.98x` against the `4x` cap), so `adaptive_direct` is `IMPROVED`. Pro is descriptive: quality tied at 72.2% with completion `-5.6 pp`. Ten non-completed runs remain in the denominator and all safety violation counts are zero. Workflow, learned profile, and distillation remain `NOT_EXERCISED`. This is a matched mechanism claim over agentic cases, not an intelligence or parity claim. |
 | Memory-effect V2 | `cd64703`, `0.2.19` | `IMPROVED` for the frozen direct memory-on/off harness: all `9/9` pairs were evaluable, all `6/6` required-memory pairs improved, and all three decoy controls passed in both arms. This is not a general Agent-quality claim. |
 | Dynamic Collaboration V1 | `bafbbd5`, `0.2.27` | `VALID_TARGETED_EVIDENCE`, `NO_GO_NOT_EXERCISED`. Every Auto/Pro run remained Direct. Auto used `1.6028x` median latency and `1.1208x` tokens versus Grounded Direct; Pro produced no matched quality or completion win. |
 | Conductor ownership | `ae6dfcb`, `0.2.27` | `VALID_TARGETED_EVIDENCE`, `KEEP_HARNESS_FIX`. Complete batch readback closed the observed terminal-verification defect. Every classifiable route remained Direct, so no workflow or learning uplift was shown. |
@@ -47,7 +48,9 @@ failures are not silently converted into positive evidence.
 The evidence currently supports these statements:
 
 - The direct/adaptive-direct path can preserve or narrowly improve the frozen
-  V5 subset under its recorded revision.
+  V5 subset under its recorded revision. The 0.2.42 full-matrix rerun adds
+  matched-pair evidence that Auto improves quality on agentic cases while
+  preserving completion and staying inside iso-budget resource bounds.
 - Durable memory helped the frozen matched direct tasks under its recorded
   revision and did not fail the decoy controls.
 - Permission, run identity, recovery, task graph, context, memory, prompt

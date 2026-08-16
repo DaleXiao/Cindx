@@ -594,6 +594,23 @@ direction before this pilot and was used only as the minimum-infrastructure
 harness-link vehicle; the pilot does not reinstate it, and any successor
 authority must bind genuine agentic benchmarks.
 
+The external-effect harness then gained host-suspend defenses (wall-minus-
+monotonic `suspend_skew_ms` accounting, sleep-interrupted runs censored as
+structural-invalid, fail-closed cell eligibility unchanged), and the Agent
+Real-World V5 full matrix (6 cases × 4 treatments × 3 replicates, 72 runs)
+was executed once on source `15702a7` under a host power assertion with zero
+structurally missing cells and zero safety violations. In all 18 complete
+iso-budget Grounded-Direct/Auto pairs Auto improved matched quality by
+`+11.1 pp` (83.3% vs 72.2%), preserved completion, and stayed inside the
+claim-contract resource bounds (median latency ratio 1.01x, token ratio
+0.98x), so the sanitized report records `adaptive_direct` as `IMPROVED` and
+the rerun as `VALID_BASELINE`. Pro remains descriptive (quality tied,
+completion `-5.6 pp`); workflow, learned profile, and distillation remain
+not exercised. Ten non-completed runs stay in the denominator. This is a
+matched mechanism claim over agentic cases with workspace effects and tool
+use, not an intelligence or parity claim; the raw evidence remains private
+outside the tracked tree.
+
 ## Blocking Fact
 
 V12 did not produce a causal result:
