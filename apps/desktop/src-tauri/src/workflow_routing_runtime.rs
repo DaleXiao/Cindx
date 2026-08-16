@@ -1,44 +1,5 @@
 use super::*;
 
-pub(crate) fn workflow_prior_for_run(
-    state: &tauri::State<'_, AppState>,
-    run_context: &Metadata,
-    allowed_models: &[String],
-    max_models: usize,
-) -> Result<Option<WorkflowTopologyPrior>, String> {
-    let telemetry = {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        load_workflow_telemetry_read_model(&mut store, allowed_models)
-            .map_err(|error| error.to_string())?
-    };
-    let teacher = WorkflowSearchTeacher::train(&telemetry);
-    let Some(task_class) = run_context
-        .get("task_class")
-        .and_then(|value| parse_task_class_label(value))
-    else {
-        return Ok(None);
-    };
-    let effort = run_context
-        .get("agent_effort")
-        .map(String::as_str)
-        .unwrap_or("auto");
-    let routing_signature = run_context
-        .get("routing_signature")
-        .map(String::as_str)
-        .unwrap_or_default();
-    Ok(teacher
-        .best_prior_for_signature(
-            &task_class,
-            effort,
-            allowed_models,
-            max_models,
-            routing_signature,
-        )
-        .cloned())
-}
 
 pub(crate) fn conductor_historical_evidence(
     state: &tauri::State<'_, AppState>,

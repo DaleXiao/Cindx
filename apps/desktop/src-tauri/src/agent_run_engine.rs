@@ -23,10 +23,6 @@ use std::sync::Arc;
 pub(crate) enum AgentRunPreparationError {
     Finished(Box<Result<AgentState, String>>),
     ControlStop(Metadata),
-    Collaboration {
-        error: String,
-        run_context: Metadata,
-    },
     Runtime {
         error: String,
         run_context: Metadata,
@@ -188,14 +184,6 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
                     &run_context,
                     self.cancellation,
                     None,
-                )
-                .map(AgentRunPreparation::Finished)
-            }
-            Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
-                agent_state_with_error_in_context(
-                    self.state,
-                    &run_context,
-                    format!("Collaboration failed: {error}"),
                 )
                 .map(AgentRunPreparation::Finished)
             }

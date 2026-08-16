@@ -121,27 +121,6 @@ impl AgentToolEpochGuard {
     }
 }
 
-pub(crate) fn execute_agent_tool_invocation(
-    state: &tauri::State<'_, AppState>,
-    registry: &ToolRegistry,
-    invocation: ToolInvocation,
-    workspace_root: &Path,
-    run_context: &Metadata,
-) -> Result<ToolResult, String> {
-    match execute_agent_tool_invocation_inner(
-        state,
-        registry,
-        invocation,
-        workspace_root,
-        run_context,
-        None,
-    )? {
-        AgentToolInvocationOutcome::Completed(result) => Ok(*result),
-        AgentToolInvocationOutcome::RestartAfterSteer => {
-            Err("agent tool invocation interrupted before execution".to_string())
-        }
-    }
-}
 
 pub(crate) fn execute_agent_tool_invocation_for_epoch(
     state: &tauri::State<'_, AppState>,

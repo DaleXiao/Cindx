@@ -12,8 +12,6 @@ mod preparation;
 mod recording;
 #[path = "agent_strategy_requirements.rs"]
 mod requirements;
-#[path = "agent_strategy_workflow_proposal.rs"]
-mod workflow_proposal;
 
 #[cfg(test)]
 pub(crate) use self::causal_route::causal_route_event_metadata;

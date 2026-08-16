@@ -7,7 +7,7 @@ use agent_application::{AgentStrategyDecisionReceipt, AgentTerminalCommitIdentit
 #[cfg(test)]
 use agent_core::EventTypeV1;
 use agent_core::{Event, EventKind};
-use orchestrator::{ExecutionPlan, WorkflowPlanIr};
+use orchestrator::{ExecutionPlan, WorkflowPlanIr, WorkflowPlanProposal};
 use std::collections::BTreeSet;
 
 const PROVIDER_RESPONSE_ID_DOMAIN: &str = "cindx.provider-response-id.v1\0";

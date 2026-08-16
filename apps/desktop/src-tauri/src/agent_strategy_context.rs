@@ -1,4 +1,4 @@
-use super::{requirements::route_decision_metadata, workflow_proposal, PlannedAgentRun};
+use super::{requirements::route_decision_metadata, PlannedAgentRun};
 use crate::collaboration_service::truncate_for_collaboration;
 use agent_core::Metadata;
 use orchestrator::{AgentExecutionMode, AgentToolRequirement, AGENT_ROUTE_OBSERVABILITY_KEYS};
@@ -121,7 +121,9 @@ impl PlannedAgentRun {
             "conductor_selected_model".to_string(),
             self.selected_conductor_model.clone().unwrap_or_default(),
         );
-        workflow_proposal::apply_to_context(self, run_context)?;
+        run_context.remove("conductor_workflow_proposal_sha256");
+        run_context.remove("conductor_workflow_proposal");
+        run_context.remove("conductor_workflow_plan_source");
         run_context.insert("prompt_profile".to_string(), self.prompt_genome.id.clone());
         run_context.insert(
             "prompt_genome".to_string(),

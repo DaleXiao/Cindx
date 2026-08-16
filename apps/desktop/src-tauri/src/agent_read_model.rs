@@ -1154,3 +1154,16 @@ pub(crate) fn is_agent_run_start_event(event: &Event) -> bool {
 #[cfg(test)]
 #[path = "agent_read_model_tests.rs"]
 mod tests;
+
+pub(crate) fn latest_external_user_turn_event(events: &[Event]) -> Option<&Event> {
+    events.iter().rev().find(|event| {
+        event.kind == EventKind::MessageAdded
+            && event.metadata.get("role").map(String::as_str) == Some("user")
+            && event
+                .metadata
+                .get("continuation_replay")
+                .map(String::as_str)
+                != Some("true")
+            && event.metadata.get("internal").map(String::as_str) != Some("true")
+    })
+}

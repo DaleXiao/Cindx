@@ -45,7 +45,7 @@ pub(crate) use agent_runtime::{
 pub(crate) use agent_runtime::{
     bounded_max_output_tokens, evidence_worker_tools, observation_from_agent_tool_result,
     observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
-    start_agent_loop, start_agent_loop_with_history, substantive_evidence_worker_tools,
+    start_agent_loop, start_agent_loop_with_history,
     AgentAdvance, AgentFailure, AgentFailureClass, AgentKernel, AgentLoopAppendTransaction,
     AgentRecoveryAction, AgentRunControl, AgentTaskStateSnapshot, AgentToolRequest,
     AgentTurnPreparationError, ContextGovernorReport, IsolatedWorkerRuntime, ResultQuality,
@@ -73,7 +73,7 @@ pub(crate) use model_provider::{
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 pub(crate) use orchestrator::{
-    adaptive_worker_prompt_for_plan, adaptive_workflow_layers, adaptive_workflow_step_budget,
+    adaptive_workflow_step_budget,
     default_plan, derive_prompt_evolution_campaign, direct_anchor_response_verdict,
     evaluate_prompt_auto_transfer_gate_in_cohort_with_failures, evaluate_prompt_convergence,
     evaluate_prompt_promotion_gate_with_failures_in_cohort, parse_policy,
@@ -83,8 +83,7 @@ pub(crate) use orchestrator::{
     AgentEvaluationCaseScore, AgentEvaluationCheck, AgentEvaluationEvidenceSource,
     AgentEvaluationReflectionPacket, AgentEvaluationSplit, AgentEvaluationToolTrace,
     AgentEvaluationTrace, AgentEvaluationTraceStep, AgentEvaluationVerifierOutcome, AgentPolicy,
-    AgentRunDecision, AnytimeCandidate, AnytimeCandidateKind, AnytimeCandidateState,
-    AnytimeController, AnytimeVerdict, ConductorExecutionContract, ConductorHarness,
+    AgentRunDecision, AnytimeCandidateState, ConductorExecutionContract, ConductorHarness,
     ConductorPromptGenome, ConductorRequest, ConductorRoleHints, ConductorStopPolicy,
     FrozenPromptProfileSnapshot, FrozenPromptTransferEvidence, LearnedModelRouter,
     MatchedCollaborationEvidenceTeacher, MemoryRecallPolicy, ModelCandidate, ModelCapabilitySource,
@@ -97,17 +96,15 @@ pub(crate) use orchestrator::{
     PromptPromotionFailurePenalty, PromptPromotionGateConfig, PromptPromotionGateResult,
     PromptProposalMinibatchDecision, PromptRetryPolicy, PromptSearchArchive, PromptStepCredit,
     PromptTreatmentIdentityV1, RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry,
-    RuleBasedRouter, TaskClass, WorkflowBudget, WorkflowEvidenceSummary,
-    WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry, WorkflowOutputKind, WorkflowPlanIr,
-    WorkflowPlanProposal, WorkflowSearchTeacher, WorkflowStepStatus, WorkflowToolPolicy,
-    WorkflowTopologyPrior, WorkflowVerificationReceipt, WorkspaceRetrievalChannel,
+    RuleBasedRouter, TaskClass, WorkflowBudget,
+    WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowStepStatus, WorkflowToolPolicy, WorkspaceRetrievalChannel,
     WorkspaceRetrievalPlan, AGENT_EVALUATION_TRACE_SCHEMA, CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS,
     CONDUCTOR_MAX_ATTEMPTS, DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS,
-    PROMPT_REFLECTION_SELECTOR_SCHEMA_V1, WORKFLOW_CHECKPOINT_SCHEMA, WORKFLOW_IR_SCHEMA,
+    PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
 };
 #[cfg(test)]
 pub(crate) use orchestrator::{
-    AgentEvaluationVerifier, AnytimeControllerConfig, PromptFailureCurriculumInput,
+    AgentEvaluationVerifier, PromptFailureCurriculumInput,
     PromptFailureCurriculumKind,
 };
 pub(crate) use serde::{Deserialize, Serialize};
@@ -130,19 +127,12 @@ pub(crate) use tools::{
 
 pub(crate) use crate::agent_resource_snapshot::AgentResourceCheckpoint;
 pub(crate) use crate::collaboration_service::{
-    adaptive_model_role, adaptive_stage_metadata, build_collaboration_arbiter_prompt,
-    build_collaboration_candidate_prompt, collaboration_agent_budget,
-    collaboration_context_for_genome, collaboration_evidence_ref, collaboration_fallback_models,
-    collaboration_recent_context, collaboration_step_result, effective_workflow_model_turn_budget,
-    effective_workflow_step_attempt_budget, merge_collaboration_evidence,
-    rebind_checkpoint_grounding_provenance, truncate_for_collaboration,
-    AdaptiveCollaborationOutcome, AdaptiveCollaborationSpec, AgentCollaboration,
-    CollaborationCompletion, CollaborationEvidence, CollaborationWorkerAccess,
-    COLLABORATION_STEER_INTERRUPTED, WORKFLOW_RESUMABLE_ERROR_PREFIX, WORKFLOW_SAFETY_ERROR_PREFIX,
+    truncate_for_collaboration, AgentCollaboration, CollaborationCompletion,
+    CollaborationEvidence, COLLABORATION_STEER_INTERRUPTED,
 };
 pub(crate) use crate::parallel_execution::{
-    run_model_jobs_until_anytime_quorum_interruptible, run_model_jobs_until_quorum_interruptible,
-    AnytimeQuorumPolicy, CancellableParallelJob, InterruptibleQuorumPolicy,
+    run_model_jobs_until_anytime_quorum_interruptible, AnytimeQuorumPolicy,
+    CancellableParallelJob,
 };
 pub(crate) use crate::permission_service::{
     agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,

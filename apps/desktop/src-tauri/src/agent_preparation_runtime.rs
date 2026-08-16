@@ -1,6 +1,4 @@
-use crate::agent_collaboration_runtime::{
-    append_agent_collaboration_context, prepare_agent_collaboration_or_degrade,
-};
+use crate::collaboration_service::AgentCollaboration;
 use crate::agent_failure_terminal_runtime::{
     commit_agent_preparation_failure_terminal, AgentPreparationFailureTerminalOutcome,
 };
@@ -55,9 +53,6 @@ fn settle_preparation_failure(
         }
         AgentRunPreparationError::ControlStop(run_context) => {
             return PreparationFailureAction::ControlStop(run_context)
-        }
-        AgentRunPreparationError::Collaboration { error, run_context } => {
-            (format!("Collaboration failed: {error}"), run_context)
         }
         AgentRunPreparationError::Runtime { error, run_context } => (error, run_context),
     };
@@ -283,7 +278,7 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_agent_execution_replay(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     task_id: &TaskId,
@@ -542,32 +537,7 @@ pub(crate) fn prepare_agent_execution_replay(
         .map_err(|error| runtime_preparation_error(&run_context, error)));
         let collaboration_policy = plan.execution_plan.action().policy();
         append_single_model_policy_guidance(&mut history, &collaboration_policy);
-        let collaboration = match prepare_agent_collaboration_or_degrade(
-            app,
-            state,
-            config,
-            task_id,
-            workspace_root,
-            &run_context,
-            &collaboration_policy,
-            &planning_objective,
-            &history,
-        ) {
-            Ok(collaboration) => collaboration,
-            Err(_) if agent_run_should_stop(cancellation) => {
-                return Err(AgentRunPreparationError::ControlStop(run_context))
-            }
-            Err(_) if !cancellation.preparation_epoch_is_current(preparation_epoch) => None,
-            Err(error) if error == MODEL_REQUEST_CANCELLED => {
-                return Err(AgentRunPreparationError::ControlStop(run_context))
-            }
-            Err(error) => {
-                settle_failure!(AgentRunPreparationError::Collaboration {
-                    error,
-                    run_context: run_context.clone(),
-                })
-            }
-        };
+        let collaboration: Option<AgentCollaboration> = None;
         if cancellation.has_pending_steer() {
             prompt = preparation_try!(apply_preparation_steer(
                 state,
@@ -578,9 +548,6 @@ pub(crate) fn prepare_agent_execution_replay(
                 cancellation,
             ));
             continue;
-        }
-        if let Some(collaboration) = collaboration.as_ref() {
-            append_agent_collaboration_context(&mut history, collaboration);
         }
         if agent_run_should_stop(cancellation) {
             return Err(AgentRunPreparationError::ControlStop(run_context));

@@ -301,13 +301,6 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
         Err(AgentRunPreparationError::ControlStop(run_context)) => {
             return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
         }
-        Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
-            return agent_state_with_error_in_context(
-                &state,
-                &run_context,
-                format!("Collaboration failed: {error}"),
-            );
-        }
         Err(AgentRunPreparationError::Runtime { error, run_context }) => {
             return agent_state_with_error_in_context(&state, &run_context, error)
         }
@@ -1009,13 +1002,6 @@ pub(crate) fn retry_agent_task_blocking_inner(
         Err(AgentRunPreparationError::Finished(result)) => return *result,
         Err(AgentRunPreparationError::ControlStop(run_context)) => {
             return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
-        }
-        Err(AgentRunPreparationError::Collaboration { error, run_context }) => {
-            return agent_state_with_error_in_context(
-                &state,
-                &run_context,
-                format!("Collaboration failed: {error}"),
-            );
         }
         Err(AgentRunPreparationError::Runtime { error, run_context }) => {
             return agent_state_with_error_in_context(&state, &run_context, error)

@@ -2,8 +2,7 @@ use agent_runtime::BoundedParallelExecutor;
 use std::sync::OnceLock;
 
 pub(crate) use agent_runtime::{
-    AnytimeQuorumExecution, AnytimeQuorumPolicy, CancellableParallelJob,
-    InterruptibleQuorumExecution, InterruptibleQuorumPolicy, ParallelJob, ParallelJobSupervisor,
+    AnytimeQuorumExecution, AnytimeQuorumPolicy, CancellableParallelJob, ParallelJob, ParallelJobSupervisor,
     ParallelTaskError,
 };
 
@@ -33,26 +32,6 @@ pub(crate) fn run_tool_jobs_ordered<T: Send + 'static>(
     tool_executor().run_ordered("agent-tool", jobs)
 }
 
-pub(crate) fn run_model_jobs_until_quorum_interruptible<T, F, I>(
-    thread_label: &str,
-    jobs: Vec<CancellableParallelJob<T>>,
-    policy: InterruptibleQuorumPolicy,
-    is_success: F,
-    should_interrupt: I,
-) -> InterruptibleQuorumExecution<T>
-where
-    T: Send + 'static,
-    F: Fn(&T) -> bool,
-    I: FnMut() -> bool,
-{
-    model_executor().run_until_quorum_interruptible(
-        thread_label,
-        jobs,
-        policy,
-        is_success,
-        should_interrupt,
-    )
-}
 
 pub(crate) fn run_model_jobs_until_anytime_quorum_interruptible<T, F, I>(
     thread_label: &str,
