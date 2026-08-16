@@ -24,6 +24,13 @@ const EVALUATION_TREATMENT_DEADLINE_SECONDS: u64 = 300;
 const EVALUATION_TERMINAL_RESERVE_SECONDS: u64 = EVALUATION_MODEL_CALL_TIMEOUT_SECONDS;
 const EVALUATION_MAX_OUTPUT_TOKENS: u64 = COLLABORATION_MAX_OUTPUT_TOKENS;
 const EVALUATION_FINALIZER_RECOVERY_SECONDS: u64 = 60;
+const EVALUATION_SUSPEND_SKEW_THRESHOLD_MS: u64 = 10_000;
+
+fn evaluation_suspend_skew_ms(started_instant: Instant, started_wall_ms: u64) -> u64 {
+    current_time_millis()
+        .saturating_sub(started_wall_ms)
+        .saturating_sub(started_instant.elapsed().as_millis() as u64)
+}
 
 fn evaluation_run_control(effort: &str) -> Arc<AgentRunControl> {
     let mut budget = RunBudget::for_effort(effort);
@@ -757,6 +764,7 @@ fn evaluation_diagnostics(usage: &Metadata) -> BTreeMap<String, String> {
             key.starts_with("planning_")
                 || key.starts_with("workflow_")
                 || key.starts_with("terminal_executor_")
+                || key.as_str() == "suspend_skew_ms"
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
@@ -1371,6 +1379,33 @@ fn gpqa_answer_parser_accepts_official_and_common_formats() {
 }
 
 #[test]
+fn evaluation_diagnostics_carry_suspend_skew_marker() {
+    let mut usage = Metadata::new();
+    usage.insert("planning_latency_ms".to_string(), "12".to_string());
+    usage.insert("suspend_skew_ms".to_string(), "4439000".to_string());
+    usage.insert("unrelated_key".to_string(), "x".to_string());
+    let diagnostics = evaluation_diagnostics(&usage);
+    assert_eq!(
+        diagnostics.get("suspend_skew_ms").map(String::as_str),
+        Some("4439000")
+    );
+    assert_eq!(
+        diagnostics.get("planning_latency_ms").map(String::as_str),
+        Some("12")
+    );
+    assert!(!diagnostics.contains_key("unrelated_key"));
+}
+
+#[test]
+fn evaluation_suspend_skew_detects_wall_clock_advancing_past_monotonic() {
+    let started = Instant::now();
+    let skew = evaluation_suspend_skew_ms(started, current_time_millis().saturating_sub(60_000));
+    assert!((55_000..=65_000).contains(&skew));
+    let skew = evaluation_suspend_skew_ms(started, current_time_millis());
+    assert!(skew < EVALUATION_SUSPEND_SKEW_THRESHOLD_MS);
+}
+
+#[test]
 fn gpqa_option_order_is_deterministic() {
     let row = || GpqaRow {
         question: "Question?".to_string(),
@@ -1720,7 +1755,9 @@ fn provider_backed_fugu_external_effect_pilot() {
             case.case_id
         );
         for (position, treatment) in gpqa_treatment_order(index).into_iter().enumerate() {
-            let result = match treatment {
+            let started_instant = Instant::now();
+            let started_wall_ms = current_time_millis();
+            let mut result = match treatment {
                 GpqaTreatment::Direct => direct_gpqa_treatment(&config, &case.prompt),
                 GpqaTreatment::Auto => {
                     auto_gpqa_treatment(&config, &repository_root, &case.prompt, &auto_profile)
@@ -1735,6 +1772,19 @@ fn provider_backed_fugu_external_effect_pilot() {
                     &pro_profile,
                 ),
             };
+            let suspend_skew_ms =
+                evaluation_suspend_skew_ms(started_instant, started_wall_ms);
+            if suspend_skew_ms > EVALUATION_SUSPEND_SKEW_THRESHOLD_MS {
+                result.succeeded = false;
+                if result.error.is_none() {
+                    result.error = Some(format!(
+                        "host_suspended_during_run skew_ms={suspend_skew_ms}"
+                    ));
+                }
+                result
+                    .usage
+                    .insert("suspend_skew_ms".to_string(), suspend_skew_ms.to_string());
+            }
             append_gpqa_run(&mut runs, case, treatment.label(), position, result);
         }
         write_external_effect_checkpoint(&output_path, &config, &sources, &runs);
