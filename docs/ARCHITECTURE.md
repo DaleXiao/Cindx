@@ -238,7 +238,13 @@ the absence instead of fabricating content.
 Terminal selection cannot convert an unmet obligation into verified success. A
 tools-disabled finalizer may produce the visible response without consuming an
 actor turn; an invalid finalizer falls back to the exact eligible grounded
-candidate rather than restarting the actor.
+candidate rather than restarting the actor. Empty or unusable finalizer output
+with no verified fallback gets one bounded retry of the gate. When no
+deliverable control candidate exists but the run holds visible tool evidence,
+the latest substantive visible assistant text (at least 160 chars, internal
+drafts excluded) is admitted as a last-resort grounded fallback so a provider
+flake cannot fail a run that already did visible work; short progress notes
+and evidence-free runs stay closed.
 
 Auto and Pro direct deliveries pass an optional bounded judge gate at the
 shared completion chokepoint (both direct completion and terminal-finalizer

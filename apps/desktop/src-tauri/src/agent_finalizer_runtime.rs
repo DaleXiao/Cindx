@@ -41,6 +41,21 @@ fn candidate_is_tool_carrier(runtime: &agent_runtime::AgentLoopState, content: &
         .any(|message| assistant_tool_carrier(message) && message.content.trim() == content.trim())
 }
 
+const LAST_RESORT_VISIBLE_ANSWER_MIN_CHARS: usize = 160;
+
+fn last_resort_visible_answer(runtime: &agent_runtime::AgentLoopState) -> Option<String> {
+    let content = runtime
+        .messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == MessageRole::Assistant
+                && message.metadata.get("internal").map(String::as_str) != Some("true")
+        })
+        .map(|message| message.content.trim().to_string())?;
+    (content.chars().count() >= LAST_RESORT_VISIBLE_ANSWER_MIN_CHARS).then_some(content)
+}
+
 pub(crate) fn prepare_finalizer_turn(
     runtime: &mut agent_runtime::AgentLoopState,
     system_prompt: Option<&str>,
@@ -93,6 +108,14 @@ pub(crate) fn grounded_finalizer_fallback(
     let partial = cancellation.partial_output();
     if !partial.trim().is_empty() && !candidate_is_tool_carrier(runtime, &partial) {
         candidates.push(partial);
+    }
+    // Last resort: when the run already holds visible tool evidence but no
+    // deliverable candidate, the latest substantive visible assistant text is
+    // better than failing the run at the delivery gate.
+    if candidates.is_empty() && !visible_evidence_sequences.is_empty() {
+        if let Some(last_resort) = last_resort_visible_answer(runtime) {
+            candidates.push(last_resort);
+        }
     }
 
     let mut seen = std::collections::BTreeSet::new();
@@ -333,6 +356,46 @@ mod tests {
         let tool_partial = AgentRunControl::new("fast");
         assert!(tool_partial.record_partial_output_at(0, "I will inspect that now"));
         assert!(grounded_finalizer_fallback(&tool_runtime, &tool_partial, 0, &[]).is_none());
+    }
+
+    #[test]
+    fn last_resort_delivers_substantive_visible_text_only_with_evidence_and_length() {
+        let long_text = format!(
+            "Cindx 的配置目录里没有 MCP 配置文件，state.sqlite3 里有 events 与 permission_requests 等表，但没有 MCP 相关的表；projects.conf 里提到 workiq MCP 可用性检测。{}",
+            "可见证据与检查步骤补充。".repeat(8)
+        );
+        assert!(long_text.chars().count() >= super::LAST_RESORT_VISIBLE_ANSWER_MIN_CHARS);
+        let mut long_runtime = runtime();
+        long_runtime.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: long_text.clone(),
+            metadata: [("tool_call_count".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        let fallback =
+            grounded_finalizer_fallback(&long_runtime, &AgentRunControl::new("fast"), 0, &[7])
+                .expect("substantive visible text with visible evidence should deliver");
+        assert_eq!(fallback.content, long_text.trim().to_string());
+
+        let mut short_runtime = runtime();
+        short_runtime.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: "让我重新启动并立即轮询".to_string(),
+            metadata: [("tool_call_count".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+        });
+        assert!(
+            grounded_finalizer_fallback(&short_runtime, &AgentRunControl::new("fast"), 0, &[7])
+                .is_none(),
+            "short progress notes must not be delivered as answers"
+        );
+        assert!(
+            grounded_finalizer_fallback(&long_runtime, &AgentRunControl::new("fast"), 0, &[])
+                .is_none(),
+            "without visible tool evidence the last resort stays closed"
+        );
     }
 
     #[test]

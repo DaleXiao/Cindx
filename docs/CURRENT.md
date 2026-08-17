@@ -94,6 +94,13 @@ entirely, so durable project memory participates in every non-trivial task;
 Fast keeps the Conductor's choice, and explicit Relevant/Comprehensive
 decisions are preserved.
 
+Direct-run delivery is resilient to finalizer flakes: an empty or unusable
+toolless finalizer response is retried once when no verified fallback exists,
+and when the run already holds visible tool evidence the latest substantive
+visible assistant text (at least 160 chars) is delivered as the grounded
+last-resort answer instead of failing the run. Short progress notes and
+evidence-free runs are never delivered this way.
+
 Auto and Pro direct execution carry a contracted delivery judge at the
 shared completion point: a model-distinct Reviewer audits the final answer
 together with bounded execution facts (mutation count, mutation-verification
