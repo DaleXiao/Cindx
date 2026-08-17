@@ -43,11 +43,11 @@ The three effort tiers form a compute ladder over one kernel and one
 quality spine; they differ by budget, iteration depth, and verification
 strength, not by permission authority:
 
-- **Fast** (quick direct answer): bypasses the Conductor and runs one direct
-  model call with a small budget and no delivery judge.
-- **Auto** (verified answer, default): the Conductor produces one typed plan;
-  execution is adaptive direct work followed by the independent delivery
-  judge with one bounded repair round when eligible.
+- **Fast** (quick direct answer): skips the planning decision and runs one
+  direct model call with a small budget and no delivery judge.
+- **Auto** (verified answer, default): the session model produces one typed
+  plan in a planning decision; execution is adaptive direct work followed by
+  the independent delivery judge with one bounded repair round when eligible.
 - **Pro** (deep mission): the same decision contract with a much larger
   budget for deep, multi-iteration work, plus the most capable prompt
   genome.
@@ -55,29 +55,35 @@ strength, not by permission authority:
 Each tier can pin a configured default model (`fast_model`, `auto_model`,
 `pro_model` in the provider configuration). The Settings Models panel exposes
 the three tier pins plus the legacy compatibility fallback slot; the legacy
-per-stage role slots (Primary/Reasoning/Verifier/Utility and the Conductor
+per-stage role slots (Primary/Reasoning/Verifier/Utility and the planning
 override) are no longer surfaced there. They remain persisted provider fields
 and still act as saved per-stage overrides behind the tier pins, so existing
 configurations keep their validated behavior. A pinned model anchors Fast's
-direct route and the Conductor's `primary_model` choice for Auto/Pro without
-removing routing authority. When a tier is unpinned, the provider catalog's
+direct route and the planning decision's `primary_model` choice for Auto/Pro
+without removing routing authority. When a tier is unpinned, the provider catalog's
 tier default applies instead — for the DashScope provider that is a flash-class
 model for Fast, a plus-class model for Auto, and a max-class model for Pro —
 and providers without catalog tier defaults keep the legacy role-slot behavior.
 
-Auto and Pro do not automatically run every configured model. The Conductor
-selects the route, model roles, retrieval needs, decomposition, and verification
-requirements in one validated execution plan. **Multi-model workflow collaboration is retired.** Natural workflow routing
+Auto and Pro do not automatically run every configured model. One planning
+decision of the session model selects the route, model roles, retrieval needs,
+decomposition, and verification requirements in one validated execution plan.
+**Multi-model workflow collaboration is retired.** Natural workflow routing
 never triggered in production, every historical forced collaboration campaign
 closed no-go, invalid, or censored, and the owner decision is permanent
 retirement, not evidence-gated reconsideration. Production runs clamp any
-conductor workflow decision to adaptive direct execution
+residual workflow decision to adaptive direct execution
 (`workflow_enabled=false`) and the planning prompt states this explicitly.
 The workflow execution machinery has been removed from the tree, and the clamp
-remains the defense-in-depth guarantee that no workflow can run.
+remains the defense-in-depth guarantee that no workflow can run. The run
+timeline presents planning steps as "Planning" / "Planning repair"; Conductor,
+Collaboration, Workflow, and GEPA semantics no longer appear in the product
+UI. Remaining `Conductor*` Rust identifiers are legacy internal naming for the
+planning contract and prompt profiles — there is no separate conductor model.
 
 One bounded read-only widening is available. When the prompt explicitly forbids
-all effects (`effect_authority=forbidden`), the Conductor may instead propose
+all effects (`effect_authority=forbidden`), the planning decision may instead
+propose
 two read-only Specialist roots with distinct bounded subtasks and, optionally,
 one tool-free Verifier that is model-distinct from both and audits both roots.
 The owner-execution graph validator accepts the two-root shape only when the
@@ -89,10 +95,10 @@ foreground Owner.
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
 effect authority does not. Auto and Pro additionally default memory recall to
-`relevant` (keyed on the run prompt) whenever the Conductor declines memory
-entirely, so durable project memory participates in every non-trivial task;
-Fast keeps the Conductor's choice, and explicit Relevant/Comprehensive
-decisions are preserved.
+`relevant` (keyed on the run prompt) whenever the planning decision declines
+memory entirely, so durable project memory participates in every non-trivial
+task; Fast keeps the planning decision's choice, and explicit
+Relevant/Comprehensive decisions are preserved.
 
 The Finalizer role is retired: single-model sessions deliver through the
 actor, and a forced stop runs at most one toolless wrap-up turn of the same
@@ -133,14 +139,15 @@ grounding repairs.
 Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is
 plan, evidence, act, verify, or finalize; and the model profile is Primary,
-Reasoning, Verifier, or Utility. The Conductor and background learning utilities
-are recorded as services, not Actors.
+Reasoning, Verifier, or Utility. The planning decision and background learning
+utilities are recorded as services, not Actors.
 
 Settings presents the persisted model allocation as configuration slots rather
 than permanent Agent roles. The compatibility model is preferred by Fast and
 remains an execution fallback; Primary and Reasoning are execution-eligible
 profiles; Verifier is reserved for the independent verification lane; Utility
-is limited to support work; and Conductor is a planning-service override.
+is limited to support work; and the planning slot is a planning-service
+override.
 Changing the compatibility model does not silently overwrite those profiles;
 copying it to every profile is an explicit action. The legacy configuration and
 wire keys remain unchanged for saved-provider compatibility, and Actor and
@@ -164,7 +171,8 @@ keep their provider defaults. There is no runtime or per-effort toggle yet.
 4. Run control applies cancellation, steer, turn, stage, and deadline budgets;
    `agent-harness` prevents duplicate active work for the same key.
 5. The effective objective and bounded history are compiled into context.
-6. Fast creates a direct plan; Auto and Pro validate a Conductor plan. Required
+6. Fast creates a direct plan; Auto and Pro validate the session model's typed
+   plan. Required
    tools, image input, effects, capability, and budget remain hard constraints.
    The router event and selected decision are committed in one SQLite
    transaction behind the active preparation epoch before treatment execution

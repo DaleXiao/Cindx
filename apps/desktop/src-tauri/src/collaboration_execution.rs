@@ -233,7 +233,7 @@ pub(crate) fn record_collaboration_stage_started(
         task_id,
         EventKind::ModelRequestStarted,
         format!(
-            "{} {stage} started",
+            "{} started",
             crate::collaboration_stage_runtime::collaboration_stage_event_subject(stage)
         ),
         metadata_with_context(metadata, run_context),

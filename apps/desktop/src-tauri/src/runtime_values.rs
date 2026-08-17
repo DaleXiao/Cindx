@@ -127,24 +127,22 @@ pub(crate) fn timeline_event_label(event: &Event) -> String {
 
 pub(crate) fn collaboration_stage_display_label(stage: &str) -> String {
     match stage {
-        "coordinator" => "Conductor".to_string(),
-        "conductor_plan" => "Conductor".to_string(),
-        "conductor_repair" => "Conductor repair".to_string(),
-        "planner" => "Planner".to_string(),
-        "arbiter" => "Arbiter".to_string(),
-        "executor" => "Executor".to_string(),
-        "reviewer" => "Reviewer".to_string(),
+        "coordinator" | "conductor_plan" | "planner" => "Planning".to_string(),
+        "conductor_repair" => "Planning repair".to_string(),
+        "arbiter" => "Selection".to_string(),
+        "executor" => "Execution".to_string(),
+        "reviewer" => "Review".to_string(),
         "synthesizer" => "Synthesis".to_string(),
         _ => {
             if let Some(index) = stage.strip_prefix("candidate_") {
-                format!("Candidate {index}")
+                format!("Approach {index}")
             } else if let Some(index) = stage.strip_prefix("worker_") {
-                format!("Worker {index}")
-            } else if let Some(index) = stage.strip_prefix("run_decision_model_") {
-                if index.ends_with("_repair") {
-                    format!("Conductor repair {}", index.trim_end_matches("_repair"))
+                format!("Step {index}")
+            } else if stage.starts_with("run_decision_model_") {
+                if stage.ends_with("_repair") {
+                    "Planning repair".to_string()
                 } else {
-                    format!("Conductor {index}")
+                    "Planning".to_string()
                 }
             } else {
                 "Model run".to_string()

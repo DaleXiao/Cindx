@@ -112,7 +112,7 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
     const event = timeline[index];
     if (event.timestampMs < startedAtMs) break;
-    if (/^Candidate \d+$/.test(event.label)) {
+    if (/^Approach \d+$/.test(event.label)) {
       if (/started/i.test(event.detail)) candidateStarts += 1;
       if (/finished/i.test(event.detail)) candidateFinishes += 1;
     }
@@ -144,18 +144,18 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
     label = "Planning work";
   } else if (/starting execution/i.test(latest.detail)) {
     label = "Executing plan";
-  } else if (/^Candidate \d+$/.test(latest.label)) {
+  } else if (/^Approach \d+$/.test(latest.label)) {
     label = `Exploring approaches ${Math.min(candidateFinishes, candidateStarts)}/${Math.max(
       1,
       candidateStarts
     )}`;
-  } else if (latest.label === "Conductor" || latest.label === "Planner") {
+  } else if (latest.label === "Planning" || latest.label === "Planning repair") {
     label = "Planning work";
-  } else if (latest.label === "Arbiter") {
+  } else if (latest.label === "Selection") {
     label = "Selecting approach";
-  } else if (latest.label === "Executor" || latest.label === "Model started") {
+  } else if (latest.label === "Execution" || latest.label === "Model started") {
     label = "Executing plan";
-  } else if (latest.label === "Reviewer") {
+  } else if (latest.label === "Review") {
     label = "Reviewing result";
   } else if (latest.label === "Synthesis") {
     label = "Writing final response";

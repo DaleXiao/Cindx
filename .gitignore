@@ -2,7 +2,7 @@ target/
 node_modules/
 dist/
 /.cindx/
-/.DS_Store
+.DS_Store
 /.env
 /.env.*
 !/examples/.env.example

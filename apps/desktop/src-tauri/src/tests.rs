@@ -5626,21 +5626,29 @@ fn collaboration_stages_have_visible_timeline_labels() {
         .collect(),
     };
 
-    assert_eq!(timeline_event_label(&event), "Candidate 2");
+    assert_eq!(timeline_event_label(&event), "Approach 2");
     assert_eq!(
         collaboration_stage_display_label("coordinator"),
-        "Conductor"
+        "Planning"
     );
     assert_eq!(
         collaboration_stage_display_label("conductor_plan"),
-        "Conductor"
+        "Planning"
     );
     assert_eq!(
         collaboration_stage_display_label("conductor_repair"),
-        "Conductor repair"
+        "Planning repair"
     );
-    assert_eq!(collaboration_stage_display_label("worker_3"), "Worker 3");
-    assert_eq!(collaboration_stage_display_label("arbiter"), "Arbiter");
+    assert_eq!(
+        collaboration_stage_display_label("run_decision_model_1"),
+        "Planning"
+    );
+    assert_eq!(
+        collaboration_stage_display_label("run_decision_model_1_repair"),
+        "Planning repair"
+    );
+    assert_eq!(collaboration_stage_display_label("worker_3"), "Step 3");
+    assert_eq!(collaboration_stage_display_label("arbiter"), "Selection");
     assert_eq!(
         collaboration_stage_display_label("synthesizer"),
         "Synthesis"

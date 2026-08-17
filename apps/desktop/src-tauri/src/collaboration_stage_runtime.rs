@@ -53,12 +53,8 @@ pub(crate) fn collaboration_stage_terminal_presentation(
     }
 }
 
-pub(crate) fn collaboration_stage_event_subject(stage: &str) -> &'static str {
-    if stage.starts_with("run_decision") {
-        "Conductor"
-    } else {
-        "Collaboration"
-    }
+pub(crate) fn collaboration_stage_event_subject(stage: &str) -> String {
+    crate::runtime_values::collaboration_stage_display_label(stage)
 }
 
 pub(crate) fn collaboration_stage_result(
@@ -171,7 +167,7 @@ pub(crate) fn collaboration_stage_finished_metadata(
     let summary = if let Some(content) = completion.content.as_ref() {
         metadata.insert("output".to_string(), content.clone());
         metadata.insert("status".to_string(), status.to_string());
-        format!("{} {stage} {terminal_verb}", collaboration_stage_event_subject(stage))
+        format!("{} {terminal_verb}", collaboration_stage_event_subject(stage))
     } else {
         metadata.insert("status".to_string(), status.to_string());
         metadata.insert(
@@ -188,7 +184,7 @@ pub(crate) fn collaboration_stage_finished_metadata(
         {
             metadata.insert("interruption_reason".to_string(), failure.code.clone());
         }
-        format!("{} {stage} {terminal_verb}", collaboration_stage_event_subject(stage))
+        format!("{} {terminal_verb}", collaboration_stage_event_subject(stage))
     };
     Ok((summary, metadata))
 }
