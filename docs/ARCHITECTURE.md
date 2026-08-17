@@ -235,20 +235,22 @@ the absence instead of fabricating content.
 
 ### 6. Completion and recovery
 
-Terminal selection cannot convert an unmet obligation into verified success. A
-tools-disabled finalizer may produce the visible response without consuming an
-actor turn; an invalid finalizer falls back to the exact eligible grounded
-candidate rather than restarting the actor. Empty or unusable finalizer output
+Terminal selection cannot convert an unmet obligation into verified success.
+The Finalizer role is retired with the serial collaboration architecture:
+single-model sessions deliver through the actor, and a forced terminal commit
+runs one toolless wrap-up turn of the same session model (actor system prompt,
+no Summarizer role, no evolved directive) when no grounded material is
+available yet; an unusable wrap-up falls back to the exact eligible grounded
+candidate rather than restarting the actor. Empty or unusable wrap-up output
 with no verified fallback gets one bounded retry of the gate. When no
 deliverable control candidate exists but the run holds visible tool evidence,
 the latest substantive visible assistant text (at least 160 chars, internal
 drafts excluded) is admitted as a last-resort grounded fallback so a provider
 flake cannot fail a run that already did visible work; short progress notes
-and evidence-free runs stay closed. Forced terminal commits (budget or
-disposition, not an actor handoff) skip the extra finalizer model call
-entirely when such grounded material already exists and deliver it directly;
-the toolless finalizer call therefore only runs for actor-requested handoffs
-or when no grounded material is available yet.
+and evidence-free runs stay closed. Forced terminal commits skip the wrap-up
+model call entirely when such grounded material already exists and deliver it
+directly. The direct-finalizer phenotype policy module remains dormant pending
+physical removal with a prompt-genome schema migration.
 
 Auto and Pro direct deliveries pass an optional bounded judge gate at the
 shared completion chokepoint (both direct completion and terminal-finalizer

@@ -127,12 +127,8 @@ impl PlannedAgentRun {
             serde_json::to_string(&self.prompt_genome)
                 .map_err(|error| format!("prompt genome serialization failed: {error}"))?,
         );
-        crate::agent_finalizer_runtime::direct_finalizer_policy::install_direct_finalizer_policy_metadata(
-            run_context,
-            self.policy,
-            decision.execution,
-            &self.prompt_genome,
-        )?;
+        // The direct-finalizer phenotype policy is retired with the Finalizer
+        // role; the genome field remains for schema compatibility only.
         Ok(())
     }
 }

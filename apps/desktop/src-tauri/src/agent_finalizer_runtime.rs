@@ -1,11 +1,15 @@
-use agent_core::{Message, MessageRole, ModelRole};
+use agent_core::{Message, MessageRole};
 use agent_runtime::{
     sanitize_assistant_content, AgentFailure, AgentKernel, AgentRunControl,
     AgentTurnPreparationError,
 };
 use model_provider::ModelResponse;
 
+// Dormant pending physical removal with a prompt-genome schema migration: the
+// Finalizer role and its evolved phenotype policy are retired; single-model
+// sessions deliver through the actor and the grounded-completion contract.
 #[path = "agent_direct_finalizer_policy.rs"]
+#[allow(dead_code)]
 pub(crate) mod direct_finalizer_policy;
 #[path = "agent_terminal_finalizer_runtime.rs"]
 pub(crate) mod terminal_runtime;
@@ -59,31 +63,20 @@ fn last_resort_visible_answer(runtime: &agent_runtime::AgentLoopState) -> Option
 pub(crate) fn prepare_finalizer_turn(
     runtime: &mut agent_runtime::AgentLoopState,
     system_prompt: Option<&str>,
-    direct_finalizer_directive: Option<&str>,
     runtime_context: Option<&str>,
     context_window_tokens: u64,
     max_output_tokens: u64,
 ) -> Result<agent_runtime::PreparedAgentTurn, AgentTurnPreparationError> {
-    let augmented_system_prompt = direct_finalizer_directive.map(|directive| {
-        let base = system_prompt.unwrap_or_default().trim();
-        if base.is_empty() {
-            directive.to_string()
-        } else {
-            format!("{base}\n\nDirect finalizer policy:\n{directive}")
-        }
-    });
+    // The Finalizer role is retired: terminal wrap-up is a toolless turn of the
+    // session's single actor model, gated by the same grounded-completion
+    // contract as direct actor delivery.
     let mut prepared = AgentKernel::new(runtime, &[]).prepare_finalizer_turn(
-        augmented_system_prompt.as_deref().or(system_prompt),
+        system_prompt,
         runtime_context,
         context_window_tokens,
         max_output_tokens,
     )?;
-    prepared.request.role = ModelRole::Summarizer;
     prepared.request.tools.clear();
-    prepared
-        .request
-        .metadata
-        .insert("execution_role".to_string(), "finalizer".to_string());
     Ok(prepared)
 }
 
@@ -266,54 +259,15 @@ mod tests {
     }
 
     #[test]
-    fn finalizer_request_is_toolless_and_does_not_advance_the_actor_turn() {
+    fn wrap_up_turn_is_toolless_single_model_and_does_not_advance_the_actor_turn() {
         let mut runtime = runtime();
         let before = runtime.turn;
-        let prepared = prepare_finalizer_turn(&mut runtime, None, None, None, 8_192, 1_024)
-            .expect("finalizer request should prepare");
+        let prepared = prepare_finalizer_turn(&mut runtime, None, None, 8_192, 1_024)
+            .expect("wrap-up request should prepare");
         assert!(prepared.request.tools.is_empty());
-        assert_eq!(prepared.request.role, ModelRole::Summarizer);
+        assert_ne!(prepared.request.role, agent_core::ModelRole::Summarizer);
+        assert!(!prepared.request.metadata.contains_key("execution_role"));
         assert_eq!(runtime.turn, before);
-    }
-
-    #[test]
-    fn direct_policy_changes_only_the_toolless_finalizer_prompt() {
-        let mut baseline_runtime = runtime();
-        let mut candidate_runtime = baseline_runtime.clone();
-        let baseline = prepare_finalizer_turn(
-            &mut baseline_runtime,
-            Some("base system prompt"),
-            None,
-            None,
-            8_192,
-            1_024,
-        )
-        .expect("baseline finalizer should prepare");
-        let directive = "challenge visible evidence before delivery";
-        let candidate = prepare_finalizer_turn(
-            &mut candidate_runtime,
-            Some("base system prompt"),
-            Some(directive),
-            None,
-            8_192,
-            1_024,
-        )
-        .expect("candidate finalizer should prepare");
-
-        assert_eq!(baseline.request.role, candidate.request.role);
-        assert!(baseline.request.tools.is_empty());
-        assert!(candidate.request.tools.is_empty());
-        assert_eq!(baseline_runtime.turn, candidate_runtime.turn);
-        assert!(!baseline
-            .request
-            .messages
-            .iter()
-            .any(|message| message.content.contains(directive)));
-        assert!(candidate
-            .request
-            .messages
-            .iter()
-            .any(|message| message.content.contains(directive)));
     }
 
     #[test]

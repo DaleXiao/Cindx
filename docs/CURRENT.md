@@ -94,16 +94,16 @@ entirely, so durable project memory participates in every non-trivial task;
 Fast keeps the Conductor's choice, and explicit Relevant/Comprehensive
 decisions are preserved.
 
-Direct-run delivery is resilient to finalizer flakes: an empty or unusable
-toolless finalizer response is retried once when no verified fallback exists,
-and when the run already holds visible tool evidence the latest substantive
-visible assistant text (at least 160 chars) is delivered as the grounded
-last-resort answer instead of failing the run. Short progress notes and
-evidence-free runs are never delivered this way. When a run is force-stopped
-(budget or disposition) and such grounded material already exists, the extra
-finalizer model call is skipped entirely and the material is delivered
-directly; plain text-only actor answers were already delivered without any
-finalizer call.
+The Finalizer role is retired: single-model sessions deliver through the
+actor, and a forced stop runs at most one toolless wrap-up turn of the same
+model (no Summarizer role, no evolved directive). Delivery stays resilient to
+wrap-up flakes: an empty or unusable wrap-up response is retried once when no
+verified fallback exists, and when the run already holds visible tool evidence
+the latest substantive visible assistant text (at least 160 chars) is delivered
+as the grounded last-resort answer instead of failing the run. Short progress
+notes and evidence-free runs are never delivered this way, and forced stops
+with grounded material skip the wrap-up call entirely. Plain text-only actor
+answers never needed a second call.
 
 Auto and Pro direct execution carry a contracted delivery judge at the
 shared completion point: a model-distinct Reviewer audits the final answer
