@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.2.51`
+Current application version: `0.2.52`
 
 Last code-fact review: `2026-08-12`
 
