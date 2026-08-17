@@ -139,7 +139,7 @@ pub(crate) fn collaboration_recent_context(history: &[Message]) -> String {
 #[cfg(test)]
 mod grounding_receipt_tests {
     use super::*;
-    
+
     fn evidence(
         schema: &str,
         epoch: Option<u64>,

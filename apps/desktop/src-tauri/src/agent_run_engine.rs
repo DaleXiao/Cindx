@@ -79,7 +79,8 @@ impl<'app, 'state> AgentExecutionService<'app, 'state> {
         effort: AgentPolicy,
         cancellation: &Arc<AgentRunControl>,
     ) -> Result<AgentState, String> {
-        prepared.runtime.generation_temperature = effort.generation_temperature().map(str::to_string);
+        prepared.runtime.generation_temperature =
+            effort.generation_temperature().map(str::to_string);
         let mut executor = DesktopAgentRunExecutor {
             app: self.app,
             state: self.state,

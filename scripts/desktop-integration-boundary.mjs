@@ -23,7 +23,6 @@ const ROOT_GLOB_IMPORT_BUDGET = 74;
 const PRODUCTION_SUPER_GLOB_MODULE_BUDGET = 56;
 
 const LEGACY_DESKTOP_PRELUDE_GLOB_MODULES = new Set([
-  "agent_collaboration_runtime.rs",
   "agent_loop_contract_runtime.rs",
   "agent_loop_runtime.rs",
   "agent_recovery_service.rs",
@@ -213,9 +212,6 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     workspaceCargo.match(/default-members\s*=\s*\[([\s\S]*?)\]/)?.[1] ?? "";
   const harnessCargo = read("crates/agent-harness/Cargo.toml");
   const harnessSource = read("crates/agent-harness/src/lib.rs");
-  const adaptiveConductor = read(
-    "apps/desktop/src-tauri/src/adaptive_conductor_runtime.rs"
-  );
 
   const integrationFiles = rustFiles.filter(
     ({ entry }) =>
@@ -358,9 +354,6 @@ export const inspectDesktopIntegrationBoundary = (root) => {
     !sameNames(INTEGRATION_COMMAND_HANDLERS, registeredIntegrationHandlers) &&
       "command_registration",
     unexpectedPreludeGlobs.length > 0 && "new_prelude_consumer",
-    /\bdeterministic_conductor_fallback\b|\bfallback_plan\s*\(/.test(
-      rustCodeWithoutCommentsAndLiterals(adaptiveConductor)
-    ) && "conductor_fallback_reintroduced",
     rootGlobImports.length > ROOT_GLOB_IMPORT_BUDGET && "root_glob_budget",
     productionSuperGlobModules.length > PRODUCTION_SUPER_GLOB_MODULE_BUDGET &&
       "production_super_glob_budget",

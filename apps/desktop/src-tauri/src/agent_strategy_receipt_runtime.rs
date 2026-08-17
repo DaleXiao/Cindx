@@ -8,9 +8,9 @@ use agent_core::{
     decode_event_type, DecodedEventType, Event, EventKind, EventTypeV1, Metadata, TaskId,
     EVENT_TYPE_METADATA_KEY,
 };
-use agent_storage::{SqliteStore, StorageError};
 #[cfg(test)]
 use agent_storage::EventStore;
+use agent_storage::{SqliteStore, StorageError};
 
 use crate::event_persistence::append_event;
 
@@ -128,11 +128,8 @@ pub(crate) fn persist_retained_strategy_decision(
         .insert_into(&mut retained_context)
         .map_err(|error| StorageError::new(error.to_string()))?;
 
-    let existing = store.list_by_task_and_metadata(
-        task_id,
-        "agent_run_id",
-        receipt.agent_run_id(),
-    )?;
+    let existing =
+        store.list_by_task_and_metadata(task_id, "agent_run_id", receipt.agent_run_id())?;
     let decisions = existing
         .iter()
         .filter(|event| {
@@ -219,9 +216,7 @@ mod tests {
 
         persist_retained_strategy_decision(&mut store, &task_id, &context, 1)
             .expect("replayed retention should be idempotent");
-        let events = store
-            .list_by_task(&task_id)
-            .expect("decisions should load");
+        let events = store.list_by_task(&task_id).expect("decisions should load");
         assert_eq!(events.len(), 2);
         assert!(rebound.matches_decision_event(&events[1]));
     }

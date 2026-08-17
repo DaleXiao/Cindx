@@ -1256,26 +1256,6 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
   }
 }
 
-export async function setPromptEvolutionEnabled(enabled: boolean): Promise<Phase4State> {
-  try {
-    return await invoke<Phase4State>("set_prompt_evolution_enabled", { enabled });
-  } catch (error) {
-    requireBrowserPreviewFallback(error);
-    browserPhase4State = {
-      ...browserPhase4State,
-      provider: {
-        ...browserPhase4State.provider,
-        promptEvolutionEnabled: enabled
-      },
-      promptEvolution: {
-        ...browserPhase4State.promptEvolution,
-        enabled
-      }
-    };
-    return browserPhase4State;
-  }
-}
-
 export async function listProviderModels(input: Pick<ProviderConfigInput, "providerId" | "providerResource" | "baseUrl" | "apiKey">): Promise<ProviderModelsState> {
   try {
     return await invoke<ProviderModelsState>("list_provider_models", { input });

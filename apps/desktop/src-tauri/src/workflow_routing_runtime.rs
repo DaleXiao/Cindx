@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) fn conductor_historical_evidence(
     state: &tauri::State<'_, AppState>,
     allowed_models: &[String],
@@ -86,11 +85,7 @@ pub(crate) fn effort_model_candidates(
 ) -> Vec<ModelCandidate> {
     let mut candidates = base_model_candidates_for_config(config);
     let pinned = config.effort_default_model(effort_label);
-    if !pinned.is_empty()
-        && !candidates
-            .iter()
-            .any(|candidate| candidate.name == pinned)
-    {
+    if !pinned.is_empty() && !candidates.iter().any(|candidate| candidate.name == pinned) {
         let (cost_tier, latency_tier) = match effort_label {
             "fast" => (1, 1),
             "pro" => (3, 1),

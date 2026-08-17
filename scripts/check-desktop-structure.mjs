@@ -140,16 +140,12 @@ const settingsPermissionsPanelSource = read(
 const settingsToolsPanelSource = read(
   "apps/desktop/src/components/SettingsToolsPanel.tsx"
 );
-const promptEvolutionPanelSource = read(
-  "apps/desktop/src/components/PromptEvolutionPanel.tsx"
-);
 const settingsPageSource = [
   settingsPageFileSource,
   settingsModelsImplementationSource,
   settingsMemoryPanelSource,
   settingsPermissionsPanelSource,
   settingsToolsPanelSource,
-  promptEvolutionPanelSource,
 ].join("\n");
 const preferencesControllerSource = read(
   "apps/desktop/src/controllers/usePreferencesController.ts"
@@ -388,12 +384,6 @@ const desktopEventSinkSource = read(
 );
 const collaborationServiceSource = read(
   "apps/desktop/src-tauri/src/collaboration_service.rs"
-);
-const collaborationWorkerRuntimeSource = read(
-  "apps/desktop/src-tauri/src/collaboration_worker_runtime.rs"
-);
-const adaptiveCollaborationFinalizationSource = read(
-  "apps/desktop/src-tauri/src/adaptive_collaboration_finalization.rs"
 );
 const agentRuntimeModelTransportSource = read(
   "crates/agent-runtime/src/model_transport.rs"
@@ -806,7 +796,6 @@ const extractedDesktopBoundaryBudgets = [
   ["modelStreamSubscription.ts", modelStreamSubscriptionSource, 120],
   ["useModelStreamAnswer.ts", modelStreamAnswerSource, 160],
   ["StreamingMarkdownDeferredTail.tsx", streamingMarkdownDeferredTailSource, 60],
-  ["PromptEvolutionPanel.tsx", promptEvolutionPanelSource, 280],
   ["SettingsModelsPanel.tsx", settingsModelsPanelSource, 320],
   ["ProviderModalityFields.tsx", providerModalityFieldsSource, 140],
   ["VoiceInputButton.tsx", voiceInputButtonSource, 80],
@@ -878,7 +867,6 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["agent_strategy_context.rs", 140],
   ["agent_strategy_runtime.rs", 420],
   ["agent_loop_runtime.rs", 550],
-  ["agent_collaboration_runtime.rs", 800],
   ["agent_recovery_service.rs", 550],
   ["agent_runtime_snapshot.rs", 220],
   ["background_work_runtime.rs", 80],
@@ -1263,7 +1251,6 @@ assert(
     settingsPageSource.includes('./SettingsModelsPanel') &&
     settingsPageSource.includes('./SettingsPermissionsPanel') &&
     settingsPageSource.includes('./SettingsToolsPanel') &&
-    settingsModelsPanelSource.includes('./PromptEvolutionPanel') &&
     sessionThreadSource.includes('./AgentMarkdown') &&
     sessionThreadSource.includes('./SessionThreadArtifacts') &&
     sessionThreadSource.includes('./SessionThreadNavigation') &&
@@ -1306,9 +1293,6 @@ for (const requiredModule of [
   "agent_conductor_runtime.rs",
   "agent_loop_runtime.rs",
   "agent_runtime_snapshot.rs",
-  "adaptive_collaboration_setup.rs",
-  "adaptive_collaboration_execution.rs",
-  "adaptive_collaboration_finalization.rs",
   "configuration_persistence.rs",
   "desktop_prelude.rs",
   "event_persistence.rs",
@@ -1934,26 +1918,6 @@ assert(
     appSource.includes("mergeAgentStateSnapshot(current, failedState)") &&
     appSource.includes("mergeAgentStateSnapshot(current, nextAgentState)"),
   "Real Tauri agent failures must propagate without replacing loaded session history"
-);
-assert(
-  orchestratorSource.includes("pub struct WorkflowExecutionCheckpoint") &&
-    orchestratorSource.includes("pub enum WorkflowStepStatus") &&
-    orchestratorSource.includes("pub fn runnable_step_indices") &&
-    orchestratorSource.includes("pub fn continue_with_budget") &&
-    rustLib.includes("load_workflow_checkpoint_for_run") &&
-    rustLib.includes("append_workflow_checkpoint_event") &&
-    rustLib.includes("Collaboration workflow step checkpointed") &&
-    rustLib.includes("WORKFLOW_RESUMABLE_ERROR_PREFIX") &&
-    rustLib.includes("workflow_checkpoint.completed_outputs()") &&
-    orchestratorSource.includes("pub fn validate_owner_execution_graph") &&
-    orchestratorSource.includes("pub fn complete_owner_handoff") &&
-    rustLib.includes("checkpoint.complete_owner_handoff") &&
-    !rustLib.includes("workflow_checkpoint.assign_step_credits") &&
-    rustLib.includes("timeline_workflow_progress") &&
-    tauriBridge.includes("workflowProgress?:") &&
-    sessionThreadSource.includes("latestWorkflow.totalSteps") &&
-    sessionThreadSource.includes("Checkpoint saved"),
-  "Adaptive workflows must preserve resumable checkpoints and complete the Owner handoff without model-derived learning credit"
 );
 assert(
   appSource.includes("sessionLoadingId") &&
@@ -3001,7 +2965,7 @@ assert(
     appSource.includes("showSettingsSaved();") &&
     desktopControllerSource.includes('showSettingsSaved("Personalization saved")') &&
     desktopControllerSource.includes('showSaved("Provider verified and configured")') &&
-    (desktopControllerSource.match(/showSaved\(/g)?.length ?? 0) === 5 &&
+    (desktopControllerSource.match(/showSaved\(/g)?.length ?? 0) === 4 &&
     appSource.includes("<CheckCircle2 aria-hidden=\"true\" />") &&
     styles.includes(".settings-saved-toast") &&
     styles.includes("color: #2f9e64;"),
@@ -3766,121 +3730,6 @@ assert(
   "Agent trace must expose the real model, latency, evidence, and completion status for each collaboration role"
 );
 assert(
-  orchestratorSource.includes("pub fn pareto_front") &&
-    orchestratorSource.includes("prompt_profile") &&
-    orchestratorSource.includes("prompt_genome") &&
-    promptEvolutionSource.includes("pub fn mutations") &&
-    promptEvolutionSource.includes("pub fn next_generation") &&
-    promptEvolutionSource.includes("learned_mutation_from_response") &&
-    promptEvolutionSource.includes("evaluate_prompt_convergence") &&
-    promptEvolutionSource.includes("pub fn reward(&self)") &&
-    promptEvolutionSource.includes("pub fn group_relative_reward(&self)") &&
-    promptEvolutionSource.includes("pub enum PromptToolPolicy") &&
-    promptEvolutionSource.includes("pub enum PromptRetryPolicy") &&
-    promptEvolutionSource.includes("PromptEvaluationMode::PairedExecution") &&
-    promptEvolutionSource.includes("PromptEvaluationMode::ReplayExecution") &&
-    promptEvolutionSource.includes("prompt_promotion_confidence") &&
-    promptEvolutionSource.includes("wilson_lower_bound") &&
-    promptEvolutionSource.includes("average_step_credit") &&
-    promptEvolutionSource.includes("pareto_selection_does_not_treat_token_cost_as_intelligence") &&
-    promptEvolutionSource.includes("format_valid_rate < 1.0") &&
-    rustLib.includes("run_decision_proposal") &&
-    !rustLib.includes("pareto_search_teacher_v2") &&
-    rustLib.includes("prompt_evolution_enabled") &&
-    promptEvolutionRuntimeSource.includes("reconcile_prompt_evolution_for_background") &&
-    promptEvolutionRuntimeSource.includes("publish_canonical_prompt_profile_deployment") &&
-    rustLib.includes('"prompt_evolution_mutation"') &&
-    rustLib.includes("PROMPT_EVOLUTION_STAGNATION_PATIENCE") &&
-    rustLib.includes("PROMPT_EVOLUTION_SHADOW_INTERVAL") &&
-    promptEvolutionReadModelSource.includes("is_agent_run_terminal") &&
-    promptEvolutionReadModelSource.includes("AgentRunEvent::from_event") &&
-    rustLib.includes("evaluate_prompt_evolution") &&
-    rustLib.includes("Conductor prompt profile selected") &&
-    rustLib.includes("PROMPT_EVOLUTION_MIN_HOLDOUT_RUNS") &&
-    rustLib.includes("PROMPT_EVOLUTION_BACKGROUND_BATCH_LIMIT") &&
-    rustLib.includes("prompt_direct_profile_evidence_counts") &&
-    rustLib.includes("prompt_rollout_counterpart") &&
-    rustLib.includes("opponent_profile_id.as_deref()") &&
-    rustLib.includes("let current_counts = prompt_direct_profile_evidence_counts") &&
-    rustLib.includes("let challenger_counts = prompt_direct_profile_evidence_counts") &&
-    rustLib.includes("PROMPT_EVOLUTION_OFFLINE_MIN_CASES") &&
-    rustLib.includes("prompt_offline_dataset") &&
-    rustLib.includes("select_prompt_offline_case") &&
-    rustLib.includes('"Conductor offline dataset selected"') &&
-    rustLib.includes("BACKGROUND_WORK_IDLE_GRACE_MS: u64 = 30_000") &&
-    promptEvolutionWorkerSource.includes("wait_for_foreground_agent_idle") &&
-    read("apps/desktop/src-tauri/src/semantic_memory_worker.rs").includes(
-      "wait_for_foreground_agent_idle"
-    ) &&
-    read("apps/desktop/src-tauri/src/semantic_memory_runtime.rs").includes(
-      "foreground_agent_should_preempt"
-    ) &&
-    rustLib.includes("schedule_prompt_pairwise_evaluation") &&
-    promptProfileServingSource.includes("select_prompt_profile_for_run") &&
-    promptProfileServingSource.includes("recover_prompt_profile_deployments") &&
-    rustLib.includes("prompt_objective") &&
-    rustLib.includes("conductor_directive.as_deref()") &&
-    rustLib.includes("evaluate_prompt_candidate_pair") &&
-    rustLib.includes("execute_prompt_workflow_candidate") &&
-    rustLib.includes("struct PromptWorkflowExecution") &&
-    rustLib.includes("prompt_replay_case") &&
-    rustLib.includes('"Conductor pairwise evaluation"') &&
-    rustLib.includes("PromptEvaluationMode::PairedExecution") &&
-    rustLib.includes("PromptEvaluationMode::ReplayExecution") &&
-    rustLib.includes("reconcile_prompt_rollout") &&
-    promptCanaryRuntimeSource.includes("next_prompt_canary_stage") &&
-    promptCanaryRuntimeSource.includes("prompt_canary_degraded") &&
-    promptCanaryLineageSource.includes("prompt_live_observation_matches_lineage") &&
-    promptCanaryLineageSource.includes(
-      "prompt_live_observation_matches_distillation_assignment"
-    ) &&
-    rustLib.includes("prompt_rollout_transition_is_valid") &&
-    rustLib.includes('next.status == "promoted"') &&
-    rustLib.includes(
-      "previous.canary_profile_id.as_deref() == Some(next.stable_profile_id.as_str())"
-    ) &&
-    rustLib.includes(
-      "snapshot.stable_profile_id == previous.stable_profile_id"
-    ) &&
-    rustLib.includes(
-      "PROMPT_EVOLUTION_READ_MODEL_PROJECTION_VERSION: u32 = 9"
-    ) &&
-    rustLib.includes("snapshot.genome.id == rollout.stable_profile_id") &&
-    rustLib.includes("promoted_prompt_rollout_without_a_valid_frozen_profile_is_ignored") &&
-    rustLib.includes(
-      "prompt_rollout_replay_rejects_forged_stable_canary_and_status"
-    ) &&
-    rustLib.includes(
-      "prompt_rollout_transition_accepts_exact_stages_and_atomic_promotion"
-    ) &&
-    rustLib.includes("stable_prompt_rollout_uses_the_evidence_bound_frozen_genome") &&
-    rustLib.includes('"Conductor prompt rollout updated"') &&
-    rustLib.includes('"evaluation_required"') &&
-    tauriBridge.includes("setPromptEvolutionEnabled") &&
-    tauriBridge.includes("averageRelativeReward") &&
-    tauriBridge.includes("averageStepCredit") &&
-    tauriBridge.includes("promotionConfidence") &&
-    tauriBridge.includes("canaryPercent") &&
-    settingsPageSource.includes('if (category === "tools") return <Wrench aria-hidden="true" />;') &&
-    /<Wrench size=\{17\} aria-hidden="true" \/>\s*<h2>Tools<\/h2>/.test(settingsPageSource) &&
-    /<Dna size=\{17\} aria-hidden="true" \/>\s*<h2>Genetic Pareto<\/h2>/.test(settingsPageSource) &&
-    settingsPageSource.includes("Genetic Pareto") &&
-    settingsPageSource.includes("Candidate harnesses execute in an isolated arena before promotion") &&
-    /direct\s+stable-versus-challenger Wilson gate controls staged canary rollout/.test(
-      settingsPageSource
-    ) &&
-    settingsPageSource.includes("Evaluating in background") &&
-    settingsPageSource.includes("Rollout by effort") &&
-    settingsPageSource.includes("Candidate profiles") &&
-    settingsPageSource.includes("prompt-evolution-table") &&
-    settingsPageSource.includes("prompt-evolution-summary") &&
-    settingsPageSource.includes("Rollbacks") &&
-    styles.includes(".prompt-evolution-table") &&
-    !settingsPageSource.includes("prompt-evolution-efforts") &&
-    !settingsPageSource.includes("prompt-evolution-profiles"),
-  "Conductor workflows must run executable harness evolution with confidence-gated canary rollout"
-);
-assert(
   !agentStrategyPreparationSource.includes("prompt_evolution_evaluation_for_run") &&
     !agentStrategyPreparationSource.includes("evaluate_prompt_evolution_read_model") &&
     !agentStrategyPreparationSource.includes("reconcile_prompt_rollout") &&
@@ -4291,13 +4140,7 @@ assert(
   "Context compaction must preserve session-scoped operational and conversational memory"
 );
 assert(
-  rustLib.includes("prepare_agent_execution(") &&
-    rustLib.includes("plan_agent_run(") &&
-    rustLib.includes("run_adaptive_collaboration(") &&
-    collaborationServiceSource.includes("struct AdaptiveCollaborationSpec") &&
     collaborationServiceSource.includes("struct CollaborationCompletion") &&
-    collaborationWorkerRuntimeSource.includes("IsolatedWorkerRuntime::new(") &&
-    adaptiveCollaborationFinalizationSource.includes("fn finalize_adaptive_collaboration(") &&
     orchestratorSource.includes(
       'AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1"'
     ) &&
@@ -4306,23 +4149,12 @@ assert(
     orchestratorSource.includes("pub fn planning_prompt(&self)") &&
     orchestratorSource.includes("pub fn repair_prompt(") &&
     orchestratorSource.includes("pub fn parse_plan(") &&
-    rustLib.includes("CONDUCTOR_MAX_ATTEMPTS") &&
-    rustLib.includes("complete_collaboration_worker_with_tools(") &&
-    rustLib.includes('"isolated_evidence_v1"') &&
     agentRuntimeSource.includes("evidence_worker_tools") &&
     parallelExecutionSource.includes("MAX_GLOBAL_MODEL_WORKERS: usize = 12") &&
     parallelExecutionSource.includes("BoundedParallelExecutor") &&
     parallelExecutionSource.includes("run_model_jobs_until_anytime_quorum_interruptible") &&
-    rustLib.includes('"conductor_workflow_plan_source"') &&
-    rustLib.includes('"run_decision_proposal"') &&
-    rustLib.includes('format!("worker_{}", step_index + 1)') &&
-    collaborationServiceSource.includes(
-      '("access_list".to_string(), spec.access.join(","))'
-    ) &&
-    rustLib.includes("recover_adaptive_worker(") &&
     orchestratorSource.includes("pub fn validate_owner_execution_graph") &&
     orchestratorSource.includes("pub fn complete_owner_handoff") &&
-    rustLib.includes("adaptive_worker_model_distinctness_error") &&
     !rustLib.includes("quality_gate_adaptive_output(") &&
     rustLib.includes("append_single_model_policy_guidance(") &&
     orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5") &&
@@ -4330,13 +4162,8 @@ assert(
     orchestratorSource.includes("adaptive_workflow_step_budget") &&
     orchestratorSource.includes("adaptive_workflow_layers") &&
     orchestratorSource.includes("must only access earlier steps") &&
-    rustLib.includes('"workflow_ir".to_string()') &&
     orchestratorSource.includes('WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1"') &&
-    !rustLib.includes("validate_and_apply_revision(") &&
-    rustLib.includes("Collaboration workflow planned") &&
-    rustLib.includes("Tool evidence ledger") &&
-    rustLib.includes("collaboration_step_result(") &&
-    rustLib.includes('"evidence_count"'),
+    !rustLib.includes("validate_and_apply_revision(") ,
   "Primary agent must use the bounded, tool-capable Owner graph from the recorded Conductor decision"
 );
 assert(

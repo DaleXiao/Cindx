@@ -1772,8 +1772,7 @@ fn provider_backed_fugu_external_effect_pilot() {
                     &pro_profile,
                 ),
             };
-            let suspend_skew_ms =
-                evaluation_suspend_skew_ms(started_instant, started_wall_ms);
+            let suspend_skew_ms = evaluation_suspend_skew_ms(started_instant, started_wall_ms);
             if suspend_skew_ms > EVALUATION_SUSPEND_SKEW_THRESHOLD_MS {
                 result.succeeded = false;
                 if result.error.is_none() {

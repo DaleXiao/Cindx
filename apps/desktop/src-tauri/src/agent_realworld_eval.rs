@@ -488,24 +488,6 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
     Ok(())
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn validate_suite(suite: &RealworldSuite) -> Result<(), String> {
     let expected = expected_treatments(&suite.schema)
         .ok_or_else(|| format!("unsupported suite schema {}", suite.schema))?;

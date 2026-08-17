@@ -195,12 +195,16 @@ impl ProviderConfig {
     }
 
     pub(crate) fn effort_default_model(&self, effort_label: &str) -> String {
-        match effort_label {
-            "fast" => self.fast_model.trim().to_string(),
-            "auto" => self.auto_model.trim().to_string(),
-            "pro" => self.pro_model.trim().to_string(),
-            _ => String::new(),
+        let pinned = match effort_label {
+            "fast" => self.fast_model.trim(),
+            "auto" => self.auto_model.trim(),
+            "pro" => self.pro_model.trim(),
+            _ => return String::new(),
+        };
+        if !pinned.is_empty() {
+            return pinned.to_string();
         }
+        provider_effort_default_model(&self.provider_id, effort_label).to_string()
     }
 
     pub(crate) fn model_for_role(&self, role: &ModelRole) -> String {

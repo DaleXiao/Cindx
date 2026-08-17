@@ -1,6 +1,6 @@
 use super::*;
-use crate::append_message_event_with_metadata;
 use crate::agent_strategy_receipt_runtime::bind_strategy_receipt_from_events;
+use crate::append_message_event_with_metadata;
 use agent_application::{
     insert_strategy_not_selected, strategy_receipt_is_explicitly_not_selected,
     AgentStrategyDecisionReceipt,
@@ -108,9 +108,7 @@ fn agent_strategy_lifecycle_contract_recovery_binds_or_explains() {
     let retained_receipt =
         AgentStrategyDecisionReceipt::new(&phase16_task_id(), &retained_context, &"d".repeat(64))
             .unwrap();
-    retained_receipt
-        .insert_into(&mut retained_context)
-        .unwrap();
+    retained_receipt.insert_into(&mut retained_context).unwrap();
     insert_event_type_v1(
         &EventKind::TaskStatusChanged,
         &mut retained_context,
@@ -152,12 +150,8 @@ fn agent_strategy_lifecycle_contract_recovery_binds_or_explains() {
     ];
     assert_eq!(latest_applied_agent_steer_epoch(&active_events), 4);
     let mut retained_recovery = Metadata::new();
-    bind_strategy_receipt_from_events(
-        &active_events,
-        &retained_context,
-        &mut retained_recovery,
-    )
-    .unwrap();
+    bind_strategy_receipt_from_events(&active_events, &retained_context, &mut retained_recovery)
+        .unwrap();
     let retained_recovery = metadata_with_context(retained_recovery, &retained_context);
     assert_eq!(
         AgentStrategyDecisionReceipt::from_metadata(&retained_recovery).unwrap(),

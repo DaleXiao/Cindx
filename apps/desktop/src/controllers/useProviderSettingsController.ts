@@ -3,7 +3,6 @@ import {
   getPhase4State,
   listProviderModels,
   saveProviderConfig,
-  setPromptEvolutionEnabled,
   validateImageEndpoint,
   type Phase4State,
   type ProviderConfigInput,
@@ -299,30 +298,6 @@ export function useProviderSettingsController({
     }
   }, [providerDraft, refreshProviderModels, showSaved]);
 
-  const handlePromptEvolutionToggle = useCallback(
-    async (enabled: boolean) => {
-      if (!providerDraft || providerBusy) return;
-      providerStateRequestRef.current += 1;
-      const previous = providerDraft.promptEvolutionEnabled;
-      setProviderDraft({ ...providerDraft, promptEvolutionEnabled: enabled });
-      setProviderBusy(true);
-      setProviderSettingsError(null);
-      try {
-        const next = await setPromptEvolutionEnabled(enabled);
-        setPhase4(next);
-        setProviderDraft(providerDraftFromState(next.provider));
-        setProviderSettingsError(next.lastError);
-        showSaved(enabled ? "Prompt evolution enabled" : "Prompt evolution disabled");
-      } catch (error) {
-        setProviderDraft({ ...providerDraft, promptEvolutionEnabled: previous });
-        setProviderSettingsError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setProviderBusy(false);
-      }
-    },
-    [providerBusy, providerDraft, showSaved]
-  );
-
   const handleLoadProviderModels = useCallback(async () => {
     if (
       !providerDraft ||
@@ -352,7 +327,6 @@ export function useProviderSettingsController({
   return {
     modelProfileCount,
     handleLoadProviderModels,
-    handlePromptEvolutionToggle,
     handleSaveProviderConfig,
     imageEndpointValidation,
     loadProviderState,

@@ -61,6 +61,9 @@ pub(crate) struct ProviderModelDefaults {
     pub(crate) executor: String,
     pub(crate) reviewer: String,
     pub(crate) summarizer: String,
+    pub(crate) fast: String,
+    pub(crate) auto: String,
+    pub(crate) pro: String,
     pub(crate) embedding: String,
     pub(crate) image: String,
     pub(crate) voice: String,
@@ -119,6 +122,18 @@ pub(crate) fn provider_models_for_modality(provider_id: &str, modality: &str) ->
 
 pub(crate) fn provider_model_defaults(provider_id: &str) -> Option<&'static ProviderModelDefaults> {
     provider_preset(provider_id).map(|provider| &provider.defaults)
+}
+
+pub(crate) fn provider_effort_default_model(provider_id: &str, effort_label: &str) -> &'static str {
+    let Some(defaults) = provider_model_defaults(provider_id) else {
+        return "";
+    };
+    match effort_label {
+        "fast" => defaults.fast.as_str(),
+        "auto" => defaults.auto.as_str(),
+        "pro" => defaults.pro.as_str(),
+        _ => "",
+    }
 }
 
 pub(crate) fn provider_model_supports_vision(provider_id: &str, model: &str) -> Option<bool> {

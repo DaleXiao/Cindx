@@ -139,35 +139,34 @@ pub(crate) fn finalize_agent_completion(
             &receipt_sequences,
         )
         .map_err(|issue| format!("{} receipt validation failed: {issue:?}", delivery.label()))?;
-    let (answer, mut grounded_completion_receipt, judge_disposition) = if delivery.used_fallback()
-        || collaboration.is_some()
-    {
-        (
-            answer,
-            grounded_completion_receipt,
-            "direct_judge_not_applicable".to_string(),
-        )
-    } else {
-        let judge_candidate = crate::agent_finalizer_runtime::GroundedFinalizerCandidate {
-            content: answer,
-            receipt: grounded_completion_receipt,
-            already_persisted: false,
+    let (answer, mut grounded_completion_receipt, judge_disposition) =
+        if delivery.used_fallback() || collaboration.is_some() {
+            (
+                answer,
+                grounded_completion_receipt,
+                "direct_judge_not_applicable".to_string(),
+            )
+        } else {
+            let judge_candidate = crate::agent_finalizer_runtime::GroundedFinalizerCandidate {
+                content: answer,
+                receipt: grounded_completion_receipt,
+                already_persisted: false,
+            };
+            let (judged, disposition) = crate::direct_judge_runtime::apply_direct_judge_gate(
+                state,
+                config,
+                &runtime.task_id,
+                run_context,
+                runtime,
+                run_context
+                    .get("agent_model")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                prompt,
+                judge_candidate,
+            );
+            (judged.content, judged.receipt, disposition)
         };
-        let (judged, disposition) = crate::direct_judge_runtime::apply_direct_judge_gate(
-            state,
-            config,
-            &runtime.task_id,
-            run_context,
-            runtime,
-            run_context
-                .get("agent_model")
-                .map(String::as_str)
-                .unwrap_or_default(),
-            prompt,
-            judge_candidate,
-        );
-        (judged.content, judged.receipt, disposition)
-    };
     let mut direct_judge_run_context = run_context.clone();
     direct_judge_run_context.insert(
         "direct_judge_disposition".to_string(),
@@ -689,10 +688,8 @@ mod tests {
             summarizer_model: "utility".to_string(),
             ..ProviderConfig::default()
         };
-        let run_context = Metadata::from([(
-            "agent_model".to_string(),
-            "routed-primary".to_string(),
-        )]);
+        let run_context =
+            Metadata::from([("agent_model".to_string(), "routed-primary".to_string())]);
 
         assert_eq!(
             routed_terminal_model(&config, &run_context),

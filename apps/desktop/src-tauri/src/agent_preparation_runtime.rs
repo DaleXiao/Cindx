@@ -1,4 +1,3 @@
-use crate::collaboration_service::AgentCollaboration;
 use crate::agent_failure_terminal_runtime::{
     commit_agent_preparation_failure_terminal, AgentPreparationFailureTerminalOutcome,
 };
@@ -12,6 +11,7 @@ use crate::agent_strategy_runtime::{
 };
 use crate::app_state::AppState;
 use crate::collaboration_service::truncate_for_collaboration;
+use crate::collaboration_service::AgentCollaboration;
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::configuration_models::ProviderConfig;
 use crate::event_persistence::append_event;

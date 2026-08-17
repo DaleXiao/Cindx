@@ -16,11 +16,9 @@ fn shadow_runtime() -> agent_runtime::AgentLoopState {
 
 fn shadow_runtime_with_verified_mutation() -> agent_runtime::AgentLoopState {
     let mut state = shadow_runtime();
-    state
-        .task_contract
-        .merge_workspace_verification_policy(
-            agent_runtime::WorkspaceVerificationPolicy::RequiredAfterMutation,
-        );
+    state.task_contract.merge_workspace_verification_policy(
+        agent_runtime::WorkspaceVerificationPolicy::RequiredAfterMutation,
+    );
     agent_runtime::record_tool_outcome_with_risk(
         &mut state,
         "file.write",
@@ -47,12 +45,9 @@ fn shadow_journal_path() -> PathBuf {
 #[test]
 fn shadow_fitness_projects_verified_pass_to_full_reward() {
     let state = shadow_runtime_with_verified_mutation();
-    let signal = project_direct_judge_shadow_signal(
-        &state,
-        "direct_judge_passed",
-        "postcondition_verified",
-    )
-    .expect("projection");
+    let signal =
+        project_direct_judge_shadow_signal(&state, "direct_judge_passed", "postcondition_verified")
+            .expect("projection");
     assert_eq!(signal.reward_bps, Some(10_000));
     assert_eq!(
         signal.mutation_verification,
@@ -134,12 +129,17 @@ fn shadow_fitness_journal_bounds_growth_and_reloads_for_summary() {
     let signals = load_direct_judge_shadow_signals(&path).expect("journal loads");
     assert_eq!(signals.len(), DIRECT_JUDGE_SHADOW_JOURNAL_CAPACITY);
     let summary = agent_application::summarize_direct_judge_fitness(&signals).expect("summary");
-    assert_eq!(summary.window, agent_application::DIRECT_JUDGE_FITNESS_WINDOW);
-    assert_eq!(summary.scored_runs, agent_application::DIRECT_JUDGE_FITNESS_WINDOW);
+    assert_eq!(
+        summary.window,
+        agent_application::DIRECT_JUDGE_FITNESS_WINDOW
+    );
+    assert_eq!(
+        summary.scored_runs,
+        agent_application::DIRECT_JUDGE_FITNESS_WINDOW
+    );
     assert_eq!(summary.average_reward_bps, Some(10_000));
     assert!(!summary.promotion_eligible);
 }
-
 
 fn admit_window(path: &std::path::Path) -> Vec<agent_application::DirectJudgeFitnessSignalV1> {
     for index in 0..2 {
@@ -155,8 +155,13 @@ fn admit_window(path: &std::path::Path) -> Vec<agent_application::DirectJudgeFit
     }
     let mut state = shadow_runtime_with_verified_mutation();
     state.task_id = TaskId("admit-censored".to_string());
-    record_direct_judge_shadow_fitness_to(path, &state, "direct_judge_not_applicable", "self_contained")
-        .expect("append censored");
+    record_direct_judge_shadow_fitness_to(
+        path,
+        &state,
+        "direct_judge_not_applicable",
+        "self_contained",
+    )
+    .expect("append censored");
     load_direct_judge_shadow_signals(path).expect("journal loads")
 }
 
@@ -208,13 +213,9 @@ fn shadow_fitness_admission_fails_closed_without_approval_or_binding() {
 
     let subset_digest =
         agent_application::direct_judge_fitness_window_digest(&signals[..2]).expect("digest");
-    let foreign = agent_application::DirectJudgeReviewReceiptV1::new(
-        "a".repeat(64),
-        subset_digest,
-        2,
-        true,
-    )
-    .expect("receipt");
+    let foreign =
+        agent_application::DirectJudgeReviewReceiptV1::new("a".repeat(64), subset_digest, 2, true)
+            .expect("receipt");
     let error = admit_direct_judge_shadow_fitness(&path, &foreign.to_json().expect("json"))
         .expect_err("foreign window must not admit");
     assert!(error.contains("does not bind"));
@@ -247,11 +248,9 @@ fn seed_admitted_window(root: &Path) {
             "answer carefully",
             agent_runtime::AgentRuntimeConfig::default(),
         );
-        state
-            .task_contract
-            .merge_workspace_verification_policy(
-                agent_runtime::WorkspaceVerificationPolicy::RequiredAfterMutation,
-            );
+        state.task_contract.merge_workspace_verification_policy(
+            agent_runtime::WorkspaceVerificationPolicy::RequiredAfterMutation,
+        );
         agent_runtime::record_tool_outcome_with_risk(
             &mut state,
             "file.write",
@@ -313,8 +312,11 @@ fn admission_runtime_stays_off_until_config_enables_it() {
 fn admission_runtime_admits_an_approving_bound_window() {
     let root = admission_root();
     seed_admitted_window(&root);
-    fs::write(prompt_evolution_admission_config_path_for(&root), config_json(true))
-        .expect("write config");
+    fs::write(
+        prompt_evolution_admission_config_path_for(&root),
+        config_json(true),
+    )
+    .expect("write config");
     let state = admitted_direct_judge_fitness_state(&root).expect("admits");
     assert_eq!(state.window_size, 2);
     assert_eq!(state.scored_runs, 2);
@@ -331,16 +333,22 @@ fn admission_runtime_admits_an_approving_bound_window() {
 fn admission_runtime_fails_closed_on_missing_or_tampered_inputs() {
     let root = admission_root();
     seed_admitted_window(&root);
-    fs::write(prompt_evolution_admission_config_path_for(&root), config_json(true))
-        .expect("write config");
+    fs::write(
+        prompt_evolution_admission_config_path_for(&root),
+        config_json(true),
+    )
+    .expect("write config");
     assert!(admitted_direct_judge_fitness_state(&root).is_some());
 
     let receipt_path = root.join("prompt-evolution/direct-judge-review-receipt.json");
     let mut tampered: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&receipt_path).expect("read")).expect("value");
     tampered["approve"] = serde_json::json!(false);
-    fs::write(&receipt_path, serde_json::to_string(&tampered).expect("encode"))
-        .expect("write tampered receipt");
+    fs::write(
+        &receipt_path,
+        serde_json::to_string(&tampered).expect("encode"),
+    )
+    .expect("write tampered receipt");
     assert!(admitted_direct_judge_fitness_state(&root).is_none());
 
     let journal = direct_judge_shadow_journal_path_for(&root);

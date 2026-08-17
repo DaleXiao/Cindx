@@ -70,9 +70,7 @@ fn append_direct_judge_shadow_signal(
     signal: &agent_application::DirectJudgeFitnessSignalV1,
 ) -> Result<(), String> {
     let mut lines = read_direct_judge_shadow_journal_lines(path);
-    let encoded = signal
-        .to_json()
-        .map_err(|error| error.to_string())?;
+    let encoded = signal.to_json().map_err(|error| error.to_string())?;
     lines.push(encoded);
     if lines.len() > DIRECT_JUDGE_SHADOW_JOURNAL_CAPACITY {
         let excess = lines.len() - DIRECT_JUDGE_SHADOW_JOURNAL_CAPACITY;

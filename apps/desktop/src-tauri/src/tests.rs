@@ -1,7 +1,5 @@
 use super::*;
-use crate::agent_conductor_runtime::{
-    conductor_call_limits, conductor_repair_recovery_window,
-};
+use crate::agent_conductor_runtime::{conductor_call_limits, conductor_repair_recovery_window};
 use crate::agent_conductor_scheduler::{
     schedule_conductor_decision, ConductorDecisionOutcome, ConductorDecisionSchedule,
 };
@@ -27,12 +25,14 @@ use crate::prompt_learning_runtime::prompt_dataset_identity;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use orchestrator::{
-    select_causal_route_v2, AdaptiveWorkflow, AdaptiveWorkflowStep,
-    AgentDecisionCalibration, AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRunDecisionHarness, AgentRunDecisionRequest, AgentToolRequirement,
-    AgentVerificationPolicy, CausalRouteReason, CausalRouteSelectionV2, ExecutionPlan, ExecutionPlanDecisionReason, ModelCapabilitySource,
+    select_causal_route_v2, AdaptiveWorkflow, AdaptiveWorkflowStep, AgentDecisionCalibration,
+    AgentEffectAuthority, AgentExecutionMode, AgentRouteRequirements, AgentRunDecisionHarness,
+    AgentRunDecisionRequest, AgentToolRequirement, AgentVerificationPolicy, CausalRouteReason,
+    CausalRouteSelectionV2, ExecutionPlan, ExecutionPlanDecisionReason, ModelCapabilitySource,
     PromptDatasetCaseIdentityV1, PromptExecutionContextV1, PromptLiveAssignmentProvenanceV1,
-    PromptTransferProvenance, RouteFeatureRequest, RouteFeatureSnapshotV2, WorkflowToolPolicy, CAUSAL_ROUTE_MAX_RECEIPT_BYTES,
-    PROMPT_EXECUTION_CONTEXT_SCHEMA_V1, PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
+    PromptTransferProvenance, RouteFeatureRequest, RouteFeatureSnapshotV2, WorkflowToolPolicy,
+    CAUSAL_ROUTE_MAX_RECEIPT_BYTES, PROMPT_EXECUTION_CONTEXT_SCHEMA_V1,
+    PROMPT_LIVE_ASSIGNMENT_PROVENANCE_SCHEMA_V1,
 };
 use tools::encode_input;
 
@@ -341,15 +341,6 @@ fn test_planned_agent_run(decision: AgentRunDecision, effort: AgentPolicy) -> Pl
     test_planned_agent_run_with_candidate(decision.clone(), decision, effort)
 }
 
-
-
-
-
-
-
-
-
-
 #[test]
 fn memory_recall_policy_controls_the_context_budget() {
     assert_eq!(memory_recall_limit(MemoryRecallPolicy::None), 0);
@@ -362,8 +353,6 @@ fn memory_recall_policy_controls_the_context_budget() {
         crate::runtime_constants::AGENT_MEMORY_RECALL_LIMIT
     );
 }
-
-
 
 #[test]
 fn pending_steer_interrupts_collaboration_without_stopping_the_run() {
@@ -984,7 +973,7 @@ fn goal2_execution_steer_replans_and_feeds_terminal_epoch_learning() {
             historical_evidence: String::new(),
             matched_collaboration_evidence: Arc::new(Default::default()),
             preferred_primary_model: None,
-        required_execution: None,
+            required_execution: None,
             execution_constraints: "isolated workers are read-only".to_string(),
             route_requirements: AgentRouteRequirements::default(),
             budget_fingerprint: None,
@@ -1413,7 +1402,6 @@ fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
     }
 }
 
-
 #[test]
 fn tool_registry_cache_is_versioned_and_bounded() {
     let mut cache = ToolRegistryCache::default();
@@ -1474,13 +1462,6 @@ fn collaboration_tool_worker_reserves_a_terminal_answer_turn() {
     );
     assert_eq!(runtime.messages.len(), message_count);
 }
-
-
-
-
-
-
-
 
 #[test]
 fn transient_provider_failures_are_retryable_but_invalid_requests_are_not() {
@@ -4451,11 +4432,30 @@ fn effort_default_models_parse_and_anchor_per_tier() {
     assert_eq!(empty.effort_default_model("auto"), "");
     assert_eq!(empty.model, "base-model");
 
+    let dashscope = provider_config_from_text(
+        "base_url=https://dashscope.aliyuncs.com/compatible-mode/v1\napi_key=secret\nmodel=qwen3.7-plus\n",
+    );
+    assert_eq!(dashscope.provider_id, PROVIDER_ALIBABA_CN);
+    assert_eq!(dashscope.effort_default_model("fast"), "qwen3.7-flash");
+    assert_eq!(dashscope.effort_default_model("auto"), "qwen3.7-plus");
+    assert_eq!(dashscope.effort_default_model("pro"), "qwen3.7-max");
+    assert_eq!(dashscope.effort_default_model("other"), "");
+
+    let openai = provider_config_from_text("base_url=https://api.openai.com/v1\napi_key=secret\n");
+    assert_eq!(openai.provider_id, PROVIDER_OPENAI);
+    assert_eq!(openai.effort_default_model("fast"), "gpt-4.1-mini");
+    assert_eq!(openai.effort_default_model("auto"), "gpt-4.1");
+    assert_eq!(openai.effort_default_model("pro"), "gpt-4.1");
+
     let pinned = effort_model_candidates(&config, "auto");
-    assert!(pinned.iter().any(|candidate| candidate.name == "auto-model"));
+    assert!(pinned
+        .iter()
+        .any(|candidate| candidate.name == "auto-model"));
 
     let candidates = model_candidates_for_config(&config);
-    assert!(!candidates.iter().any(|candidate| candidate.name == "auto-model"));
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate.name == "auto-model"));
 
     let text = provider_config_text(&config);
     assert!(text.contains("fast_model=fast-model"));
@@ -4862,11 +4862,6 @@ fn custom_catalog_must_include_the_configured_chat_model() {
         .expect_err("a different model must not validate the configured custom model");
     assert!(error.contains("configured Chat model is unavailable"));
 }
-
-
-
-
-
 
 #[test]
 fn run_context_selects_the_primary_model_without_collapsing_to_executor() {
@@ -5499,7 +5494,6 @@ fn retry_recovers_effort_from_the_active_run() {
     );
 }
 
-
 #[test]
 fn adaptive_coordinator_rejects_models_outside_the_configured_pool() {
     let response = r#"{"steps":[
@@ -5537,9 +5531,6 @@ fn adaptive_coordinator_rejects_a_fifth_step_beyond_the_execution_contract() {
 
     assert!(error.contains("exceeds the 4-step budget"));
 }
-
-
-
 
 #[test]
 fn collaboration_stages_have_visible_timeline_labels() {
@@ -6810,15 +6801,6 @@ fn completion_learning_signal_requires_post_mutation_verification() {
     );
 }
 
-
-
-
-
-
-
-
-
-
 #[test]
 fn offline_prompt_evidence_rejects_invalid_agent_boundaries() {
     let run_events = |run_id: &str, start_tag: Option<&str>, terminal_tag: Option<&str>| {
@@ -7881,7 +7863,6 @@ fn pro_mutation_reserves_reflection_capacity_for_auto_transfer_evidence() {
             .all(|packet| packet.suite_id != orchestrator::PROMPT_FAILURE_CURRICULUM_SCHEMA_V1)
     );
 }
-
 
 #[test]
 fn offline_prompt_scheduler_prioritizes_underrepresented_task_class() {
@@ -9300,7 +9281,6 @@ fn evaluation_arena_applies_retry_and_alternate_model_genes() {
         .prompt
         .contains("Retry the same authorized evaluation node"));
 }
-
 
 #[test]
 fn prompt_evolution_waits_for_the_final_agent_outcome() {

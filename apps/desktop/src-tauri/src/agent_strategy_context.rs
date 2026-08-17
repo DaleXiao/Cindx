@@ -121,9 +121,6 @@ impl PlannedAgentRun {
             "conductor_selected_model".to_string(),
             self.selected_conductor_model.clone().unwrap_or_default(),
         );
-        run_context.remove("conductor_workflow_proposal_sha256");
-        run_context.remove("conductor_workflow_proposal");
-        run_context.remove("conductor_workflow_plan_source");
         run_context.insert("prompt_profile".to_string(), self.prompt_genome.id.clone());
         run_context.insert(
             "prompt_genome".to_string(),

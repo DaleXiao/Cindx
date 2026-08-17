@@ -48,7 +48,11 @@ fn verification_required_from_run_context(run_context: &Metadata) -> bool {
     run_context
         .get("conductor_contract")
         .and_then(|contract| serde_json::from_str::<serde_json::Value>(contract).ok())
-        .and_then(|value| value.get("verification_required").and_then(serde_json::Value::as_bool))
+        .and_then(|value| {
+            value
+                .get("verification_required")
+                .and_then(serde_json::Value::as_bool)
+        })
         .unwrap_or(false)
 }
 
@@ -178,7 +182,11 @@ pub(crate) fn apply_direct_judge_gate(
         &plan.judge_model,
         ModelRole::Reviewer,
         "direct_judge",
-        format!("{prompt}\n\n{facts}", prompt = plan.prompt, facts = direct_judge_execution_summary(runtime)),
+        format!(
+            "{prompt}\n\n{facts}",
+            prompt = plan.prompt,
+            facts = direct_judge_execution_summary(runtime)
+        ),
     ) {
         Ok(output) => output,
         Err(_) => return (candidate, "direct_judge_unavailable".to_string()),

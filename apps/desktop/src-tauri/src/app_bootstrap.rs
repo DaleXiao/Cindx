@@ -236,7 +236,6 @@ pub fn run() -> Result<(), String> {
             get_personalization_config,
             save_personalization_config,
             save_provider_config,
-            set_prompt_evolution_enabled,
             list_provider_models,
             validate_image_endpoint,
             negotiate_voice_session,

@@ -77,6 +77,7 @@ pub(crate) fn pause_agent_loop_for_control_stop(
 
 #[path = "agent_loop_contract_runtime.rs"]
 mod contract_runtime;
+use contract_runtime::synchronize_noop_control_epoch_context;
 #[cfg(test)]
 pub(crate) use contract_runtime::{
     apply_run_task_contract, workspace_verification_policy_for_run_context,
@@ -85,7 +86,6 @@ pub(crate) use contract_runtime::{
 pub(crate) use contract_runtime::{
     apply_run_task_contract_with_completion_intent, planned_agent_tools,
 };
-use contract_runtime::synchronize_noop_control_epoch_context;
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentLoopExecutionOutcome {
     Finished(AgentState),

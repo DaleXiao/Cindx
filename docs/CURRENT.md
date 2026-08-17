@@ -53,10 +53,12 @@ strength, not by permission authority:
   genome.
 
 Each tier can pin a configured default model (`fast_model`, `auto_model`,
-`pro_model` in the provider configuration, empty by default). A pinned model
-anchors Fast's direct route and the Conductor's `primary_model` choice for
-Auto/Pro without removing routing authority; when empty, the legacy role-slot
-behavior applies.
+`pro_model` in the provider configuration). A pinned model anchors Fast's
+direct route and the Conductor's `primary_model` choice for Auto/Pro without
+removing routing authority. When a tier is unpinned, the provider catalog's
+tier default applies instead — for the DashScope provider that is a flash-class
+model for Fast, a plus-class model for Auto, and a max-class model for Pro —
+and providers without catalog tier defaults keep the legacy role-slot behavior.
 
 Auto and Pro do not automatically run every configured model. The Conductor
 selects the route, model roles, retrieval needs, decomposition, and verification
@@ -66,8 +68,8 @@ closed no-go, invalid, or censored, and the owner decision is permanent
 retirement, not evidence-gated reconsideration. Production runs clamp any
 conductor workflow decision to adaptive direct execution
 (`workflow_enabled=false`) and the planning prompt states this explicitly.
-The workflow execution machinery is being physically removed from the tree;
-during the removal window the clamp guarantees no workflow can run.
+The workflow execution machinery has been removed from the tree, and the clamp
+remains the defense-in-depth guarantee that no workflow can run.
 
 One bounded read-only widening is available. When the prompt explicitly forbids
 all effects (`effect_authority=forbidden`), the Conductor may instead propose
@@ -215,9 +217,16 @@ context limits, or run budgets, and cannot alter an in-flight run. Missing,
 stale, invalid, or inconsistent deployment state fails closed to the seed
 profile.
 
-The mechanism is wired, but current checked-in provider evidence does not show
-that a learned workflow or finalizer profile improves production quality. No
-profile produced by the recent workflow experiments was promoted.
+Continuous evolution spend is quarantined and the workflow collaboration path
+is retired. The Settings evolution panel and its toggle are removed from the
+UI, and the `set_prompt_evolution_enabled` command is retired with them. The
+persisted `prompt_evolution_enabled` flag stays for configuration
+compatibility but is no longer surfaced. The background evolution machinery
+remains in the tree in a quarantined state; its read path is default-off and
+nothing it produces can reach a foreground run without an explicit promotion
+gate. Current checked-in provider evidence does not show that a learned
+workflow or finalizer profile improves production quality, and no profile from
+the historical experiments was promoted.
 
 ## Current Evidence Boundary
 

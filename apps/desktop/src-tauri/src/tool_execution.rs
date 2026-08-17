@@ -121,7 +121,6 @@ impl AgentToolEpochGuard {
     }
 }
 
-
 pub(crate) fn execute_agent_tool_invocation_for_epoch(
     state: &tauri::State<'_, AppState>,
     registry: &ToolRegistry,

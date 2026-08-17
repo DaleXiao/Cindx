@@ -12,7 +12,6 @@ import {
   providerModelContextWindow,
   type ProviderModelGroups
 } from "../providerProfiles";
-import { PromptEvolutionPanel } from "./PromptEvolutionPanel";
 import { ProviderConnectionFields } from "./ProviderConnectionFields";
 import { ProviderModalityFields } from "./ProviderModalityFields";
 import { ProviderModelInput as ModelSelect } from "./ProviderModelInput";
@@ -22,7 +21,6 @@ type SettingsModelsPanelProps = {
   modelProfileCount: number;
   handleLoadProviderModels: () => Promise<void>;
   handleReloadProviderState: () => Promise<unknown>;
-  handlePromptEvolutionToggle: (enabled: boolean) => Promise<void>;
   handleSaveProviderConfig: () => Promise<void>;
   imageEndpointValidation: "idle" | "checking" | "valid" | "invalid";
   phase4: Phase4State | null;
@@ -42,7 +40,6 @@ export function SettingsModelsPanel({
   modelProfileCount,
   handleLoadProviderModels,
   handleReloadProviderState,
-  handlePromptEvolutionToggle,
   handleSaveProviderConfig,
   imageEndpointValidation,
   phase4,
@@ -305,13 +302,6 @@ export function SettingsModelsPanel({
           </button>
         )}
       </section>
-
-      <PromptEvolutionPanel
-        phase4={phase4}
-        providerBusy={providerBusy}
-        providerDraft={providerDraft}
-        onToggle={handlePromptEvolutionToggle}
-      />
     </>
   );
 }

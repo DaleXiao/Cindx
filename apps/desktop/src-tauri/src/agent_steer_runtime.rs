@@ -552,8 +552,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_strategy_lifecycle_contract_preparation_noop_replans_without_precommitting_a_decision(
-    ) {
+    fn agent_strategy_lifecycle_contract_preparation_noop_replans_without_precommitting_a_decision()
+    {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let mut run_context = test_run_context();
         run_context.insert("steer_epoch".to_string(), "0".to_string());
@@ -579,7 +579,12 @@ mod tests {
             run_context.clone(),
         )
         .expect("initial decision should persist");
-        append_queue_action(&mut store, &run_context, "enqueue", "queue-preparation-noop");
+        append_queue_action(
+            &mut store,
+            &run_context,
+            "enqueue",
+            "queue-preparation-noop",
+        );
         append_queue_action(&mut store, &run_context, "delete", "queue-preparation-noop");
 
         let control = AgentRunControl::new("pro");

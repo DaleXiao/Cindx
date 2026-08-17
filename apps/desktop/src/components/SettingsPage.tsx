@@ -136,7 +136,6 @@ export type SettingsPageProps = {
   handleReloadProviderState: () => Promise<unknown>;
   handleMcpPolicy: (serverId: string, enabled: boolean, requireApproval: boolean) => Promise<void>;
   handlePickWorkspace: () => Promise<void>;
-  handlePromptEvolutionToggle: (enabled: boolean) => Promise<void>;
   handleRefreshMcpServer: (serverId: string) => Promise<void>;
   handleRefreshSkills: () => Promise<void>;
   handleRemoveMcpServer: (serverId: string) => Promise<void>;
@@ -290,7 +289,6 @@ export function SettingsPage(props: SettingsPageProps) {
     handleReloadProviderState,
     handleMcpPolicy,
     handlePickWorkspace,
-    handlePromptEvolutionToggle,
     handleRefreshMcpServer,
     handleRefreshSkills,
     handleRemoveMcpServer,
@@ -674,7 +672,6 @@ export function SettingsPage(props: SettingsPageProps) {
                     modelProfileCount={modelProfileCount}
                     handleLoadProviderModels={handleLoadProviderModels}
                     handleReloadProviderState={handleReloadProviderState}
-                    handlePromptEvolutionToggle={handlePromptEvolutionToggle}
                     handleSaveProviderConfig={handleSaveProviderConfig}
                     imageEndpointValidation={imageEndpointValidation}
                     phase4={phase4}

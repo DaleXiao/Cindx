@@ -336,45 +336,6 @@ fn looks_like_chat_model(model: &str) -> bool {
 }
 
 #[tauri::command]
-pub(crate) fn set_prompt_evolution_enabled(
-    state: tauri::State<'_, AppState>,
-    enabled: bool,
-) -> Result<Phase4State, String> {
-    let _update = state
-        .provider_config_update
-        .lock()
-        .map_err(|error| format!("provider config update lock poisoned: {error}"))?;
-    let config = {
-        let mut config = state
-            .provider_config
-            .lock()
-            .map_err(|error| format!("provider config lock poisoned: {error}"))?;
-        config.prompt_evolution_enabled = enabled;
-        save_provider_config_to_disk(&config).map_err(|error| error.to_string())?;
-        config.clone()
-    };
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_event(
-        &mut store,
-        &phase4_task_id(),
-        EventKind::TaskStatusChanged,
-        if enabled {
-            "Prompt evolution enabled"
-        } else {
-            "Prompt evolution disabled"
-        },
-        [("enabled".to_string(), enabled.to_string())]
-            .into_iter()
-            .collect(),
-    )
-    .map_err(|error| error.to_string())?;
-    phase4_state(&mut store, &config, None).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 pub(crate) async fn list_provider_models(
     app: tauri::AppHandle,
     input: ProviderModelsInput,

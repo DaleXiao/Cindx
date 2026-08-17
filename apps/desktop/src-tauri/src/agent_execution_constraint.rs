@@ -157,12 +157,10 @@ impl AgentExecutionConstraint {
     ) -> Result<AgentRunDecision, String> {
         match self {
             Self::Native
-                if workflow_quarantined
-                    && decision.execution == AgentExecutionMode::Workflow =>
+                if workflow_quarantined && decision.execution == AgentExecutionMode::Workflow =>
             {
                 let mut decision = decision.constrained_to_grounded_direct();
-                decision.rationale =
-                    format!("{} (workflow quarantined)", decision.rationale);
+                decision.rationale = format!("{} (workflow quarantined)", decision.rationale);
                 Ok(decision)
             }
             Self::Native => Ok(decision),
@@ -297,7 +295,11 @@ mod tests {
             "durable project requirements and prior-session facts"
         );
         assert!(AgentExecutionConstraint::MatchedMemoryEffect
-            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro, false)
+            .apply(
+                AgentRunDecision::direct("executor"),
+                AgentPolicy::Pro,
+                false
+            )
             .is_err());
     }
 
@@ -328,10 +330,18 @@ mod tests {
             Some(AgentExecutionMode::Workflow)
         );
         assert!(AgentExecutionConstraint::MatchedDirect
-            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Auto, false)
+            .apply(
+                AgentRunDecision::direct("executor"),
+                AgentPolicy::Auto,
+                false
+            )
             .is_err());
         assert!(AgentExecutionConstraint::MatchedWorkflow
-            .apply(AgentRunDecision::direct("executor"), AgentPolicy::Pro, false)
+            .apply(
+                AgentRunDecision::direct("executor"),
+                AgentPolicy::Pro,
+                false
+            )
             .is_err());
     }
 

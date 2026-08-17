@@ -992,8 +992,6 @@ fn trusted_workspace_knowledge_satisfies_grounding_without_duplicate_read() {
     );
 }
 
-
-
 #[test]
 fn collaboration_metadata_without_structured_observation_fails_closed() {
     let tools = vec![read_tool("file.read", ToolRisk::ReadOnly)];

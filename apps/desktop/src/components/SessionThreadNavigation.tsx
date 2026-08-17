@@ -107,7 +107,6 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
   const timelineStartedAtMs = startIndex >= 0 ? timeline[startIndex].timestampMs : 0;
   const startedAtMs = runStartedAtMs || timelineStartedAtMs || Date.now();
   let latest: TimelineEntry | undefined;
-  let latestWorkflow: TimelineEntry["workflowProgress"] | undefined;
   let candidateStarts = 0;
   let candidateFinishes = 0;
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
@@ -117,7 +116,6 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
       if (/started/i.test(event.detail)) candidateStarts += 1;
       if (/finished/i.test(event.detail)) candidateFinishes += 1;
     }
-    if (!latestWorkflow && event.workflowProgress) latestWorkflow = event.workflowProgress;
     if (!latest && event.label !== "Message" && !/agent router selected/i.test(event.detail)) {
       latest = event;
     }
@@ -125,8 +123,7 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
   if (!latest) {
     return {
       label: "Thinking",
-      detail: "Cindx is working",
-      workflow: latestWorkflow ?? null
+      detail: "Cindx is working"
     };
   }
 
@@ -154,9 +151,6 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
     )}`;
   } else if (latest.label === "Conductor" || latest.label === "Planner") {
     label = "Planning work";
-  } else if (/collaboration layer \d+\/\d+ started/i.test(latest.detail)) {
-    const progress = latest.detail.match(/layer (\d+\/\d+)/i)?.[1];
-    label = progress ? `Coordinating models ${progress}` : "Coordinating models";
   } else if (latest.label === "Arbiter") {
     label = "Selecting approach";
   } else if (latest.label === "Executor" || latest.label === "Model started") {
@@ -167,25 +161,7 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
     label = "Writing final response";
   }
 
-  if (latestWorkflow) {
-    const remaining = Math.max(0, latestWorkflow.totalSteps - latestWorkflow.completedSteps);
-    const step = latestWorkflow.currentStepId ? ` · ${latestWorkflow.currentStepId}` : "";
-    if (latestWorkflow.stepStatus === "failed") {
-      label = "Checkpoint saved";
-    } else if (/workflow resumed/i.test(latest.detail)) {
-      label = "Resuming plan";
-    } else if (remaining === 0) {
-      label = "Finalizing plan";
-    } else {
-      label = "Executing plan";
-    }
-    latest = {
-      ...latest,
-      detail: `${latest.detail} · ${latestWorkflow.completedSteps}/${latestWorkflow.totalSteps} complete · ${remaining} remaining${step}${latestWorkflow.continuations ? ` · continuation ${latestWorkflow.continuations}` : ""}${latestWorkflow.recoverable ? " · checkpointed" : ""}`
-    };
-  }
-
-  return { label, detail: latest.detail, workflow: latestWorkflow ?? null };
+  return { label, detail: latest.detail };
 }
 
 export const RunProgressStatus = memo(function RunProgressStatus({
@@ -198,12 +174,6 @@ export const RunProgressStatus = memo(function RunProgressStatus({
   return (
     <div className={`thread-thinking ${className}`} role="status">
       <span title={progress.detail}>{progress.label}</span>
-      {progress.workflow && (
-        <small title={progress.detail}>
-          {progress.workflow.completedSteps}/{progress.workflow.totalSteps}
-          {progress.workflow.currentStepId ? ` · ${progress.workflow.currentStepId}` : ""}
-        </small>
-      )}
     </div>
   );
 });

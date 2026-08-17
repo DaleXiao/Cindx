@@ -75,7 +75,7 @@ function fallbackToolIcon(toolName: string): LucideIcon {
   if (toolName.startsWith("graph_")) return Network;
   if (/^(semantic_|rag[._]|memory[._]|knowledge[._])/.test(toolName)) return DatabaseZap;
   if (toolName.startsWith("git.")) return GitBranch;
-  if (toolName.startsWith("agent.") || toolName.startsWith("collaboration.")) return Users;
+  if (toolName.startsWith("agent.")) return Users;
   if (toolName.startsWith("mcp") || toolName.includes("__")) return Plug;
   if (toolName.startsWith("tool.")) return Blocks;
   return Wrench;

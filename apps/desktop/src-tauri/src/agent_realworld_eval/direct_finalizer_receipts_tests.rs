@@ -98,10 +98,7 @@ fn strategy_events() -> Vec<Event> {
     decision.insert("collaboration_policy".to_string(), "single".to_string());
     decision.insert("decision_source".to_string(), "fixture".to_string());
     decision.insert("routing_signature".to_string(), "frozen-route".to_string());
-    decision.insert(
-        "execution_plan_semantic_sha256".to_string(),
-        "a".repeat(64),
-    );
+    decision.insert("execution_plan_semantic_sha256".to_string(), "a".repeat(64));
     insert_event_type_v1(
         &EventKind::TaskStatusChanged,
         &mut decision,

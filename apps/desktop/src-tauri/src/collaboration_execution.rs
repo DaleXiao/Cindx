@@ -103,7 +103,6 @@ pub(crate) fn collaboration_model_failure(
         .unwrap_or_else(|| AgentFailure::from_model_error(error))
 }
 
-
 pub(crate) fn collaboration_candidate_models(
     config: &ProviderConfig,
     candidates: usize,
@@ -121,7 +120,6 @@ pub(crate) fn collaboration_candidate_models(
     }
     models
 }
-
 
 pub(crate) fn collaboration_role_hints(
     config: &ProviderConfig,
@@ -175,7 +173,6 @@ fn collaboration_failure_completion(
         evidence: Vec::new(),
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collaboration_stage_started_metadata(
@@ -744,7 +741,6 @@ mod protocol_tests {
         assert_eq!(usage["request_payload_sha256"], "a".repeat(64));
         assert_eq!(usage["response_semantic_sha256"], "b".repeat(64));
     }
-
 
     fn response_with_tool_call() -> model_provider::ModelResponse {
         model_provider::ModelResponse {

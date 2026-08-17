@@ -529,7 +529,6 @@ pub(super) fn synchronize_noop_control_epoch_context(
     agent_runtime_context_for_run(run_context)
 }
 
-
 #[cfg(test)]
 #[path = "agent_loop_contract_runtime_tests.rs"]
 mod tests;

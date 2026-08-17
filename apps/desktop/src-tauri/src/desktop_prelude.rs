@@ -45,14 +45,13 @@ pub(crate) use agent_runtime::{
 pub(crate) use agent_runtime::{
     bounded_max_output_tokens, evidence_worker_tools, observation_from_agent_tool_result,
     observation_from_tool_result, resume_agent_loop_from_messages, sanitize_assistant_content,
-    start_agent_loop, start_agent_loop_with_history,
-    AgentAdvance, AgentFailure, AgentFailureClass, AgentKernel, AgentLoopAppendTransaction,
-    AgentRecoveryAction, AgentRunControl, AgentTaskStateSnapshot, AgentToolRequest,
-    AgentTurnPreparationError, ContextGovernorReport, IsolatedWorkerRuntime, ResultQuality,
-    RunBudget, RunContinuationDirective, RunControlSnapshot, RunResourceSnapshot, RunStageClass,
-    RunStopReason, WorkerAdvance, WorkerToolAdmission, WorkspaceVerificationPolicy,
-    DEFAULT_COLLABORATION_WORKER_TURNS, MAX_COLLABORATION_WORKER_TOOL_CALLS,
-    MAX_IDENTICAL_TOOL_FAILURES,
+    start_agent_loop, start_agent_loop_with_history, AgentAdvance, AgentFailure, AgentFailureClass,
+    AgentKernel, AgentLoopAppendTransaction, AgentRecoveryAction, AgentRunControl,
+    AgentTaskStateSnapshot, AgentToolRequest, AgentTurnPreparationError, ContextGovernorReport,
+    IsolatedWorkerRuntime, ResultQuality, RunBudget, RunContinuationDirective, RunControlSnapshot,
+    RunResourceSnapshot, RunStageClass, RunStopReason, WorkerAdvance, WorkerToolAdmission,
+    WorkspaceVerificationPolicy, DEFAULT_COLLABORATION_WORKER_TURNS,
+    MAX_COLLABORATION_WORKER_TOOL_CALLS, MAX_IDENTICAL_TOOL_FAILURES,
 };
 #[rustfmt::skip]
 pub(crate) use agent_skills::{
@@ -73,39 +72,37 @@ pub(crate) use model_provider::{
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 pub(crate) use orchestrator::{
-    adaptive_workflow_step_budget,
-    default_plan, derive_prompt_evolution_campaign, direct_anchor_response_verdict,
-    evaluate_prompt_auto_transfer_gate_in_cohort_with_failures, evaluate_prompt_convergence,
-    evaluate_prompt_promotion_gate_with_failures_in_cohort, parse_policy,
-    prompt_failure_reflection_packets, prompt_genome_sha256, prompt_proposal_minibatch_decision,
-    prompt_reflection_packets, prompt_reflection_success_anchor, prompt_transfer_reflection_pairs,
-    role_label, sha256_hex, step_prompt, ActionableSideInformation, AgentEngineSession,
-    AgentEvaluationCaseScore, AgentEvaluationCheck, AgentEvaluationEvidenceSource,
-    AgentEvaluationReflectionPacket, AgentEvaluationSplit, AgentEvaluationToolTrace,
-    AgentEvaluationTrace, AgentEvaluationTraceStep, AgentEvaluationVerifierOutcome, AgentPolicy,
-    AgentRunDecision, AnytimeCandidateState, ConductorExecutionContract, ConductorHarness,
-    ConductorPromptGenome, ConductorRequest, ConductorRoleHints, ConductorStopPolicy,
-    FrozenPromptProfileSnapshot, FrozenPromptTransferEvidence, LearnedModelRouter,
-    MatchedCollaborationEvidenceTeacher, MemoryRecallPolicy, ModelCandidate, ModelCapabilitySource,
-    OrchestrationPolicy, PromptDatasetIdentityV1, PromptEvaluationAttemptEventV1,
-    PromptEvaluationAttemptStatus, PromptEvaluationMode, PromptEvaluationProvenance,
-    PromptEvaluationSplit, PromptEvolutionCampaignInput, PromptEvolutionCampaignSnapshot,
-    PromptEvolutionMethod, PromptEvolutionObservation, PromptFailureCurriculumReceiptV1,
-    PromptInstanceParetoArchive, PromptLearningCohortV1, PromptLearningEligibilityReceiptV1,
-    PromptMatchedEvaluationIdentityV1, PromptParetoArchive, PromptPromotionConfidence,
-    PromptPromotionFailurePenalty, PromptPromotionGateConfig, PromptPromotionGateResult,
-    PromptProposalMinibatchDecision, PromptRetryPolicy, PromptSearchArchive, PromptStepCredit,
-    PromptTreatmentIdentityV1, RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry,
-    RuleBasedRouter, TaskClass, WorkflowBudget,
-    WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry, WorkflowPlanIr, WorkflowStepStatus, WorkflowToolPolicy, WorkspaceRetrievalChannel,
-    WorkspaceRetrievalPlan, AGENT_EVALUATION_TRACE_SCHEMA, CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS,
-    CONDUCTOR_MAX_ATTEMPTS, DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS,
-    PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
+    adaptive_workflow_step_budget, default_plan, derive_prompt_evolution_campaign,
+    direct_anchor_response_verdict, evaluate_prompt_auto_transfer_gate_in_cohort_with_failures,
+    evaluate_prompt_convergence, evaluate_prompt_promotion_gate_with_failures_in_cohort,
+    parse_policy, prompt_failure_reflection_packets, prompt_genome_sha256,
+    prompt_proposal_minibatch_decision, prompt_reflection_packets,
+    prompt_reflection_success_anchor, prompt_transfer_reflection_pairs, role_label, sha256_hex,
+    step_prompt, ActionableSideInformation, AgentEngineSession, AgentEvaluationCaseScore,
+    AgentEvaluationCheck, AgentEvaluationEvidenceSource, AgentEvaluationReflectionPacket,
+    AgentEvaluationSplit, AgentEvaluationToolTrace, AgentEvaluationTrace, AgentEvaluationTraceStep,
+    AgentEvaluationVerifierOutcome, AgentPolicy, AgentRunDecision, AnytimeCandidateState,
+    ConductorExecutionContract, ConductorHarness, ConductorPromptGenome, ConductorRequest,
+    ConductorRoleHints, ConductorStopPolicy, FrozenPromptProfileSnapshot,
+    FrozenPromptTransferEvidence, LearnedModelRouter, MatchedCollaborationEvidenceTeacher,
+    MemoryRecallPolicy, ModelCandidate, ModelCapabilitySource, OrchestrationPolicy,
+    PromptDatasetIdentityV1, PromptEvaluationAttemptEventV1, PromptEvaluationAttemptStatus,
+    PromptEvaluationMode, PromptEvaluationProvenance, PromptEvaluationSplit,
+    PromptEvolutionCampaignInput, PromptEvolutionCampaignSnapshot, PromptEvolutionMethod,
+    PromptEvolutionObservation, PromptFailureCurriculumReceiptV1, PromptInstanceParetoArchive,
+    PromptLearningCohortV1, PromptLearningEligibilityReceiptV1, PromptMatchedEvaluationIdentityV1,
+    PromptParetoArchive, PromptPromotionConfidence, PromptPromotionFailurePenalty,
+    PromptPromotionGateConfig, PromptPromotionGateResult, PromptProposalMinibatchDecision,
+    PromptRetryPolicy, PromptSearchArchive, PromptStepCredit, PromptTreatmentIdentityV1,
+    RoutingContext, RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter, TaskClass,
+    WorkflowBudget, WorkflowExecutionCheckpoint, WorkflowExecutionTelemetry, WorkflowPlanIr,
+    WorkflowStepStatus, WorkflowToolPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    AGENT_EVALUATION_TRACE_SCHEMA, CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS, CONDUCTOR_MAX_ATTEMPTS,
+    DIRECT_ANCHOR_CANDIDATE_ID, MAX_ADAPTIVE_WORKFLOW_AGENTS, PROMPT_REFLECTION_SELECTOR_SCHEMA_V1,
 };
 #[cfg(test)]
 pub(crate) use orchestrator::{
-    AgentEvaluationVerifier, PromptFailureCurriculumInput,
-    PromptFailureCurriculumKind,
+    AgentEvaluationVerifier, PromptFailureCurriculumInput, PromptFailureCurriculumKind,
 };
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use std::cmp::Reverse;
@@ -127,12 +124,11 @@ pub(crate) use tools::{
 
 pub(crate) use crate::agent_resource_snapshot::AgentResourceCheckpoint;
 pub(crate) use crate::collaboration_service::{
-    truncate_for_collaboration, AgentCollaboration, CollaborationCompletion,
-    CollaborationEvidence, COLLABORATION_STEER_INTERRUPTED,
+    truncate_for_collaboration, AgentCollaboration, CollaborationCompletion, CollaborationEvidence,
+    COLLABORATION_STEER_INTERRUPTED,
 };
 pub(crate) use crate::parallel_execution::{
-    run_model_jobs_until_anytime_quorum_interruptible, AnytimeQuorumPolicy,
-    CancellableParallelJob,
+    run_model_jobs_until_anytime_quorum_interruptible, AnytimeQuorumPolicy, CancellableParallelJob,
 };
 pub(crate) use crate::permission_service::{
     agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
