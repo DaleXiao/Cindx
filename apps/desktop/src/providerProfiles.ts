@@ -68,6 +68,21 @@ export function providerSupportsModelDiscovery(providerId: ProviderId) {
   return Boolean(providerPreset(providerId)?.modelDiscovery);
 }
 
+export type ProviderTierDefaults = {
+  fast: string;
+  auto: string;
+  pro: string;
+};
+
+export function providerTierDefaults(providerId: ProviderId): ProviderTierDefaults {
+  const defaults = providerPreset(providerId)?.defaults;
+  return {
+    fast: defaults?.fast ?? "",
+    auto: defaults?.auto ?? "",
+    pro: defaults?.pro ?? ""
+  };
+}
+
 export function providerPresetModelGroups(providerId: ProviderId): ProviderModelGroups {
   const models = providerPreset(providerId)?.models ?? [];
   const withModality = (modality: string) =>

@@ -332,6 +332,9 @@ export type ProviderConfigState = {
   executorModel: string;
   reviewerModel: string;
   summarizerModel: string;
+  fastModel: string;
+  autoModel: string;
+  proModel: string;
   embeddingModel: string;
   imageModel: string;
   imageEndpoint: string;
@@ -357,6 +360,9 @@ export type ProviderConfigInput = {
   executorModel: string;
   reviewerModel: string;
   summarizerModel: string;
+  fastModel: string;
+  autoModel: string;
+  proModel: string;
   embeddingModel: string;
   imageModel: string;
   imageEndpoint: string;
@@ -395,80 +401,9 @@ export type ChatMessageView = {
 
 export type Phase4State = {
   provider: ProviderConfigState;
-  promptEvolution: PromptEvolutionState;
   timeline: TimelineEntry[];
   messages: ChatMessageView[];
   lastError: string | null;
-};
-
-export type PromptEvolutionProfileState = {
-  id: string;
-  effort: string;
-  generation: number;
-  runs: number;
-  trainRuns: number;
-  holdoutRuns: number;
-  reflectionRuns: number;
-  successRate: number;
-  averageReward: number | null;
-  averageRelativeReward: number | null;
-  averageStepCredit: number | null;
-  averageQuality: number | null;
-  averageLatencyMs: number;
-  averageTokens: number;
-  frontier: boolean;
-  champion: boolean;
-  learned: boolean;
-  next: boolean;
-};
-
-export type PromptEvolutionEffortState = {
-  effort: string;
-  applicable: boolean;
-  status: string;
-  championId: string | null;
-  championScore: number | null;
-  stagnantGenerations: number;
-  evaluatedGenerations: number;
-  freezeReason: string | null;
-  shadowRatePercent: number;
-  nextMode: string;
-  pairedRuns: number;
-  replayRuns: number;
-  reflectionPackets: number;
-  learnedProfiles: number;
-  readyProfiles: number;
-  evaluationInflight: boolean;
-  stableProfileId: string;
-  canaryProfileId: string | null;
-  canaryPercent: number;
-  promotionConfidence: number | null;
-  rollbackCount: number;
-  rolloutStatus: string;
-  readiness: string;
-  campaignStage: string;
-  campaignNextAction: string;
-  campaignResumeToken: string;
-  datasetCases: number;
-  datasetTrainCases: number;
-  datasetHoldoutCases: number;
-  requiredPairedRuns: number;
-  requiredReplayRuns: number;
-};
-
-export type PromptEvolutionState = {
-  enabled: boolean;
-  observedRuns: number;
-  generation: number;
-  populationSize: number;
-  frontierProfiles: number;
-  pairedRuns: number;
-  replayRuns: number;
-  reflectionPackets: number;
-  learnedProfiles: number;
-  evaluationInflight: boolean;
-  efforts: PromptEvolutionEffortState[];
-  profiles: PromptEvolutionProfileState[];
 };
 
 export type ToolSpecView = {

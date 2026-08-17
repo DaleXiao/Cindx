@@ -90,6 +90,9 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
             .map(|value| value.summarizer.as_str())
             .unwrap_or_default(),
     );
+    config.fast_model = normalized_config_value(&input.fast_model);
+    config.auto_model = normalized_config_value(&input.auto_model);
+    config.pro_model = normalized_config_value(&input.pro_model);
     config.embedding_model = resolve_model(
         &input.embedding_model,
         &config.embedding_model,

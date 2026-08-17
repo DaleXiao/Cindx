@@ -2,17 +2,13 @@ import { KeyRound, RefreshCw, Save } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import type { Phase4State, ProviderConfigInput } from "../tauri";
 import {
-  applyFastModelToProfiles,
-  selectFastFallbackModel
-} from "../providerModelAllocation";
-import {
   isValidProviderBaseUrl,
   providerBaseUrl,
   providerCanUseConfiguredKey,
-  providerModelContextWindow,
   type ProviderModelGroups
 } from "../providerProfiles";
 import { ProviderConnectionFields } from "./ProviderConnectionFields";
+import { SettingsEffortModelFields } from "./SettingsEffortModelFields";
 import { ProviderModalityFields } from "./ProviderModalityFields";
 import { ProviderModelInput as ModelSelect } from "./ProviderModelInput";
 
@@ -207,45 +203,12 @@ export function SettingsModelsPanel({
                 }
               />
             </div>
-            <div className="provider-form provider-model-group">
-              <div>
-                <p className="settings-section-copy">
-                  <strong>Fast &amp; compatibility</strong>
-                  <br />
-                  Preferred by Cindx Fast and used as an Auto/Pro compatibility fallback.
-                </p>
-              </div>
-              <ModelSelect
-                label={
-                  providerDraft.providerId === "azure_openai"
-                    ? "Fast deployment"
-                    : "Fast model"
-                }
-                description="Changing this fallback does not overwrite the profiles above."
-                value={providerDraft.model}
-                options={providerModelOptions.chat}
-                disabled={providerBusy}
-                onChange={(model) =>
-                  setProviderDraft(
-                    selectFastFallbackModel(
-                      providerDraft,
-                      model,
-                      providerModelContextWindow(providerDraft.providerId, model)
-                    )
-                  )
-                }
-              />
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={providerBusy || !providerDraft.model.trim()}
-                onClick={() =>
-                  setProviderDraft(applyFastModelToProfiles(providerDraft))
-                }
-              >
-                Apply to all profiles
-              </button>
-            </div>
+            <SettingsEffortModelFields
+              providerBusy={providerBusy}
+              providerDraft={providerDraft}
+              providerModelOptions={providerModelOptions}
+              setProviderDraft={setProviderDraft}
+            />
             <ProviderModalityFields
               imageEndpointValidation={imageEndpointValidation}
               providerBusy={providerBusy}

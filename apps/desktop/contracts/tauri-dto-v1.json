@@ -12,12 +12,30 @@
           "kernelStatus": "online",
           "providerReady": true,
           "workspaceRoot": "/contract/workspace",
-          "orchestrationModes": ["single", "auto_router"],
-          "registeredTools": ["file.read", "shell.run"],
+          "orchestrationModes": [
+            "single",
+            "auto_router"
+          ],
+          "registeredTools": [
+            "file.read",
+            "shell.run"
+          ],
           "agentRunBudgets": {
-            "fast": { "maxDurationMs": 300000, "maxModelCalls": 24, "maxToolCalls": 48 },
-            "auto": { "maxDurationMs": 2700000, "maxModelCalls": 128, "maxToolCalls": 256 },
-            "pro": { "maxDurationMs": 14400000, "maxModelCalls": 384, "maxToolCalls": 768 }
+            "fast": {
+              "maxDurationMs": 300000,
+              "maxModelCalls": 24,
+              "maxToolCalls": 48
+            },
+            "auto": {
+              "maxDurationMs": 2700000,
+              "maxModelCalls": 128,
+              "maxToolCalls": 256
+            },
+            "pro": {
+              "maxDurationMs": 14400000,
+              "maxModelCalls": 384,
+              "maxToolCalls": 768
+            }
           }
         }
       ]
@@ -147,6 +165,9 @@
           "executorModel": "gpt-contract",
           "reviewerModel": "gpt-contract",
           "summarizerModel": "gpt-contract",
+          "fastModel": "",
+          "autoModel": "",
+          "proModel": "",
           "embeddingModel": "text-embedding-contract",
           "imageModel": "image-contract",
           "imageEndpoint": "",
@@ -170,6 +191,9 @@
           "executorModel": "custom-contract",
           "reviewerModel": "custom-contract",
           "summarizerModel": "custom-contract",
+          "fastModel": "",
+          "autoModel": "",
+          "proModel": "",
           "embeddingModel": "embedding-contract",
           "imageModel": "",
           "imageEndpoint": "",

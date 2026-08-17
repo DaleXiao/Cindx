@@ -118,6 +118,9 @@ const settingsPageFileSource = read("apps/desktop/src/components/SettingsPage.ts
 const settingsModelsPanelSource = read(
   "apps/desktop/src/components/SettingsModelsPanel.tsx"
 );
+const settingsEffortModelFieldsSource = read(
+  "apps/desktop/src/components/SettingsEffortModelFields.tsx"
+);
 const settingsMemoryPanelSource = read(
   "apps/desktop/src/components/SettingsMemoryPanel.tsx"
 );
@@ -146,6 +149,7 @@ const settingsPageSource = [
   settingsMemoryPanelSource,
   settingsPermissionsPanelSource,
   settingsToolsPanelSource,
+  settingsEffortModelFieldsSource,
 ].join("\n");
 const preferencesControllerSource = read(
   "apps/desktop/src/controllers/usePreferencesController.ts"
@@ -3188,8 +3192,12 @@ assert(
     settingsModelsPanelSource.includes('label="Verifier"') &&
     settingsModelsPanelSource.includes('label="Utility"') &&
     settingsModelsPanelSource.includes("Planning service override") &&
-    settingsModelsPanelSource.includes("Fast &amp; compatibility") &&
-    settingsModelsPanelSource.includes("Apply to all profiles") &&
+    settingsPageSource.includes("Effort tier defaults") &&
+    settingsPageSource.includes('label="Fast tier"') &&
+    settingsPageSource.includes('label="Auto tier"') &&
+    settingsPageSource.includes('label="Pro tier"') &&
+    settingsPageSource.includes("Compatibility fallback") &&
+    settingsPageSource.includes("Apply to all profiles") &&
     !settingsModelsPanelSource.includes("Default effort") &&
     !settingsModelsPanelSource.includes("4 worker roles"),
   "Provider settings must expose model profiles and services without legacy role semantics"
