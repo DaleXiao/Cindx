@@ -31,6 +31,10 @@ use agent_runtime::{
 use model_provider::StreamingModelProvider;
 use std::{path::Path, sync::Arc};
 
+fn forced_terminal_skips_the_model_call(forced_terminal: bool, fallback_available: bool) -> bool {
+    forced_terminal && fallback_available
+}
+
 fn finalizer_attempt_is_retryable(
     resolution: &Result<FinalizerResolution, AgentFailure>,
     fallback_available: bool,
@@ -56,6 +60,7 @@ pub(crate) struct TerminalFinalizerContext<'a, 'state> {
     pub(crate) runtime_context: Option<&'a str>,
     pub(crate) max_output_tokens: u64,
     pub(crate) snapshot_cursor: &'a mut AgentRuntimeSnapshotCursor,
+    pub(crate) forced_terminal: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -250,6 +255,26 @@ pub(crate) fn execute_terminal_finalizer(
             run_context_steer_epoch(context.run_context),
             &visible_contract_evidence_sequences,
         );
+        // A forced terminal commit (budget/disposition, not an actor handoff)
+        // must not spend a fragile extra model call when grounded material is
+        // already available: deliver it directly.
+        if finalizer_retries == 0
+            && forced_terminal_skips_the_model_call(context.forced_terminal, fallback.is_some())
+        {
+            let fallback = fallback.expect("skip requires a grounded fallback");
+            let resolution = resolve_finalizer_fallback(
+                runtime,
+                Some(fallback),
+                epoch_lease.epoch(),
+                &visible_contract_evidence_sequences,
+            );
+            break (
+                resolution,
+                "forced-terminal-fallback".to_string(),
+                false,
+                epoch_lease,
+            );
+        }
         let model_turn = execute_agent_model_turn(
             context.app,
             context.state,
@@ -457,6 +482,14 @@ pub(crate) fn execute_terminal_finalizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forced_terminal_commits_skip_the_model_call_only_with_a_fallback() {
+        assert!(forced_terminal_skips_the_model_call(true, true));
+        assert!(!forced_terminal_skips_the_model_call(true, false));
+        assert!(!forced_terminal_skips_the_model_call(false, true));
+        assert!(!forced_terminal_skips_the_model_call(false, false));
+    }
 
     #[test]
     fn finalizer_retry_is_bounded_and_only_for_unbacked_no_candidate_failures() {

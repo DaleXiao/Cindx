@@ -99,7 +99,11 @@ toolless finalizer response is retried once when no verified fallback exists,
 and when the run already holds visible tool evidence the latest substantive
 visible assistant text (at least 160 chars) is delivered as the grounded
 last-resort answer instead of failing the run. Short progress notes and
-evidence-free runs are never delivered this way.
+evidence-free runs are never delivered this way. When a run is force-stopped
+(budget or disposition) and such grounded material already exists, the extra
+finalizer model call is skipped entirely and the material is delivered
+directly; plain text-only actor answers were already delivered without any
+finalizer call.
 
 Auto and Pro direct execution carry a contracted delivery judge at the
 shared completion point: a model-distinct Reviewer audits the final answer

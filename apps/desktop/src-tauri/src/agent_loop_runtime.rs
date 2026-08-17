@@ -185,6 +185,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         }
         let max_output_tokens =
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);
+        let actor_requested_terminal = actor_requested_finalizer;
         let terminal_commit = actor_requested_finalizer
             || matches!(
                 runtime.adaptive_loop_disposition(),
@@ -212,6 +213,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     runtime_context: runtime_context.as_deref(),
                     max_output_tokens,
                     snapshot_cursor: &mut snapshot_cursor,
+                    forced_terminal: !actor_requested_terminal,
                 },
             )? {
                 TerminalFinalizerOutcome::Finished(agent_state) => {

@@ -244,7 +244,11 @@ deliverable control candidate exists but the run holds visible tool evidence,
 the latest substantive visible assistant text (at least 160 chars, internal
 drafts excluded) is admitted as a last-resort grounded fallback so a provider
 flake cannot fail a run that already did visible work; short progress notes
-and evidence-free runs stay closed.
+and evidence-free runs stay closed. Forced terminal commits (budget or
+disposition, not an actor handoff) skip the extra finalizer model call
+entirely when such grounded material already exists and deliver it directly;
+the toolless finalizer call therefore only runs for actor-requested handoffs
+or when no grounded material is available yet.
 
 Auto and Pro direct deliveries pass an optional bounded judge gate at the
 shared completion chokepoint (both direct completion and terminal-finalizer
