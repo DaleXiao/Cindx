@@ -54,13 +54,16 @@ strength, not by permission authority:
 
 Each tier can pin a configured default model (`fast_model`, `auto_model`,
 `pro_model` in the provider configuration). The Settings Models panel exposes
-the three tier pins plus the legacy compatibility fallback slot. A pinned model
-anchors Fast's direct route and the Conductor's `primary_model` choice for
-Auto/Pro without removing routing authority. When a tier is unpinned, the
-provider catalog's tier default applies instead — for the DashScope provider
-that is a flash-class model for Fast, a plus-class model for Auto, and a
-max-class model for Pro — and providers without catalog tier defaults keep the
-legacy role-slot behavior.
+the three tier pins plus the legacy compatibility fallback slot; the legacy
+per-stage role slots (Primary/Reasoning/Verifier/Utility and the Conductor
+override) are no longer surfaced there. They remain persisted provider fields
+and still act as saved per-stage overrides behind the tier pins, so existing
+configurations keep their validated behavior. A pinned model anchors Fast's
+direct route and the Conductor's `primary_model` choice for Auto/Pro without
+removing routing authority. When a tier is unpinned, the provider catalog's
+tier default applies instead — for the DashScope provider that is a flash-class
+model for Fast, a plus-class model for Auto, and a max-class model for Pro —
+and providers without catalog tier defaults keep the legacy role-slot behavior.
 
 Auto and Pro do not automatically run every configured model. The Conductor
 selects the route, model roles, retrieval needs, decomposition, and verification

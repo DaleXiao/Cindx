@@ -3150,9 +3150,7 @@ assert(
   "Provider first-use gate must preserve drafts, expose Models recovery, and use Rust readiness"
 );
 assert(
-  settingsPageSource.includes('label="Conductor"') &&
-    settingsPageSource.includes("providerDraft.conductorModel") &&
-    tauriBridge.includes("conductorModel: string") &&
+  tauriBridge.includes("conductorModel: string") &&
     rustLib.includes("conductor_model: String") &&
     rustLib.includes("model_for_conductor"),
   "Models settings must persist and use a dedicated Conductor model"
@@ -3186,12 +3184,12 @@ assert(
   "Session title, context usage, and runtime status must be integrated into the window titlebar"
 );
 assert(
-  settingsModelsPanelSource.includes("Model profiles") &&
-    settingsModelsPanelSource.includes('label="Primary"') &&
-    settingsModelsPanelSource.includes('label="Reasoning"') &&
-    settingsModelsPanelSource.includes('label="Verifier"') &&
-    settingsModelsPanelSource.includes('label="Utility"') &&
-    settingsModelsPanelSource.includes("Planning service override") &&
+  !settingsModelsPanelSource.includes("Model profiles") &&
+    !settingsModelsPanelSource.includes('label="Primary"') &&
+    !settingsModelsPanelSource.includes('label="Reasoning"') &&
+    !settingsModelsPanelSource.includes('label="Verifier"') &&
+    !settingsModelsPanelSource.includes('label="Utility"') &&
+    !settingsModelsPanelSource.includes("Planning service override") &&
     settingsPageSource.includes("Effort tier defaults") &&
     settingsPageSource.includes('label="Fast tier"') &&
     settingsPageSource.includes('label="Auto tier"') &&

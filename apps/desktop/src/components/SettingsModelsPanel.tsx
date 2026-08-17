@@ -135,74 +135,6 @@ export function SettingsModelsPanel({
                 </select>
               </label>
             </div>
-            <div className="provider-form provider-model-group">
-              <div>
-                <p className="settings-section-copy">
-                  <strong>Model profiles</strong>
-                  <br />
-                  Configuration slots used by runtime stages, not independent agents.
-                </p>
-              </div>
-              <div className="role-grid provider-meta-grid">
-                <ModelSelect
-                  label="Primary"
-                  description="Default for general execution and Owner delivery."
-                  value={providerDraft.executorModel}
-                  options={providerModelOptions.chat}
-                  disabled={providerBusy}
-                  onChange={(executorModel) =>
-                    setProviderDraft({ ...providerDraft, executorModel })
-                  }
-                />
-                <ModelSelect
-                  label="Reasoning"
-                  description="Reasoning-heavy execution and Specialist analysis."
-                  value={providerDraft.plannerModel}
-                  options={providerModelOptions.chat}
-                  disabled={providerBusy}
-                  onChange={(plannerModel) => setProviderDraft({ ...providerDraft, plannerModel })}
-                />
-                <ModelSelect
-                  label="Verifier"
-                  description="Independent verification when a distinct verifier is used."
-                  value={providerDraft.reviewerModel}
-                  options={providerModelOptions.chat}
-                  disabled={providerBusy}
-                  onChange={(reviewerModel) =>
-                    setProviderDraft({ ...providerDraft, reviewerModel })
-                  }
-                />
-                <ModelSelect
-                  label="Utility"
-                  description="Summaries and other non-decision work."
-                  value={providerDraft.summarizerModel}
-                  options={providerModelOptions.chat}
-                  disabled={providerBusy}
-                  onChange={(summarizerModel) =>
-                    setProviderDraft({ ...providerDraft, summarizerModel })
-                  }
-                />
-              </div>
-            </div>
-            <div className="provider-form provider-model-group">
-              <div>
-                <p className="settings-section-copy">
-                  <strong>Planning service override</strong>
-                  <br />
-                  Conductor plans work but does not own effects or final delivery.
-                </p>
-              </div>
-              <ModelSelect
-                label="Conductor"
-                description="Dedicated model override for the planning service."
-                value={providerDraft.conductorModel}
-                options={providerModelOptions.chat}
-                disabled={providerBusy}
-                onChange={(conductorModel) =>
-                  setProviderDraft({ ...providerDraft, conductorModel })
-                }
-              />
-            </div>
             <SettingsEffortModelFields
               providerBusy={providerBusy}
               providerDraft={providerDraft}
@@ -231,10 +163,6 @@ export function SettingsModelsPanel({
               <div>
                 <dt>Multimodal</dt>
                 <dd>{multimodalModel}</dd>
-              </div>
-              <div>
-                <dt>Model allocation</dt>
-                <dd>{modelProfileCount} unique models across 4 profiles</dd>
               </div>
             </dl>
             <button

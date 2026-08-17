@@ -84,8 +84,8 @@ export function SettingsEffortModelFields({
           <p className="settings-section-copy">
             <strong>Compatibility fallback</strong>
             <br />
-            Legacy primary slot used when a tier has no pin or catalog
-            default.
+            Legacy primary slot used when a runtime stage has no dedicated
+            model.
           </p>
         </div>
         <ModelSelect
