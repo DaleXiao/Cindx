@@ -241,7 +241,30 @@ pub(super) fn peek_agent_recovery_envelope(
         return Ok(None);
     };
     if envelope.state == AgentRecoveryState::Resuming {
-        return Err("agent recovery checkpoint is already claimed".to_string());
+        // A claim only blocks a new resume while the claimed resume is still in
+        // flight. If the resumed run settled afterwards (terminal or paused),
+        // the claim is stale and must not poison retry/resume for that session.
+        let recovery_sequence = active_events
+            .iter()
+            .rev()
+            .find(|event| {
+                event
+                    .metadata
+                    .get("recovery_envelope")
+                    .and_then(|encoded| serde_json::from_str::<AgentRecoveryEnvelope>(encoded).ok())
+                    .is_some_and(|candidate| candidate == envelope)
+            })
+            .map(|event| event.sequence)
+            .unwrap_or_default();
+        let settled_after_claim = active_events
+            .iter()
+            .filter(|event| event.sequence > recovery_sequence)
+            .filter_map(AgentRunEvent::from_event)
+            .any(|event| event.status().is_terminal() || matches!(event, AgentRunEvent::Paused));
+        if !settled_after_claim {
+            return Err("agent recovery checkpoint is already claimed".to_string());
+        }
+        return Ok(None);
     }
     let recoverable_status = latest_agent_run_event(&active_events)
         .ok()

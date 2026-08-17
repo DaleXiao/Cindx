@@ -952,3 +952,70 @@ fn malformed_latest_recovery_envelope_does_not_revive_an_older_checkpoint() {
 
     assert!(latest_agent_recovery_envelope(&events).is_none());
 }
+
+#[test]
+fn settled_resume_does_not_poison_later_retry_with_a_stale_claim() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let context = run_metadata("session-stale-claim", "run-stale-claim", true);
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        context.clone(),
+    )
+    .expect("run should start");
+    let events = store
+        .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-stale-claim")
+        .expect("events should load");
+    let paused = agent_recovery_metadata_with_task_state(
+        &events,
+        &context,
+        AgentRecoveryState::Paused,
+        AgentRecoveryReason::DeadlineExceeded,
+        Metadata::new(),
+        None,
+        None,
+    )
+    .expect("pause checkpoint should build");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task paused",
+        paused,
+    )
+    .expect("pause should persist");
+
+    claim_agent_recovery_envelope(
+        &mut store,
+        &context,
+        &[AgentRecoveryState::Paused],
+        AgentRecoveryReason::UserContinued,
+    )
+    .expect("claim should succeed")
+    .expect("paused checkpoint should be claimed");
+
+    let active_claim = peek_agent_recovery_envelope(&store, &context, &[AgentRecoveryState::Paused]);
+    assert!(active_claim
+        .expect_err("an in-flight resume must keep blocking new claims")
+        .contains("already claimed"));
+
+    let mut failed = run_metadata("session-stale-claim", "run-stale-claim", false);
+    insert_event_type_v1(&EventKind::Error, &mut failed, EventTypeV1::AgentRunFailed)
+        .expect("failure tag should build");
+    append_event(
+        &mut store,
+        &phase16_task_id(),
+        EventKind::Error,
+        "Agent task failed",
+        failed,
+    )
+    .expect("failure should persist");
+
+    assert_eq!(
+        peek_agent_recovery_envelope(&store, &context, &[AgentRecoveryState::Paused])
+            .expect("a settled claim must not block retry"),
+        None
+    );
+}
