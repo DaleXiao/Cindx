@@ -8,7 +8,7 @@ use crate::{
     },
     agent_finalizer_runtime::{
         grounded_finalizer_fallback, prepare_finalizer_turn, resolve_finalizer_fallback,
-        resolve_finalizer_response,
+        resolve_finalizer_response, FinalizerResolution,
     },
     agent_model_turn_runtime::{
         execute_agent_model_turn, AgentModelTurnOutcome, AgentModelTurnPlan, AgentModelTurnResponse,
@@ -30,6 +30,17 @@ use agent_runtime::{
 };
 use model_provider::StreamingModelProvider;
 use std::{path::Path, sync::Arc};
+
+fn finalizer_attempt_is_retryable(
+    resolution: &Result<FinalizerResolution, AgentFailure>,
+    fallback_available: bool,
+    retries: u8,
+) -> bool {
+    const MAX_FINALIZER_RETRIES: u8 = 1;
+    retries < MAX_FINALIZER_RETRIES
+        && !fallback_available
+        && matches!(resolution, Err(failure) if failure.code == "finalizer_no_grounded_candidate")
+}
 
 pub(crate) struct TerminalFinalizerContext<'a, 'state> {
     pub(crate) app: &'a tauri::AppHandle,
@@ -180,125 +191,146 @@ pub(crate) fn execute_terminal_finalizer(
         }
     }
 
-    let prepared_turn = match prepare_finalizer_turn(
-        runtime,
-        Some(&context.config.agent_system_prompt),
-        direct_finalizer_policy
-            .as_ref()
-            .and_then(|selection| selection.phenotype.directive()),
-        context.runtime_context,
-        context.config.context_window_tokens,
-        context.max_output_tokens,
-    ) {
-        Ok(prepared_turn) => prepared_turn,
-        Err(AgentTurnPreparationError::Budget(exhausted)) => {
-            if let Some(partial_answer) = exhausted.partial_answer {
-                if let agent_runtime::RunEpochLeaseOutcome::Acquired(lease) =
-                    context.cancellation.execution_epoch_lease()
-                {
-                    context
-                        .cancellation
-                        .record_partial_output_at(lease.epoch(), &partial_answer);
+    // A direct run's delivery gate is one toolless finalizer call. Empty or
+    // unusable finalizer output is usually a provider flake, so when no verified
+    // fallback exists the gate gets one bounded retry before the run fails.
+    let mut finalizer_retries = 0u8;
+    let (resolution, request_id, streamed_output, epoch_lease) = loop {
+        let prepared_turn = match prepare_finalizer_turn(
+            runtime,
+            Some(&context.config.agent_system_prompt),
+            direct_finalizer_policy
+                .as_ref()
+                .and_then(|selection| selection.phenotype.directive()),
+            context.runtime_context,
+            context.config.context_window_tokens,
+            context.max_output_tokens,
+        ) {
+            Ok(prepared_turn) => prepared_turn,
+            Err(AgentTurnPreparationError::Budget(exhausted)) => {
+                if let Some(partial_answer) = exhausted.partial_answer {
+                    if let agent_runtime::RunEpochLeaseOutcome::Acquired(lease) =
+                        context.cancellation.execution_epoch_lease()
+                    {
+                        context
+                            .cancellation
+                            .record_partial_output_at(lease.epoch(), &partial_answer);
+                    }
                 }
+                context
+                    .cancellation
+                    .request_stop(RunStopReason::TurnBudgetExhausted);
+                return Ok(TerminalFinalizerOutcome::Pause);
             }
-            context
-                .cancellation
-                .request_stop(RunStopReason::TurnBudgetExhausted);
-            return Ok(TerminalFinalizerOutcome::Pause);
-        }
-        Err(AgentTurnPreparationError::Context(violation)) => {
-            return resolve_internal_finalizer_failure(
-                runtime,
-                &context,
-                epoch_lease,
-                "finalizer_context_invalid",
-                violation.to_string(),
-                "agent-finalizer-context",
-                false,
-            );
-        }
-    };
-    let visible_contract_evidence_sequences = prepared_turn.visible_contract_evidence_sequences;
-    let mut request = prepared_turn.request;
-    let context_governor = prepared_turn.context;
-    request.metadata.insert(
-        "max_output_tokens".to_string(),
-        context.max_output_tokens.to_string(),
-    );
-    if let Some(selection) = &direct_finalizer_policy {
-        insert_direct_finalizer_receipt_metadata(&mut request.metadata, selection);
-    }
-    let fallback = grounded_finalizer_fallback(
-        runtime,
-        context.cancellation,
-        run_context_steer_epoch(context.run_context),
-        &visible_contract_evidence_sequences,
-    );
-    let model_turn = execute_agent_model_turn(
-        context.app,
-        context.state,
-        context.workspace_root,
-        runtime,
-        context.prompt,
-        context.run_context,
-        context.collaboration,
-        context.cancellation,
-        context.provider,
-        context.agent_model,
-        &context_governor,
-        AgentModelTurnPlan::finalizer(request),
-    )?;
-    let (resolution, request_id, streamed_output, epoch_lease) = match model_turn {
-        AgentModelTurnOutcome::Response(AgentModelTurnResponse {
-            response,
-            request_id,
-            streamed_output,
-            epoch_lease,
-        }) => (
-            resolve_finalizer_response(
-                runtime,
-                response,
-                fallback,
-                epoch_lease.epoch(),
-                &visible_contract_evidence_sequences,
-            ),
-            request_id,
-            streamed_output,
-            epoch_lease,
-        ),
-        AgentModelTurnOutcome::Unavailable(unavailable) => {
-            let resolution = match fallback {
-                Some(fallback) => resolve_finalizer_fallback(
+            Err(AgentTurnPreparationError::Context(violation)) => {
+                return resolve_internal_finalizer_failure(
                     runtime,
-                    Some(fallback),
-                    unavailable.epoch_lease.epoch(),
+                    &context,
+                    epoch_lease,
+                    "finalizer_context_invalid",
+                    violation.to_string(),
+                    "agent-finalizer-context",
+                    false,
+                );
+            }
+        };
+        let visible_contract_evidence_sequences = prepared_turn.visible_contract_evidence_sequences;
+        let mut request = prepared_turn.request;
+        let context_governor = prepared_turn.context;
+        request.metadata.insert(
+            "max_output_tokens".to_string(),
+            context.max_output_tokens.to_string(),
+        );
+        if let Some(selection) = &direct_finalizer_policy {
+            insert_direct_finalizer_receipt_metadata(&mut request.metadata, selection);
+        }
+        let fallback = grounded_finalizer_fallback(
+            runtime,
+            context.cancellation,
+            run_context_steer_epoch(context.run_context),
+            &visible_contract_evidence_sequences,
+        );
+        let model_turn = execute_agent_model_turn(
+            context.app,
+            context.state,
+            context.workspace_root,
+            runtime,
+            context.prompt,
+            context.run_context,
+            context.collaboration,
+            context.cancellation,
+            context.provider,
+            context.agent_model,
+            &context_governor,
+            AgentModelTurnPlan::finalizer(request),
+        )?;
+        let attempt = match model_turn {
+            AgentModelTurnOutcome::Response(AgentModelTurnResponse {
+                response,
+                request_id,
+                streamed_output,
+                epoch_lease,
+            }) => (
+                resolve_finalizer_response(
+                    runtime,
+                    response,
+                    fallback.clone(),
+                    epoch_lease.epoch(),
                     &visible_contract_evidence_sequences,
                 ),
-                None => Err(unavailable.failure),
-            };
-            (
-                resolution,
-                unavailable.request_id,
-                unavailable.streamed_output,
-                unavailable.epoch_lease,
-            )
-        }
-        AgentModelTurnOutcome::HandoffToFinalizer => {
-            return resolve_internal_finalizer_failure(
-                runtime,
-                &context,
+                request_id,
+                streamed_output,
                 epoch_lease,
-                "finalizer_role_violation",
-                "the Finalizer requested an Actor-to-Finalizer handoff".to_string(),
-                "agent-finalizer-role",
+            ),
+            AgentModelTurnOutcome::Unavailable(unavailable) => {
+                let resolution = match fallback.clone() {
+                    Some(fallback) => resolve_finalizer_fallback(
+                        runtime,
+                        Some(fallback),
+                        unavailable.epoch_lease.epoch(),
+                        &visible_contract_evidence_sequences,
+                    ),
+                    None => Err(unavailable.failure),
+                };
+                (
+                    resolution,
+                    unavailable.request_id,
+                    unavailable.streamed_output,
+                    unavailable.epoch_lease,
+                )
+            }
+            AgentModelTurnOutcome::HandoffToFinalizer => {
+                return resolve_internal_finalizer_failure(
+                    runtime,
+                    &context,
+                    epoch_lease,
+                    "finalizer_role_violation",
+                    "the Finalizer requested an Actor-to-Finalizer handoff".to_string(),
+                    "agent-finalizer-role",
+                    false,
+                );
+            }
+            AgentModelTurnOutcome::RestartAfterSteer => {
+                return Ok(TerminalFinalizerOutcome::RestartAfterSteer);
+            }
+            AgentModelTurnOutcome::Finished(agent_state) => {
+                return Ok(TerminalFinalizerOutcome::Finished(*agent_state));
+            }
+        };
+        if !finalizer_attempt_is_retryable(&attempt.0, fallback.is_some(), finalizer_retries) {
+            break attempt;
+        }
+        finalizer_retries += 1;
+        if attempt.2 {
+            emit_agent_stream_delta(
+                context.app,
+                &attempt.1,
+                context.run_context.get("session_id").map(String::as_str),
+                "",
                 false,
+                true,
+                None,
             );
-        }
-        AgentModelTurnOutcome::RestartAfterSteer => {
-            return Ok(TerminalFinalizerOutcome::RestartAfterSteer);
-        }
-        AgentModelTurnOutcome::Finished(agent_state) => {
-            return Ok(TerminalFinalizerOutcome::Finished(*agent_state));
         }
     };
     let session_id = context.run_context.get("session_id").map(String::as_str);
@@ -419,5 +451,23 @@ pub(crate) fn execute_terminal_finalizer(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finalizer_retry_is_bounded_and_only_for_unbacked_no_candidate_failures() {
+        let no_candidate = Err(AgentFailure::model_output(
+            "finalizer_no_grounded_candidate",
+            "empty finalizer output",
+        ));
+        assert!(finalizer_attempt_is_retryable(&no_candidate, false, 0));
+        assert!(!finalizer_attempt_is_retryable(&no_candidate, true, 0));
+        assert!(!finalizer_attempt_is_retryable(&no_candidate, false, 1));
+        let other = Err(AgentFailure::model_output("finalizer_lineage", "x"));
+        assert!(!finalizer_attempt_is_retryable(&other, false, 0));
     }
 }
