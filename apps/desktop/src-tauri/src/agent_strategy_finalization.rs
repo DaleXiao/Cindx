@@ -54,9 +54,12 @@ pub(super) fn finalize_planned_run(
         &candidates,
         route_requirements,
     )?;
+    // Mirror the degraded projection onto the recorded candidate so its action
+    // identity cannot diverge from the executed decision; matched-route anchors
+    // never carry a degradation reason and keep their raw workflow candidate.
     conductor_candidate = requirements::apply_and_validate_route_requirements(
         conductor_candidate,
-        false,
+        degradation_reason.is_some(),
         &candidates,
         route_requirements,
     )?;

@@ -1,8 +1,9 @@
 use super::PlannedAgentRun;
 use agent_core::Metadata;
 use orchestrator::{
-    AgentExecutionMode, AgentRouteRequirements, AgentRunDecision, MemoryRecallPlan,
-    MemoryRecallPolicy, ModelCandidate, MAX_RUN_DECISION_QUERY_CHARS,
+    AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
+    CausalRouteSelectionV2, MemoryRecallPlan, MemoryRecallPolicy, ModelCandidate,
+    MAX_RUN_DECISION_QUERY_CHARS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +152,7 @@ pub(super) fn route_decision_metadata(planned: &PlannedAgentRun) -> Metadata {
 /// keyed on the run prompt so durable project memory participates in every
 /// non-trivial task. Fast returns before this point; explicit
 /// Relevant/Comprehensive choices are kept; evaluation arms are exempt.
-pub(super) fn apply_default_memory_recall(
+pub(crate) fn apply_default_memory_recall(
     constraint: &crate::agent_execution_constraint::AgentExecutionConstraint,
     decision: &mut AgentRunDecision,
     prompt: &str,
@@ -165,6 +166,48 @@ pub(super) fn apply_default_memory_recall(
             ),
         };
     }
+}
+
+pub(super) fn align_candidate_and_route(
+    constraint: &crate::agent_execution_constraint::AgentExecutionConstraint,
+    decision: AgentRunDecision,
+    conductor_candidate: AgentRunDecision,
+    mut compatibility_route: Option<CausalRouteSelectionV2>,
+    effort: AgentPolicy,
+    workflow_quarantined: bool,
+    prompt: &str,
+) -> Result<(AgentRunDecision, AgentRunDecision, Option<CausalRouteSelectionV2>), String> {
+    let mut decision = constraint.apply(decision, effort, workflow_quarantined)?;
+    // Quarantine clamps the action; clamp the recorded candidate identically and
+    // drop the stale route so finalize recomputes it, keeping the plan consistent.
+    let (mut conductor_candidate, candidate_clamped) = constraint
+        .quarantine_conductor_candidate(conductor_candidate, effort, workflow_quarantined)?;
+    if candidate_clamped {
+        compatibility_route = None;
+    }
+    // Default memory recall rewrites the action identity after the draft route
+    // receipt was computed; mirror it onto the recorded candidate and drop the
+    // stale route so finalize recomputes it, keeping the plan consistent.
+    if apply_default_memory_recall_pair(constraint, &mut decision, &mut conductor_candidate, prompt)
+    {
+        compatibility_route = None;
+    }
+    Ok((decision, conductor_candidate, compatibility_route))
+}
+
+pub(crate) fn apply_default_memory_recall_pair(
+    constraint: &crate::agent_execution_constraint::AgentExecutionConstraint,
+    decision: &mut AgentRunDecision,
+    conductor_candidate: &mut AgentRunDecision,
+    prompt: &str,
+) -> bool {
+    let before = decision.memory.policy;
+    apply_default_memory_recall(constraint, decision, prompt);
+    let changed = decision.memory.policy != before;
+    if changed {
+        apply_default_memory_recall(constraint, conductor_candidate, prompt);
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -196,6 +239,35 @@ mod tests {
         let mut decision = AgentRunDecision::direct("executor");
         apply_default_memory_recall(&grounded, &mut decision, "prompt");
         assert_eq!(decision.memory.policy, MemoryRecallPolicy::None);
+    }
+
+    #[test]
+    fn default_memory_recall_pair_mirrors_the_candidate_and_reports_change() {
+        let native = crate::agent_execution_constraint::AgentExecutionConstraint::Native;
+        let mut decision = AgentRunDecision::direct("executor");
+        let mut candidate = decision.clone();
+        assert!(apply_default_memory_recall_pair(
+            &native,
+            &mut decision,
+            &mut candidate,
+            "greet the user"
+        ));
+        assert_eq!(decision.memory.policy, MemoryRecallPolicy::Relevant);
+        assert_eq!(decision.memory, candidate.memory);
+
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.memory = MemoryRecallPlan {
+            policy: MemoryRecallPolicy::Comprehensive,
+            query: "kept".to_string(),
+        };
+        let mut candidate = decision.clone();
+        assert!(!apply_default_memory_recall_pair(
+            &native,
+            &mut decision,
+            &mut candidate,
+            "ignored"
+        ));
+        assert_eq!(candidate.memory.query, "kept");
     }
 
     #[test]

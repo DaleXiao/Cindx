@@ -5014,6 +5014,77 @@ fn causal_route_provenance_keeps_context_small_and_event_receipt_complete() {
 }
 
 #[test]
+fn default_memory_recall_mirror_keeps_the_execution_plan_consistent() {
+    let constraint = crate::agent_execution_constraint::AgentExecutionConstraint::Native;
+    let prompt = "greet the user";
+    let mut decision = AgentRunDecision::direct("executor");
+    let mut candidate = decision.clone();
+    let candidates = vec![ModelCandidate {
+        name: "executor".to_string(),
+        role: ModelRole::Executor,
+        supports_tools: true,
+        supports_vision: true,
+        tools_capability_source: ModelCapabilitySource::Configured,
+        vision_capability_source: ModelCapabilitySource::Configured,
+        cost_tier: 1,
+        latency_tier: 1,
+    }];
+    let snapshot_for = |candidate: &AgentRunDecision| {
+        RouteFeatureSnapshotV2::from_decision_request(
+            candidate,
+            RouteFeatureRequest {
+                objective: prompt,
+                recent_context: "",
+                effort: AgentPolicy::Auto.label(),
+                requirements: AgentRouteRequirements {
+                    minimum_tool_requirement: AgentToolRequirement::None,
+                    effect_authority: AgentEffectAuthority::Forbidden,
+                    image_input_required: false,
+                },
+                budget_fingerprint: None,
+                prompt_profile_sha256: &"1".repeat(64),
+            },
+            &candidates,
+        )
+    };
+    let stale_receipt =
+        select_causal_route_v2(&candidate, &snapshot_for(&candidate), &candidates, None, 0)
+            .expect("draft route should compute");
+    let mut recalled = decision.clone();
+    crate::agent_strategy_runtime::apply_default_memory_recall(&constraint, &mut recalled, prompt);
+    assert_ne!(recalled.memory, decision.memory);
+    let stale = ExecutionPlan::new(
+        candidate.clone(),
+        recalled,
+        ExecutionPlanDecisionReason::ConductorSelection,
+        stale_receipt,
+        None,
+    );
+    assert!(stale
+        .err()
+        .expect("stale receipt must reject the rewritten action identity")
+        .contains("inconsistent"));
+
+    assert!(crate::agent_strategy_runtime::apply_default_memory_recall_pair(
+        &constraint,
+        &mut decision,
+        &mut candidate,
+        prompt
+    ));
+    let receipt =
+        select_causal_route_v2(&candidate, &snapshot_for(&candidate), &candidates, None, 0)
+            .expect("recomputed route should compute");
+    ExecutionPlan::new(
+        candidate,
+        decision,
+        ExecutionPlanDecisionReason::ConductorSelection,
+        receipt,
+        None,
+    )
+    .expect("mirrored recall must keep the plan consistent");
+}
+
+#[test]
 fn preparation_route_requirements_recompute_intent_and_active_images() {
     let mut run_context = [(
         "effective_prompt_objective".to_string(),

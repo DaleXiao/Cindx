@@ -232,7 +232,10 @@ pub(crate) fn record_collaboration_stage_started(
         &mut store,
         task_id,
         EventKind::ModelRequestStarted,
-        format!("Collaboration {stage} started"),
+        format!(
+            "{} {stage} started",
+            crate::collaboration_stage_runtime::collaboration_stage_event_subject(stage)
+        ),
         metadata_with_context(metadata, run_context),
     )
     .map_err(|error| error.to_string())?;
