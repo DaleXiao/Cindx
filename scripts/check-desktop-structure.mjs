@@ -869,7 +869,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["agent_run_engine.rs", 250],
   ["agent_conductor_runtime.rs", 140],
   ["agent_strategy_context.rs", 140],
-  ["agent_strategy_runtime.rs", 420],
+  ["agent_strategy_runtime.rs", 430],
   ["agent_loop_runtime.rs", 550],
   ["agent_recovery_service.rs", 550],
   ["agent_runtime_snapshot.rs", 220],

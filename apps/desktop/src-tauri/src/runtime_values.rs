@@ -140,8 +140,14 @@ pub(crate) fn collaboration_stage_display_label(stage: &str) -> String {
                 format!("Candidate {index}")
             } else if let Some(index) = stage.strip_prefix("worker_") {
                 format!("Worker {index}")
+            } else if let Some(index) = stage.strip_prefix("run_decision_model_") {
+                if index.ends_with("_repair") {
+                    format!("Conductor repair {}", index.trim_end_matches("_repair"))
+                } else {
+                    format!("Conductor {index}")
+                }
             } else {
-                "Model collaboration".to_string()
+                "Model run".to_string()
             }
         }
     }

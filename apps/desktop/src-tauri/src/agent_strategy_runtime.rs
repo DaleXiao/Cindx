@@ -318,9 +318,9 @@ pub(crate) fn plan_agent_run(
     } = schedule;
 
     let (
-        conductor_candidate,
+        mut conductor_candidate,
         decision,
-        compatibility_route,
+        mut compatibility_route,
         source,
         mut decision_reason,
         degradation_reason,
@@ -367,9 +367,19 @@ pub(crate) fn plan_agent_run(
             )
         }
     };
+    let workflow_quarantined = !config.workflow_enabled;
     let mut decision = execution_constraint
-        .apply(decision, effort, !config.workflow_enabled)
+        .apply(decision, effort, workflow_quarantined)
         .map_err(CollaborationStageError::Failed)?;
+    // Quarantine clamps the action; clamp the recorded candidate identically and
+    // drop the stale route so it is recomputed, keeping the plan consistent.
+    let (clamped_candidate, candidate_clamped) = execution_constraint
+        .quarantine_conductor_candidate(conductor_candidate, effort, workflow_quarantined)
+        .map_err(CollaborationStageError::Failed)?;
+    conductor_candidate = clamped_candidate;
+    if candidate_clamped {
+        compatibility_route = None;
+    }
     requirements::apply_default_memory_recall(&execution_constraint, &mut decision, prompt);
     if execution_constraint.is_grounded_direct() {
         decision_reason = ExecutionPlanDecisionReason::RuntimeGroundedDirect;

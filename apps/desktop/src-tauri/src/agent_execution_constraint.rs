@@ -200,6 +200,20 @@ impl AgentExecutionConstraint {
             }
         }
     }
+
+    pub(crate) fn quarantine_conductor_candidate(
+        self,
+        candidate: AgentRunDecision,
+        effort: AgentPolicy,
+        workflow_quarantined: bool,
+    ) -> Result<(AgentRunDecision, bool), String> {
+        if workflow_quarantined && candidate.execution == AgentExecutionMode::Workflow {
+            let clamped = self.apply(candidate, effort, workflow_quarantined)?;
+            Ok((clamped, true))
+        } else {
+            Ok((candidate, false))
+        }
+    }
 }
 
 const fn execution_mode_label(mode: AgentExecutionMode) -> &'static str {

@@ -506,6 +506,39 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_clamp_recomputes_route_so_plan_stays_consistent() {
+        let candidate = workflow_candidate(6_000);
+        let stale_route = route(&candidate);
+
+        // A workflow route receipt validated against a clamped-direct action is
+        // inconsistent and must be rejected.
+        let clamped_action = candidate.clone().constrained_to_grounded_direct();
+        assert!(ExecutionPlan::new(
+            candidate.clone(),
+            clamped_action.clone(),
+            ExecutionPlanDecisionReason::ConductorSelection,
+            stale_route,
+            None,
+        )
+        .is_err());
+
+        // Clamping the recorded candidate identically and recomputing the route
+        // from it yields a consistent, validated direct plan.
+        let clamped_candidate = candidate.constrained_to_grounded_direct();
+        let fresh_route = route(&clamped_candidate);
+        let plan = ExecutionPlan::new(
+            clamped_candidate,
+            clamped_action,
+            ExecutionPlanDecisionReason::ConductorSelection,
+            fresh_route,
+            None,
+        )
+        .expect("clamped candidate plus recomputed route validates");
+        assert_eq!(plan.action.execution, AgentExecutionMode::Direct);
+        assert_eq!(plan.authority, ExecutionPlanAuthority::Conductor);
+    }
+
+    #[test]
     fn compatibility_value_policy_is_shadow_only_for_v2() {
         let candidate = workflow_candidate(2_999);
         let receipt = route(&candidate);
