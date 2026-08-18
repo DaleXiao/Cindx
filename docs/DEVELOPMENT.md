@@ -161,21 +161,14 @@ markdown command discovery, frontmatter parsing and effort normalization,
 project-over-global name precedence, and file-count and byte caps. It is
 included in `quick`, `ci-contract`, `control-plane`, and `full`.
 
-They also include `agent-collaboration-learning-contract`. Its 18 provider-free
-tests check the bounded policy schema, trusted assignment-to-exercise binding,
-actual context and same-lane repair attribution, matched Direct/Workflow
-identity, append-only train/holdout evidence, freeze conditions, and the
-independent-review requirement. Its approved state remains offline-only and is
-not a prompt, routing, memory, canary, or serving admission.
-
-`agent-collaboration-learning-offline-contract` checks bounded canonical import,
-hash-chain replay, physical-run deduplication, and committed-context aggregation
-with the optional agent-application feature. The adjacent
-`agent-collaboration-learning-offline-adapter-contract` is retired: the desktop
-collaboration-learning eval adapter it guarded was removed with the workflow
-machinery, so matched policy installation and capture no longer exist in the
-product path. These gates do not
-contact a provider or prove intelligence uplift.
+The portable collaboration-learning contracts (`agent-collaboration-learning-contract`,
+`agent-collaboration-learning-offline-contract`, and the retired
+`agent-collaboration-learning-offline-adapter-contract`) have been removed along
+with the `collaboration_learning_*` modules in `agent-application`: multi-model
+collaboration is permanently retired, so the policy/projection/holdout/admission
+contracts had no production consumer. Learning evidence that remains is the
+terminal `learning_evidence_v1` used by memory extraction/retention and
+recall-to-terminal attribution, which is unrelated to collaboration learning.
 
 `agent-collaboration-successor-protocol-contract` also enables only
 `realworld-eval`. Its nine deterministic tests validate the tracked successor

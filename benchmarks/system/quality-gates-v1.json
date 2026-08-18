@@ -47,8 +47,6 @@
       "agent-outcome-evidence-contract",
       "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
-      "agent-collaboration-learning-contract",
-      "agent-collaboration-learning-offline-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -82,8 +80,6 @@
       "agent-outcome-evidence-contract",
       "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
-      "agent-collaboration-learning-contract",
-      "agent-collaboration-learning-offline-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -154,8 +150,6 @@
       "agent-outcome-evidence-contract",
       "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
-      "agent-collaboration-learning-contract",
-      "agent-collaboration-learning-offline-contract",
       "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
@@ -616,44 +610,6 @@
       "required_output": [
         "test result: ok. 12 passed; 0 failed",
         "cindx.agent.delivery-verification-subject.v1"
-      ]
-    },
-    {
-      "id": "agent-collaboration-learning-contract",
-      "category": "gepa",
-      "command": [
-        "cargo",
-        "test",
-        "--locked",
-        "-p",
-        "agent-application",
-        "agent_collaboration_learning_contract_",
-        "--",
-        "--nocapture"
-      ],
-      "required_output": [
-        "test result: ok. 18 passed; 0 failed",
-        "cindx.agent-collaboration-learning-policy.v1"
-      ]
-    },
-    {
-      "id": "agent-collaboration-learning-offline-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "cargo",
-        "test",
-        "--locked",
-        "-p",
-        "agent-application",
-        "--features",
-        "collaboration-learning-offline",
-        "agent_collaboration_learning_offline_adapter_contract_",
-        "--",
-        "--nocapture"
-      ],
-      "required_output": [
-        "test result: ok. 5 passed; 0 failed",
-        "cindx.agent-collaboration-learning-offline-genesis.v1"
       ]
     },
     {
