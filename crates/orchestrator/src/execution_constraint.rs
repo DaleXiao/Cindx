@@ -75,7 +75,7 @@ mod tests {
         assert_eq!(constrained.stop_policy, ConductorStopPolicy::FirstVerified);
         assert_eq!(constrained.route_tier(), AgentRouteTier::GroundedDirect);
         constrained
-            .validate(&["executor".to_string()], 2, false)
+            .validate(&["executor".to_string()])
             .expect("the constrained decision should satisfy direct invariants");
     }
 }

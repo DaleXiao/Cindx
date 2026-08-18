@@ -8,13 +8,13 @@ use super::tool_receipts::{project_tool_receipts, ToolReceiptStatus};
 use super::{metadata_u64, EventMetrics, PermissionPolicy, ProductRun, Treatment};
 use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
-use crate::collaboration_learning_eval_runtime::CollaborationLearningEvalPolicyInput;
 use crate::{
     cancel_background_prompt_evaluations, phase16_task_id, project_session_metadata_for_session,
     resolve_agent_permission_blocking, retry_agent_task_blocking,
     run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate, AgentState,
-    AgentTaskInput, AppState, EventKind, FrozenPromptProfileSnapshot, SessionActionInput,
+    AgentTaskInput, AppState, EventKind, SessionActionInput,
 };
+use orchestrator::FrozenPromptProfileSnapshot;
 use agent_core::Event;
 use agent_runtime::{AgentRunControl, RunBudget};
 use std::{path::Path, sync::Arc};
@@ -32,7 +32,6 @@ pub(super) fn run_product_task_with_execution_constraint(
     run_budget: Option<RunBudget>,
     execution_constraint_override: Option<AgentExecutionConstraint>,
     matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
-    collaboration_learning_policy: Option<&CollaborationLearningEvalPolicyInput>,
 ) -> ProductRun {
     let effort = treatment
         .product_effort()
@@ -85,7 +84,6 @@ pub(super) fn run_product_task_with_execution_constraint(
             execution_constraint,
             memory_constraint,
             matched_route_plan_anchor,
-            collaboration_learning_policy,
             &mut start_gate,
         );
         if start_gate.is_some() {

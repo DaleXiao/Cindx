@@ -23,9 +23,7 @@ use self::matched_route::{
 use self::recording::record_planned_agent_run as record_plan;
 #[cfg(test)]
 pub(crate) use self::preparation::should_evaluate_strategy_profile;
-pub(crate) use self::preparation::{
-    cumulative_effective_prompt_objective, effective_prompt_objective_for_messages,
-};
+pub(crate) use self::preparation::effective_prompt_objective_for_messages;
 use self::preparation::{ensure_planning_current, selected_strategy_profile};
 #[cfg(test)]
 pub(crate) use self::requirements::{
@@ -53,7 +51,7 @@ use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRouteRequirements, AgentRunDecision,
     AgentRunDecisionHarness, AgentRunDecisionRequest, ConductorExecutionContract,
     ConductorPromptGenome, ExecutionPlan, ExecutionPlanDecisionReason, RoutingContext,
-    RoutingDecision, WorkflowPlanProposal,
+    RoutingDecision,
 };
 
 #[derive(Debug, Clone)]
@@ -70,7 +68,6 @@ pub(crate) struct PlannedAgentRun {
     pub(crate) attempted_conductor_models: Vec<String>,
     pub(crate) selected_conductor_model: Option<String>,
     pub(crate) route_requirements: AgentRouteRequirements,
-    pub(crate) workflow_plan: Option<WorkflowPlanProposal>,
 }
 
 pub(crate) struct AgentRunPlanningRequest<'a> {
@@ -175,7 +172,6 @@ pub(crate) fn plan_agent_run(
                 attempted_conductor_models: Vec::new(),
                 selected_conductor_model: None,
                 route_requirements,
-                workflow_plan: None,
                 budget_fingerprint,
                 recent_context: recent_context.clone(),
                 route_prompt_profile_sha256: route_prompt_profile_sha256.clone(),
@@ -218,7 +214,6 @@ pub(crate) fn plan_agent_run(
                 attempted_conductor_models: Vec::new(),
                 selected_conductor_model: None,
                 route_requirements,
-                workflow_plan: None,
                 budget_fingerprint,
                 recent_context: recent_context.clone(),
                 route_prompt_profile_sha256: route_prompt_profile_sha256.clone(),
@@ -249,7 +244,7 @@ pub(crate) fn plan_agent_run(
             &configured_conductor_models,
             run_context,
         );
-    let (historical_evidence, matched_collaboration_evidence) =
+    let historical_evidence =
         conductor_historical_evidence(state, &allowed_models).unwrap_or_default();
     let base_request = AgentRunDecisionRequest {
         objective: prompt.to_string(),
@@ -264,7 +259,6 @@ pub(crate) fn plan_agent_run(
         max_parallelism,
         evolved_directive: evolved_route_directive,
         historical_evidence,
-        matched_collaboration_evidence,
         required_execution: execution_constraint.conductor_required_execution(),
         route_requirements,
         execution_constraints: crate::agent_execution_constraint::execution_constraints_text(config.workflow_enabled),
@@ -326,7 +320,6 @@ pub(crate) fn plan_agent_run(
         source,
         mut decision_reason,
         degradation_reason,
-        workflow_plan,
     ) = match outcome {
         ConductorDecisionOutcome::Selected(draft) => {
             let source = requirements::selected_conductor_source(attempted_conductor_models.len());
@@ -337,7 +330,6 @@ pub(crate) fn plan_agent_run(
                 source,
                 ExecutionPlanDecisionReason::ConductorSelection,
                 None,
-                draft.workflow_plan,
             )
         }
         ConductorDecisionOutcome::Exhausted => {
@@ -365,7 +357,6 @@ pub(crate) fn plan_agent_run(
                 source,
                 ExecutionPlanDecisionReason::DegradedFallback,
                 Some(reason),
-                None,
             )
         }
     };
@@ -384,7 +375,7 @@ pub(crate) fn plan_agent_run(
     if execution_constraint.is_grounded_direct() {
         decision_reason = ExecutionPlanDecisionReason::RuntimeGroundedDirect;
         decision
-            .validate(&allowed_models, max_parallelism, false)
+            .validate(&allowed_models)
             .map_err(CollaborationStageError::Failed)?;
     } else if execution_constraint.is_matched_route() {
         decision_reason = ExecutionPlanDecisionReason::MatchedRouteEvaluation;
@@ -405,7 +396,6 @@ pub(crate) fn plan_agent_run(
             attempted_conductor_models,
             selected_conductor_model,
             route_requirements,
-            workflow_plan,
             budget_fingerprint,
             recent_context,
             route_prompt_profile_sha256,

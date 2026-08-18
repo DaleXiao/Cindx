@@ -3,32 +3,18 @@ use super::*;
 pub(crate) fn conductor_historical_evidence(
     state: &tauri::State<'_, AppState>,
     allowed_models: &[String],
-) -> Result<(String, std::sync::Arc<MatchedCollaborationEvidenceTeacher>), String> {
-    let (routing_telemetry, workflow_telemetry) = {
+) -> Result<String, String> {
+    let routing_telemetry = {
         let mut store = state
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        (
-            load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?,
-            load_workflow_telemetry_read_model(&mut store, allowed_models)
-                .map_err(|error| error.to_string())?,
-        )
+        load_routing_telemetry_read_model(&mut store).map_err(|error| error.to_string())?
     };
     let allowed = allowed_models
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let matched_teacher = MatchedCollaborationEvidenceTeacher::train(&workflow_telemetry);
-    let matched = matched_teacher
-        .calibrated_evidence()
-        .iter()
-        .filter(|evidence| {
-            evidence.pre_decision_context_fingerprint.is_empty()
-                && evidence.route_action_id.is_empty()
-        })
-        .take(CAUSAL_ROUTE_MAX_PROMPT_EVIDENCE_ROWS)
-        .map(|evidence| evidence.prompt_hint());
     let routes = LearnedModelRouter::train(&routing_telemetry)
         .calibrated_evidence()
         .into_iter()
@@ -54,8 +40,7 @@ pub(crate) fn conductor_historical_evidence(
                 route.average_latency_ms,
             )
         });
-    let evidence = matched.chain(routes).collect::<Vec<_>>();
-    Ok((evidence.join("\n"), std::sync::Arc::new(matched_teacher)))
+    Ok(routes.collect::<Vec<_>>().join("\n"))
 }
 
 pub(crate) fn parse_task_class_label(value: &str) -> Option<TaskClass> {

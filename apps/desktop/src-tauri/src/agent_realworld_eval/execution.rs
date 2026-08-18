@@ -16,7 +16,6 @@ use super::{
 use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
 use crate::app_state::AppState;
 use crate::collaboration_execution::complete_collaboration_model_with_control;
-use crate::collaboration_learning_eval_runtime::CollaborationLearningEvalPolicyInput;
 use crate::configuration_models::ProviderConfig;
 use crate::knowledge_commands::index_workspace_rag_blocking;
 use crate::runtime_values::unique_id;
@@ -40,7 +39,6 @@ pub(super) struct CaseExecutionInput<'a> {
     pub(super) run_budget: Option<RunBudget>,
     pub(super) execution_constraint: Option<AgentExecutionConstraint>,
     pub(super) matched_route_plan_anchor: Option<&'a MatchedRoutePlanAnchor>,
-    pub(super) collaboration_learning_policy: Option<&'a CollaborationLearningEvalPolicyInput>,
 }
 
 pub(super) fn execute_case(
@@ -61,7 +59,6 @@ pub(super) fn execute_case(
         run_budget,
         execution_constraint,
         matched_route_plan_anchor,
-        collaboration_learning_policy,
     } = input;
     let input_sha256 = case_input_sha256(case);
     let started = Instant::now();
@@ -382,7 +379,6 @@ pub(super) fn execute_case(
         run_budget,
         execution_constraint,
         matched_route_plan_anchor,
-        collaboration_learning_policy,
     );
     let output = product.state.latest_answer.clone().unwrap_or_default();
     let mut event_metrics = match collect_event_metrics(

@@ -137,12 +137,6 @@ pub(super) fn record_planned_agent_run(
                             "agent strategy receipt conflicts with a durable decision",
                         ));
                     }
-                    #[cfg(feature = "realworld-eval")]
-                    crate::collaboration_learning_eval_runtime::append_direct_assignment_if_enabled(
-                        store,
-                        task_id,
-                        &committed_context,
-                    )?;
                     return Ok(());
                 }
                 append_router_decision_event(
@@ -159,12 +153,6 @@ pub(super) fn record_planned_agent_run(
                     EventKind::TaskStatusChanged,
                     "Agent run decision selected",
                     metadata_with_context(decision_metadata, run_context),
-                )?;
-                #[cfg(feature = "realworld-eval")]
-                crate::collaboration_learning_eval_runtime::append_direct_assignment_if_enabled(
-                    store,
-                    task_id,
-                    &committed_context,
                 )?;
                 Ok(())
             })

@@ -47,7 +47,7 @@ pub(super) fn finalize_causal_route(
         Some(_) => {
             return Err("causal route receipt does not match its planning inputs".to_string())
         }
-        None => select_causal_route_v2(conductor_candidate, &snapshot, candidates, None, 0)?,
+        None => select_causal_route_v2(conductor_candidate, &snapshot, candidates, 0)?,
     };
     if source == AgentPlanningSource::FastDirect {
         receipt.reason = CausalRouteReason::FastPolicy;

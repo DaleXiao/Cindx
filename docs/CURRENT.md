@@ -68,37 +68,27 @@ and providers without catalog tier defaults keep the legacy role-slot behavior.
 Auto and Pro do not automatically run every configured model. One planning
 decision of the session model selects the route, model roles, retrieval needs,
 decomposition, and verification requirements in one validated execution plan.
-**Multi-model workflow collaboration is retired.** Natural workflow routing
-never triggered in production, every historical forced collaboration campaign
-closed no-go, invalid, or censored, and the owner decision is permanent
-retirement, not evidence-gated reconsideration. Production runs clamp any
-residual workflow decision to adaptive direct execution
-(`workflow_enabled=false`) and the planning prompt states this explicitly.
-The workflow execution machinery has been removed from the tree, and the clamp
-remains the defense-in-depth guarantee that no workflow can run. The run
-timeline presents planning steps as "Planning" / "Planning repair"; Conductor,
-Collaboration, Workflow, and GEPA semantics no longer appear in the product
-UI. Remaining `Conductor*` Rust identifiers are legacy internal naming for the
-planning contract and prompt profiles — there is no separate conductor model.
-
-One bounded read-only widening is available. When the prompt explicitly forbids
-all effects (`effect_authority=forbidden`), the planning decision may instead
-propose
-two read-only Specialist roots with distinct bounded subtasks and, optionally,
-one tool-free Verifier that is model-distinct from both and audits both roots.
-The owner-execution graph validator accepts the two-root shape only when the
-plan carries a harness-stamped read-only authorization, and it stays
-single-Specialist for every other authority or for any mutation-bearing graph.
-The widened graph remains read-only end to end; side effects still belong to the
-foreground Owner.
+**Multi-model workflow collaboration is retired and physically removed.**
+Natural workflow routing never triggered in production, every historical forced
+collaboration campaign closed no-go, invalid, or censored, and the owner
+decision is permanent retirement, not evidence-gated reconsideration. The
+workflow execution chain, the owner-execution graph validator (including the
+former read-only two-Specialist widening), and the GEPA campaign/evolution
+worker machinery have all been removed from the tree. A residual workflow
+decision fails closed, and the planning prompt states that workflow
+collaboration is retired. The run timeline presents planning steps as
+"Planning" / "Planning repair"; Conductor, Collaboration, Workflow, and GEPA
+semantics no longer appear in the product UI. Remaining `Conductor*` Rust
+identifiers are legacy internal naming for the planning contract and prompt
+profiles — there is no separate conductor model.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their planning budgets differ; their
-effect authority does not. Auto and Pro additionally default memory recall to
-`relevant` (keyed on the run prompt) whenever the planning decision declines
-memory entirely, so durable project memory participates in every non-trivial
-task; Fast keeps the planning decision's choice, and explicit
-Relevant/Comprehensive decisions are preserved.
+effect authority does not. There is no multi-model workflow lane. Auto and Pro
+additionally default memory recall to `relevant` (keyed on the run prompt)
+whenever the planning decision declines memory entirely, so durable project
+memory participates in every non-trivial task; Fast keeps the planning
+decision's choice, and explicit Relevant/Comprehensive decisions are preserved.
 
 The Finalizer role is retired: single-model sessions deliver through the
 actor, and a forced stop runs at most one toolless wrap-up turn of the same
@@ -126,12 +116,11 @@ facts are projected into a typed shadow outcome receipt
 capped fitness-signal journal; the channel is shadow-only, consumes no
 provider call, and is not admitted to routing, promotion, memory, canary, or
 serving. An independent review receipt binds the exact journal-window digest
-and an explicit decision; only its admission maps the window into a
-conservative prompt-evolution fitness shape that remains production- and
-promotion-ineligible. The prompt-evolution read path resolves that admitted
-window best-effort when `prompt_evolution.json` in the app support directory
-enables it (off by default), revalidating the receipt and window digest at
-every read; any failure falls back to no admitted signal. Grounding obligations also accept anchor-matched failed tool attempts
+and an explicit decision; its admission maps the window into a conservative,
+permanently production- and promotion-ineligible fitness shape. The prompt
+evolution consumption path has been removed, so the admitted window is inert
+measurement data with no production consumer. Grounding obligations also accept
+anchor-matched failed tool attempts
 as absent-target evidence, so a task whose requested workspace file does not
 exist fails closed on content but no longer spins through unsatisfiable
 grounding repairs.
@@ -231,26 +220,26 @@ Tool visibility does not grant authority.
 
 ## Prompt Evolution
 
-Prompt evolution is outside the foreground loop. Background workers consume
-redacted completed evidence, evaluate candidate profiles, and can publish a
-stable/canary deployment for future Auto or Pro runs only after typed train,
-holdout, safety, and lineage gates pass.
+Prompt evolution is retired. The background workers that consumed redacted
+completed evidence, evaluated candidate profiles, and published stable/canary
+deployments have been removed from the tree. Foreground runs now always resolve
+a seed prompt profile for their effort tier.
 
 Fast remains seed-only. A profile cannot broaden tool authority, permissions,
 context limits, or run budgets, and cannot alter an in-flight run. Missing,
 stale, invalid, or inconsistent deployment state fails closed to the seed
 profile.
 
-Continuous evolution spend is quarantined and the workflow collaboration path
-is retired. The Settings evolution panel and its toggle are removed from the
-UI, and the `set_prompt_evolution_enabled` command is retired with them. The
-persisted `prompt_evolution_enabled` flag stays for configuration
-compatibility but is no longer surfaced. The background evolution machinery
-remains in the tree in a quarantined state; its read path is default-off and
-nothing it produces can reach a foreground run without an explicit promotion
-gate. Current checked-in provider evidence does not show that a learned
-workflow or finalizer profile improves production quality, and no profile from
-the historical experiments was promoted.
+Continuous evolution spend is retired and the workflow collaboration path is
+retired. The Settings evolution panel and its toggle are removed from the UI,
+and the `set_prompt_evolution_enabled` command is retired with them. The
+background evolution machinery (campaign runtime, mutation, pairwise
+evaluation, learning outbox, canary/rollout, and distillation) has been
+physically removed from the tree; only inert prompt-profile seed serving and
+the shadow judge-outcome measurement plumbing remain. Current checked-in
+provider evidence does not show that a learned workflow or finalizer profile
+improves production quality, and no profile from the historical experiments was
+promoted.
 
 ## Current Evidence Boundary
 

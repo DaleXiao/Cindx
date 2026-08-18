@@ -872,88 +872,6 @@ pub(crate) struct RoutingTelemetryReadModel {
     pub(crate) entries: Vec<RoutingTelemetryEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkflowTelemetryEntry {
-    pub(crate) workflow_id: String,
-    pub(crate) telemetry: WorkflowExecutionTelemetry,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkflowTelemetryReadModel {
-    pub(crate) schema: String,
-    pub(crate) revision: u64,
-    pub(crate) event_count: u64,
-    pub(crate) model_pool_signature: String,
-    pub(crate) entries: Vec<WorkflowTelemetryEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PromptGenomeRecord {
-    #[serde(default)]
-    pub(crate) scope: String,
-    pub(crate) effort: String,
-    pub(crate) genome: ConductorPromptGenome,
-    #[serde(default)]
-    pub(crate) evolution_method: Option<PromptEvolutionMethod>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PromptOfflineDatasetState {
-    pub(crate) effort: String,
-    pub(crate) project_id: String,
-    pub(crate) digest: String,
-    #[serde(default)]
-    pub(crate) identity: Option<PromptDatasetIdentityV1>,
-    #[serde(default)]
-    pub(crate) generation: u32,
-    #[serde(default)]
-    pub(crate) case_ids: Vec<String>,
-    pub(crate) case_count: usize,
-    pub(crate) train_count: usize,
-    pub(crate) holdout_count: usize,
-    pub(crate) selected_case_id: Option<String>,
-    pub(crate) status: String,
-    pub(crate) updated_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PromptEvaluationAttemptState {
-    pub(crate) started: PromptEvaluationAttemptEventV1,
-    pub(crate) terminal: Option<PromptEvaluationAttemptEventV1>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PromptFailureCurriculumRecord {
-    pub(crate) scope: String,
-    pub(crate) effort: String,
-    pub(crate) receipt: PromptFailureCurriculumReceiptV1,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PromptEvolutionReadModel {
-    pub(crate) schema: String,
-    #[serde(default)]
-    pub(crate) projection_version: u32,
-    pub(crate) revision: u64,
-    pub(crate) event_count: u64,
-    pub(crate) genomes: Vec<PromptGenomeRecord>,
-    #[serde(default)]
-    pub(crate) genome_identity_fingerprints: BTreeMap<String, String>,
-    pub(crate) observations: Vec<(String, PromptEvolutionObservation)>,
-    #[serde(default)]
-    pub(crate) failure_curricula: Vec<PromptFailureCurriculumRecord>,
-    #[serde(default)]
-    pub(crate) attempts: BTreeMap<String, PromptEvaluationAttemptState>,
-    #[serde(default)]
-    pub(crate) cohorts: BTreeMap<String, PromptLearningCohortV1>,
-    #[serde(default)]
-    pub(crate) cohort_sequences: BTreeMap<String, u64>,
-    #[serde(default)]
-    pub(crate) rollouts: BTreeMap<String, PromptRolloutState>,
-    #[serde(default)]
-    pub(crate) datasets: BTreeMap<String, PromptOfflineDatasetState>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PromptDistillationCanaryLeaseV1 {
     pub(crate) schema: String,
@@ -963,27 +881,6 @@ pub(crate) struct PromptDistillationCanaryLeaseV1 {
     pub(crate) stable_profile_sha256: String,
     pub(crate) cohort_sha256: String,
     pub(crate) paired_evidence_sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct PromptRolloutState {
-    pub(crate) stable_profile_id: String,
-    pub(crate) canary_profile_id: Option<String>,
-    pub(crate) canary_percent: u8,
-    pub(crate) evidence_checkpoint: usize,
-    pub(crate) live_checkpoint: usize,
-    #[serde(default)]
-    pub(crate) stable_live_checkpoint: usize,
-    #[serde(default)]
-    pub(crate) quarantined_profile_ids: Vec<String>,
-    #[serde(default)]
-    pub(crate) distillation_lease: Option<PromptDistillationCanaryLeaseV1>,
-    pub(crate) rollback_count: usize,
-    pub(crate) status: String,
-    pub(crate) last_reason: Option<String>,
-    pub(crate) promotion_confidence: Option<f64>,
-    #[serde(default)]
-    pub(crate) frozen_profile: Option<FrozenPromptProfileSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]

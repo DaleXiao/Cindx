@@ -48,6 +48,7 @@ pub(crate) struct CollaborationEvidence {
     pub(crate) output: String,
 }
 impl CollaborationCompletion {
+    #[cfg(test)]
     pub(crate) fn completed_worker(
         content: String,
         latency_ms: u64,
@@ -59,23 +60,6 @@ impl CollaborationCompletion {
             partial_content: None,
             error: None,
             failure: None,
-            latency_ms,
-            usage,
-            evidence,
-        }
-    }
-    pub(crate) fn failed_worker(
-        failure: AgentFailure,
-        partial_content: Option<String>,
-        latency_ms: u64,
-        usage: Metadata,
-        evidence: Vec<CollaborationEvidence>,
-    ) -> Self {
-        Self {
-            content: None,
-            partial_content,
-            error: Some(failure.message.clone()),
-            failure: Some(failure),
             latency_ms,
             usage,
             evidence,
@@ -135,28 +119,4 @@ pub(crate) fn collaboration_recent_context(history: &[Message]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-#[cfg(test)]
-mod grounding_receipt_tests {
-    use super::*;
-
-    fn evidence(
-        schema: &str,
-        epoch: Option<u64>,
-        status: &str,
-        tool_name: &str,
-        call_id: &str,
-    ) -> CollaborationEvidence {
-        CollaborationEvidence {
-            evidence_schema: schema.to_string(),
-            steer_epoch: epoch,
-            collaboration_id: "collaboration-1".to_string(),
-            source_step: "inspect".to_string(),
-            tool_call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            request: r#"{"path":"README.md"}"#.to_string(),
-            status: status.to_string(),
-            output: "runtime observation".to_string(),
-        }
-    }
 }

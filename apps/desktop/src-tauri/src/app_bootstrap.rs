@@ -163,7 +163,6 @@ pub fn run() -> Result<(), String> {
             }
             schedule_main_window_reveal_fallback(app.handle().clone());
             start_schedule_runner(app.handle().clone());
-            start_prompt_evolution_worker(app.handle().clone());
             start_tool_event_metadata_compaction();
             Ok(())
         })

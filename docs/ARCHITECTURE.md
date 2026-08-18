@@ -11,7 +11,7 @@ React UI
   -> typed Tauri adapter
   -> desktop commands and composition root
   -> application driver
-  -> execution plan + optional workflow
+  -> single-model execution plan
   -> agent kernel
   -> model observations and permission-gated tools
   -> SQLite events, state, artifacts, memory, and retrieval indexes
@@ -73,7 +73,7 @@ legacy and are not reclassified from display strings.
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, system-prompt composition, model-turn and tool-runtime semantics |
 | `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
-| `orchestrator` | Conductor execution contracts, run decisions, workflows, task graph, verification, direct-delivery judge contracts, routing evidence, and prompt-evolution policy |
+| `orchestrator` | Planning execution contracts, run decisions, verification, direct-delivery judge contracts, routing evidence, and prompt-genome policy types |
 | `orchestrator-eval` | Non-default evaluation and Fugu comparison contracts |
 | `agent-memory` | Memory records, retention, recall, utility attribution, and deterministic curation contracts |
 | `agent-rag` | Workspace indexing, file adapter, semantic retrieval, and vector-store integration |
@@ -98,8 +98,7 @@ changing product behavior:
 - Permission UI, platform commands, sidecars, and effect execution.
 - Session/project lifecycle, attachments, outputs, schedules, voice, and native
   open/reveal operations.
-- Foreground orchestration glue, workflow checkpoints, memory workers, and
-  prompt-evolution workers.
+- Foreground orchestration glue and memory workers.
 
 This layer is not yet a thin adapter. `src/lib.rs` declares and imports a large
 set of sibling modules, and several workflows still cross desktop services by
@@ -164,50 +163,14 @@ The desktop adapter coordinates provider embeddings, background queues, and
 state persistence. Retrieved data retains source provenance and does not mutate
 canonical chat history.
 
-### 4. Optional workflow and task graph
+### 4. No workflow lane
 
-`orchestrator` materializes a fixed owner-execution graph only for a validated
-Workflow decision: one dependency-free Analysis or Evidence Specialist,
-optionally one tool-free and model-distinct Independent Verifier, and one final
-compatibility sink. The Specialist receives only its admitted read-only catalog.
-Side effects remain with the foreground Owner.
-
-One bounded widening exists for the read-only request class. When preparation
-persisted a forbidden prompt effect authority (`route_effect_authority =
-forbidden`), the Conductor may propose two dependency-free read-only Specialist
-roots with distinct bounded subtasks, optionally one tool-free Verifier that is
-model-distinct from both and audits exactly both roots, and the same final
-tool-free sink depending on the Verifier or on both roots. The materializing
-harness stamps `parallel_read_only_specialists` on the plan only under that
-authorization and only when the materialized graph actually carries two roots;
-owner-graph validation reads the stamp from the plan itself, so checkpoint
-restore and Owner handoff stay fail-closed without external context. Any other
-authority, a missing receipt, or a graph carrying mutations keeps the
-single-Specialist invariant and rejects a second Specialist. Both roots
-schedule within the contract branch budget in the anytime controller.
-
-A completed verification verdict of `needs_revision` opens at most one bounded
-repair round through `WorkflowExecutionCheckpoint::begin_verification_repair`:
-the audited steps return to a pending state under one additional granted model
-turn, the revision receipt stays readable for repair prompting, and the same
-verification step is then rechecked once. A second revision verdict exhausts the
-one-repair budget and leaves verification unsatisfied. The adaptive frontier
-requeues the audited and verification candidates in the anytime controller and
-injects the unresolved findings into the repaired worker prompt before the
-recheck wave runs.
-
-The final sink is not a model Actor. The runtime completes it deterministically
-from the checkpoint after its dependency succeeds, preserving step identity,
-input and output digests, evidence lineage, resume identity, and typed
-verification receipts. The resulting packet is untrusted internal guidance;
-the Owner independently reconciles it and owns final delivery. Missing,
-malformed, failed, or required-but-unsatisfied verification rejects the handoff
-and falls through to the direct Owner path. Checkpoint loading separates an
-executable resume from an untrusted Owner-only handoff: retired models and a
-legacy final sink that already consumed a model attempt are never scheduled,
-while completed outputs remain available as partial context. The production
-graph has no direct anchor competition, reviewer tournament, model synthesis,
-uplift repair, or second Conductor planner.
+Multi-model workflow collaboration has been physically removed. There is no
+owner-execution graph materializer, no workflow checkpoint, no read-only
+Specialist/Verifier widening, and no verification-repair wave. Every run is a
+single-model Owner execution; the planning decision validates route, retrieval,
+and verification requirements, and the foreground Owner owns all effects and
+final delivery. A residual workflow decision fails closed rather than executing.
 
 ### 5. Kernel and effects
 
@@ -451,19 +414,18 @@ be rebuilt; a cache publication failure cannot rewrite the scientific outcome.
 
 ## Prompt Evolution Boundary
 
-Prompt evolution observes completed, redacted evidence. `orchestrator` owns
-candidate schemas, comparison, promotion gates, and rollout policy; desktop
-workers own provider calls, durable campaign state, and publication.
+Prompt evolution is retired. The campaign runtime, mutation, pairwise
+evaluation, learning outbox, canary/rollout, and distillation machinery have
+been removed from both `orchestrator` (policy/worker) and the desktop crate
+(provider calls, durable campaign state, and publication). `orchestrator`
+retains prompt-genome schema types and seed definitions only; the desktop
+retains seed-only prompt-profile serving and the shadow direct-judge outcome
+journal.
 
-Goal 3B collaboration candidates are not prompt-evolution candidates. They are
-shadow/offline admission records owned by `agent-application`; keeping that
-dependency direction prevents the production prompt selector from consuming
-them implicitly.
-
-A deployed profile is selected once per logical run, is stable across retries,
-and cannot alter permissions, tools, or budgets. Fast is seed-only. Missing or
-invalid deployment state falls back to seed. Evaluation harnesses are not
-serving authority.
+A run resolves its seed prompt profile once per logical run, stable across
+retries. A profile cannot alter permissions, tools, or budgets. Missing or
+invalid deployment state falls back to seed. There is no longer any machinery
+that can publish or promote a learned profile.
 
 ## Dependency Rules
 

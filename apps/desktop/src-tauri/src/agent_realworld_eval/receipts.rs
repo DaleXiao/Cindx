@@ -7,7 +7,7 @@ use agent_application::{AgentStrategyDecisionReceipt, AgentTerminalCommitIdentit
 #[cfg(test)]
 use agent_core::EventTypeV1;
 use agent_core::{Event, EventKind};
-use orchestrator::{ExecutionPlan, WorkflowPlanIr, WorkflowPlanProposal};
+use orchestrator::{prompt_genome_sha256, ExecutionPlan, FrozenPromptProfileSnapshot};
 use std::collections::BTreeSet;
 
 const PROVIDER_RESPONSE_ID_DOMAIN: &str = "cindx.provider-response-id.v1\0";
@@ -342,138 +342,9 @@ pub(super) fn strategy_receipt_from_events_with_constraint(
     let matched_direct_anchor =
         expected_execution_constraint == Some(AgentExecutionConstraint::MatchedDirect);
     if decision.execution == orchestrator::AgentExecutionMode::Workflow {
-        let encoded = workflow_proposal
-            .ok_or_else(|| "workflow strategy receipt is missing its route proposal".to_string())?;
-        let proposal = serde_json::from_str::<WorkflowPlanProposal>(encoded)
-            .map_err(|error| format!("workflow strategy proposal is invalid: {error}"))?;
-        let proposal_models = proposal
-            .steps
-            .iter()
-            .map(|step| step.model.trim().to_string())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        proposal.validate_v1(&decision, &proposal_models)?;
-        let expected_proposal_sha256 = sha256_hex(encoded.as_bytes());
-        if workflow_proposal_sha256.as_deref() != Some(expected_proposal_sha256.as_str())
-            || declared_workflow_plan_source.as_deref() != Some("run_decision")
-        {
-            return Err("workflow strategy proposal receipt is inconsistent".to_string());
-        }
-        if expected_execution_constraint.is_some_and(AgentExecutionConstraint::is_matched_route) {
-            let plan = execution_plan.as_ref().ok_or_else(|| {
-                "matched Workflow execution plan is missing from its strategy receipt".to_string()
-            })?;
-            matched_route_plan_anchor = Some(MatchedRoutePlanAnchor::new(
-                plan.conductor_candidate.clone(),
-                plan.compatibility_route.clone(),
-                proposal.clone(),
-            )?);
-        }
-
-        if let Some((planned_index, planned)) = events
-            .iter()
-            .enumerate()
-            .skip(decision_index.saturating_add(1))
-            .find(|(_, event)| event.summary == "Collaboration workflow planned")
-        {
-            let encoded_plan = required_metadata(&planned.metadata, "workflow_ir")?;
-            let plan = serde_json::from_str::<WorkflowPlanIr>(encoded_plan)
-                .map_err(|error| format!("materialized workflow receipt is invalid: {error}"))?;
-            let plan_models = plan
-                .steps
-                .iter()
-                .map(|step| step.model.trim().to_string())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            plan.validate(&plan_models)?;
-            let source = required_metadata(&planned.metadata, "conductor_source")?;
-            if source == "run_decision_proposal"
-                && !workflow_plan_matches_proposal(&plan, &proposal)
-            {
-                return Err(
-                    "materialized workflow does not match its run-decision proposal".to_string(),
-                );
-            }
-            workflow_plan_source = Some(
-                if source == "run_decision_proposal" {
-                    "run_decision"
-                } else {
-                    source
-                }
-                .to_string(),
-            );
-            workflow_plan_sha256 = Some(sha256_hex(encoded_plan.as_bytes()));
-            workflow_step_count = plan.steps.len();
-            workflow_root_roles = plan
-                .steps
-                .iter()
-                .filter(|step| step.access.is_empty())
-                .map(|step| step.role.clone())
-                .collect();
-            workflow_verifier_steps = plan
-                .steps
-                .iter()
-                .filter(|step| {
-                    step.contract.output_kind == orchestrator::WorkflowOutputKind::Verification
-                })
-                .count();
-            workflow_synthesis_steps = plan
-                .steps
-                .iter()
-                .filter(|step| {
-                    step.contract.output_kind == orchestrator::WorkflowOutputKind::Synthesis
-                })
-                .count();
-            workflow_profile_exercised = planned.metadata.get("prompt_profile") == Some(&genome.id);
-            let collaboration_id = planned.metadata.get("collaboration_id");
-            workflow_execution_completed =
-                events
-                    .iter()
-                    .skip(planned_index.saturating_add(1))
-                    .any(|event| {
-                        event.summary == "Collaboration workflow completed"
-                            && event.metadata.get("collaboration_id") == collaboration_id
-                    });
-        }
-    } else if matched_direct_anchor {
-        let encoded = workflow_proposal.ok_or_else(|| {
-            "matched Direct receipt is missing its shared workflow proposal anchor".to_string()
-        })?;
-        let proposal = serde_json::from_str::<WorkflowPlanProposal>(encoded)
-            .map_err(|error| format!("matched Direct workflow anchor is invalid: {error}"))?;
-        let candidate = execution_plan
-            .as_ref()
-            .map(|plan| &plan.conductor_candidate)
-            .ok_or_else(|| "matched Direct execution plan is missing".to_string())?;
-        if candidate.execution != orchestrator::AgentExecutionMode::Workflow {
-            return Err("matched Direct conductor anchor is not a workflow".to_string());
-        }
-        let proposal_models = proposal
-            .steps
-            .iter()
-            .map(|step| step.model.trim().to_string())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        proposal.validate_v1(candidate, &proposal_models)?;
-        let expected_proposal_sha256 = sha256_hex(encoded.as_bytes());
-        if workflow_proposal_sha256.as_deref() != Some(expected_proposal_sha256.as_str())
-            || declared_workflow_plan_source.as_deref() != Some("run_decision")
-        {
-            return Err("matched Direct workflow anchor receipt is inconsistent".to_string());
-        }
-        matched_route_plan_anchor = Some(MatchedRoutePlanAnchor::new(
-            candidate.clone(),
-            execution_plan
-                .as_ref()
-                .expect("matched Direct execution plan was required above")
-                .compatibility_route
-                .clone(),
-            proposal,
-        )?);
-    } else if workflow_proposal.is_some()
+        return Err("workflow execution is retired".to_string());
+    }
+    if workflow_proposal.is_some()
         || workflow_proposal_sha256.is_some()
         || declared_workflow_plan_source.is_some()
     {
@@ -610,27 +481,6 @@ fn validate_execution_constraint_receipt(
     }
 }
 
-fn workflow_plan_matches_proposal(plan: &WorkflowPlanIr, proposal: &WorkflowPlanProposal) -> bool {
-    plan.steps.len() == proposal.steps.len()
-        && plan
-            .steps
-            .iter()
-            .zip(&proposal.steps)
-            .all(|(materialized, proposed)| {
-                materialized.id == proposed.id.trim()
-                    && materialized.role == proposed.role.trim().to_ascii_lowercase()
-                    && materialized.model == proposed.model.trim()
-                    && materialized.subtask == proposed.subtask.trim()
-                    && materialized.access
-                        == proposed
-                            .access
-                            .iter()
-                            .map(|dependency| dependency.trim().to_string())
-                            .collect::<Vec<_>>()
-                    && materialized.tool_policy == proposed.tool_policy
-                    && materialized.contract.output_kind == proposed.output_kind
-            })
-}
 
 pub(crate) fn model_receipts_from_metadata(
     metadata: &Metadata,
@@ -770,11 +620,7 @@ mod tests {
         insert_event_type_v1, AgentActor, AgentEffectAuthority, AgentModelAttribution,
         AgentModelProfile, AgentService, AgentStage, EventId, TaskId,
     };
-    use orchestrator::{
-        AgentExecutionMode, AgentVerificationPolicy, WorkflowBudget, WorkflowCompletionCriteria,
-        WorkflowOutputKind, WorkflowPlanIr, WorkflowPlanProposal, WorkflowPlanProposalStep,
-        WorkflowPlanStep, WorkflowStepContract, WorkflowToolPolicy, WORKFLOW_IR_SCHEMA,
-    };
+    use orchestrator::ModelCapabilitySource;
 
     fn event(summary: &str, kind: EventKind, metadata: Metadata) -> Event {
         Event {
@@ -957,49 +803,8 @@ mod tests {
         ])
     }
 
-    fn workflow_strategy_metadata() -> Metadata {
-        let mut decision = AgentRunDecision::direct("configured-model");
-        decision.execution = AgentExecutionMode::Workflow;
-        decision.verification = AgentVerificationPolicy::SelfCheck;
-        decision.max_parallelism = 2;
-        decision.min_successful_branches = 2;
-        decision.distinct_contributions = 2;
-        decision.estimated_steps = 3;
-        decision.expected_uplift_bps = 4_000;
-        decision.confidence_bps = 8_000;
-        decision.stop_policy = ConductorStopPolicy::Quorum;
-        let proposal = WorkflowPlanProposal {
-            steps: vec![
-                WorkflowPlanProposalStep {
-                    id: "analysis".to_string(),
-                    role: "analyst".to_string(),
-                    model: "configured-model".to_string(),
-                    subtask: "derive the primary solution".to_string(),
-                    access: Vec::new(),
-                    output_kind: WorkflowOutputKind::Analysis,
-                    tool_policy: WorkflowToolPolicy::None,
-                },
-                WorkflowPlanProposalStep {
-                    id: "counterexample".to_string(),
-                    role: "critic".to_string(),
-                    model: "configured-model".to_string(),
-                    subtask: "search for an independent counterexample".to_string(),
-                    access: Vec::new(),
-                    output_kind: WorkflowOutputKind::Verification,
-                    tool_policy: WorkflowToolPolicy::None,
-                },
-                WorkflowPlanProposalStep {
-                    id: "synthesis".to_string(),
-                    role: "synthesizer".to_string(),
-                    model: "configured-model".to_string(),
-                    subtask: "reconcile both contributions".to_string(),
-                    access: vec!["analysis".to_string(), "counterexample".to_string()],
-                    output_kind: WorkflowOutputKind::Synthesis,
-                    tool_policy: WorkflowToolPolicy::None,
-                },
-            ],
-        };
-        let encoded_proposal = serde_json::to_string(&proposal).unwrap();
+    fn direct_strategy_metadata() -> Metadata {
+        let decision = AgentRunDecision::direct("configured-model");
         let genome = ConductorPromptGenome::seed_for_effort("pro");
         Metadata::from([
             (
@@ -1025,158 +830,27 @@ mod tests {
                 "routing_signature".to_string(),
                 decision.learning_signature(),
             ),
-            (
-                "conductor_workflow_proposal_sha256".to_string(),
-                sha256_hex(encoded_proposal.as_bytes()),
-            ),
-            ("conductor_workflow_proposal".to_string(), encoded_proposal),
-            (
-                "conductor_workflow_plan_source".to_string(),
-                "run_decision".to_string(),
-            ),
         ])
     }
 
-    fn workflow_strategy_events(metadata: &Metadata) -> Vec<Event> {
-        workflow_strategy_events_for_epoch(metadata, 0)
+    fn direct_strategy_events(metadata: &Metadata) -> Vec<Event> {
+        direct_strategy_events_for_epoch(metadata, 0)
     }
 
-    fn workflow_strategy_events_for_epoch(metadata: &Metadata, steer_epoch: u64) -> Vec<Event> {
-        let proposal = serde_json::from_str::<WorkflowPlanProposal>(
-            metadata.get("conductor_workflow_proposal").unwrap(),
-        )
-        .unwrap();
-        let genome =
-            serde_json::from_str::<ConductorPromptGenome>(metadata.get("prompt_genome").unwrap())
-                .unwrap();
-        let plan = WorkflowPlanIr {
-            schema: WORKFLOW_IR_SCHEMA.to_string(),
-            workflow_id: "workflow-receipt-test".to_string(),
-            objective: "test the bound workflow receipt".to_string(),
-            effort: "pro".to_string(),
-            policy: "best_of_n".to_string(),
-            coordinator_model: "configured-model".to_string(),
-            prompt_profile: genome.id.clone(),
-            parallel_read_only_specialists: false,
-            steps: proposal
-                .steps
-                .iter()
-                .map(|step| WorkflowPlanStep {
-                    id: step.id.clone(),
-                    role: step.role.clone(),
-                    model: step.model.clone(),
-                    subtask: step.subtask.clone(),
-                    access: step.access.clone(),
-                    tool_policy: step.tool_policy,
-                    contract: WorkflowStepContract {
-                        input_steps: step.access.clone(),
-                        output_kind: step.output_kind.clone(),
-                        completion: WorkflowCompletionCriteria::default(),
-                    },
-                })
-                .collect(),
-            budget: WorkflowBudget {
-                max_steps: 3,
-                max_models: 1,
-                max_model_turns_per_step: 1,
-                max_tool_calls_per_step: 1,
-                max_output_tokens_per_step: 1_024,
-            },
-        };
+    fn direct_strategy_events_for_epoch(metadata: &Metadata, steer_epoch: u64) -> Vec<Event> {
         with_completed_strategy_lifecycle_for_epoch(
-            vec![
-                event(
-                    "Agent run decision selected",
-                    EventKind::TaskStatusChanged,
-                    metadata.clone(),
-                ),
-                event(
-                    "Collaboration workflow planned",
-                    EventKind::TaskStatusChanged,
-                    Metadata::from([
-                        ("workflow_ir".to_string(), plan.to_json().unwrap()),
-                        (
-                            "conductor_source".to_string(),
-                            "run_decision_proposal".to_string(),
-                        ),
-                        ("prompt_profile".to_string(), genome.id),
-                        (
-                            "collaboration_id".to_string(),
-                            "workflow-receipt-test".to_string(),
-                        ),
-                    ]),
-                ),
-                event(
-                    "Collaboration workflow completed",
-                    EventKind::TaskStatusChanged,
-                    Metadata::from([(
-                        "collaboration_id".to_string(),
-                        "workflow-receipt-test".to_string(),
-                    )]),
-                ),
-            ],
+            vec![event(
+                "Agent run decision selected",
+                EventKind::TaskStatusChanged,
+                metadata.clone(),
+            )],
             steer_epoch,
         )
     }
 
     #[test]
-    fn workflow_strategy_receipt_binds_the_route_proposal() {
-        let metadata = workflow_strategy_metadata();
-        let events = workflow_strategy_events(&metadata);
-        let receipt = strategy_receipt_from_events(&events, Treatment::Pro, None)
-            .expect("strategy receipt")
-            .expect("product strategy");
-
-        assert_eq!(receipt.execution_mode, "workflow");
-        assert_eq!(
-            receipt.workflow_plan_source.as_deref(),
-            Some("run_decision")
-        );
-        assert_eq!(
-            receipt.workflow_proposal_sha256.as_ref(),
-            metadata.get("conductor_workflow_proposal_sha256")
-        );
-        assert!(receipt.workflow_plan_sha256.is_some());
-        assert_eq!(receipt.workflow_step_count, 3);
-        assert_eq!(receipt.workflow_root_roles, ["analyst", "critic"]);
-        assert_eq!(receipt.workflow_verifier_steps, 1);
-        assert_eq!(receipt.workflow_synthesis_steps, 1);
-        assert!(receipt.workflow_execution_completed);
-        assert!(receipt.workflow_profile_exercised);
-
-        let mut fallback_events = events.clone();
-        fallback_events[1].metadata.insert(
-            "conductor_source".to_string(),
-            "model_cold_start".to_string(),
-        );
-        let fallback_receipt = strategy_receipt_from_events(&fallback_events, Treatment::Pro, None)
-            .expect("fallback strategy receipt")
-            .expect("product strategy");
-        assert_eq!(
-            fallback_receipt.workflow_plan_source.as_deref(),
-            Some("model_cold_start")
-        );
-
-        let mut tampered = metadata;
-        tampered.insert(
-            "conductor_workflow_proposal_sha256".to_string(),
-            "0".repeat(64),
-        );
-        let tampered_events = with_completed_strategy_lifecycle(vec![event(
-            "Agent run decision selected",
-            EventKind::TaskStatusChanged,
-            tampered,
-        )]);
-        assert!(
-            strategy_receipt_from_events(&tampered_events, Treatment::Pro, None,)
-                .expect_err("tampered proposal receipt must fail closed")
-                .contains("proposal receipt is inconsistent")
-        );
-    }
-
-    #[test]
     fn agent_strategy_lifecycle_contract_evidence_fails_closed() {
-        let events = workflow_strategy_events(&workflow_strategy_metadata());
+        let events = direct_strategy_events(&direct_strategy_metadata());
 
         let mut missing_terminal = events.clone();
         missing_terminal.pop();
@@ -1210,15 +884,15 @@ mod tests {
 
     #[test]
     fn agent_strategy_lifecycle_contract_scopes_decisions_to_the_terminal_epoch() {
-        let metadata = workflow_strategy_metadata();
-        let mut events = workflow_strategy_events_for_epoch(&metadata, 1);
-        let previous_decision = workflow_strategy_events_for_epoch(&metadata, 0).remove(0);
+        let metadata = direct_strategy_metadata();
+        let mut events = direct_strategy_events_for_epoch(&metadata, 1);
+        let previous_decision = direct_strategy_events_for_epoch(&metadata, 0).remove(0);
         events.insert(0, previous_decision);
         strategy_receipt_from_events(&events, Treatment::Pro, None)
             .expect("a prior steer epoch must not invalidate the terminal epoch")
             .expect("product strategy");
 
-        let mut duplicate_terminal = workflow_strategy_events(&metadata);
+        let mut duplicate_terminal = direct_strategy_events(&metadata);
         let mut unlinked = duplicate_terminal.last().unwrap().clone();
         unlinked
             .metadata
@@ -1234,7 +908,7 @@ mod tests {
                 .contains("duplicate terminal receipts")
         );
 
-        let mut cross_run_terminal = workflow_strategy_events(&metadata);
+        let mut cross_run_terminal = direct_strategy_events(&metadata);
         let mut other_run = cross_run_terminal.last().unwrap().clone();
         other_run
             .metadata
@@ -1253,7 +927,7 @@ mod tests {
                 .contains("duplicate terminal receipts")
         );
 
-        let mut out_of_order = workflow_strategy_events(&metadata);
+        let mut out_of_order = direct_strategy_events(&metadata);
         let decision_sequence = out_of_order[0].sequence;
         out_of_order.last_mut().unwrap().sequence = decision_sequence;
         let ordering_error = strategy_receipt_from_events(&out_of_order, Treatment::Pro, None)
@@ -1492,141 +1166,6 @@ mod tests {
             orchestrator::AgentExecutionMode::Direct,
         )
         .is_err());
-    }
-
-    #[test]
-    fn agent_execution_graph_contract_counts_every_model_stage_without_reclassification() {
-        let mut events = Vec::new();
-        events.extend(attributed_model_events(
-            "conductor",
-            1,
-            AgentModelAttribution::service(
-                AgentService::Conductor,
-                AgentStage::Plan,
-                AgentModelProfile::Reasoning,
-            ),
-            "conductor-model",
-            "conductor",
-            None,
-        ));
-        let mut decision = event(
-            "Agent run decision selected",
-            EventKind::TaskStatusChanged,
-            Metadata::from([("execution_plan_semantic_sha256".to_string(), "a".repeat(64))]),
-        );
-        decision.sequence = 3;
-        events.push(decision);
-        events.extend(attributed_model_events(
-            "owner",
-            4,
-            AgentModelAttribution::actor(
-                AgentActor::Owner,
-                AgentStage::Act,
-                AgentModelProfile::Primary,
-                AgentEffectAuthority::PermissionGated,
-            ),
-            "owner-model",
-            "foreground_agent",
-            None,
-        ));
-        let mut planned = event(
-            "Collaboration workflow planned",
-            EventKind::TaskStatusChanged,
-            Metadata::from([(
-                "collaboration_id".to_string(),
-                "workflow-exposure".to_string(),
-            )]),
-        );
-        planned.sequence = 6;
-        events.push(planned);
-        let mut specialist_events = attributed_model_events(
-            "specialist",
-            7,
-            AgentModelAttribution::actor(
-                AgentActor::Specialist,
-                AgentStage::Act,
-                AgentModelProfile::Reasoning,
-                AgentEffectAuthority::ReadOnly,
-            ),
-            "specialist-model",
-            "analysis",
-            Some("workflow-exposure"),
-        );
-        specialist_events[1]
-            .metadata
-            .insert("worker_model_responses".to_string(), "3".to_string());
-        events.extend(specialist_events);
-        events.extend(attributed_model_events(
-            "verifier",
-            9,
-            AgentModelAttribution::actor(
-                AgentActor::IndependentVerifier,
-                AgentStage::Verify,
-                AgentModelProfile::Verifier,
-                AgentEffectAuthority::ReadOnly,
-            ),
-            "verifier-model",
-            "verification",
-            Some("workflow-exposure"),
-        ));
-        let mut completed = event(
-            "Collaboration workflow completed",
-            EventKind::TaskStatusChanged,
-            Metadata::from([(
-                "collaboration_id".to_string(),
-                "workflow-exposure".to_string(),
-            )]),
-        );
-        completed.sequence = 13;
-        events.push(completed);
-        events = with_completed_strategy_lifecycle(events);
-        for event in &mut events {
-            event
-                .metadata
-                .entry("agent_run_id".to_string())
-                .or_insert_with(|| "run-receipt".to_string());
-            event
-                .metadata
-                .entry("steer_epoch".to_string())
-                .or_insert_with(|| "0".to_string());
-        }
-
-        let exposure = treatment_exposure_from_events(&events).unwrap();
-        assert_eq!(exposure.logical_model_calls, 6);
-        assert_eq!(exposure.worker_model_calls, 2);
-        assert_eq!(exposure.successful_conductor_model_calls, 1);
-        assert_eq!(exposure.successful_owner_model_calls, 1);
-        assert_eq!(exposure.successful_specialist_model_calls, 1);
-        assert_eq!(exposure.successful_independent_verifier_model_calls, 1);
-        assert_eq!(exposure.successful_workflow_specialist_model_calls, 1);
-        assert_eq!(exposure.successful_workflow_verifier_model_calls, 1);
-        assert_eq!(
-            exposure.successful_workflow_specialist_models,
-            BTreeSet::from(["specialist-model".to_string()])
-        );
-        assert_eq!(
-            exposure.successful_workflow_verifier_models,
-            BTreeSet::from(["verifier-model".to_string()])
-        );
-        assert_eq!(exposure.direct_anchor_competition_calls, 0);
-        assert_eq!(exposure.non_owner_permission_gated_calls, 0);
-        assert!(exposure.workflow_planned);
-        assert!(exposure.workflow_completed);
-
-        let mut changed_attribution = events.clone();
-        changed_attribution
-            .iter_mut()
-            .find(|event| {
-                event.kind == EventKind::ModelRequestFinished
-                    && event.metadata.get("request_id").map(String::as_str) == Some("owner")
-            })
-            .unwrap()
-            .metadata
-            .insert(
-                agent_core::AGENT_ATTRIBUTION_COMPONENT_METADATA_KEY.to_string(),
-                "changed".to_string(),
-            );
-        assert!(treatment_exposure_from_events(&changed_attribution).is_err());
     }
 
     #[test]

@@ -482,7 +482,7 @@ mod tests {
             },
             &models,
         );
-        select_causal_route_v2(candidate, &snapshot, &models, None, 0).expect("route receipt")
+        select_causal_route_v2(candidate, &snapshot, &models, 0).expect("route receipt")
     }
 
     #[test]

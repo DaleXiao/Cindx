@@ -86,19 +86,12 @@ node scripts/run-quality-gates.mjs \
 
 The `ci-contract`, `control-plane`, and `full` profiles include the
 `agent-strategy-lifecycle-contract`, `agent-strategy-control-contract`, and
-`agent-terminal-lifecycle-contract` gates. They also include the
-`agent-execution-graph-contract`, which projects typed model attribution to
-prove that matched Direct exposes no workflow worker while matched Workflow
-completes exactly one read-only Specialist and its optional planned Independent
-Verifier. When present, the actual Verifier attribution must use a different
-configured model from the Specialist. The gate also proves the read-only
-widening: a forbidden effect authority materializes a two-Specialist graph whose
-Verifier audits both roots, and the same graph without the authorization stamp
-fails closed. The seven deterministic tests retain the existing total model-call
-boundary. Together these checks cover preparation and start
-linearization, selected-decision recovery, success/failure/cancellation terminal
-linkage, exactly-once replay, and evaluation fail-closed behavior without
-contacting a provider.
+`agent-terminal-lifecycle-contract` gates. Together these checks cover
+preparation and start linearization, selected-decision recovery,
+success/failure/cancellation terminal linkage, exactly-once replay, and
+evaluation fail-closed behavior without contacting a provider. The former
+`agent-execution-graph-contract` (which projected matched Direct/Workflow
+attribution) is retired along with the workflow machinery it guarded.
 
 The lifecycle filters include the preparation failure race against cancellation
 and steer, including exactly-once terminal persistence for the winning epoch.
@@ -178,11 +171,10 @@ not a prompt, routing, memory, canary, or serving admission.
 `agent-collaboration-learning-offline-contract` checks bounded canonical import,
 hash-chain replay, physical-run deduplication, and committed-context aggregation
 with the optional agent-application feature. The adjacent
-`agent-collaboration-learning-offline-adapter-contract` enables only
-`realworld-eval` and checks explicit matched policy installation, actual context
-budgeting, materialized assignment, private journal recovery, orphan handling,
-tamper/fork rejection, old-V12 isolation, actual-pair capture identity, and
-censor-without-retry behavior. These gates do not
+`agent-collaboration-learning-offline-adapter-contract` is retired: the desktop
+collaboration-learning eval adapter it guarded was removed with the workflow
+machinery, so matched policy installation and capture no longer exist in the
+product path. These gates do not
 contact a provider or prove intelligence uplift.
 
 `agent-collaboration-successor-protocol-contract` also enables only

@@ -1,11 +1,6 @@
-mod binding;
-#[cfg(test)]
-mod consistency_tests;
 mod continuity;
-mod deployment;
 mod model;
 mod persistence;
-mod recovery;
 mod selection;
 #[cfg(test)]
 mod tests;
@@ -13,22 +8,11 @@ mod tests;
 pub(crate) use continuity::{
     copy_prompt_profile_assignment, prompt_profile_assignment_from_events,
 };
-#[cfg(test)]
-pub(crate) use model::PromptProfileDistillationLease;
 pub(crate) use model::{
-    PromptProfileAssignmentSource, PromptProfileDeployment, PromptProfileDeploymentLineage,
-    PromptProfileFallback, PromptProfileSelection,
+    PromptProfileAssignmentSource, PromptProfileDeployment, PromptProfileFallback,
+    PromptProfileSelection,
 };
-pub(crate) use persistence::{
-    active_prompt_profile_deployment_lineage,
-    delete_prompt_profile_deployments_for_scope_in_transaction,
-    publish_canonical_prompt_profile_deployment, validate_canonical_prompt_profile_deployment,
-};
-#[cfg(test)]
-pub(crate) use persistence::{
-    delete_prompt_profile_deployments_for_scope, publish_prompt_profile_deployment,
-};
-pub(crate) use recovery::recover_prompt_profile_deployments;
+pub(crate) use persistence::delete_prompt_profile_deployments_for_scope_in_transaction;
 #[cfg(any(test, feature = "realworld-eval"))]
 pub(crate) use selection::frozen_prompt_profile_selection;
 pub(crate) use selection::{
@@ -43,8 +27,6 @@ pub(super) const PROMPT_PROFILE_RECORD_SCHEMA: &str = "cindx.prompt-profile-reco
 pub(super) const PROMPT_PROFILE_SCOPE_FENCE_NAMESPACE: &str = "cindx.prompt-profile-scope-fence.v1";
 pub(super) const PROMPT_PROFILE_SCOPE_FENCE_SCHEMA: &str = "cindx.prompt-profile-scope-fence.v1";
 pub(super) const PROMPT_PROFILE_CANONICAL_BINDING_NAMESPACE: &str =
-    "cindx.prompt-profile-canonical-binding.v1";
-pub(super) const PROMPT_PROFILE_CANONICAL_BINDING_SCHEMA: &str =
     "cindx.prompt-profile-canonical-binding.v1";
 pub(super) const PROMPT_PROFILE_ASSIGNMENT_SCHEMA: &str = "cindx.prompt-profile-assignment.v1";
 pub(super) const MAX_ASSIGNMENT_RECEIPT_BYTES: usize = 4 * 1024;

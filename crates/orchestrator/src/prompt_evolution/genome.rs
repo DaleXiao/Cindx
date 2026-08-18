@@ -293,8 +293,12 @@ impl ConductorPromptGenome {
         } else {
             self.max_model_turns_per_step
         };
-        self.workflow_tool_ceiling()
-            .effective_model_turn_budget(declared_turns)
+        let minimum = match self.tool_policy {
+            PromptToolPolicy::Disabled => 1,
+            PromptToolPolicy::EvidenceOnly => 2,
+            PromptToolPolicy::ReadOnlyExploration => 3,
+        };
+        declared_turns.max(minimum)
     }
 
     pub fn effective_max_tool_calls_per_step(&self) -> usize {
@@ -305,8 +309,11 @@ impl ConductorPromptGenome {
         } else {
             self.max_tool_calls_per_step
         };
-        self.workflow_tool_ceiling()
-            .effective_tool_call_budget(declared_calls)
+        match self.tool_policy {
+            PromptToolPolicy::Disabled => 0,
+            PromptToolPolicy::EvidenceOnly => declared_calls.max(4),
+            PromptToolPolicy::ReadOnlyExploration => declared_calls.max(6),
+        }
     }
 
     pub(super) fn workflow_behavior_directive(&self) -> String {
@@ -426,28 +433,6 @@ impl ConductorPromptGenome {
             self.generation,
             self.workflow_behavior_directive()
         )
-    }
-
-    pub fn workflow_tool_policy(&self, role: &str) -> crate::WorkflowToolPolicy {
-        match self.tool_policy {
-            PromptToolPolicy::Disabled => crate::WorkflowToolPolicy::None,
-            PromptToolPolicy::EvidenceOnly if matches!(role, "worker" | "verifier") => {
-                crate::WorkflowToolPolicy::ReadOnlyEvidence
-            }
-            PromptToolPolicy::EvidenceOnly => crate::WorkflowToolPolicy::None,
-            PromptToolPolicy::ReadOnlyExploration if role != "synthesizer" => {
-                crate::WorkflowToolPolicy::ReadOnlyExploration
-            }
-            PromptToolPolicy::ReadOnlyExploration => crate::WorkflowToolPolicy::None,
-        }
-    }
-
-    pub fn workflow_tool_ceiling(&self) -> crate::WorkflowToolPolicy {
-        match self.tool_policy {
-            PromptToolPolicy::Disabled => crate::WorkflowToolPolicy::None,
-            PromptToolPolicy::EvidenceOnly => crate::WorkflowToolPolicy::ReadOnlyEvidence,
-            PromptToolPolicy::ReadOnlyExploration => crate::WorkflowToolPolicy::ReadOnlyExploration,
-        }
     }
 
     pub fn mutation_prompt(&self, evaluation_feedback: &str) -> String {

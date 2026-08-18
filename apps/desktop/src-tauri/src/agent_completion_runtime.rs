@@ -476,7 +476,6 @@ pub(crate) fn finalize_agent_completion(
             epoch_lease.epoch(),
             &terminal_metadata,
         );
-    let mut prompt_learning_eligible = false;
     let terminal_commit = cancellation.commit_terminal_result_with(epoch_lease, || {
         let mut store = state
             .store
@@ -535,7 +534,6 @@ pub(crate) fn finalize_agent_completion(
                     learning_tool_evidence,
                     workflow_terminal.as_ref(),
                 );
-                prompt_learning_eligible = learning_evidence.is_learnable();
                 let encoded_learning_evidence = learning_evidence.to_metadata_value();
                 if let Some(encoded) = encoded_learning_evidence {
                     terminal_metadata.insert(
@@ -607,18 +605,6 @@ pub(crate) fn finalize_agent_completion(
     }
     emit_agent_stream_delta(app, &delivery_request_id, session_id, "", true, false, None);
     if inserted_terminal {
-        if prompt_learning_eligible {
-            if let Err(error) =
-                crate::prompt_terminal_learning_runtime::schedule_terminal_prompt_pairwise_evaluation(
-                    app,
-                    &runtime.task_id,
-                    config,
-                    run_context,
-                )
-            {
-                eprintln!("terminal prompt evaluation could not be scheduled: {error}");
-            }
-        }
         crate::semantic_memory_worker::schedule_semantic_memory_refresh(
             app.clone(),
             workspace_root.to_path_buf(),

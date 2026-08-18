@@ -1,7 +1,7 @@
 use agent_core::Metadata;
 use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentToolRequirement,
-    CausalRouteSelectionV2, MemoryRecallPlan, MemoryRecallPolicy, WorkflowPlanProposal,
+    CausalRouteSelectionV2, MemoryRecallPlan, MemoryRecallPolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -13,51 +13,13 @@ pub(crate) const MATCHED_ROUTE_PLAN_ANCHOR_KEY: &str = "matched_route_plan_ancho
 pub(crate) struct MatchedRoutePlanAnchor {
     pub(crate) conductor_candidate: AgentRunDecision,
     pub(crate) compatibility_route: CausalRouteSelectionV2,
-    pub(crate) workflow_plan: WorkflowPlanProposal,
 }
 
 impl MatchedRoutePlanAnchor {
-    #[cfg(feature = "realworld-eval")]
-    pub(crate) fn new(
-        conductor_candidate: AgentRunDecision,
-        compatibility_route: CausalRouteSelectionV2,
-        workflow_plan: WorkflowPlanProposal,
-    ) -> Result<Self, String> {
-        let anchor = Self {
-            conductor_candidate,
-            compatibility_route,
-            workflow_plan,
-        };
-        anchor.validate()?;
-        Ok(anchor)
-    }
-
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.conductor_candidate.execution != AgentExecutionMode::Workflow {
-            return Err("matched route plan anchor must contain a workflow candidate".to_string());
-        }
-        self.compatibility_route.validate()?;
-        let allowed_models = self
-            .workflow_plan
-            .steps
-            .iter()
-            .map(|step| step.model.trim().to_string())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        self.workflow_plan.validate_owner_execution_graph(
-            &self.conductor_candidate,
-            &allowed_models,
-            false,
+        Err(
+            "matched route plan anchors are retired with workflow collaboration".to_string(),
         )
-    }
-
-    pub(crate) fn write_to_context(&self, run_context: &mut Metadata) -> Result<(), String> {
-        self.validate()?;
-        let encoded = serde_json::to_string(self)
-            .map_err(|error| format!("matched route plan anchor serialization failed: {error}"))?;
-        run_context.insert(MATCHED_ROUTE_PLAN_ANCHOR_KEY.to_string(), encoded);
-        Ok(())
     }
 
     pub(crate) fn from_context(run_context: &Metadata) -> Result<Option<Self>, String> {
@@ -224,11 +186,11 @@ const fn execution_mode_label(mode: AgentExecutionMode) -> &'static str {
 }
 
 pub(crate) fn execution_constraints_text(workflow_enabled: bool) -> String {
-    let base = "The foreground executor may use permission-gated tools after user approval. Isolated workflow workers can use only exposed permissionless read-only evidence tools: they cannot operate browser/computer controls, mutate the workspace, execute shell commands, or request user approval. For interactive or effectful tasks, choose workflow only when bounded isolated analysis or verification adds independent value around foreground execution.";
+    let base = "The foreground executor may use permission-gated tools after user approval.";
     if workflow_enabled {
         base.to_string()
     } else {
-        format!("{base} Workflow is quarantined in this deployment: execution must be direct and workflow_plan must be null.")
+        format!("{base} Multi-model workflow collaboration is retired in this deployment: execution is always direct.")
     }
 }
 
@@ -381,7 +343,7 @@ mod tests {
             .expect("direct survives quarantine");
         assert_eq!(kept.execution, AgentExecutionMode::Direct);
 
-        assert!(!execution_constraints_text(true).contains("quarantined"));
-        assert!(execution_constraints_text(false).contains("quarantined"));
+        assert!(!execution_constraints_text(true).contains("retired"));
+        assert!(execution_constraints_text(false).contains("retired"));
     }
 }

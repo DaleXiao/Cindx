@@ -160,7 +160,7 @@ pub(crate) fn routing_learning_evidence(
     else {
         return censored();
     };
-    if crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
+    if terminal_outcome_ledger_has_blocking_denial(
         terminal,
     ) {
         return censored();
@@ -183,77 +183,21 @@ pub(crate) fn routing_learning_evidence(
     persisted
 }
 
-pub(crate) fn workflow_learning_evidence(
-    workflow_events: &[&Event],
-    planned: &Event,
-    terminal: &Event,
-) -> LearningEvidenceV1 {
-    let planned_epoch = planned
-        .metadata
-        .get("steer_epoch")
-        .and_then(|value| value.parse::<u64>().ok());
-    let terminal_epoch = terminal
-        .metadata
-        .get("steer_epoch")
-        .and_then(|value| value.parse::<u64>().ok());
-    let steer_epoch = planned_epoch.filter(|epoch| Some(*epoch) == terminal_epoch);
-    let stable_events = workflow_events
-        .iter()
-        .copied()
-        .filter(|event| {
-            event
-                .metadata
-                .get("steer_epoch")
-                .and_then(|value| value.parse::<u64>().ok())
-                == steer_epoch
-        })
-        .collect::<Vec<_>>();
-    let usage = learning_usage_completeness(&stable_events);
-    let budget_fingerprint = learning_budget_fingerprint(&planned.metadata);
-    let termination = match terminal.summary.as_str() {
-        "Collaboration workflow completed" => LearningTermination::Completed,
-        "Collaboration workflow failed" => LearningTermination::Failed,
-        _ => LearningTermination::Unknown,
+fn terminal_outcome_ledger_has_blocking_denial(terminal: &Event) -> bool {
+    let Some(ledger) = agent_runtime::OutcomeLedgerShadow::from_terminal_metadata(
+        &terminal.metadata,
+        agent_runtime::OutcomeLedgerPhase::Completed,
+    ) else {
+        return false;
     };
-    let censored = || {
-        LearningEvidenceV1::censored(
-            termination,
-            LearningAttribution::Workflow,
-            usage,
-            steer_epoch,
-            budget_fingerprint.clone(),
-        )
-    };
-
-    let (Some(steer_epoch), Some(budget_fingerprint)) = (steer_epoch, budget_fingerprint.clone())
-    else {
-        return censored();
-    };
-    if usage == LearningUsageCompleteness::Missing || termination != LearningTermination::Completed
-    {
-        return censored();
-    }
-    let Some(run_terminal) = stable_events.iter().rev().find(|event| {
-        AgentRunEvent::from_event(event).map(AgentRunEvent::status)
-            == Some(AgentRunStatus::Completed)
-    }) else {
-        return censored();
-    };
-    if crate::prompt_failure_curriculum_projection::terminal_outcome_ledger_has_blocking_denial(
-        run_terminal,
-    ) {
-        return censored();
-    }
-    let Some(persisted) = LearningEvidenceV1::from_metadata(&run_terminal.metadata) else {
-        return censored();
-    };
-    if persisted.steer_epoch != Some(steer_epoch)
-        || persisted.budget_fingerprint.as_deref() != Some(budget_fingerprint.as_str())
-        || persisted.termination != LearningTermination::Completed
-        || persisted.usage_completeness == LearningUsageCompleteness::Missing
-        || (persisted.is_learnable() && persisted.attribution != LearningAttribution::Workflow)
-    {
-        return censored();
-    }
-    persisted
+    ledger.obligations.iter().any(|obligation| {
+        obligation.satisfaction == agent_runtime::OutcomeSatisfaction::Blocked
+            && obligation.blocker.is_some()
+            && obligation.evidence_sequence.is_some_and(|sequence| {
+                ledger.evidence.iter().any(|evidence| {
+                    evidence.sequence == sequence
+                        && evidence.kind == agent_runtime::ContractEvidenceKind::Denial
+                })
+            })
+    })
 }

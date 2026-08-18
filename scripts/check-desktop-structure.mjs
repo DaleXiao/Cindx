@@ -425,21 +425,6 @@ const sessionOutputCacheStoreSource = read(
 const memoryProjectionRuntimeSource = read(
   "apps/desktop/src-tauri/src/memory_projection_runtime.rs"
 );
-const promptEvolutionWorkerSource = read(
-  "apps/desktop/src-tauri/src/prompt_evolution_worker.rs"
-);
-const promptEvolutionReadModelSource = read(
-  "apps/desktop/src-tauri/src/prompt_evolution_read_model.rs"
-);
-const promptEvolutionRuntimeSource = read(
-  "apps/desktop/src-tauri/src/prompt_evolution_runtime.rs"
-);
-const promptCanaryRuntimeSource = read(
-  "apps/desktop/src-tauri/src/prompt_canary_runtime.rs"
-);
-const promptCanaryLineageSource = read(
-  "apps/desktop/src-tauri/src/prompt_canary_lineage.rs"
-);
 const promptProfileServingSource = readRustSourceTree(
   path.join(desktopRustSourceDirectory, "prompt_profile_serving")
 );
@@ -454,15 +439,6 @@ const agentStrategyCausalRouteSource = read(
 );
 const agentStrategyRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_strategy_runtime.rs"
-);
-const promptEvolutionHotStateSource = read(
-  "apps/desktop/src-tauri/src/prompt_evolution_hot_state.rs"
-);
-const promptLearningOutboxProjectionSource = read(
-  "apps/desktop/src-tauri/src/prompt_learning_outbox_projection.rs"
-);
-const promptPairwiseRuntimeSource = read(
-  "apps/desktop/src-tauri/src/prompt_pairwise_runtime.rs"
 );
 const parallelExecutionSource = read(
   "apps/desktop/src-tauri/src/parallel_execution.rs"
@@ -565,11 +541,8 @@ const desktopDtoContractRustTest = read(
 const shippingPerformanceGateIds = [
   "agent-cognitive-loop-scaling",
   "context-compiler-scaling",
-  "causal-router-v2-scaling",
   "session-projection-scaling",
   "agent-runtime-snapshot-scaling",
-  "prompt-learning-outbox-scaling",
-  "prompt-profile-selection-scaling",
   "workspace-graph-cache-scaling",
   "prepared-image-request-scaling",
   "model-transport-prepare-scaling",
@@ -591,13 +564,6 @@ const shippingPerformanceProofs = new Map([
     ]
   ],
   [
-    "causal-router-v2-scaling",
-    [
-      "causal_routing::tests::causal_router_v2_scaling_gate",
-      "cindx.causal-router-v2-scaling.v1"
-    ]
-  ],
-  [
     "session-projection-scaling",
     [
       "session_projection::tests::incremental_projection_reads_only_the_target_session_delta",
@@ -609,20 +575,6 @@ const shippingPerformanceProofs = new Map([
     [
       "agent_runtime_snapshot_cursor::tests::incremental_runtime_snapshot_visits_only_appended_messages",
       "cindx.agent-runtime-snapshot-scaling.v1"
-    ]
-  ],
-  [
-    "prompt-learning-outbox-scaling",
-    [
-      "prompt_learning_outbox_projection::tests::prompt_learning_outbox_delta_projection_scaling_gate",
-      "cindx.prompt-learning-outbox-scaling.v1"
-    ]
-  ],
-  [
-    "prompt-profile-selection-scaling",
-    [
-      "prompt_profile_serving::tests::prompt_profile_selection_scaling_gate",
-      "cindx.prompt-profile-selection-scaling.v1"
     ]
   ],
   [
@@ -879,8 +831,6 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["event_security.rs", 500],
   ["permission_service.rs", 220],
   ["project_session_persistence.rs", 600],
-  ["prompt_evolution_worker.rs", 650],
-  ["prompt_workflow_execution.rs", 800],
   ["runtime_values.rs", 420],
   ["session_context_service.rs", 550],
   ["session_output_cache.rs", 180],
@@ -1161,43 +1111,10 @@ assert(
 assert(
   agentStorageSource.includes("idx_events_task_kind_sequence") &&
     agentRecoveryServiceSource.includes(".list_by_task_and_kinds(") &&
-    agentRecoveryServiceSource.includes("agent_events_for_session(store, &task_id, session_id)") &&
-    promptEvolutionWorkerSource.includes(
-      '.list_by_task_and_metadata(\n            &crate::runtime_values::phase16_task_id(),\n            "background_evaluation",\n            "true",'
-    ) &&
-    promptPairwiseRuntimeSource.includes(
-      '.list_by_task_and_metadata(task_id, "project_id", project_id)'
-    ),
-  "Startup recovery and prompt evolution must keep history reads indexed and scope-bounded"
+    agentRecoveryServiceSource.includes("agent_events_for_session(store, &task_id, session_id)"),
+  "Startup recovery must keep history reads indexed and scope-bounded"
 );
-assert(
-  agentStorageSource.includes("pub fn compare_exchange_read_model(") &&
-    promptEvolutionReadModelSource.includes("compare_exchange_read_model(") &&
-    promptEvolutionReadModelSource.includes(
-      "prompt evolution snapshot publication conflicted twice"
-    ) &&
-    promptEvolutionRuntimeSource.includes("append_prompt_rollout_update(") &&
-    !promptEvolutionRuntimeSource.includes("save_prompt_evolution_read_model") &&
-    promptLearningOutboxProjectionSource.includes("list_by_task_after(") &&
-    promptLearningOutboxProjectionSource.includes("compare_exchange_read_model(") &&
-    orchestratorSource.includes("pub struct PromptLearningOutboxProjection") &&
-    orchestratorSource.includes("pub struct PromptAutoTransferIntent") &&
-    orchestratorSource.includes("pub struct PromptProDistillationIntent") &&
-    orchestratorSource.includes("insert_auto_transfer_intent") &&
-    orchestratorSource.includes("insert_pro_distillation_intent") &&
-    orchestratorSource.includes("pending_payloads_are_valid") &&
-    orchestratorSource.includes("PROMPT_LEARNING_OUTBOX_MAX_PENDING") &&
-    orchestratorSource.includes("left.sequence") &&
-    !promptLearningOutboxProjectionSource.includes("struct PendingIntentEnvelope") &&
-    !rustLib.includes(".insert_auto_transfer(") &&
-    !rustLib.includes(".insert_pro_distillation(") &&
-    rustLib.includes(
-      "matches_dispatch_marker(project_id, intent_id, &event.metadata)"
-    ) &&
-    !rustLib.includes("struct PromptAutoTransferIntent") &&
-    !rustLib.includes("struct PromptProDistillationIntent"),
-  "Prompt learning control must keep typed identity and FIFO state in orchestrator while desktop retains canonical-event, CAS, and delta adapters"
-);
+
 assert(
   shippingOrchestratorExamples.length === 0 &&
     fs.existsSync(
@@ -1217,17 +1134,7 @@ assert(
     !orchestratorSource.includes("mod fugu_evaluation;"),
   "Shipping orchestrator must not compile research evaluation modules or examples"
 );
-const workflowTopologyLearningSource = read(
-  "crates/orchestrator/src/routing/workflow_topology_learning.rs"
-);
-assert(
-  orchestratorSource.includes("mod workflow_topology_learning;") &&
-    orchestratorSource.includes("pub use workflow_topology_learning::*;") &&
-    workflowTopologyLearningSource.includes("pub struct WorkflowSearchTeacher") &&
-    workflowTopologyLearningSource.includes("pub fn pareto_front") &&
-    !workflowTopologyLearningSource.includes("use super::*;"),
-  "Offline topology learning must remain isolated from the online router with explicit dependencies"
-);
+
 assert(
   appLineCount <= 2_360 &&
     appUseStateCount <= 25 &&
@@ -1301,10 +1208,6 @@ for (const requiredModule of [
   "desktop_prelude.rs",
   "event_persistence.rs",
   "event_security.rs",
-  "prompt_evaluation_runtime.rs",
-  "prompt_evolution_hot_state.rs",
-  "prompt_evolution_runtime.rs",
-  "prompt_learning_outbox_projection.rs",
   "project_session_persistence.rs",
   "routing_learning_runtime.rs",
   "runtime_values.rs",
@@ -3748,30 +3651,12 @@ assert(
     agentStrategyRuntimeSource.includes("route_decision_profile_sha256") &&
     agentStrategyCausalRouteSource.includes("run_decision_evolved_directive") &&
     agentStrategyCausalRouteSource.includes("route_decision_directive") &&
-    orchestratorSource.includes("tool_policy.limited_by(step.tool_policy)") &&
     promptProfileServingSource.includes("LOGICAL_AGENT_RUN_ID_METADATA_KEY") &&
     promptProfileServingSource.includes("MAX_ASSIGNMENT_RECEIPT_BYTES") &&
-    promptProfileServingSource.includes("PromptProfileDistillationLease") &&
-    rustLib.includes("validated_live_prompt_assignment") &&
-    rustLib.includes("is_trusted_live_assignment"),
+    promptProfileServingSource.includes("PromptProfileDistillationLease"),
   "Foreground prompt-profile selection must stay O(1), read-only, retry-stable, and isolated from route authority"
 );
-assert(
-  orchestratorSource.includes('"cindx.prompt-learning-eligibility.v1"') &&
-    orchestratorSource.includes('"cindx.prompt-dataset-identity.v1"') &&
-    orchestratorSource.includes('"cindx.prompt-evaluation-attempt.v1"') &&
-    orchestratorSource.includes("PromptLearningQualificationInput") &&
-    rustLib.includes("PromptEvaluationAttemptGuard::start") &&
-    orchestratorSource.includes("is_strict_matched_evidence") &&
-    rustLib.includes(
-      "frozen prompt dataset is incomplete; refusing cohort substitution"
-    ) &&
-    promptEvolutionHotStateSource.includes(
-      "PROMPT_EVALUATION_ATTEMPT_RETENTION: usize = 1_024"
-    ) &&
-    localBuildScript.includes("CINDX_SOURCE_REVISION"),
-  "Prompt learning must remain eligibility-gated, cohort-bound, matched, auditable, and source-versioned"
-);
+
 
 const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]
   .map((match) => match[1].toLowerCase())
@@ -4151,26 +4036,16 @@ assert(
       'AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1"'
     ) &&
     orchestratorSource.includes("pub struct AgentRunDecisionHarness") &&
-    orchestratorSource.includes("pub struct ConductorHarness") &&
     orchestratorSource.includes("pub fn planning_prompt(&self)") &&
     orchestratorSource.includes("pub fn repair_prompt(") &&
-    orchestratorSource.includes("pub fn parse_plan(") &&
-    agentRuntimeSource.includes("evidence_worker_tools") &&
-    parallelExecutionSource.includes("MAX_GLOBAL_MODEL_WORKERS: usize = 12") &&
+    orchestratorSource.includes("pub fn parse_draft(") &&
     parallelExecutionSource.includes("BoundedParallelExecutor") &&
-    parallelExecutionSource.includes("run_model_jobs_until_anytime_quorum_interruptible") &&
-    orchestratorSource.includes("pub fn validate_owner_execution_graph") &&
-    orchestratorSource.includes("pub fn complete_owner_handoff") &&
+    !parallelExecutionSource.includes("run_model_jobs_until_anytime_quorum_interruptible") &&
     !rustLib.includes("quality_gate_adaptive_output(") &&
     rustLib.includes("append_single_model_policy_guidance(") &&
-    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_STEPS: usize = 5") &&
-    orchestratorSource.includes("MAX_ADAPTIVE_WORKFLOW_AGENTS: usize = 3") &&
-    orchestratorSource.includes("adaptive_workflow_step_budget") &&
-    orchestratorSource.includes("adaptive_workflow_layers") &&
-    orchestratorSource.includes("must only access earlier steps") &&
-    orchestratorSource.includes('WORKFLOW_IR_SCHEMA: &str = "cindx.workflow.v1"') &&
+    !orchestratorSource.includes('WORKFLOW_IR_SCHEMA') &&
     !rustLib.includes("validate_and_apply_revision(") ,
-  "Primary agent must use the bounded, tool-capable Owner graph from the recorded Conductor decision"
+  "Primary agent must use the bounded single-model planning harness; workflow graphs stay retired"
 );
 assert(
   orchestratorSource.includes("evaluate_routing_cases") &&

@@ -1,14 +1,8 @@
 use super::*;
 use agent_core::{
-    Event, EventId, EventKind, ModelRole, AGENT_RUN_ID_METADATA_KEY,
-    LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+    Event, EventId, EventKind, AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
-use orchestrator::{
-    causal_route_action_id_v2, prompt_genome_sha256, select_causal_route_v2, AgentExecutionMode,
-    AgentRiskLevel, AgentVerificationPolicy, CausalRouteEvidenceBasis, ConductorStopPolicy,
-    MatchedCollaborationEvidence, ModelCandidate, ModelCapabilitySource, PromptVerification,
-    RouteFeatureRequest, RouteFeatureSnapshotV2, TaskClass,
-};
+use orchestrator::{prompt_genome_sha256, PromptVerification};
 
 #[test]
 fn run_decision_prompt_applies_only_the_learned_route_directive() {
@@ -49,7 +43,6 @@ fn run_decision_prompt_applies_only_the_learned_route_directive() {
         max_parallelism: 2,
         evolved_directive: run_decision_evolved_directive(&profile, AgentPolicy::Auto).unwrap(),
         historical_evidence: String::new(),
-        matched_collaboration_evidence: std::sync::Arc::new(Default::default()),
         preferred_primary_model: None,
         required_execution: None,
         execution_constraints: String::new(),
@@ -63,106 +56,6 @@ fn run_decision_prompt_applies_only_the_learned_route_directive() {
     let prompt = AgentRunDecisionHarness::new(request).planning_prompt();
     assert!(prompt.contains(marker));
     assert!(prompt.contains("cannot override schema, configured models, safety, or budgets"));
-}
-
-#[test]
-fn learned_profile_provenance_is_neutral_to_route_and_matched_admission() {
-    let mut profile_a = ConductorPromptGenome::seed_for_effort("auto");
-    profile_a.id = "learned-a".to_string();
-    profile_a.custom_directive =
-        "prefer independent verification when evidence conflicts".to_string();
-    let mut profile_b = profile_a.clone();
-    profile_b.id = "learned-b".to_string();
-    profile_b.generation = profile_a.generation.saturating_add(1);
-    let actual_a = prompt_genome_sha256(&profile_a).unwrap();
-    let actual_b = prompt_genome_sha256(&profile_b).unwrap();
-    assert_ne!(actual_a, actual_b);
-
-    let route_a = profile_a.route_decision_profile_sha256("auto").unwrap();
-    let route_b = profile_b.route_decision_profile_sha256("auto").unwrap();
-    assert_eq!(route_a, route_b);
-    assert_eq!(
-        route_a,
-        ConductorPromptGenome::seed_for_effort("auto")
-            .route_decision_profile_sha256("auto")
-            .unwrap()
-    );
-    assert_eq!(
-        run_decision_evolved_directive(&profile_a, AgentPolicy::Auto).unwrap(),
-        run_decision_evolved_directive(&profile_b, AgentPolicy::Auto).unwrap()
-    );
-    let candidates = vec![ModelCandidate {
-        name: "executor".to_string(),
-        role: ModelRole::Executor,
-        supports_tools: true,
-        supports_vision: true,
-        tools_capability_source: ModelCapabilitySource::Configured,
-        vision_capability_source: ModelCapabilitySource::Configured,
-        cost_tier: 1,
-        latency_tier: 1,
-    }];
-    let mut decision = AgentRunDecision::direct("executor");
-    decision.task_class = TaskClass::Research;
-    decision.execution = AgentExecutionMode::Workflow;
-    decision.risk_level = AgentRiskLevel::Elevated;
-    decision.verification = AgentVerificationPolicy::Independent;
-    decision.max_parallelism = 2;
-    decision.min_successful_branches = 2;
-    decision.distinct_contributions = 2;
-    decision.estimated_steps = 4;
-    decision.expected_uplift_bps = 6_000;
-    decision.confidence_bps = 8_000;
-    decision.stop_policy = ConductorStopPolicy::Quorum;
-    let build_snapshot = |route_profile_sha256: &str| {
-        RouteFeatureSnapshotV2::from_decision_request(
-            &decision,
-            RouteFeatureRequest {
-                objective: "Compare independent architecture alternatives and cross-check sources",
-                recent_context: "",
-                effort: "auto",
-                requirements: AgentRouteRequirements::default(),
-                budget_fingerprint: Some(&"1".repeat(64)),
-                prompt_profile_sha256: route_profile_sha256,
-            },
-            &candidates,
-        )
-    };
-    let snapshot_a = build_snapshot(&route_a);
-    let snapshot_b = build_snapshot(&route_b);
-    assert_eq!(snapshot_a, snapshot_b);
-    assert!(!serde_json::to_string(&snapshot_a)
-        .unwrap()
-        .contains(&actual_a));
-    assert!(!serde_json::to_string(&snapshot_b)
-        .unwrap()
-        .contains(&actual_b));
-
-    let evidence = MatchedCollaborationEvidence {
-        task_class: decision.task_class.clone(),
-        effort: "auto".to_string(),
-        pre_decision_context_fingerprint: snapshot_a.context_fingerprint.clone(),
-        route_action_id: causal_route_action_id_v2(&decision).unwrap(),
-        routing_signature: decision.learning_signature(),
-        examples: 8,
-        team_wins: 8,
-        team_win_rate: 1.0,
-        team_win_confidence: 0.67,
-        below_admission_floor: 0,
-        below_admission_floor_confidence: 0.0,
-        anchor_selections: 0,
-        average_uplift_bps: 500,
-        average_team_latency_ms: 2_000,
-        average_anchor_latency_ms: Some(1_500),
-    };
-    let receipt_a =
-        select_causal_route_v2(&decision, &snapshot_a, &candidates, Some(&evidence), 1).unwrap();
-    let receipt_b =
-        select_causal_route_v2(&decision, &snapshot_b, &candidates, Some(&evidence), 1).unwrap();
-    assert_eq!(receipt_a, receipt_b);
-    assert_eq!(
-        receipt_a.support.basis,
-        CausalRouteEvidenceBasis::MatchedContextAction
-    );
 }
 
 #[test]

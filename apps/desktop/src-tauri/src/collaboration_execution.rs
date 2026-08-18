@@ -103,53 +103,6 @@ pub(crate) fn collaboration_model_failure(
         .unwrap_or_else(|| AgentFailure::from_model_error(error))
 }
 
-pub(crate) fn collaboration_candidate_models(
-    config: &ProviderConfig,
-    candidates: usize,
-) -> Vec<String> {
-    let limit = candidates.clamp(1, MAX_ADAPTIVE_WORKFLOW_AGENTS);
-    let mut models = Vec::new();
-    for role in [ModelRole::Planner, ModelRole::Executor] {
-        let model = config.model_for_role(&role);
-        if !model.trim().is_empty() && !models.iter().any(|existing| existing == &model) {
-            models.push(model);
-        }
-        if models.len() >= limit {
-            break;
-        }
-    }
-    models
-}
-
-pub(crate) fn collaboration_role_hints(
-    config: &ProviderConfig,
-    worker_models: &[String],
-) -> ConductorRoleHints {
-    let fallback = |preferred: String, index: usize| {
-        if worker_models.iter().any(|model| model == &preferred) {
-            preferred
-        } else {
-            worker_models
-                .get(index)
-                .or_else(|| worker_models.first())
-                .cloned()
-                .unwrap_or(preferred)
-        }
-    };
-    let planner = fallback(config.model_for_role(&ModelRole::Planner), 0);
-    let executor = fallback(config.model_for_role(&ModelRole::Executor), 1);
-    let reviewer = fallback(
-        config.model_for_role(&ModelRole::Reviewer),
-        worker_models.len().saturating_sub(1),
-    );
-    ConductorRoleHints {
-        planner: planner.clone(),
-        executor,
-        reviewer,
-        synthesizer: fallback(config.model_for_role(&ModelRole::Summarizer), 0),
-    }
-}
-
 fn collaboration_failure_completion(
     failure: AgentFailure,
     termination_scope: Option<&str>,
@@ -242,6 +195,7 @@ pub(crate) fn record_collaboration_stage_started(
     Ok(())
 }
 
+#[cfg(feature = "realworld-eval")]
 pub(crate) fn complete_collaboration_model_with_control(
     config: ProviderConfig,
     role: ModelRole,
@@ -265,6 +219,7 @@ pub(crate) fn complete_collaboration_model_with_control(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "realworld-eval")]
 pub(crate) fn complete_collaboration_model_for_stage_with_control(
     config: ProviderConfig,
     stage: String,

@@ -2,11 +2,9 @@ use super::*;
 
 mod evaluation;
 mod learning_evidence;
-mod workflow_topology_learning;
 
 pub use evaluation::*;
 pub use learning_evidence::*;
-pub use workflow_topology_learning::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -320,7 +318,7 @@ impl RoutingContext {
                 + u8::from(verification_required)
                 + u8::from(deep_analysis)
                 + u8::from(multi_phase))
-            .min(MAX_ADAPTIVE_WORKFLOW_STEPS as u8)
+            .min(5u8)
         };
         let mut complexity_score = 0u8;
         if explicit_multi_model {

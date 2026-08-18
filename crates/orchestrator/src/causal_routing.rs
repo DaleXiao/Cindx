@@ -1,16 +1,13 @@
 use crate::{
     minimum_team_uplift_bps, AgentEffectAuthority, AgentRiskLevel, AgentRouteRequirements,
     AgentRouteTier, AgentRunDecision, AgentToolRequirement, AgentVerificationPolicy,
-    ConductorStopPolicy, MatchedCollaborationEvidence, MemoryRecallPolicy, ModelCandidate,
-    ModelCapabilitySource, TaskClass, WorkspaceRetrievalChannel,
-    AUTO_COLLABORATION_MIN_CONFIDENCE_BPS, AUTO_COLLABORATION_MIN_UPLIFT_BPS,
+    ConductorStopPolicy, MemoryRecallPolicy, ModelCandidate, ModelCapabilitySource, TaskClass,
+    WorkspaceRetrievalChannel, AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
+    AUTO_COLLABORATION_MIN_UPLIFT_BPS,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-
-#[cfg(test)]
-use crate::MatchedCollaborationEvidenceTeacher;
 
 pub const CAUSAL_ROUTE_SELECTION_SCHEMA_V2: &str = "cindx.causal-route.v2";
 pub const CAUSAL_ROUTE_SELECTION_POLICY_V2: &str = "runtime-counterfactual-value-v2";
@@ -375,7 +372,6 @@ pub fn select_causal_route_v2(
     decision: &AgentRunDecision,
     snapshot: &RouteFeatureSnapshotV2,
     model_candidates: &[ModelCandidate],
-    matched: Option<&MatchedCollaborationEvidence>,
     evidence_key_lookups: usize,
 ) -> Result<CausalRouteSelectionV2, String> {
     snapshot.validate()?;
@@ -387,23 +383,16 @@ pub fn select_causal_route_v2(
     } else {
         None
     };
-    let support = route_support(snapshot, decision, &candidate_action.action_id, matched);
+    let support = CausalRouteSupportV2 {
+        basis: CausalRouteEvidenceBasis::RuntimeDemandOnly,
+        evidence_sha256: None,
+        matched_examples: 0,
+        observed_uplift_bps: None,
+    };
     let predicted_benefit_bps = i32::from(decision.expected_uplift_bps)
         .saturating_mul(i32::from(decision.confidence_bps))
         / 10_000;
-    let evidence_adjusted_benefit_bps = matched
-        .filter(|evidence| evidence.evidence_ready())
-        .and(support.observed_uplift_bps)
-        .map(|observed| {
-            const PRIOR_SAMPLES: i32 = 4;
-            const MAX_MATCHED_SAMPLES: usize = 32;
-            let samples = support.matched_examples.min(MAX_MATCHED_SAMPLES) as i32;
-            predicted_benefit_bps
-                .saturating_mul(PRIOR_SAMPLES)
-                .saturating_add(i32::from(observed).saturating_mul(samples))
-                / PRIOR_SAMPLES.saturating_add(samples)
-        })
-        .unwrap_or(predicted_benefit_bps);
+    let evidence_adjusted_benefit_bps = predicted_benefit_bps;
     let pro = snapshot.effort == "pro";
     // The receipt keeps its v2 field names for replay compatibility. The only
     // deterministic "cost" is the declared quality floor; latency and
@@ -429,14 +418,6 @@ pub fn select_causal_route_v2(
     let independent_verification = decision.verification == AgentVerificationPolicy::Independent
         && decision.estimated_steps >= 2;
     let independent_demand = independent_contributions || independent_verification;
-    let strong_evidence_against = support.basis != CausalRouteEvidenceBasis::RuntimeDemandOnly
-        && matched.is_some_and(|evidence| {
-            evidence.strong_evidence_against_collaboration(if pro {
-                minimum_team_uplift_bps("pro")
-            } else {
-                AUTO_COLLABORATION_MIN_UPLIFT_BPS
-            })
-        });
     let reason = if candidate_route != AgentRouteTier::Workflow {
         CausalRouteReason::CandidateDirect
     } else if !candidate_action.feasible {
@@ -445,8 +426,6 @@ pub fn select_causal_route_v2(
         CausalRouteReason::BelowPredictionFloor
     } else if !independent_demand {
         CausalRouteReason::NoIndependentDemand
-    } else if strong_evidence_against {
-        CausalRouteReason::MatchedEvidenceAgainst
     } else if net_value_lower_bps < 0 {
         CausalRouteReason::NegativeExpectedValue
     } else {
@@ -587,64 +566,6 @@ pub fn causal_route_action_id_v2(decision: &AgentRunDecision) -> Result<String, 
     serde_json::to_vec(&identity)
         .map(|encoded| sha256_hex(&encoded))
         .map_err(|error| format!("causal route action identity serialization failed: {error}"))
-}
-
-fn route_support(
-    snapshot: &RouteFeatureSnapshotV2,
-    decision: &AgentRunDecision,
-    candidate_action_id: &str,
-    matched: Option<&MatchedCollaborationEvidence>,
-) -> CausalRouteSupportV2 {
-    let Some(evidence) = matched else {
-        return CausalRouteSupportV2 {
-            basis: CausalRouteEvidenceBasis::RuntimeDemandOnly,
-            evidence_sha256: None,
-            matched_examples: 0,
-            observed_uplift_bps: None,
-        };
-    };
-    let common_scope = evidence.task_class == decision.task_class
-        && evidence.effort.eq_ignore_ascii_case(&snapshot.effort)
-        && !candidate_action_id.is_empty();
-    let exact_context_action = common_scope
-        && evidence.pre_decision_context_fingerprint == snapshot.context_fingerprint
-        && evidence.route_action_id == candidate_action_id;
-    let matched_route_shape = common_scope
-        && evidence.pre_decision_context_fingerprint.is_empty()
-        && evidence.route_action_id.is_empty()
-        && evidence.routing_signature == decision.learning_signature();
-    if !exact_context_action && !matched_route_shape {
-        return CausalRouteSupportV2 {
-            basis: CausalRouteEvidenceBasis::RuntimeDemandOnly,
-            evidence_sha256: None,
-            matched_examples: 0,
-            observed_uplift_bps: None,
-        };
-    }
-    let canonical = format!(
-        "context={};class={};effort={};action={};route_shape={};examples={};wins={};below={};uplift={};team_latency={};anchor_latency={}",
-        evidence.pre_decision_context_fingerprint,
-        evidence.task_class.label(),
-        evidence.effort,
-        evidence.route_action_id,
-        evidence.routing_signature,
-        evidence.examples,
-        evidence.team_wins,
-        evidence.below_admission_floor,
-        evidence.average_uplift_bps,
-        evidence.average_team_latency_ms,
-        evidence.average_anchor_latency_ms.unwrap_or_default(),
-    );
-    CausalRouteSupportV2 {
-        basis: if exact_context_action {
-            CausalRouteEvidenceBasis::MatchedContextAction
-        } else {
-            CausalRouteEvidenceBasis::MatchedRouteShape
-        },
-        evidence_sha256: Some(sha256_hex(canonical.as_bytes())),
-        matched_examples: evidence.examples,
-        observed_uplift_bps: Some(evidence.average_uplift_bps),
-    }
 }
 
 fn model_pool_digest(candidates: &[ModelCandidate]) -> String {

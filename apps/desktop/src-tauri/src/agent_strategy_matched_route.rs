@@ -69,7 +69,6 @@ pub(super) fn plan_from_shared_anchor(
             attempted_conductor_models: Vec::new(),
             selected_conductor_model: None,
             route_requirements: input.route_requirements,
-            workflow_plan: Some(input.anchor.workflow_plan),
             budget_fingerprint: input.budget_fingerprint,
             recent_context: input.recent_context,
             route_prompt_profile_sha256: input.route_prompt_profile_sha256,

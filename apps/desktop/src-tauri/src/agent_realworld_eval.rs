@@ -1,4 +1,5 @@
 use crate::*;
+use orchestrator::FrozenPromptProfileSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -473,7 +474,6 @@ pub fn run_agent_realworld_eval() -> Result<(), String> {
                         run_budget: None,
                         execution_constraint: None,
                         matched_route_plan_anchor: None,
-                        collaboration_learning_policy: None,
                     },
                 );
                 *runs.last_mut().expect("pending evaluation run") = run;

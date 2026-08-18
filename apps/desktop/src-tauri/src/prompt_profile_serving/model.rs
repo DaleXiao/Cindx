@@ -29,13 +29,6 @@ pub(crate) struct PromptProfileDeployment {
     pub(crate) distillation_lease: Option<PromptProfileDistillationLease>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PromptProfileDeploymentLineage {
-    pub(crate) scope_sha256: String,
-    pub(crate) source_revision: u64,
-    pub(crate) deployment_generation: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum PromptProfileDeploymentState {
@@ -193,54 +186,6 @@ impl PromptProfileDeployment {
 }
 
 impl PromptProfileDeploymentRecord {
-    pub(super) fn active(
-        scope: &str,
-        effort: &str,
-        generation: u64,
-        deployment: PromptProfileDeployment,
-    ) -> Self {
-        Self {
-            schema: PROMPT_PROFILE_RECORD_SCHEMA.to_string(),
-            scope_sha256: scope_sha256(scope),
-            effort: effort.to_string(),
-            generation,
-            state: PromptProfileDeploymentState::Active,
-            deployment: Some(deployment),
-        }
-    }
-
-    pub(super) fn tombstone(
-        scope: &str,
-        effort: &str,
-        generation: u64,
-        state: PromptProfileDeploymentState,
-    ) -> Self {
-        debug_assert!(state != PromptProfileDeploymentState::Active);
-        Self {
-            schema: PROMPT_PROFILE_RECORD_SCHEMA.to_string(),
-            scope_sha256: scope_sha256(scope),
-            effort: effort.to_string(),
-            generation,
-            state,
-            deployment: None,
-        }
-    }
-
-    pub(super) fn tombstone_from_stored_identity(
-        scope_sha256: String,
-        effort: String,
-        generation: u64,
-    ) -> Self {
-        Self {
-            schema: PROMPT_PROFILE_RECORD_SCHEMA.to_string(),
-            scope_sha256,
-            effort,
-            generation,
-            state: PromptProfileDeploymentState::Withdrawn,
-            deployment: None,
-        }
-    }
-
     pub(super) fn validate_for(&self, scope: &str, effort: &str) -> Result<(), String> {
         if self.schema != PROMPT_PROFILE_RECORD_SCHEMA
             || self.scope_sha256 != scope_sha256(scope)
@@ -258,49 +203,6 @@ impl PromptProfileDeploymentRecord {
         }
     }
 
-    pub(super) fn has_valid_stored_identity(&self, revision: u64) -> bool {
-        self.schema == PROMPT_PROFILE_RECORD_SCHEMA
-            && is_sha256(&self.scope_sha256)
-            && matches!(self.effort.as_str(), "auto" | "pro")
-            && self.generation == revision
-            && match (&self.state, &self.deployment) {
-                (PromptProfileDeploymentState::Active, Some(deployment)) => {
-                    deployment.scope_sha256 == self.scope_sha256 && deployment.effort == self.effort
-                }
-                (PromptProfileDeploymentState::Withdrawn, None) => true,
-                _ => false,
-            }
-    }
-
-    pub(super) fn withdrawn_from_stored(&self, generation: u64) -> Self {
-        Self {
-            schema: PROMPT_PROFILE_RECORD_SCHEMA.to_string(),
-            scope_sha256: self.scope_sha256.clone(),
-            effort: self.effort.clone(),
-            generation,
-            state: PromptProfileDeploymentState::Withdrawn,
-            deployment: None,
-        }
-    }
-
-    pub(super) fn stored_scope_sha256(&self) -> &str {
-        &self.scope_sha256
-    }
-
-    pub(super) fn stored_effort(&self) -> &str {
-        &self.effort
-    }
-
-    pub(super) fn active_lineage(&self) -> Option<PromptProfileDeploymentLineage> {
-        let deployment = (self.state == PromptProfileDeploymentState::Active)
-            .then_some(self.deployment.as_ref())
-            .flatten()?;
-        Some(PromptProfileDeploymentLineage {
-            scope_sha256: self.scope_sha256.clone(),
-            source_revision: deployment.source_revision,
-            deployment_generation: self.generation,
-        })
-    }
 }
 
 impl TryFrom<&PromptDistillationCanaryLeaseV1> for PromptProfileDistillationLease {
