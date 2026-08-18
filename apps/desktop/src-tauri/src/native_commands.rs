@@ -168,6 +168,7 @@ pub(crate) async fn confirm_delete_action(
     let kind = match input.kind.trim() {
         "project" => "project".to_string(),
         "session" => "session".to_string(),
+        "sessions" => "sessions".to_string(),
         _ => return Err("unsupported delete target".to_string()),
     };
     let name = normalized_config_value(&input.name);
@@ -199,11 +200,15 @@ pub(crate) fn show_native_delete_confirmation(kind: &str, name: &str) -> bool {
     };
     let target = if kind == "project" {
         "Project"
+    } else if kind == "sessions" {
+        "All Archived Sessions"
     } else {
         "Session"
     };
     let informative_text = if kind == "project" {
         "This permanently removes the project and its sessions from Cindx. Files in the workspace are not affected."
+    } else if kind == "sessions" {
+        "This permanently removes every archived session and its agent history. This action cannot be undone."
     } else {
         "This permanently removes the conversation and its agent history. This action cannot be undone."
     };

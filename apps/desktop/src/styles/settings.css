@@ -262,40 +262,6 @@
   font-size: 12px;
 }
 
-.archived-session-list {
-  display: grid;
-  border-top: 1px solid var(--border);
-}
-
-.archived-session-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 0;
-}
-
-.archived-session-row + .archived-session-row {
-  border-top: 1px solid var(--border);
-}
-
-.archived-session-row > span {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.archived-session-row strong {
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.archived-session-row small {
-  color: var(--muted);
-  font-size: 10px;
-}
 
 .section-title {
   display: flex;

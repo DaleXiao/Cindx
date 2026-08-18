@@ -143,12 +143,16 @@ const settingsPermissionsPanelSource = read(
 const settingsToolsPanelSource = read(
   "apps/desktop/src/components/SettingsToolsPanel.tsx"
 );
+const settingsSessionsPanelSource = read(
+  "apps/desktop/src/components/SettingsSessionsPanel.tsx"
+);
 const settingsPageSource = [
   settingsPageFileSource,
   settingsModelsImplementationSource,
   settingsMemoryPanelSource,
   settingsPermissionsPanelSource,
   settingsToolsPanelSource,
+  settingsSessionsPanelSource,
   settingsEffortModelFieldsSource,
 ].join("\n");
 const preferencesControllerSource = read(
@@ -312,6 +316,7 @@ const styleModuleEntries = [
   "trace.css",
   "schedule.css",
   "settings.css",
+  "session-settings.css",
   "knowledge-settings.css",
   "memory-settings.css",
   "inspector.css",

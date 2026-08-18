@@ -1434,7 +1434,6 @@ export function App() {
     }
   }
 
-
   function applyAgentStateForSession(sessionId: string, next: AgentState) {
     const effectiveNext = preserveOptimisticQueuedMessages(sessionId, next);
     agentStateRevisionsRef.current.set(sessionId, {
@@ -2210,9 +2209,10 @@ export function App() {
               handleRefreshSkills,
               handleRemoveMcpServer,
               handleResolvePermissionReview,
-              handleRestorePermissionReview,
-              handleRestoreSession,
-              handleRunBrowserTool,
+               handleRestorePermissionReview,
+               handleRestoreSession,
+               handleDeleteSession,
+               handleRunBrowserTool,
               handleRunTool,
               handleSavePersonalization,
               handleSaveProviderConfig,

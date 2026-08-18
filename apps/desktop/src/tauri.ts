@@ -440,7 +440,7 @@ export async function acknowledgeSessionActivity(sessionId: string, throughSeque
 }
 
 export async function confirmDeleteAction(
-  kind: "project" | "session",
+  kind: "project" | "session" | "sessions",
   name: string
 ): Promise<boolean> {
   try {

@@ -65,6 +65,7 @@ import type { ProviderModelGroups } from "../providerProfiles";
 import { SettingsMemoryPanel } from "./SettingsMemoryPanel";
 import { SettingsModelsPanel } from "./SettingsModelsPanel";
 import { SettingsPermissionsPanel } from "./SettingsPermissionsPanel";
+import { SettingsSessionsPanel } from "./SettingsSessionsPanel";
 import { SettingsToolsPanel, type WebSearchDraft } from "./SettingsToolsPanel";
 
 const appIconUrl = new URL("../../src-tauri/icons/icon.png", import.meta.url).href;
@@ -145,6 +146,7 @@ export type SettingsPageProps = {
   ) => Promise<void>;
   handleRestorePermissionReview: (requestId: string) => void;
   handleRestoreSession: (sessionId: string) => Promise<void>;
+  handleDeleteSession: (sessionId: string) => Promise<void>;
   handleRunBrowserTool: (toolName: string) => Promise<void>;
   handleRunTool: () => Promise<void>;
   handleSavePersonalization: () => Promise<void>;
@@ -295,6 +297,7 @@ export function SettingsPage(props: SettingsPageProps) {
     handleResolvePermissionReview,
     handleRestorePermissionReview,
     handleRestoreSession,
+    handleDeleteSession,
     handleRunBrowserTool,
     handleRunTool,
     handleSavePersonalization,
@@ -628,44 +631,15 @@ export function SettingsPage(props: SettingsPageProps) {
                 )}
     
                 {settingsCategory === "sessions" && (
-                <section className="settings-section" data-settings-group="sessions">
-                  <div className="section-title">
-                    <ArchiveRestore aria-hidden="true" />
-                    <h2>Archived sessions</h2>
-                  </div>
-                  {archivedSessions.length === 0 ? (
-                    <div className="settings-empty">No archived sessions</div>
-                  ) : (
-                    <div className="archived-session-list">
-                      {archivedSessions.map((session) => (
-                        <div className="archived-session-row" key={session.id}>
-                          <span>
-                            <strong>{session.name}</strong>
-                            <small>
-                              {projectSessionState?.projects.find(
-                                (project) => project.id === session.projectId
-                              )?.name ?? "Project"}
-                              {session.archivedAtMs
-                                ? ` · ${formatTime(session.archivedAtMs)}`
-                                : ""}
-                            </small>
-                          </span>
-                          <button
-                            className="secondary-button"
-                            type="button"
-                            disabled={projectSessionBusy}
-                            onClick={() => void handleRestoreSession(session.id)}
-                          >
-                            <ArchiveRestore aria-hidden="true" />
-                            <span>Restore</span>
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
+                <SettingsSessionsPanel
+                  archivedSessions={archivedSessions}
+                  projectSessionState={projectSessionState}
+                  projectSessionBusy={projectSessionBusy}
+                  handleRestoreSession={handleRestoreSession}
+                  handleDeleteSession={handleDeleteSession}
+                />
                 )}
-    
+
                 {settingsCategory === "models" && (
                   <SettingsModelsPanel
                     canUseConfiguredKey={canUseConfiguredKey}
