@@ -388,6 +388,68 @@ fn conductor_effect_and_browser_evidence_are_both_required_for_the_current_epoch
 }
 
 #[test]
+fn deferred_image_generate_success_satisfies_the_effect_obligation() {
+    // The inline exposure list can omit a deferred effect tool such as
+    // image.generate; the effect obligation must still be satisfiable by its
+    // success because the catalog advertises it as an available effect tool.
+    // image.generate is deferred (absent from the inline exposure list) but is
+    // advertised by the catalog, so the effect obligation must be satisfiable by
+    // its success.
+    let tools = vec![ToolSpec::builtin(
+        "file.write",
+        "file",
+        "write",
+        ToolRisk::WritesWorkspace,
+        r#"{"type":"object"}"#,
+    )];
+    let catalog = vec![
+        tools[0].clone(),
+        ToolSpec::builtin(
+            "image.generate",
+            "image",
+            "generate",
+            ToolRisk::UsesNetwork,
+            r#"{"type":"object"}"#,
+        ),
+    ];
+    let mut context = run_context("Change the portrait to a woman", 0);
+    context.insert("tool_requirement".to_string(), "effects".to_string());
+    let mut runtime = start_agent_loop(
+        TaskId("deferred-effect".to_string()),
+        "Change the portrait to a woman",
+        AgentRuntimeConfig::default(),
+    );
+    apply_run_task_contract_with_completion_intent(
+        &mut runtime,
+        &context,
+        &tools,
+        &catalog,
+        None,
+        &prompt_completion_intent(&context),
+    )
+    .expect("contract applies");
+
+    let instruction = AgentKernel::new(&mut runtime, &tools)
+        .completion_gate_for_task()
+        .expect("effect gate evaluates")
+        .expect("no effect yet");
+    assert!(instruction.content.contains("conductor_effect"));
+
+    apply_observation(
+        &mut runtime,
+        &tools,
+        "image.generate",
+        "{}",
+        ToolOutcomeStatus::Succeeded,
+        "tool=image.generate\nstatus=succeeded\noutput=\nGenerated image: portrait.png",
+    );
+    assert_eq!(
+        AgentKernel::new(&mut runtime, &tools).completion_gate_for_task(),
+        Ok(None)
+    );
+}
+
+#[test]
 fn explicit_software_change_infers_effect_and_postcondition_without_conductor_metadata() {
     const POSTCONDITION_SCOPE: &str = "contract-test:inferred-effect:5";
     let tools = vec![

@@ -140,6 +140,7 @@ pub(crate) fn apply_run_task_contract(
         runtime,
         run_context,
         tools,
+        tools,
         collaboration,
         &completion_intent,
     )
@@ -149,6 +150,7 @@ pub(crate) fn apply_run_task_contract_with_completion_intent(
     runtime: &mut agent_runtime::AgentLoopState,
     run_context: &Metadata,
     tools: &[ToolSpec],
+    effect_catalog: &[ToolSpec],
     collaboration: Option<&AgentCollaboration>,
     completion_intent: &PromptCompletionIntent,
 ) -> Result<(), String> {
@@ -181,8 +183,12 @@ pub(crate) fn apply_run_task_contract_with_completion_intent(
         prompt_required_tools.iter().copied(),
     );
 
-    let prompt_capability_requirements =
-        prompt_capability_requirements(run_context, tools, completion_intent.tool_requirement);
+    let prompt_capability_requirements = prompt_capability_requirements(
+        run_context,
+        tools,
+        effect_catalog,
+        completion_intent.tool_requirement,
+    );
     AgentKernel::new(runtime, tools).replace_prompt_required_any_tool_successes(
         prompt_contract_epoch,
         prompt_capability_requirements,
@@ -288,6 +294,7 @@ pub(crate) fn apply_run_task_contract_with_completion_intent(
 fn prompt_capability_requirements(
     run_context: &Metadata,
     tools: &[ToolSpec],
+    effect_catalog: &[ToolSpec],
     completion: PromptToolRequirement,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut requirements = BTreeMap::new();
@@ -307,7 +314,10 @@ fn prompt_capability_requirements(
             }
         }
         PromptToolRequirement::Effects => {
-            let tools = tools
+            // Source the effect alternatives from the full catalog so a deferred
+            // but available effect tool (e.g. image.generate) can satisfy the
+            // obligation; the inline exposure list alone can omit it.
+            let mut tools = effect_catalog
                 .iter()
                 .filter(|tool| {
                     tool.namespace != "meta"
@@ -315,6 +325,13 @@ fn prompt_capability_requirements(
                 })
                 .map(|tool| tool.name.clone())
                 .collect::<BTreeSet<_>>();
+            if run_context
+                .get("image_generation_required")
+                .map(String::as_str)
+                == Some("true")
+            {
+                tools.insert("image.generate".to_string());
+            }
             if !tools.is_empty() {
                 let id = if configured == PromptToolRequirement::Effects {
                     "conductor_effect"

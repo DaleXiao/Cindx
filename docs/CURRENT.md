@@ -122,8 +122,12 @@ evolution consumption path has been removed, so the admitted window is inert
 measurement data with no production consumer. Grounding obligations also accept
 anchor-matched failed tool attempts
 as absent-target evidence, so a task whose requested workspace file does not
-exist fails closed on content but no longer spins through unsatisfiable
-grounding repairs.
+ exist fails closed on content but no longer spins through unsatisfiable
+ grounding repairs. The effect any-tool obligation (`conductor_effect` /
+ `prompt_effect`) sources its satisfiable alternatives from the full tool
+ catalog rather than the inline exposure list, so a deferred-but-available
+ effect tool such as `image.generate` satisfies the obligation on success and
+ cannot trigger an unsatisfiable repair loop.
 
 Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is

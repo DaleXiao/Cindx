@@ -113,6 +113,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
     let session_id_owned = run_context.get("session_id").cloned();
     let session_id = session_id_owned.as_deref();
     let registry = tool_registry_for_state(state, workspace_root)?;
+    let catalog = registry.specs();
     let (tools, completion_intent) = planned_agent_tools(
         &registry,
         &run_context,
@@ -123,6 +124,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         &mut runtime,
         &run_context,
         &tools,
+        &catalog,
         collaboration,
         &completion_intent,
     )?;

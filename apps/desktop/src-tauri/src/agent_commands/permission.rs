@@ -838,6 +838,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         )
     });
     let registry = tool_registry_for_state(&state, &root)?;
+    let catalog = registry.specs();
     let (tools, completion_intent) = crate::agent_loop_runtime::planned_agent_tools(
         &registry,
         &run_context,
@@ -848,6 +849,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         &mut runtime,
         &run_context,
         &tools,
+        &catalog,
         None,
         &completion_intent,
     )?;
