@@ -29,6 +29,24 @@ pub(crate) fn planned_agent_tools(
     (tools, completion_intent)
 }
 
+/// Compact index of deferred tools so the model can discover and use tools it
+/// was not explicitly given, without registering every schema up front.
+pub(crate) fn deferred_tool_index(
+    registry: &ToolRegistry,
+    run_context: &Metadata,
+    prompt: &str,
+    context_window: u64,
+) -> String {
+    let completion_intent = prompt_completion_intent(run_context);
+    let intent = tool_exposure_intent(
+        run_context,
+        &completion_intent.evidence_scopes,
+        completion_intent.tool_requirement,
+    );
+    let plan = registry.exposure_plan_with_intent(prompt, context_window, &intent);
+    tools::render_deferred_tool_index(&plan.deferred)
+}
+
 fn tool_exposure_intent(
     run_context: &Metadata,
     evidence_scopes: &BTreeSet<PromptEvidenceScope>,

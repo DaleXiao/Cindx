@@ -84,7 +84,7 @@ pub(crate) use contract_runtime::{
 };
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use contract_runtime::{
-    apply_run_task_contract_with_completion_intent, planned_agent_tools,
+    apply_run_task_contract_with_completion_intent, deferred_tool_index, planned_agent_tools,
 };
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentLoopExecutionOutcome {
@@ -120,6 +120,15 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         effective_agent_objective(&run_context, &prompt),
         config.context_window_tokens,
     );
+    let deferred_index = deferred_tool_index(
+        &registry,
+        &run_context,
+        effective_agent_objective(&run_context, &prompt),
+        config.context_window_tokens,
+    );
+    if !deferred_index.is_empty() {
+        run_context.insert("deferred_tool_index".to_string(), deferred_index);
+    }
     apply_run_task_contract_with_completion_intent(
         &mut runtime,
         &run_context,

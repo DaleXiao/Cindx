@@ -288,6 +288,9 @@ pub(crate) fn agent_runtime_context_for_run(run_context: &Metadata) -> Option<St
             "Image generation policy (authoritative): this request requires raster image generation. You MUST use `image.generate`, which is locked to the user's Settings model `{model}` at `{endpoint}`. Never substitute a model, provider, shell command, browser workflow, direct HTTP request, SVG, emoji, CSS drawing, or text-only approximation for the requested generated image. The visual prompt is your responsibility; model and provider selection are not."
         ));
     }
+    if let Some(deferred_index) = run_context.get("deferred_tool_index") {
+        sections.push(deferred_index.clone());
+    }
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 

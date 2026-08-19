@@ -451,6 +451,33 @@ impl Default for ToolRegistry {
     }
 }
 
+/// Render a compact, cheap index of deferred tools so the model knows what is
+/// available on demand without paying for every full schema up front. The model
+/// loads a full schema with `tool.inspect` and calls it with `tool.invoke`.
+pub fn render_deferred_tool_index(deferred: &[ToolSpec]) -> String {
+    if deferred.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "Additional tools are available on demand (not loaded to save context). If the request matches one, call tool.inspect with its name to load the full schema, then tool.invoke to use it; do not ask the user which tool to use:\n",
+    );
+    for spec in deferred {
+        out.push_str(&format!("- {}: {}\n", spec.name, first_line(&spec.description)));
+    }
+    out
+}
+
+fn first_line(value: &str) -> String {
+    value
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(160)
+        .collect()
+}
+
 fn tool_relevance(spec: &ToolSpec, query: &str) -> usize {
     let mut score = 0;
     if spec.name == "image.generate" && prompt_requests_image_generation(query) {
@@ -565,6 +592,23 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn deferred_tool_index_is_compact_and_discoverable() {
+        let deferred = vec![ToolSpec::builtin(
+            "mermaid.render",
+            "diagram",
+            "Render a Mermaid diagram to an image.\nSecond line is dropped.",
+            ToolRisk::ReadOnly,
+            "{}",
+        )];
+        let index = render_deferred_tool_index(&deferred);
+        assert!(index.contains("mermaid.render"));
+        assert!(index.contains("Render a Mermaid diagram to an image."));
+        assert!(!index.contains("Second line"));
+        assert!(index.contains("tool.inspect"));
+        assert!(render_deferred_tool_index(&[]).is_empty());
+    }
 
     struct CatalogTool {
         name: String,
