@@ -1,5 +1,10 @@
 import { ArchiveRestore, Trash2 } from "lucide-react";
-import { confirmDeleteAction, type ProjectSessionState, type SessionView } from "../tauri";
+import {
+  confirmDeleteAction,
+  deleteSession,
+  type ProjectSessionState,
+  type SessionView
+} from "../tauri";
 
 export type SettingsSessionsPanelProps = {
   archivedSessions: SessionView[];
@@ -7,6 +12,11 @@ export type SettingsSessionsPanelProps = {
   projectSessionBusy: boolean;
   handleRestoreSession: (sessionId: string) => Promise<void>;
   handleDeleteSession: (sessionId: string) => Promise<void>;
+  completeBulkDelete: (
+    ids: string[],
+    next: ProjectSessionState | null,
+    error: string | null
+  ) => void;
 };
 
 function formatArchivedTime(timestampMs: number | null) {
@@ -19,12 +29,25 @@ export function SettingsSessionsPanel({
   projectSessionState,
   projectSessionBusy,
   handleRestoreSession,
-  handleDeleteSession
+  handleDeleteSession,
+  completeBulkDelete
 }: SettingsSessionsPanelProps) {
+  // Delete each archived session with a single fast command apiece, then run
+  // one workspace refresh at the end instead of one per deletion.
   const deleteAllArchived = async () => {
+    const ids: string[] = [];
+    let next: ProjectSessionState | null = null;
+    let error: string | null = null;
     for (const session of archivedSessions) {
-      await handleDeleteSession(session.id);
+      try {
+        next = await deleteSession(session.id);
+        ids.push(session.id);
+      } catch (err) {
+        error = err instanceof Error ? err.message : String(err);
+        break;
+      }
     }
+    completeBulkDelete(ids, next, error);
   };
   return (
     <section className="settings-section" data-settings-group="sessions">

@@ -1434,6 +1434,12 @@ export function App() {
     }
   }
 
+  function completeBulkDelete(ids: string[], next: ProjectSessionState | null, error: string | null) {
+    forgetDeletedSessions(ids);
+    if (error) setComposerError(error);
+    if (next) void refreshWorkspaceAfterProjectSession(next);
+  }
+
   function applyAgentStateForSession(sessionId: string, next: AgentState) {
     const effectiveNext = preserveOptimisticQueuedMessages(sessionId, next);
     agentStateRevisionsRef.current.set(sessionId, {
@@ -2209,9 +2215,8 @@ export function App() {
               handleRefreshSkills,
               handleRemoveMcpServer,
               handleResolvePermissionReview,
-               handleRestorePermissionReview,
-               handleRestoreSession,
-               handleDeleteSession,
+               handleRestorePermissionReview, handleRestoreSession,
+               handleDeleteSession, completeBulkDelete,
                handleRunBrowserTool,
               handleRunTool,
               handleSavePersonalization,

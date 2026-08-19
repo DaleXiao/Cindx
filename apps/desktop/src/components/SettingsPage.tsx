@@ -147,6 +147,11 @@ export type SettingsPageProps = {
   handleRestorePermissionReview: (requestId: string) => void;
   handleRestoreSession: (sessionId: string) => Promise<void>;
   handleDeleteSession: (sessionId: string) => Promise<void>;
+  completeBulkDelete: (
+    ids: string[],
+    next: ProjectSessionState | null,
+    error: string | null
+  ) => void;
   handleRunBrowserTool: (toolName: string) => Promise<void>;
   handleRunTool: () => Promise<void>;
   handleSavePersonalization: () => Promise<void>;
@@ -298,6 +303,7 @@ export function SettingsPage(props: SettingsPageProps) {
     handleRestorePermissionReview,
     handleRestoreSession,
     handleDeleteSession,
+    completeBulkDelete,
     handleRunBrowserTool,
     handleRunTool,
     handleSavePersonalization,
@@ -637,6 +643,7 @@ export function SettingsPage(props: SettingsPageProps) {
                   projectSessionBusy={projectSessionBusy}
                   handleRestoreSession={handleRestoreSession}
                   handleDeleteSession={handleDeleteSession}
+                  completeBulkDelete={completeBulkDelete}
                 />
                 )}
 
