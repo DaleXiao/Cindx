@@ -154,6 +154,41 @@ pub(crate) fn upsert_mcp_server(
 }
 
 #[tauri::command]
+pub(crate) fn import_external_mcp_servers(
+    state: tauri::State<'_, AppState>,
+) -> Result<McpStateView, String> {
+    let workspace_root = active_workspace_root(&state).ok();
+    let candidate_paths =
+        agent_mcp::external_mcp_config_candidate_paths(workspace_root.as_deref());
+    let mut incoming = Vec::new();
+    for path in candidate_paths {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        incoming.extend(agent_mcp::parse_external_mcp_servers(&raw));
+    }
+    let mut catalog = state
+        .mcp_catalog
+        .lock()
+        .map_err(|error| format!("MCP catalog lock poisoned: {error}"))?;
+    let existing_names: std::collections::BTreeSet<String> = catalog
+        .states()
+        .into_iter()
+        .map(|server| server.config.name)
+        .collect();
+    for server in incoming {
+        if existing_names.contains(&server.name) {
+            continue;
+        }
+        catalog
+            .upsert_server(server)
+            .map_err(|error| error.to_string())?;
+    }
+    invalidate_tool_registry_cache(&state)?;
+    Ok(mcp_state_view(&catalog, None))
+}
+
+#[tauri::command]
 pub(crate) fn update_mcp_server_policy(
     state: tauri::State<'_, AppState>,
     input: McpServerPolicyInput,

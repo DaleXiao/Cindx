@@ -9,6 +9,7 @@ const INTEGRATION_COMMAND_HANDLERS = [
   "get_mcp_state",
   "save_mcp_servers",
   "upsert_mcp_server",
+  "import_external_mcp_servers",
   "update_mcp_server_policy",
   "remove_mcp_server",
   "refresh_mcp_server",

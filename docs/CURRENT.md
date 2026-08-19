@@ -203,6 +203,11 @@ Tool visibility does not grant authority.
   in terminal output.
 - Browser and computer control require healthy sidecars and the relevant macOS
   privacy permissions.
+- MCP servers already configured for other tools can be imported via
+  "Import installed" in Settings → MCP. Cindx reads the standard config
+  locations (Claude Desktop, Claude Code, Cursor, a workspace `.mcp.json`),
+  converts stdio/http entries, and adds any server not already present as
+  enabled with approval required. Existing servers are never overwritten.
 
 ## State, Retrieval, and Memory
 

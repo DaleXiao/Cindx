@@ -260,6 +260,15 @@ export async function upsertMcpServer(server: McpServerConfig): Promise<McpState
   return await invoke<McpState>("upsert_mcp_server", { input: { server } });
 }
 
+export async function importExternalMcpServers(): Promise<McpState> {
+  try {
+    return await invoke<McpState>("import_external_mcp_servers");
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
+    return { servers: [], lastError: String(error) };
+  }
+}
+
 export async function updateMcpServerPolicy(
   serverId: string,
   enabled: boolean,

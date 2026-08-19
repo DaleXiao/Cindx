@@ -192,6 +192,7 @@ pub fn run() -> Result<(), String> {
             integration_commands::get_mcp_state,
             integration_commands::save_mcp_servers,
             integration_commands::upsert_mcp_server,
+            integration_commands::import_external_mcp_servers,
             integration_commands::update_mcp_server_policy,
             integration_commands::remove_mcp_server,
             integration_commands::refresh_mcp_server,

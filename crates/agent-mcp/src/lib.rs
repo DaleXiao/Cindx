@@ -107,6 +107,125 @@ pub struct McpServerConfig {
     pub transport: McpTransportConfig,
 }
 
+/// Candidate locations of MCP configs written by other tools on this machine
+/// (Claude Desktop, Claude Code, Cursor, and a workspace `.mcp.json`). Importing
+/// these lets Cindx reuse servers the user already installed elsewhere.
+pub fn external_mcp_config_candidate_paths(workspace_root: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut paths = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        paths.push(home.join("Library/Application Support/Claude/claude_desktop_config.json"));
+        paths.push(home.join(".claude.json"));
+        paths.push(home.join(".claude/settings.json"));
+        paths.push(home.join(".cursor/mcp.json"));
+        paths.push(home.join(".config/mcp/config.json"));
+    }
+    if let Some(root) = workspace_root {
+        paths.push(root.join(".mcp.json"));
+    }
+    paths
+}
+
+fn external_server_id(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "external".to_string()
+    } else {
+        slug
+    }
+}
+
+fn external_server_config_from_entry(name: &str, entry: &Value) -> Option<McpServerConfig> {
+    let obj = entry.as_object()?;
+    let transport = if let Some(command) = obj.get("command").and_then(Value::as_str) {
+        let args = obj
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let env = obj
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        McpTransportConfig::Stdio {
+            command: command.to_string(),
+            args,
+            env,
+        }
+    } else if let Some(url) = obj.get("url").and_then(Value::as_str) {
+        let headers = obj
+            .get("headers")
+            .and_then(Value::as_object)
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        McpTransportConfig::StreamableHttp {
+            url: url.to_string(),
+            headers,
+        }
+    } else {
+        return None;
+    };
+    Some(McpServerConfig {
+        id: format!("ext-{}", external_server_id(name)),
+        name: name.to_string(),
+        enabled: true,
+        require_approval: true,
+        timeout_ms: 30_000,
+        transport,
+    })
+}
+
+/// Parse a foreign MCP config document (a `mcpServers` map, or a bare
+/// name->server object) into Cindx server configs. Unparseable entries are
+/// skipped rather than failing the whole import.
+pub fn parse_external_mcp_servers(raw: &str) -> Vec<McpServerConfig> {
+    let Ok(document) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let servers_map = document
+        .get("mcpServers")
+        .or_else(|| document.get("mcp_servers"))
+        .cloned()
+        .unwrap_or_else(|| document.clone());
+    let Some(entries) = servers_map.as_object() else {
+        return Vec::new();
+    };
+    let mut servers: Vec<McpServerConfig> = entries
+        .iter()
+        .filter_map(|(name, entry)| external_server_config_from_entry(name, entry))
+        .collect();
+    servers.sort_by(|left, right| left.id.cmp(&right.id));
+    servers
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolDescriptor {
@@ -1421,6 +1540,50 @@ fn default_timeout_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_external_mcp_servers_handles_stdio_and_http_entries() {
+        let raw = r#"{
+          "mcpServers": {
+            "filesystem": {
+              "command": "npx",
+              "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+              "env": {"HOME": "/Users/x"}
+            },
+            "remote": { "type": "http", "url": "https://example.com/mcp" },
+            "broken": { "nothing": true }
+          }
+        }"#;
+        let servers = parse_external_mcp_servers(raw);
+        assert_eq!(servers.len(), 2);
+        let fs = servers.iter().find(|s| s.name == "filesystem").unwrap();
+        match &fs.transport {
+            McpTransportConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args.len(), 3);
+                assert_eq!(env.get("HOME").map(String::as_str), Some("/Users/x"));
+            }
+            _ => panic!("filesystem should be stdio"),
+        }
+        assert!(fs.enabled);
+        assert!(fs.require_approval);
+        let remote = servers.iter().find(|s| s.name == "remote").unwrap();
+        match &remote.transport {
+            McpTransportConfig::StreamableHttp { url, .. } => {
+                assert_eq!(url, "https://example.com/mcp");
+            }
+            _ => panic!("remote should be http"),
+        }
+    }
+
+    #[test]
+    fn parse_external_mcp_servers_accepts_bare_object_and_skips_invalid() {
+        let raw = r#"{ "gh": { "command": "gh-mcp" }, "bad": {} }"#;
+        let servers = parse_external_mcp_servers(raw);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "gh");
+        assert_eq!(servers[0].id, "ext-gh");
+    }
 
     #[cfg(unix)]
     #[test]

@@ -138,6 +138,7 @@ export type SettingsPageProps = {
   handleMcpPolicy: (serverId: string, enabled: boolean, requireApproval: boolean) => Promise<void>;
   handlePickWorkspace: () => Promise<void>;
   handleRefreshMcpServer: (serverId: string) => Promise<void>;
+  handleImportExternalMcpServers: () => Promise<void>;
   handleRefreshSkills: () => Promise<void>;
   handleRemoveMcpServer: (serverId: string) => Promise<void>;
   handleResolvePermissionReview: (
@@ -297,6 +298,7 @@ export function SettingsPage(props: SettingsPageProps) {
     handleMcpPolicy,
     handlePickWorkspace,
     handleRefreshMcpServer,
+    handleImportExternalMcpServers,
     handleRefreshSkills,
     handleRemoveMcpServer,
     handleResolvePermissionReview,
@@ -961,6 +963,15 @@ export function SettingsPage(props: SettingsPageProps) {
                   <div className="section-title">
                     <Cable size={17} aria-hidden="true" />
                     <h2>MCP servers</h2>
+                    <button
+                      className="secondary-button archived-delete-all"
+                      type="button"
+                      disabled={mcpBusy}
+                      onClick={() => void handleImportExternalMcpServers()}
+                    >
+                      <PackagePlus aria-hidden="true" />
+                      <span>Import installed</span>
+                    </button>
                   </div>
                   <div className="integration-list">
                     {(mcpState?.servers ?? []).length === 0 ? (

@@ -244,7 +244,7 @@ export function App() {
     showSaved: showSettingsSaved
   });
   const {
-    handleAddMcpServer,
+    handleAddMcpServer, handleImportExternalMcpServers,
     handleInstallSkillPackage,
     handleInstallSkillUrl,
     handleMcpPolicy,
@@ -2209,7 +2209,7 @@ export function App() {
               handleInstallSkillUrl,
               handleLoadProviderModels,
               handleReloadProviderState: loadProviderState,
-              handleMcpPolicy,
+              handleMcpPolicy, handleImportExternalMcpServers,
               handlePickWorkspace,
               handleRefreshMcpServer,
               handleRefreshSkills,

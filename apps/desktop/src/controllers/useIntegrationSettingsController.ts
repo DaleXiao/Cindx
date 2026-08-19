@@ -4,6 +4,7 @@ import {
   getSidecarState,
   getSkillState,
   getWebSearchConfig,
+  importExternalMcpServers,
   installSkillPackage,
   installSkillUrl,
   refreshMcpServer,
@@ -178,6 +179,20 @@ export function useIntegrationSettingsController({
     [reportError]
   );
 
+  const handleImportExternalMcpServers = useCallback(async () => {
+    setMcpBusy(true);
+    reportError(null);
+    try {
+      const next = await importExternalMcpServers();
+      setMcpState(next);
+      reportError(next.lastError);
+    } catch (error) {
+      reportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }, [reportError]);
+
   const handleMcpPolicy = useCallback(
     async (serverId: string, enabled: boolean, requireApproval: boolean) => {
       setMcpBusy(true);
@@ -269,6 +284,7 @@ export function useIntegrationSettingsController({
 
   return {
     handleAddMcpServer,
+    handleImportExternalMcpServers,
     handleInstallSkillPackage,
     handleInstallSkillUrl,
     handleMcpPolicy,
