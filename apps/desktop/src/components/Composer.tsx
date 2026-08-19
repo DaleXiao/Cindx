@@ -58,17 +58,17 @@ const EFFORT_OPTIONS: Array<{
   {
     value: "fast",
     label: "Cindx Fast",
-    description: "One model, one direct answer; fastest, no verification"
+    description: "Think fast, get a quick answer"
   },
   {
     value: "auto",
     label: "Cindx Auto",
-    description: "One model plans and acts, an independent judge verifies"
+    description: "Thinks it through, acts, and double-checks the result"
   },
   {
     value: "pro",
     label: "Cindx Pro",
-    description: "One model, deepest budget for multi-step reasoning and verification"
+    description: "Deepest thinking for complex, multi-step work"
   }
 ];
 
