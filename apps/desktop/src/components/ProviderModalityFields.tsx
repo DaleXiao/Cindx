@@ -60,6 +60,11 @@ export function ProviderModalityFields({
           value={providerDraft.embeddingModel}
           options={providerModelOptions.embedding}
           disabled={providerBusy}
+          status={{
+            available: providerModels.includes(providerDraft.embeddingModel),
+            label: "Embedding model available through the latest authenticated provider connection",
+            title: "The selected embedding model is present in the latest authenticated model catalog"
+          }}
           onChange={(embeddingModel) => setProviderDraft({ ...providerDraft, embeddingModel })}
         />
         <ModelSelect

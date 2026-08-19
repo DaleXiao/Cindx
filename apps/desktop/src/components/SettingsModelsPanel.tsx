@@ -139,6 +139,7 @@ export function SettingsModelsPanel({
               providerBusy={providerBusy}
               providerDraft={providerDraft}
               providerModelOptions={providerModelOptions}
+              providerModels={providerModels}
               setProviderDraft={setProviderDraft}
             />
             <ProviderModalityFields
@@ -172,7 +173,7 @@ export function SettingsModelsPanel({
               onClick={handleSaveProviderConfig}
             >
               <Save size={17} aria-hidden="true" />
-              <span>{providerBusy ? "Verifying" : "Connect provider"}</span>
+              <span>{providerBusy ? "Verifying" : "Save"}</span>
             </button>
           </div>
         )}

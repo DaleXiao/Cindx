@@ -3103,7 +3103,9 @@ assert(
     settingsPageSource.includes('label="Auto tier"') &&
     settingsPageSource.includes('label="Pro tier"') &&
     settingsPageSource.includes("Compatibility fallback") &&
-    settingsPageSource.includes("Apply to all profiles") &&
+    !settingsPageSource.includes("Apply to all profiles") &&
+    !settingsPageSource.includes("Empty uses") &&
+    !settingsPageSource.includes("does not overwrite the profiles above") &&
     !settingsModelsPanelSource.includes("Default effort") &&
     !settingsModelsPanelSource.includes("4 worker roles"),
   "Provider settings must expose model profiles and services without legacy role semantics"
@@ -3721,8 +3723,8 @@ assert(
   "Projects heading must render an aligned SVG icon"
 );
 assert(
-  settingsPageSource.includes("Connect provider"),
-  "App must render provider verification and connect action"
+  settingsPageSource.includes('providerBusy ? "Verifying" : "Save"'),
+  "App must render provider verification and save action"
 );
 assert(settingsPageSource.includes("Run tool"), "App must render the Phase 5 tool runner");
 assert(settingsPageSource.includes("Index workspace"), "App must render the Phase 7 RAG index action");
