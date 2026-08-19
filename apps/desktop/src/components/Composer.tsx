@@ -58,17 +58,17 @@ const EFFORT_OPTIONS: Array<{
   {
     value: "fast",
     label: "Cindx Fast",
-    description: "Quick direct answer; lowest latency"
+    description: "One model, one direct answer; fastest, no verification"
   },
   {
     value: "auto",
     label: "Cindx Auto",
-    description: "Adaptive execution with independent delivery verification"
+    description: "One model plans and acts, an independent judge verifies"
   },
   {
     value: "pro",
     label: "Cindx Pro",
-    description: "Deep iterative execution with the largest budget"
+    description: "One model, deepest budget for multi-step reasoning and verification"
   }
 ];
 
