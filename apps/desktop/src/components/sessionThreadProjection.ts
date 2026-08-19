@@ -179,31 +179,41 @@ function buildRows(items: SessionThreadSelection[]) {
   return { rows, rowIndexByItemId };
 }
 
+function isUserMessageItem(item: SessionThreadSelection | undefined) {
+  return item?.type === "message" && item.message.role === "user";
+}
+
+function rowContainsUserMessage(row: ThreadRow) {
+  return row.type === "item" && isUserMessageItem(row.item);
+}
+
+function currentTurnChainIndex(rows: ThreadRow[]): number | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.type === "tool-chain") return index;
+    if (rowContainsUserMessage(row)) return null;
+  }
+  return null;
+}
+
 function appendRows(
   rows: ThreadRow[],
   rowIndexByItemId: Map<string, number>,
   items: SessionThreadSelection[],
   itemIndexOffset: number
 ) {
+  let turnChainIndex = currentTurnChainIndex(rows);
   let index = 0;
-  const lastRowIndex = rows.length - 1;
-  const lastRow = rows[lastRowIndex];
-  if (lastRow?.type === "tool-chain" && isActivityCandidate(items[0])) {
-    let end = 1;
-    while (end < items.length && isActivityCandidate(items[end])) end += 1;
-    const appended = items.slice(0, end);
-    rows[lastRowIndex] = { ...lastRow, items: [...lastRow.items, ...appended] };
-    appended.forEach((item) => rowIndexByItemId.set(item.id, lastRowIndex));
-    index = end;
-  }
 
   while (index < items.length) {
-    const rowIndex = rows.length;
+    const item = items[index];
     const globalItemIndex = itemIndexOffset + index;
-    if (!isActivityCandidate(items[index])) {
-      const item = items[index];
+
+    if (!isActivityCandidate(item)) {
+      const rowIndex = rows.length;
       rows.push({ type: "item", item, itemIndex: globalItemIndex });
       rowIndexByItemId.set(item.id, rowIndex);
+      if (isUserMessageItem(item)) turnChainIndex = null;
       index += 1;
       continue;
     }
@@ -211,13 +221,29 @@ function appendRows(
     let end = index + 1;
     while (end < items.length && isActivityCandidate(items[end])) end += 1;
     const candidates = items.slice(index, end);
-    rows.push({
-      type: "tool-chain",
-      id: `tool-chain-${candidates[0].id}`,
-      items: candidates,
-      itemIndex: globalItemIndex
-    });
-    candidates.forEach((candidate) => rowIndexByItemId.set(candidate.id, rowIndex));
+    const existing =
+      turnChainIndex !== null && rows[turnChainIndex]?.type === "tool-chain"
+        ? (rows[turnChainIndex] as Extract<ThreadRow, { type: "tool-chain" }>)
+        : null;
+    if (existing) {
+      rows[turnChainIndex as number] = {
+        ...existing,
+        items: [...existing.items, ...candidates]
+      };
+      candidates.forEach((candidate) =>
+        rowIndexByItemId.set(candidate.id, turnChainIndex as number)
+      );
+    } else {
+      const rowIndex = rows.length;
+      rows.push({
+        type: "tool-chain",
+        id: `tool-chain-${candidates[0].id}`,
+        items: candidates,
+        itemIndex: globalItemIndex
+      });
+      candidates.forEach((candidate) => rowIndexByItemId.set(candidate.id, rowIndex));
+      turnChainIndex = rowIndex;
+    }
     index = end;
   }
 }

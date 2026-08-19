@@ -13,7 +13,9 @@ The desktop app currently includes:
 - Projects and sessions with rename, delete confirmation, search, status, and
   persistent history.
 - Streamed chat with Markdown, code, Mermaid, mind maps, links, attachments,
-  queue/steer input, cancellation, retry, and artifact output.
+  queue/steer input, cancellation, retry, and artifact output. A turn's tool and
+  event activity is collected into a single "Agent actions" disclosure shown once,
+  instead of one before and one after the answer.
 - A right output pane with file lists and previews, plus a collapsible debug
   drawer for trace, context, and artifacts.
 - Schedules, model/provider settings, tools, MCP, skills, permissions, knowledge,
