@@ -73,14 +73,6 @@ export function SettingsEffortModelFields({
         />
       </div>
       <div className="provider-form provider-model-group">
-        <div>
-          <p className="settings-section-copy">
-            <strong>Compatibility fallback</strong>
-            <br />
-            Legacy primary slot used when a runtime stage has no dedicated
-            model.
-          </p>
-        </div>
         <ModelSelect
           label={
             providerDraft.providerId === "azure_openai"

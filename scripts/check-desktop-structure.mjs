@@ -3102,7 +3102,8 @@ assert(
     settingsPageSource.includes('label="Fast tier"') &&
     settingsPageSource.includes('label="Auto tier"') &&
     settingsPageSource.includes('label="Pro tier"') &&
-    settingsPageSource.includes("Compatibility fallback") &&
+    settingsPageSource.includes("Fallback model") &&
+    !settingsPageSource.includes("Compatibility fallback") &&
     !settingsPageSource.includes("Apply to all profiles") &&
     !settingsPageSource.includes("Empty uses") &&
     !settingsPageSource.includes("does not overwrite the profiles above") &&
