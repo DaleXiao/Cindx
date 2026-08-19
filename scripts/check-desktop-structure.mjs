@@ -2368,7 +2368,9 @@ assert(
 assert(
   !sessionThreadSource.includes("thread-message-agent-meta") &&
     sessionThreadSource.includes("!isUser && !isAssistant") &&
-    sessionThreadSource.includes("thread-streaming-status") &&
+    sessionThreadSource.includes("thread-tool-chain-status") &&
+    sessionThreadSource.includes("progressLabel") &&
+    !sessionThreadSource.includes("thread-streaming-status") &&
     !sessionThreadSource.includes('<strong>Cindx</strong>'),
   "Assistant output must begin without a robot icon or Cindx label"
 );

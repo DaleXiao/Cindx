@@ -831,6 +831,8 @@ export const SessionThread = memo(function SessionThread({
                 key={row.id}
                 row={row}
                 active={row.id === activeActionRowId}
+                progressLabel={row.id === activeActionRowId ? runProgress.label : undefined}
+                progressDetail={row.id === activeActionRowId ? runProgress.detail : undefined}
                 selectedId={selectedId}
                 onSelect={onSelect}
               />
@@ -1023,7 +1025,6 @@ export const SessionThread = memo(function SessionThread({
             data-minimap-index={items.length}
             data-minimap-kind="streaming"
           >
-            <RunProgressStatus progress={runProgress} className="thread-streaming-status" />
             <AgentMarkdown
               streamingContent={streamAnswer}
               onOpenError={onLinkOpenError}
@@ -1032,7 +1033,7 @@ export const SessionThread = memo(function SessionThread({
           </article>
         )}
 
-        {!streamAnswer && status === "running" && (
+        {status === "running" && !activeActionRowId && (
           <RunProgressStatus progress={runProgress} className="thread-running" />
         )}
         <span className="thread-scroll-anchor" aria-hidden="true" />

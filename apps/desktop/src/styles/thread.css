@@ -1443,6 +1443,16 @@ details[open] > summary .disclosure-triangle {
   white-space: nowrap;
 }
 
+.thread-tool-chain-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread-tool-chain-chevron {
   width: 13px;
   height: 13px;

@@ -64,10 +64,7 @@ export function EventIcon({ event }: { event: TimelineEntry }) {
 export function toolMessageSummary(content: string) {
   const tool = content.match(/^tool=(.+)$/m)?.[1]?.trim();
   const status = content.match(/^status=(.+)$/m)?.[1]?.trim();
-  return {
-    label: tool || "Tool output",
-    status: status || "done"
-  };
+  return { label: tool || "Tool output", status: status || "done" };
 }
 
 function toolMessageDetail(content: string) {
@@ -134,12 +131,14 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
   row,
   selectedId,
   onSelect,
-  active = false
+  active = false,
+  progressLabel, progressDetail
 }: {
   row: Extract<ThreadRow, { type: "tool-chain" }>;
   selectedId: string | null;
   onSelect: (selection: SessionThreadSelection) => void;
   active?: boolean;
+  progressLabel?: string; progressDetail?: string;
 }) {
   const [open, setOpen] = useState(false);
   const selected = row.items.some((item) => item.id === selectedId);
@@ -156,6 +155,9 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
       <summary>
         {active ? <AgentActionOrb /> : null}
         <strong>Agent actions</strong>
+        {progressLabel ? (
+          <span className="thread-tool-chain-status" title={progressDetail}>{progressLabel}</span>
+        ) : null}
         <ChevronRight className="thread-tool-chain-chevron" aria-hidden="true" />
       </summary>
       {open && (

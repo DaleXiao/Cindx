@@ -15,7 +15,9 @@ The desktop app currently includes:
 - Streamed chat with Markdown, code, Mermaid, mind maps, links, attachments,
   queue/steer input, cancellation, retry, and artifact output. A turn's tool and
   event activity is collected into a single "Agent actions" disclosure shown once,
-  instead of one before and one after the answer.
+  instead of one before and one after the answer. The live run status (Thinking,
+  Executing plan, Running ...) trails that disclosure header while the run is
+  active, rather than rendering as a separate block.
 - A right output pane with file lists and previews, plus a collapsible debug
   drawer for trace, context, and artifacts.
 - Schedules, model/provider settings, tools, MCP, skills, permissions, knowledge,
