@@ -205,9 +205,11 @@ Tool visibility does not grant authority.
   privacy permissions.
 - MCP servers already configured for other tools can be imported via
   "Import installed" in Settings → MCP. Cindx reads the standard config
-  locations (Claude Desktop, Claude Code, Cursor, a workspace `.mcp.json`),
-  converts stdio/http entries, and adds any server not already present as
-  enabled with approval required. Existing servers are never overwritten.
+  locations (Claude Desktop, Claude Code, Cursor, opencode `.jsonc`/`.json`,
+  a workspace `.mcp.json`), strips JSONC comments, and converts both
+  string+args and array-form `command` entries (stdio) plus `url` entries
+  (http/sse). Imported servers are added as enabled with approval required;
+  existing servers and `enabled:false` entries are never overwritten/imported.
 
 ## State, Retrieval, and Memory
 

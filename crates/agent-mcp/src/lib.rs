@@ -120,11 +120,68 @@ pub fn external_mcp_config_candidate_paths(workspace_root: Option<&std::path::Pa
         paths.push(home.join(".claude/settings.json"));
         paths.push(home.join(".cursor/mcp.json"));
         paths.push(home.join(".config/mcp/config.json"));
+        paths.push(home.join(".config/opencode/opencode.jsonc"));
+        paths.push(home.join(".config/opencode/opencode.json"));
+        paths.push(home.join(".config/opencode/config.json"));
+        paths.push(home.join(".opencode/config.json"));
     }
     if let Some(root) = workspace_root {
         paths.push(root.join(".mcp.json"));
     }
     paths
+}
+
+/// Strip `//` and `/* */` comments (JSONC) without touching string literals, so
+/// configs such as opencode's `opencode.jsonc` parse as JSON.
+pub fn strip_jsonc_comments(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    while let Some(character) = chars.next() {
+        if in_line_comment {
+            if character == '\n' {
+                in_line_comment = false;
+                output.push(character);
+            }
+            continue;
+        }
+        if in_block_comment {
+            if character == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if in_string {
+            output.push(character);
+            if character == '\\' {
+                if let Some(escaped) = chars.next() {
+                    output.push(escaped);
+                }
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => {
+                in_string = true;
+                output.push(character);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                chars.next();
+                in_line_comment = true;
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                in_block_comment = true;
+            }
+            _ => output.push(character),
+        }
+    }
+    output
 }
 
 fn external_server_id(name: &str) -> String {
@@ -148,7 +205,22 @@ fn external_server_id(name: &str) -> String {
 
 fn external_server_config_from_entry(name: &str, entry: &Value) -> Option<McpServerConfig> {
     let obj = entry.as_object()?;
-    let transport = if let Some(command) = obj.get("command").and_then(Value::as_str) {
+    if obj.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let env = obj
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    // `command` may be a string plus `args` (Claude/Cursor) or a single array
+    // whose first element is the binary (opencode).
+    let stdio = if let Some(command) = obj.get("command").and_then(Value::as_str) {
         let args = obj
             .get("args")
             .and_then(Value::as_array)
@@ -160,22 +232,26 @@ fn external_server_config_from_entry(name: &str, entry: &Value) -> Option<McpSer
                     .collect()
             })
             .unwrap_or_default();
-        let env = obj
-            .get("env")
-            .and_then(Value::as_object)
-            .map(|pairs| {
-                pairs
-                    .iter()
-                    .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        McpTransportConfig::Stdio {
-            command: command.to_string(),
-            args,
-            env,
-        }
-    } else if let Some(url) = obj.get("url").and_then(Value::as_str) {
+        Some((command.to_string(), args))
+    } else if let Some(parts) = obj.get("command").and_then(Value::as_array) {
+        let mut parts = parts.iter().filter_map(Value::as_str);
+        let command = parts.next()?.to_string();
+        let args = parts.map(str::to_string).collect();
+        Some((command, args))
+    } else {
+        None
+    };
+    let kind = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let transport = if let Some((command, args)) = stdio {
+        McpTransportConfig::Stdio { command, args, env }
+    } else if matches!(kind.as_str(), "http" | "https" | "sse" | "remote" | "streamable-http")
+        || obj.get("url").is_some()
+    {
+        let url = obj.get("url").and_then(Value::as_str)?;
         let headers = obj
             .get("headers")
             .and_then(Value::as_object)
@@ -207,12 +283,13 @@ fn external_server_config_from_entry(name: &str, entry: &Value) -> Option<McpSer
 /// name->server object) into Cindx server configs. Unparseable entries are
 /// skipped rather than failing the whole import.
 pub fn parse_external_mcp_servers(raw: &str) -> Vec<McpServerConfig> {
-    let Ok(document) = serde_json::from_str::<Value>(raw) else {
+    let Ok(document) = serde_json::from_str::<Value>(&strip_jsonc_comments(raw)) else {
         return Vec::new();
     };
     let servers_map = document
         .get("mcpServers")
         .or_else(|| document.get("mcp_servers"))
+        .or_else(|| document.get("mcp"))
         .cloned()
         .unwrap_or_else(|| document.clone());
     let Some(entries) = servers_map.as_object() else {
@@ -1574,6 +1651,41 @@ mod tests {
             }
             _ => panic!("remote should be http"),
         }
+    }
+
+    #[test]
+    fn parse_external_mcp_servers_handles_opencode_jsonc_array_command() {
+        let raw = r#"{
+          // opencode config uses "mcp" and an array command
+          "mcp": {
+            "cua-driver": {
+              "type": "local",
+              "command": ["/usr/bin/true", "mcp"],
+              "enabled": true
+            },
+            "disabled-one": { "command": ["/usr/bin/true"], "enabled": false }
+          }
+        }"#;
+        let servers = parse_external_mcp_servers(raw);
+        assert_eq!(servers.len(), 1);
+        let cua = &servers[0];
+        assert_eq!(cua.name, "cua-driver");
+        match &cua.transport {
+            McpTransportConfig::Stdio { command, args, .. } => {
+                assert_eq!(command, "/usr/bin/true");
+                assert_eq!(args, &vec!["mcp".to_string()]);
+            }
+            _ => panic!("cua-driver should be stdio"),
+        }
+    }
+
+    #[test]
+    fn strip_jsonc_comments_preserves_strings_with_slashes() {
+        let raw = r#"{ "url": "https://x.example//path", /* block */ "k": "//not-comment" } // tail"#;
+        let stripped = strip_jsonc_comments(raw);
+        let value: Value = serde_json::from_str(&stripped).expect("valid after strip");
+        assert_eq!(value["url"], "https://x.example//path");
+        assert_eq!(value["k"], "//not-comment");
     }
 
     #[test]
