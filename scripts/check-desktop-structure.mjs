@@ -3327,14 +3327,16 @@ assert(
 assert(
   composerSource.includes("const EFFORT_OPTIONS") &&
     composerSource.includes('label: "Cindx Fast"') &&
-    composerSource.includes('description: "Quick direct answer; lowest latency"') &&
+    composerSource.includes(
+      'description: "One model, one direct answer; fastest, no verification"'
+    ) &&
     composerSource.includes('label: "Cindx Auto"') &&
     composerSource.includes(
-      'description: "Adaptive execution with independent delivery verification"'
+      'description: "One model plans and acts, an independent judge verifies"'
     ) &&
     composerSource.includes('label: "Cindx Pro"') &&
     composerSource.includes(
-      'description: "Deep iterative execution with the largest budget"'
+      'description: "One model, deepest budget for multi-step reasoning and verification"'
     ) &&
     composerSource.includes('className="composer-effort-menu"') &&
     composerSource.includes('role="listbox"') &&

@@ -161,11 +161,29 @@ pub(crate) fn apply_default_memory_recall(
         decision.memory = MemoryRecallPlan {
             policy: MemoryRecallPolicy::Relevant,
             query: crate::collaboration_service::truncate_for_collaboration(
-                prompt,
+                &plan_conditioned_recall_query(decision, prompt),
                 MAX_RUN_DECISION_QUERY_CHARS.saturating_sub(12),
             ),
         };
     }
+}
+
+/// Condition default memory recall on the plan, not just the raw prompt: the
+/// task class and the plan's focused retrieval query make recall target the
+/// knowledge the plan determined it needs, surfacing more relevant durable
+/// memory for the same recall budget.
+fn plan_conditioned_recall_query(decision: &AgentRunDecision, prompt: &str) -> String {
+    let mut query = prompt.to_string();
+    query.push_str(" | task_class: ");
+    query.push_str(decision.task_class.label());
+    if decision.retrieval.enabled() {
+        let retrieval_query = decision.retrieval.query.trim();
+        if !retrieval_query.is_empty() {
+            query.push_str(" | plan_retrieval: ");
+            query.push_str(retrieval_query);
+        }
+    }
+    query
 }
 
 pub(super) fn align_candidate_and_route(
@@ -221,7 +239,8 @@ mod tests {
         assert_eq!(decision.memory.policy, MemoryRecallPolicy::None);
         apply_default_memory_recall(&native, &mut decision, "Summarize the project memory needs");
         assert_eq!(decision.memory.policy, MemoryRecallPolicy::Relevant);
-        assert_eq!(decision.memory.query, "Summarize the project memory needs");
+        assert!(decision.memory.query.starts_with("Summarize the project memory needs"));
+        assert!(decision.memory.query.contains("task_class:"));
 
         let mut decision = AgentRunDecision::direct("executor");
         decision.memory = MemoryRecallPlan {
@@ -231,6 +250,22 @@ mod tests {
         apply_default_memory_recall(&native, &mut decision, "ignored");
         assert_eq!(decision.memory.policy, MemoryRecallPolicy::Comprehensive);
         assert_eq!(decision.memory.query, "existing");
+    }
+
+    #[test]
+    fn default_memory_recall_conditions_the_query_on_the_plan() {
+        let native = crate::agent_execution_constraint::AgentExecutionConstraint::Native;
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.retrieval.query = "auth session expiry".to_string();
+        decision
+            .retrieval
+            .channels
+            .insert(orchestrator::WorkspaceRetrievalChannel::Semantic);
+
+        apply_default_memory_recall(&native, &mut decision, "Why does login expire early?");
+        assert!(decision.memory.query.contains("Why does login expire early?"));
+        assert!(decision.memory.query.contains("plan_retrieval: auth session expiry"));
+        assert!(decision.memory.query.contains("task_class:"));
     }
 
     #[test]

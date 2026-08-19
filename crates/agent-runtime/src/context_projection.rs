@@ -34,9 +34,18 @@ pub(crate) fn fit_message_to_budget_with_estimate(
     let character_count = message.content.chars().count();
     let mut max_characters =
         ((character_count as u64).saturating_mul(content_budget) / content_tokens).max(16) as usize;
+    // Tool evidence is tail-heavy: results, diagnostics, and test summaries that
+    // determine the next action sit at the end, so retain a larger tail share
+    // than for prose messages.
+    let (head_num, head_den) = if message.role == MessageRole::Tool {
+        (2u64, 5u64)
+    } else {
+        (2u64, 3u64)
+    };
     let mut fitted = message.clone();
     for _ in 0..5 {
-        fitted.content = truncate_middle(&message.content, max_characters);
+        fitted.content =
+            truncate_middle_with_split(&message.content, max_characters, head_num, head_den);
         if estimate_model_message_tokens(&fitted) <= budget {
             return Some((fitted, true));
         }
@@ -199,7 +208,12 @@ pub(crate) fn compact_excerpt(value: &str, max_characters: usize) -> String {
     output
 }
 
-fn truncate_middle(value: &str, max_characters: usize) -> String {
+fn truncate_middle_with_split(
+    value: &str,
+    max_characters: usize,
+    head_numerator: u64,
+    head_denominator: u64,
+) -> String {
     let character_count = value.chars().count();
     if character_count <= max_characters {
         return value.to_string();
@@ -210,7 +224,9 @@ fn truncate_middle(value: &str, max_characters: usize) -> String {
         return value.chars().take(max_characters).collect();
     }
     let retained = max_characters - marker_characters;
-    let head = retained.saturating_mul(2) / 3;
+    let head = ((retained as u64)
+        .saturating_mul(head_numerator)
+        / head_denominator.max(1)) as usize;
     let tail = retained.saturating_sub(head);
     let mut output = value.chars().take(head).collect::<String>();
     output.push_str(marker);
@@ -255,6 +271,40 @@ mod tests {
         assert!(
             digest.content.matches("- user requirement:").count() <= MAX_ARCHIVE_DIGEST_ENTRIES
         );
+    }
+
+    #[test]
+    fn tool_messages_retain_a_larger_tail_than_prose_when_fitted() {
+        // Salient tool evidence (final diagnostics) lives at the tail; a tool
+        // message must keep more of it than a prose message at the same budget.
+        let tail_marker = "final_test_failure_marker";
+        let middle = "noise ".repeat(4_000);
+        let content = format!("head {middle}{tail_marker}");
+        let tool = message(MessageRole::Tool, content.clone());
+        let prose = message(MessageRole::Assistant, content);
+
+        let budget = 1_200;
+        let (fitted_tool, tool_truncated) =
+            super::fit_message_to_budget(&tool, budget).expect("tool fits");
+        let (fitted_prose, prose_truncated) =
+            super::fit_message_to_budget(&prose, budget).expect("prose fits");
+
+        assert!(tool_truncated && prose_truncated);
+        assert!(fitted_tool.content.contains(tail_marker));
+        // The tool split (2/5 head) keeps strictly more tail than prose (2/3 head).
+        let tool_tail = fitted_tool
+            .content
+            .split("omitted middle content")
+            .last()
+            .unwrap_or_default()
+            .len();
+        let prose_tail = fitted_prose
+            .content
+            .split("omitted middle content")
+            .last()
+            .unwrap_or_default()
+            .len();
+        assert!(tool_tail > prose_tail);
     }
 
     #[test]
