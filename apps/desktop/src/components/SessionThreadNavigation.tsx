@@ -159,6 +159,10 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
     label = "Reviewing result";
   } else if (latest.label === "Synthesis") {
     label = "Writing final response";
+  } else if (latest.label === "Status" && /subagent started/i.test(latest.detail)) {
+    label = "Running subagent";
+  } else if (latest.label === "Status" && /subagent finished/i.test(latest.detail)) {
+    label = "Subagent done";
   }
 
   return { label, detail: latest.detail };

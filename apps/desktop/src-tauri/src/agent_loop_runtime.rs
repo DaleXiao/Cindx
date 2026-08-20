@@ -512,6 +512,8 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 let normal_calls = crate::agent_subagent_runtime::execute_subagent_delegations(
                     &mut runtime,
                     actor_provider,
+                    state,
+                    &run_context,
                     calls,
                 );
                 if normal_calls.is_empty() {

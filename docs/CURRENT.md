@@ -41,7 +41,9 @@ The desktop app currently includes:
   delegates to an isolated child run that sees only the delegated task (never the
   parent transcript), and its answer returns to the parent as an internal
   instruction. The child is a bounded provider completion; the read-only tool policy
-  and step budget live in `agent_runtime::subagent`.
+  and step budget live in `agent_runtime::subagent`. While a subagent runs, transient
+  "Subagent started/finished" progress events drive a "Running subagent" status that
+  disappears when the delegation completes.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and
