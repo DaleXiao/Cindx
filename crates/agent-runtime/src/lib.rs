@@ -41,6 +41,7 @@ mod result_frontier;
 mod run_budget;
 mod run_context;
 mod state_transaction;
+mod subagent;
 mod system_prompt;
 mod task_contract;
 mod task_state;
@@ -72,6 +73,10 @@ pub use context_engine::{
 pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
     ContextInvariantViolation,
+};
+pub use subagent::{
+    build_subagent_task_prompt, subagent_system_prompt, subagent_tool_allowed,
+    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_MAX_STEPS,
 };
 pub use control::{
     AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunEpochLease,
