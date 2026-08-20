@@ -62,19 +62,6 @@ export function SettingsModelsPanel({
   const credentialReady = Boolean(providerDraft?.apiKey.trim() || canUseConfiguredKey);
   const chatModelReady = Boolean(providerDraft?.executorModel.trim());
   const providerCanConnect = providerBaseUrlReady && credentialReady && chatModelReady;
-  const configuredChatModels = providerDraft
-    ? [
-        providerDraft.model,
-        providerDraft.conductorModel,
-        providerDraft.plannerModel,
-        providerDraft.executorModel,
-        providerDraft.reviewerModel,
-        providerDraft.summarizerModel
-      ]
-    : [];
-  const multimodalModel =
-    configuredChatModels.find((model) => providerModelOptions.multimodal.includes(model)) ??
-    "Not active";
   const draftUsesSavedCredential = Boolean(
     providerDraft &&
       phase4?.provider &&
@@ -160,10 +147,6 @@ export function SettingsModelsPanel({
                       ? "Legacy key — reconnect to verify"
                       : "Not verified"}
                 </dd>
-              </div>
-              <div>
-                <dt>Multimodal</dt>
-                <dd>{multimodalModel}</dd>
               </div>
             </dl>
             <button
