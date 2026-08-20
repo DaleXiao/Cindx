@@ -66,17 +66,13 @@ pub use context_compiler::{
 };
 pub use context_engine::{
     compaction_summary_instruction, context_prompt_reserve, estimate_context_tokens,
-    estimate_message_tokens, estimate_text_tokens, is_user_turn_start,
-    extractive_rolling_summary, serialize_transcript_for_compaction, ContextCompactionPlan,
-    ContextCompactionPolicy, ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
+    estimate_message_tokens, estimate_text_tokens, extractive_rolling_summary, is_user_turn_start,
+    serialize_transcript_for_compaction, ContextCompactionPlan, ContextCompactionPolicy,
+    ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
 };
 pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
     ContextInvariantViolation,
-};
-pub use subagent::{
-    build_subagent_task_prompt, subagent_system_prompt, subagent_tool_allowed,
-    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_MAX_STEPS,
 };
 pub use control::{
     AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunEpochLease,
@@ -130,6 +126,10 @@ pub use run_budget::{
 };
 pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
+pub use subagent::{
+    build_subagent_task_prompt, subagent_system_prompt, subagent_tool_allowed,
+    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_MAX_STEPS,
+};
 pub use task_contract::{
     AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,
     AgentActionRecovery, AgentCognitiveFocus, AgentCognitiveState, AgentGoalDelta,

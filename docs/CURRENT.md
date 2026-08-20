@@ -35,18 +35,21 @@ The desktop app currently includes:
   from opencode/deepseek-harness), and the loop never executes a tool-call batch that
   the provider truncated at its output limit (borrowed from pi), re-asking instead.
 - Long runs keep a rolling summary injected into the trusted runtime context so the
-  model retains the objective across compaction. For long transcripts a
-  model-generated summary (Goal/Constraints/Progress/Decisions/Next Steps) is
-  produced and cached by transcript fingerprint; shorter runs fall back to the
-  deterministic extractive Goal/Progress/Latest-position summary.
+  model retains the objective across compaction. Only transcripts already pressing on
+  the context window (≥40% used) pay a model-generated summary
+  (Goal/Constraints/Progress/Decisions/Next Steps), cached by transcript fingerprint;
+  everything else uses the cheap deterministic extractive
+  Goal/Progress/Latest-position summary, so routine runs never block at startup.
 - Subagent delegation (borrowed from opencode/pi/deepseek-harness): a `task` tool
   delegates to an isolated child run that sees only the delegated task (never the
   parent transcript), and its answer returns to the parent as an internal
   instruction. The child is a bounded provider completion; the read-only tool policy
-  and step budget live in `agent_runtime::subagent`. While subagents run, the Agent
-  actions header shows a per-subagent panel (one row each, orb while running, check
-  when done) plus a "Running subagents done/total" status; the panel collapses when
-  every delegation completes.
+  and step budget live in `agent_runtime::subagent`. Multiple delegations in one
+  batch run concurrently (results rejoined in call order) and honour the parent run's
+  cancellation, so stopping a run aborts its subagents. While subagents run, the
+  Agent actions header shows a per-subagent panel (one row each, orb while running,
+  check when done) plus a "Running subagents done/total" status; the panel collapses
+  when every delegation completes.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and

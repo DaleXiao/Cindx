@@ -58,14 +58,14 @@ pub use file_patch::PatchFileTool;
 pub use file_search::SearchFilesTool;
 pub use file_tools::{ReadFileTool, WriteFileTool};
 pub use image_generation::ImageGenerationTool;
-pub use subagent_tool::SubagentTaskTool;
-pub use todo_tool::TodoTool;
 pub use private_file::write_private_file_atomically;
 pub use process_runtime::ProcessManager;
 pub use process_tools::{
     ProcessInputTool, ProcessPollTool, ProcessStartTool, ProcessTerminateTool,
 };
 pub use shell::ShellRunTool;
+pub use subagent_tool::SubagentTaskTool;
+pub use todo_tool::TodoTool;
 pub use tool_support::{encode_input, parse_input};
 pub use web_search::WebSearchTool;
 
@@ -468,7 +468,11 @@ pub fn render_deferred_tool_index(deferred: &[ToolSpec]) -> String {
         "Additional tools are available on demand (not loaded to save context). If the request matches one, call tool.inspect with its name to load the full schema, then tool.invoke to use it; do not ask the user which tool to use:\n",
     );
     for spec in deferred {
-        out.push_str(&format!("- {}: {}\n", spec.name, first_line(&spec.description)));
+        out.push_str(&format!(
+            "- {}: {}\n",
+            spec.name,
+            first_line(&spec.description)
+        ));
     }
     out
 }

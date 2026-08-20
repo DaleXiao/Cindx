@@ -224,9 +224,8 @@ fn truncate_middle_with_split(
         return value.chars().take(max_characters).collect();
     }
     let retained = max_characters - marker_characters;
-    let head = ((retained as u64)
-        .saturating_mul(head_numerator)
-        / head_denominator.max(1)) as usize;
+    let head =
+        ((retained as u64).saturating_mul(head_numerator) / head_denominator.max(1)) as usize;
     let tail = retained.saturating_sub(head);
     let mut output = value.chars().take(head).collect::<String>();
     output.push_str(marker);

@@ -434,7 +434,12 @@ pub fn serialize_transcript_for_compaction(
             continue;
         };
         let role = format!("{:?}", message.role).to_ascii_lowercase();
-        let capped: String = message.content.trim().chars().take(max_output_chars).collect();
+        let capped: String = message
+            .content
+            .trim()
+            .chars()
+            .take(max_output_chars)
+            .collect();
         out.push_str(&format!("[{role}] {capped}\n"));
     }
     out
@@ -459,7 +464,9 @@ pub fn extractive_rolling_summary(messages: &[Message], max_chars: usize) -> Opt
     let last_assistant = messages
         .iter()
         .rev()
-        .find(|message| message.role == MessageRole::Assistant && !message.content.trim().is_empty())
+        .find(|message| {
+            message.role == MessageRole::Assistant && !message.content.trim().is_empty()
+        })
         .map(|message| cap(&message.content, 220));
 
     let mut summary = String::from("## Goal\n");
@@ -685,7 +692,10 @@ mod tests {
         for index in 0..6 {
             messages.push(message(MessageRole::Tool, &format!("obs {index}")));
         }
-        messages.push(message(MessageRole::Assistant, "the parser is done and tested"));
+        messages.push(message(
+            MessageRole::Assistant,
+            "the parser is done and tested",
+        ));
 
         let summary = extractive_rolling_summary(&messages, 1000).unwrap();
         assert!(summary.contains("## Goal"));

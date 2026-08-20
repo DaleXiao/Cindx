@@ -117,15 +117,34 @@ pub(crate) fn model_rolling_summary(
     Some(summary)
 }
 
-/// Rolling summary for a run: prefer the model-generated summary for long
-/// transcripts, falling back to the deterministic extractive summary.
+/// Fraction of the context window beyond which a transcript is worth a
+/// model-generated summary. Below this the cheap extractive summary is used, so
+/// routine runs never pay a blocking summarization call at startup.
+const MODEL_SUMMARY_CONTEXT_FRACTION_PERCENT: u64 = 40;
+
+/// Rolling summary for a run. Only transcripts already pressing on the context
+/// window pay the model-generated summary (cached by fingerprint); everything
+/// else uses the deterministic extractive summary, so the common path is cheap.
 pub(crate) fn rolling_summary_for_run(
     provider: &dyn StreamingModelProvider,
     messages: &[Message],
     cancellation: &Arc<AgentRunControl>,
+    context_window_tokens: u64,
 ) -> Option<String> {
-    model_rolling_summary(provider, messages, cancellation)
-        .or_else(|| agent_runtime::extractive_rolling_summary(messages, 1200))
+    if context_pressure_warrants_model_summary(messages, context_window_tokens) {
+        if let Some(summary) = model_rolling_summary(provider, messages, cancellation) {
+            return Some(summary);
+        }
+    }
+    agent_runtime::extractive_rolling_summary(messages, 1200)
+}
+
+fn context_pressure_warrants_model_summary(messages: &[Message], context_window_tokens: u64) -> bool {
+    if context_window_tokens == 0 {
+        return false;
+    }
+    let used = agent_runtime::estimate_context_tokens(messages);
+    used.saturating_mul(100) >= context_window_tokens * MODEL_SUMMARY_CONTEXT_FRACTION_PERCENT
 }
 
 #[cfg(test)]
@@ -171,6 +190,18 @@ mod tests {
             request.metadata.get(GENERATION_TEMPERATURE_KEY).map(String::as_str),
             Some("0.2")
         );
+    }
+
+    #[test]
+    fn model_summary_only_when_context_pressure_is_high() {
+        let small = long_transcript(20);
+        assert!(!context_pressure_warrants_model_summary(&small, 1_000_000));
+        assert!(!context_pressure_warrants_model_summary(&small, 0));
+
+        let heavy: Vec<Message> = (0..40)
+            .map(|index| message(MessageRole::User, &format!("bulk {index} {}", "x".repeat(400))))
+            .collect();
+        assert!(context_pressure_warrants_model_summary(&heavy, 100));
     }
 
     #[test]

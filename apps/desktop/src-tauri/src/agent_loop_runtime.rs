@@ -134,6 +134,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
         actor_provider,
         &runtime.messages,
         cancellation,
+        config.context_window_tokens,
     ) {
         run_context.insert("rolling_summary".to_string(), rolling_summary);
     }
@@ -516,6 +517,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     actor_provider,
                     state,
                     &run_context,
+                    cancellation,
                     calls,
                 );
                 if normal_calls.is_empty() {

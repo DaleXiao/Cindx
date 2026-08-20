@@ -110,7 +110,9 @@ pub struct McpServerConfig {
 /// Candidate locations of MCP configs written by other tools on this machine
 /// (Claude Desktop, Claude Code, Cursor, and a workspace `.mcp.json`). Importing
 /// these lets Cindx reuse servers the user already installed elsewhere.
-pub fn external_mcp_config_candidate_paths(workspace_root: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+pub fn external_mcp_config_candidate_paths(
+    workspace_root: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
     let mut paths = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
@@ -214,7 +216,9 @@ fn external_server_config_from_entry(name: &str, entry: &Value) -> Option<McpSer
         .map(|pairs| {
             pairs
                 .iter()
-                .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_string()))
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -248,8 +252,10 @@ fn external_server_config_from_entry(name: &str, entry: &Value) -> Option<McpSer
         .to_ascii_lowercase();
     let transport = if let Some((command, args)) = stdio {
         McpTransportConfig::Stdio { command, args, env }
-    } else if matches!(kind.as_str(), "http" | "https" | "sse" | "remote" | "streamable-http")
-        || obj.get("url").is_some()
+    } else if matches!(
+        kind.as_str(),
+        "http" | "https" | "sse" | "remote" | "streamable-http"
+    ) || obj.get("url").is_some()
     {
         let url = obj.get("url").and_then(Value::as_str)?;
         let headers = obj
@@ -258,7 +264,9 @@ fn external_server_config_from_entry(name: &str, entry: &Value) -> Option<McpSer
             .map(|pairs| {
                 pairs
                     .iter()
-                    .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|text| (key.clone(), text.to_string()))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -1706,7 +1714,8 @@ mod tests {
 
     #[test]
     fn strip_jsonc_comments_preserves_strings_with_slashes() {
-        let raw = r#"{ "url": "https://x.example//path", /* block */ "k": "//not-comment" } // tail"#;
+        let raw =
+            r#"{ "url": "https://x.example//path", /* block */ "k": "//not-comment" } // tail"#;
         let stripped = strip_jsonc_comments(raw);
         let value: Value = serde_json::from_str(&stripped).expect("valid after strip");
         assert_eq!(value["url"], "https://x.example//path");
