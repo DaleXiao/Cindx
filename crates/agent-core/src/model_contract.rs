@@ -91,6 +91,22 @@ impl ModelResponse {
             disposition,
         }
     }
+
+    /// True when the response both carries tool calls and was cut off by the
+    /// output limit. Such a batch has possibly-truncated arguments and must not
+    /// be executed; the loop re-asks the model instead.
+    pub fn truncated_tool_call_batch(&self) -> bool {
+        if self.tool_calls.is_empty() {
+            return false;
+        }
+        matches!(
+            self.metadata
+                .get("finish_reason")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("length" | "max_tokens" | "max_output_tokens")
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,5 +342,29 @@ mod tests {
             response.assessment().disposition,
             ModelResponseDisposition::Usable
         );
+    }
+
+    #[test]
+    fn truncated_tool_call_batch_requires_both_calls_and_length_stop() {
+        let call = ModelToolCall {
+            id: "c1".to_string(),
+            name: "file.read".to_string(),
+            arguments_json: "{}".to_string(),
+        };
+        let make = |finish: &str, calls: Vec<ModelToolCall>| ModelResponse {
+            message: Message {
+                role: crate::MessageRole::Assistant,
+                content: String::new(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: calls,
+            metadata: Metadata::from([("finish_reason".to_string(), finish.to_string())]),
+        };
+        assert!(make("length", vec![call.clone()]).truncated_tool_call_batch());
+        assert!(make("max_tokens", vec![call.clone()]).truncated_tool_call_batch());
+        assert!(!make("stop", vec![call.clone()]).truncated_tool_call_batch());
+        assert!(!make("length", Vec::new()).truncated_tool_call_batch());
+        assert!(!make("tool_calls", vec![call]).truncated_tool_call_batch());
     }
 }

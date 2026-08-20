@@ -627,6 +627,7 @@ pub fn advance_with_model_response(
     tools: &[ToolSpec],
 ) -> AgentAdvance {
     let assessment = response.assessment();
+    let truncated_batch = response.truncated_tool_call_batch();
     let content = sanitize_assistant_content(&response.message.content);
     let tool_call_count = response.tool_calls.len();
     turn_budget::record_model_response(state);
@@ -641,25 +642,31 @@ pub fn advance_with_model_response(
             "model_response_disposition".to_string(),
             format!("{:?}", assessment.disposition).to_ascii_lowercase(),
         );
-        if matches!(
-            assessment.disposition,
-            ModelResponseDisposition::IncompleteOutput | ModelResponseDisposition::Filtered
-        ) {
+        if truncated_batch
+            || matches!(
+                assessment.disposition,
+                ModelResponseDisposition::IncompleteOutput | ModelResponseDisposition::Filtered
+            )
+        {
             metadata.insert("internal".to_string(), "true".to_string());
         }
-        if let Some(raw_tool_calls_json) = response.raw_tool_calls_json.clone() {
-            metadata.insert("raw_tool_calls_json".to_string(), raw_tool_calls_json);
-        }
-        if tool_call_count > 0 {
-            metadata.insert(
-                "tool_call_ids".to_string(),
-                response
-                    .tool_calls
-                    .iter()
-                    .map(|call| call.id.clone())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
+        // A truncated batch is never executed, so its call ids must not enter
+        // the transcript (that would leave dangling tool calls with no results).
+        if !truncated_batch {
+            if let Some(raw_tool_calls_json) = response.raw_tool_calls_json.clone() {
+                metadata.insert("raw_tool_calls_json".to_string(), raw_tool_calls_json);
+            }
+            if tool_call_count > 0 {
+                metadata.insert(
+                    "tool_call_ids".to_string(),
+                    response
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.id.clone())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+            }
         }
         state.messages.push(Message {
             role: MessageRole::Assistant,
@@ -668,7 +675,12 @@ pub fn advance_with_model_response(
         });
     }
 
-    let retry_instruction = match assessment.disposition {
+    let retry_instruction = if truncated_batch {
+        Some(
+            "The previous tool-call batch was cut off by the output limit and was NOT executed, because truncated arguments are unsafe. Re-issue the needed tool calls with complete, valid arguments (prefer fewer or smaller calls), or provide a complete final answer instead.",
+        )
+    } else {
+        match assessment.disposition {
         ModelResponseDisposition::IncompleteOutput => Some(
             "The previous response reached its output limit before completion. Continue from the preserved partial response without repeating it. Finish the pending reasoning or make the next necessary tool call, then provide a complete answer."
         ),
@@ -679,6 +691,7 @@ pub fn advance_with_model_response(
             "The previous model response was empty. Continue from the preserved task state: either make the next necessary tool call or provide a substantive final answer grounded in available evidence. Do not return an empty response."
         ),
         ModelResponseDisposition::Usable | ModelResponseDisposition::ToolCalls => None,
+        }
     };
     if let Some(instruction) = retry_instruction {
         state.consecutive_empty_responses = state.consecutive_empty_responses.saturating_add(1);
