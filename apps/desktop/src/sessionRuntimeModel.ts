@@ -305,13 +305,17 @@ export function dedupeAdjacentAssistantMessages(messages: ChatMessageView[]) {
   const out: ChatMessageView[] = [];
   for (const message of messages) {
     const previous = out[out.length - 1];
-    if (
-      previous &&
-      message.role === "assistant" &&
-      previous.role === "assistant" &&
-      message.content.trim() === previous.content.trim()
-    ) {
-      continue;
+    if (previous && message.role === "assistant" && previous.role === "assistant") {
+      const current = message.content.trim();
+      const prior = previous.content.trim();
+      // Collapse a partial+final commit of the same answer (one is a prefix of the
+      // other), keeping the longer; skip exact duplicates.
+      if (current === prior) continue;
+      if (current.startsWith(prior)) {
+        out[out.length - 1] = message;
+        continue;
+      }
+      if (prior.startsWith(current)) continue;
     }
     out.push(message);
   }

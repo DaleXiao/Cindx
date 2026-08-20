@@ -362,6 +362,14 @@ export const SessionThread = memo(function SessionThread({
   const hasLiveAssistantMessage =
     runStartedAtMs > 0 &&
     projection.assistants.some((item) => item.message.timestampMs >= runStartedAtMs);
+  const lastAssistant = projection.assistants[projection.assistants.length - 1];
+  const streamPreview = (streamAnswer?.preview ?? "").trim();
+  const lastAssistantContent = lastAssistant?.message.content.trim() ?? "";
+  const streamingMatchesMessage =
+    streamPreview.length > 0 &&
+    lastAssistantContent.length > 0 &&
+    (lastAssistantContent.startsWith(streamPreview) ||
+      streamPreview.startsWith(lastAssistantContent));
   const minimapMarkers = useMemo(
     () =>
       sessionMinimapMarkers(
@@ -1022,7 +1030,10 @@ export const SessionThread = memo(function SessionThread({
           </div>
         )}
 
-        {streamAnswer && !runTerminal && !hasLiveAssistantMessage && (
+        {streamAnswer &&
+          !runTerminal &&
+          !hasLiveAssistantMessage &&
+          !streamingMatchesMessage && (
           <article
             className="thread-message thread-message-assistant thread-message-streaming"
             data-minimap-id="streaming-answer"

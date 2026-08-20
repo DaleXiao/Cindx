@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   committedSteerReconciliation,
   committedSteerUserMessage,
+  dedupeAdjacentAssistantMessages,
   latestTraceStep,
   mergeAcknowledgedSessionActivity,
   messagesWithOptimisticUserMessages,
@@ -256,4 +257,31 @@ test("late acknowledgements update read state without restoring stale selection"
     ).unseenResult,
     true
   );
+});
+
+test("adjacent partial and final assistant commits collapse to the longer one", () => {
+  const assistant = (content: string) =>
+    ({ role: "assistant", content }) as any;
+  const user = { role: "user", content: "go" } as any;
+
+  const collapsed = dedupeAdjacentAssistantMessages([
+    user,
+    assistant("let me delegate the research"),
+    assistant("let me delegate the research."),
+  ]);
+  assert.equal(collapsed.length, 2);
+  assert.equal(collapsed[1].content, "let me delegate the research.");
+
+  const reversed = dedupeAdjacentAssistantMessages([
+    assistant("let me delegate the research."),
+    assistant("let me delegate the research"),
+  ]);
+  assert.equal(reversed.length, 1);
+  assert.equal(reversed[0].content, "let me delegate the research.");
+
+  const distinct = dedupeAdjacentAssistantMessages([
+    assistant("first answer"),
+    assistant("second, unrelated answer"),
+  ]);
+  assert.equal(distinct.length, 2);
 });
