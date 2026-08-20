@@ -22,7 +22,9 @@ The desktop app currently includes:
   suppressed once the run reaches a terminal status (completed/failed/cancelled),
   so a lingering stream no longer duplicates the committed answer. Adjacent
   assistant messages with identical content are also collapsed during state merge,
-  so a duplicated final answer is never rendered twice.
+  so a duplicated final answer is never rendered twice. The streaming article is
+  likewise hidden while the run's live assistant message is already rendered, so
+  an in-progress answer is never shown twice.
 - A right output pane with file lists and previews, plus a collapsible debug
   drawer for trace, context, and artifacts.
 - Schedules, model/provider settings, tools, MCP, skills, permissions, knowledge,
