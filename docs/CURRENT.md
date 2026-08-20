@@ -31,6 +31,9 @@ The desktop app currently includes:
   personalization, appearance, and runtime diagnostics.
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
+- A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed
+  from opencode/deepseek-harness), and the loop never executes a tool-call batch that
+  the provider truncated at its output limit (borrowed from pi), re-asking instead.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and
