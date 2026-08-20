@@ -9,10 +9,10 @@ use crate::agent_query_commands::finish_agent_run_for_control_stop_with_task_sta
 use crate::agent_read_model::agent_state_with_error_in_context;
 use crate::app_state::AppState;
 use crate::collaboration_service::AgentCollaboration;
-use crate::configuration_models::{agent_model_for_run, ProviderConfig};
+use crate::configuration_models::ProviderConfig;
 use crate::view_models::AgentState;
 use agent_application::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, AgentRunPreparation};
-use agent_core::{Message, Metadata, TaskId};
+use agent_core::{Message, Metadata, ModelRole, TaskId};
 use agent_runtime::{AgentLoopState, AgentRunControl};
 use execution_providers::build_agent_execution_providers;
 use orchestrator::AgentPolicy;
@@ -127,7 +127,7 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
         &mut self,
         prepared: Self::Prepared,
     ) -> Result<AgentRunEpoch<Self::Reprepare, Self::Output>, Self::Error> {
-        let agent_model = agent_model_for_run(self.config, &prepared.run_context);
+        let agent_model = effort_tier_model(self.config, self.effort.label());
         let providers =
             build_agent_execution_providers(self.config, &agent_model, self.cancellation);
         match execute_agent_loop_epoch_with_provider(
@@ -232,5 +232,17 @@ pub(crate) fn runtime_preparation_error(
     AgentRunPreparationError::Runtime {
         error: error.into(),
         run_context: run_context.clone(),
+    }
+}
+
+/// Effort-tier model selection: the actor/finalizer model is the pinned default for
+/// the run's effort tier (Fast/Auto/Pro), falling back to the executor role model.
+/// This is the single scheduling source; no conductor/router override is consulted.
+pub(crate) fn effort_tier_model(config: &ProviderConfig, effort_label: &str) -> String {
+    let pinned = config.effort_default_model(effort_label);
+    if pinned.trim().is_empty() {
+        config.model_for_role(&ModelRole::Executor)
+    } else {
+        pinned
     }
 }
