@@ -34,6 +34,9 @@ The desktop app currently includes:
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed
   from opencode/deepseek-harness), and the loop never executes a tool-call batch that
   the provider truncated at its output limit (borrowed from pi), re-asking instead.
+- Long runs keep a rolling summary: an extractive Goal/Progress/Latest-position
+  summary of the earlier transcript is generated at run start and injected into the
+  trusted runtime context, so the model retains the objective across compaction.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and

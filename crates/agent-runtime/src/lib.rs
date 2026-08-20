@@ -66,8 +66,8 @@ pub use context_compiler::{
 pub use context_engine::{
     compaction_summary_instruction, context_prompt_reserve, estimate_context_tokens,
     estimate_message_tokens, estimate_text_tokens, is_user_turn_start,
-    serialize_transcript_for_compaction, ContextCompactionPlan, ContextCompactionPolicy,
-    ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
+    extractive_rolling_summary, serialize_transcript_for_compaction, ContextCompactionPlan,
+    ContextCompactionPolicy, ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
 };
 pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,

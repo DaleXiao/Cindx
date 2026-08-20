@@ -440,6 +440,43 @@ pub fn serialize_transcript_for_compaction(
     out
 }
 
+/// Deterministic extractive rolling summary of a long transcript. Keeps the user's
+/// goal, the work done so far, and the latest assistant position so a long run stays
+/// coherent without a model call. Returns None for short transcripts.
+pub fn extractive_rolling_summary(messages: &[Message], max_chars: usize) -> Option<String> {
+    if messages.len() < 8 {
+        return None;
+    }
+    let cap = |value: &str, limit: usize| -> String { value.trim().chars().take(limit).collect() };
+    let goal = messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| cap(&message.content, 220));
+    let tool_calls = messages
+        .iter()
+        .filter(|message| message.metadata.contains_key("tool_call_count"))
+        .count();
+    let last_assistant = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::Assistant && !message.content.trim().is_empty())
+        .map(|message| cap(&message.content, 220));
+
+    let mut summary = String::from("## Goal\n");
+    summary.push_str(goal.as_deref().unwrap_or("(not captured)"));
+    summary.push_str("\n## Progress\n");
+    summary.push_str(&format!(
+        "{} transcript messages, {} model turns with tool calls.",
+        messages.len(),
+        tool_calls
+    ));
+    summary.push_str("\n## Latest position\n");
+    summary.push_str(last_assistant.as_deref().unwrap_or("(none)"));
+
+    let summary: String = summary.chars().take(max_chars).collect();
+    Some(summary)
+}
+
 /// Fixed structured sections a rolling compaction summary must fill, mirroring the
 /// pi / deepseek-harness compaction prompts so long runs keep goal and progress.
 pub fn compaction_summary_instruction() -> &'static str {
@@ -640,5 +677,21 @@ mod tests {
         ] {
             assert!(instruction.contains(section));
         }
+    }
+
+    #[test]
+    fn extractive_rolling_summary_captures_goal_and_position() {
+        let mut messages = vec![message(MessageRole::User, "build a parser")];
+        for index in 0..6 {
+            messages.push(message(MessageRole::Tool, &format!("obs {index}")));
+        }
+        messages.push(message(MessageRole::Assistant, "the parser is done and tested"));
+
+        let summary = extractive_rolling_summary(&messages, 1000).unwrap();
+        assert!(summary.contains("## Goal"));
+        assert!(summary.contains("build a parser"));
+        assert!(summary.contains("## Latest position"));
+        assert!(summary.contains("the parser is done"));
+        assert!(extractive_rolling_summary(&messages[..3], 1000).is_none());
     }
 }
