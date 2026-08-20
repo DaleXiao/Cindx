@@ -421,6 +421,31 @@ pub fn is_user_turn_start(message: &Message) -> bool {
         && message.metadata.get("kind").map(String::as_str) != Some("tool_observation")
 }
 
+/// Serialize the compacted head of a transcript into a compact textual form a
+/// summarizer can condense. Each message is capped to `max_output_chars`.
+pub fn serialize_transcript_for_compaction(
+    messages: &[Message],
+    indices: &[usize],
+    max_output_chars: usize,
+) -> String {
+    let mut out = String::new();
+    for index in indices.iter().copied() {
+        let Some(message) = messages.get(index) else {
+            continue;
+        };
+        let role = format!("{:?}", message.role).to_ascii_lowercase();
+        let capped: String = message.content.trim().chars().take(max_output_chars).collect();
+        out.push_str(&format!("[{role}] {capped}\n"));
+    }
+    out
+}
+
+/// Fixed structured sections a rolling compaction summary must fill, mirroring the
+/// pi / deepseek-harness compaction prompts so long runs keep goal and progress.
+pub fn compaction_summary_instruction() -> &'static str {
+    "Summarize the transcript into these sections, preserving decisions and open work:\n## Goal\n## Constraints & Preferences\n## Progress (Done / In Progress / Blocked)\n## Key Decisions\n## Next Steps\n## Critical Context"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +620,25 @@ mod tests {
         let knowledge_source = ContextSourceKind::from_message(&knowledge).unwrap();
         assert!(memory_source.is_protected());
         assert!(memory_source.priority() > knowledge_source.priority());
+    }
+
+    #[test]
+    fn compaction_serializer_caps_outputs_and_instruction_has_sections() {
+        let messages = vec![message(MessageRole::User, &"x".repeat(500))];
+        let serialized = serialize_transcript_for_compaction(&messages, &[0], 10);
+        assert!(serialized.contains("[user]"));
+        assert!(serialized.contains("xxxxxxxxxx"));
+        assert!(!serialized.contains(&"x".repeat(11)));
+
+        let instruction = compaction_summary_instruction();
+        for section in [
+            "## Goal",
+            "## Progress (Done / In Progress / Blocked)",
+            "## Key Decisions",
+            "## Next Steps",
+            "## Critical Context",
+        ] {
+            assert!(instruction.contains(section));
+        }
     }
 }
