@@ -358,6 +358,8 @@ export const SessionThread = memo(function SessionThread({
     [runStartedAtMs, status, threadRows]
   );
   const hasStreamAnswer = streamAnswer !== null;
+  const runTerminal =
+    status === "completed" || status === "failed" || status === "cancelled";
   const minimapMarkers = useMemo(
     () =>
       sessionMinimapMarkers(
@@ -1018,7 +1020,7 @@ export const SessionThread = memo(function SessionThread({
           </div>
         )}
 
-        {streamAnswer && (
+        {streamAnswer && !runTerminal && (
           <article
             className="thread-message thread-message-assistant thread-message-streaming"
             data-minimap-id="streaming-answer"
