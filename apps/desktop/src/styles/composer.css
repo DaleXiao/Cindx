@@ -12,7 +12,8 @@
     animation: none;
   }
 
-  .thread-thinking > span {
+  .thread-thinking > span,
+  .thread-tool-chain-status {
     background: none;
     -webkit-text-fill-color: currentColor;
     animation: none;

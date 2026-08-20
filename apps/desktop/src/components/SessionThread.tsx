@@ -36,7 +36,6 @@ import {
   LATEST_OUTPUT_THRESHOLD,
   MAX_MINIMAP_MARKERS,
   MIN_MINIMAP_MARKERS,
-  RunProgressStatus,
   ThreadFind
 } from "./SessionThreadNavigation";
 import { SessionMinimap } from "./SessionMinimap";
@@ -1033,10 +1032,6 @@ export const SessionThread = memo(function SessionThread({
               onCopyCode={copyCode}
             />
           </article>
-        )}
-
-        {status === "running" && !activeActionRowId && (
-          <RunProgressStatus progress={runProgress} className="thread-running" />
         )}
         <span className="thread-scroll-anchor" aria-hidden="true" />
         </div>

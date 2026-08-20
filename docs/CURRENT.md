@@ -17,7 +17,8 @@ The desktop app currently includes:
   event activity is collected into a single "Agent actions" disclosure shown once,
   instead of one before and one after the answer. The live run status (Thinking,
   Executing plan, Running ...) trails that disclosure header while the run is
-  active, rather than rendering as a separate block. The streamed answer is
+  active with the same shimmer as the thinking indicator, and is no longer shown
+  as a separate status block. The streamed answer is
   suppressed once the run reaches a terminal status (completed/failed/cancelled),
   so a lingering stream no longer duplicates the committed answer.
 - A right output pane with file lists and previews, plus a collapsible debug

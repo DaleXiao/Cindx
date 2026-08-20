@@ -1446,11 +1446,16 @@ details[open] > summary .disclosure-triangle {
 .thread-tool-chain-status {
   min-width: 0;
   overflow: hidden;
-  color: var(--subtle);
   font-size: 11px;
   line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  background: linear-gradient(105deg, #777777 36%, #d8d8d8 49%, #777777 62%);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-sheen 1.8s ease-in-out infinite;
 }
 
 .thread-tool-chain-chevron {
