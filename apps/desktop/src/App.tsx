@@ -521,10 +521,9 @@ export function App() {
             fontWaitTimer = window.setTimeout(resolve, 120);
           })
         ]);
-      } catch {
-        // A missing font should not keep the native window hidden.
-      }
+      } catch {}
       if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       if (disposed || startupWindowRevealRequestedRef.current) return;
       startupWindowRevealRequestedRef.current = true;
       await revealMainWindow().catch(() => {});

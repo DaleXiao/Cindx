@@ -27,6 +27,8 @@ The desktop app currently includes:
   personalization, appearance, and runtime diagnostics.
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
+- The main window stays hidden until the WebView has painted its first frame, so
+  launch no longer flashes a bare sidebar before the rest of the app appears.
 - Workspace file changes made by `file.write` and `file.patch` preserve their
   prior content best-effort for recovery. A session can undo and redo its most
   recent file change through Composer controls, guarded by content-hash
