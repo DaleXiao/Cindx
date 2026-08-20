@@ -1,6 +1,6 @@
 [package]
 name = "cindx-desktop"
-version = "0.2.72"
+version = "0.2.73"
 edition = "2021"
 license = "UNLICENSED"
 
