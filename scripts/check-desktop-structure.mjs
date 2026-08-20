@@ -967,6 +967,7 @@ const toolsModuleBudgets = new Map([
   ["file_search_traversal.rs", 300],
   ["file_search_types.rs", 60],
   ["file_tools.rs", 540],
+  ["subagent_tool.rs", 80],
   ["todo_tool.rs", 200],
   ["image_generation.rs", 280],
   ["lib.rs", 720],

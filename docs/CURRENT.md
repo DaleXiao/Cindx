@@ -37,9 +37,11 @@ The desktop app currently includes:
 - Long runs keep a rolling summary: an extractive Goal/Progress/Latest-position
   summary of the earlier transcript is generated at run start and injected into the
   trusted runtime context, so the model retains the objective across compaction.
-- Subagent delegation policy is in place (borrowed from opencode/pi/deepseek-harness):
-  an isolated child sees only the delegated task, a read-only tool set, and a bounded
-  step budget; the child-run execution wiring is the remaining integration.
+- Subagent delegation (borrowed from opencode/pi/deepseek-harness): a `task` tool
+  delegates to an isolated child run that sees only the delegated task (never the
+  parent transcript), and its answer returns to the parent as an internal
+  instruction. The child is a bounded provider completion; the read-only tool policy
+  and step budget live in `agent_runtime::subagent`.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and

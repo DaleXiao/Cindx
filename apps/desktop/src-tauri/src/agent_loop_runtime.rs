@@ -37,6 +37,7 @@ use crate::{
     view_models::AgentState,
 };
 
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pause_agent_loop_for_control_stop(
     app: &tauri::AppHandle,
@@ -508,6 +509,14 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 }
             }
             AgentAdvance::ToolCalls { calls } => {
+                let normal_calls = crate::agent_subagent_runtime::execute_subagent_delegations(
+                    &mut runtime,
+                    actor_provider,
+                    calls,
+                );
+                if normal_calls.is_empty() {
+                    continue 'agent_loop;
+                }
                 match execute_agent_tool_batch(
                     app,
                     state,
@@ -520,7 +529,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     epoch_lease,
                     &registry,
                     &tools,
-                    calls,
+                    normal_calls,
                     &mut snapshot_cursor,
                 )? {
                     AgentToolBatchOutcome::Continue => {}

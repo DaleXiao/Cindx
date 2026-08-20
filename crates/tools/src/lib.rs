@@ -38,6 +38,7 @@ mod process_tools;
 mod shell;
 mod shell_postcondition;
 mod stream_capture;
+mod subagent_tool;
 mod todo_tool;
 mod tool_contract_v2;
 mod tool_support;
@@ -57,6 +58,7 @@ pub use file_patch::PatchFileTool;
 pub use file_search::SearchFilesTool;
 pub use file_tools::{ReadFileTool, WriteFileTool};
 pub use image_generation::ImageGenerationTool;
+pub use subagent_tool::SubagentTaskTool;
 pub use todo_tool::TodoTool;
 pub use private_file::write_private_file_atomically;
 pub use process_runtime::ProcessManager;
@@ -280,6 +282,7 @@ impl ToolRegistry {
         registry.register(Box::new(PatchFileTool::new(workspace_root.clone())));
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(TodoTool::new(workspace_root.clone())));
+        registry.register(Box::new(SubagentTaskTool::new()));
         registry.register(Box::new(ShellRunTool::new(workspace_root.clone())));
         registry.register(Box::new(ProcessStartTool::new(
             workspace_root.clone(),
