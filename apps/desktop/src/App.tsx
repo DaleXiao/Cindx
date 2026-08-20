@@ -523,7 +523,8 @@ export function App() {
         ]);
       } catch {}
       if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      // Timers fire while the window is hidden (rAF does not), so this never blocks reveal.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
       if (disposed || startupWindowRevealRequestedRef.current) return;
       startupWindowRevealRequestedRef.current = true;
       await revealMainWindow().catch(() => {});

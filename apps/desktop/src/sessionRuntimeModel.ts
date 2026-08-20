@@ -301,8 +301,27 @@ export function mergeAgentStateDelta(
   return mergeAgentStateSnapshot(current, delta.state);
 }
 
+export function dedupeAdjacentAssistantMessages(messages: ChatMessageView[]) {
+  const out: ChatMessageView[] = [];
+  for (const message of messages) {
+    const previous = out[out.length - 1];
+    if (
+      previous &&
+      message.role === "assistant" &&
+      previous.role === "assistant" &&
+      message.content.trim() === previous.content.trim()
+    ) {
+      continue;
+    }
+    out.push(message);
+  }
+  return out;
+}
+
 export function mergeAgentStateSnapshot(current: AgentState | null, incoming: AgentState) {
-  if (!current || current.sessionId !== incoming.sessionId) return incoming;
+  if (!current || current.sessionId !== incoming.sessionId) {
+    return { ...incoming, messages: dedupeAdjacentAssistantMessages(incoming.messages) };
+  }
   const currentHasEarlierHistory =
     current.oldestSequence > 0 &&
     (incoming.oldestSequence === 0 || current.oldestSequence <= incoming.oldestSequence);
@@ -313,7 +332,9 @@ export function mergeAgentStateSnapshot(current: AgentState | null, incoming: Ag
       ? current.hasOlderHistory
       : incoming.hasOlderHistory,
     timeline: mergeSequencedItems(current.timeline, incoming.timeline),
-    messages: mergeSequencedItems(current.messages, incoming.messages)
+    messages: dedupeAdjacentAssistantMessages(
+      mergeSequencedItems(current.messages, incoming.messages)
+    )
   };
 }
 

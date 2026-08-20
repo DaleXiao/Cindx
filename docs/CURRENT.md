@@ -20,15 +20,19 @@ The desktop app currently includes:
   active with the same shimmer as the thinking indicator, and is no longer shown
   as a separate status block. The streamed answer is
   suppressed once the run reaches a terminal status (completed/failed/cancelled),
-  so a lingering stream no longer duplicates the committed answer.
+  so a lingering stream no longer duplicates the committed answer. Adjacent
+  assistant messages with identical content are also collapsed during state merge,
+  so a duplicated final answer is never rendered twice.
 - A right output pane with file lists and previews, plus a collapsible debug
   drawer for trace, context, and artifacts.
 - Schedules, model/provider settings, tools, MCP, skills, permissions, knowledge,
   personalization, appearance, and runtime diagnostics.
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
-- The main window stays hidden until the WebView has painted its first frame, so
-  launch no longer flashes a bare sidebar before the rest of the app appears.
+- The main window stays hidden until fonts and initial state are ready plus a short
+  timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
+  not fire while the window is hidden), so launch can never stall with no UI, and
+  the WebView gets a beat to paint before the window shows.
 - Workspace file changes made by `file.write` and `file.patch` preserve their
   prior content best-effort for recovery. A session can undo and redo its most
   recent file change through Composer controls, guarded by content-hash
