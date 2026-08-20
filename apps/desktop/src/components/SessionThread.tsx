@@ -845,6 +845,7 @@ export const SessionThread = memo(function SessionThread({
                 active={row.id === activeActionRowId}
                 progressLabel={row.id === activeActionRowId ? runProgress.label : undefined}
                 progressDetail={row.id === activeActionRowId ? runProgress.detail : undefined}
+                subagents={row.id === activeActionRowId ? runProgress.subagents : undefined}
                 selectedId={selectedId}
                 onSelect={onSelect}
               />

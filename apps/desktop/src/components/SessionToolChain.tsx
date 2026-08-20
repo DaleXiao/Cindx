@@ -132,16 +132,21 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
   selectedId,
   onSelect,
   active = false,
-  progressLabel, progressDetail
+  progressLabel, progressDetail,
+  subagents
 }: {
   row: Extract<ThreadRow, { type: "tool-chain" }>;
   selectedId: string | null;
   onSelect: (selection: SessionThreadSelection) => void;
   active?: boolean;
   progressLabel?: string; progressDetail?: string;
+  subagents?: { description: string; done: boolean }[];
 }) {
   const [open, setOpen] = useState(false);
   const selected = row.items.some((item) => item.id === selectedId);
+  const liveSubagents = (subagents ?? []).some((subagent) => !subagent.done)
+    ? subagents ?? []
+    : [];
 
   return (
     <details
@@ -160,6 +165,22 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
         ) : null}
         <ChevronRight className="thread-tool-chain-chevron" aria-hidden="true" />
       </summary>
+      {liveSubagents.length > 0 && (
+        <div className="thread-tool-chain-subagents">
+          {liveSubagents.map((subagent) => (
+            <div className="thread-tool-chain-subagent" key={subagent.description}>
+              <span className="thread-tool-chain-subagent-icon">
+                {subagent.done ? (
+                  <TraceStatusIcon status="done" />
+                ) : (
+                  <AgentActionOrb />
+                )}
+              </span>
+              <span className="thread-tool-chain-subagent-label">{subagent.description}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {open && (
         <div className="thread-tool-chain-items">
           {row.items

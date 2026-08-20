@@ -130,9 +130,11 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
     if !deferred_index.is_empty() {
         run_context.insert("deferred_tool_index".to_string(), deferred_index);
     }
-    if let Some(rolling_summary) =
-        agent_runtime::extractive_rolling_summary(&runtime.messages, 1200)
-    {
+    if let Some(rolling_summary) = crate::agent_summary_runtime::rolling_summary_for_run(
+        actor_provider,
+        &runtime.messages,
+        cancellation,
+    ) {
         run_context.insert("rolling_summary".to_string(), rolling_summary);
     }
     apply_run_task_contract_with_completion_intent(

@@ -1496,6 +1496,41 @@ details[open] > summary .disclosure-triangle {
   padding: 1px 8px 8px 25px;
 }
 
+.thread-tool-chain-subagents {
+  display: grid;
+  gap: 2px;
+  padding: 2px 8px 6px 25px;
+}
+
+.thread-tool-chain-subagent {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.thread-tool-chain-subagent-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--subtle);
+}
+
+.thread-tool-chain-subagent-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.thread-tool-chain-subagent-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread-tool-chain-item {
   display: grid;
   width: 100%;

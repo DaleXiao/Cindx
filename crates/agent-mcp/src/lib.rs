@@ -1246,15 +1246,21 @@ impl McpCatalogService {
 
     pub fn cached_tools(&self) -> Vec<Box<dyn Tool>> {
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for server in self.servers.iter().filter(|server| server.enabled) {
             let Some(snapshot) = self.cache.servers.get(&server.id) else {
                 continue;
             };
             for descriptor in &snapshot.tools {
+                let wire_name = unique_wire_name(
+                    mcp_wire_name(&server.name, &descriptor.name),
+                    &mut used_names,
+                );
                 tools.push(Box::new(McpRemoteTool {
                     server: server.clone(),
                     descriptor: descriptor.clone(),
                     runtime: Arc::clone(&self.runtime),
+                    wire_name,
                 }));
             }
         }
@@ -1266,6 +1272,7 @@ struct McpRemoteTool {
     server: McpServerConfig,
     descriptor: McpToolDescriptor,
     runtime: Arc<McpRuntime>,
+    wire_name: String,
 }
 
 impl McpRemoteTool {
@@ -1301,7 +1308,7 @@ impl McpRemoteTool {
 impl Tool for McpRemoteTool {
     fn spec(&self) -> ToolSpec {
         let mut spec = ToolSpec::new(
-            mcp_wire_name(&self.server.name, &self.descriptor.name),
+            self.wire_name.clone(),
             format!("mcp:{}", self.server.name),
             self.descriptor.description.clone(),
             ToolRisk::SensitiveContext,
@@ -1587,6 +1594,24 @@ fn mcp_wire_name(server: &str, tool: &str) -> String {
     format!("mcp__{}__{}", wire_segment(server), wire_segment(tool))
 }
 
+/// Returns a wire name not already present in `used`, inserting it before
+/// returning. Wire names are invocation identity and must never be truncated or
+/// collapsed: when the lossy slug of two distinct tools collides, the later one
+/// gets a numeric suffix instead of being silently dropped.
+fn unique_wire_name(base: String, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base}_{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 fn wire_segment(value: &str) -> String {
     let mut segment = String::new();
     for character in value.chars() {
@@ -1729,6 +1754,18 @@ mod tests {
             mcp_wire_name("Git Hub", "search/issues"),
             "mcp__Git_Hub__search_issues"
         );
+    }
+
+    #[test]
+    fn colliding_wire_names_get_a_suffix_instead_of_being_dropped() {
+        let mut used = std::collections::HashSet::new();
+        let first = unique_wire_name("mcp__srv__read".to_string(), &mut used);
+        let second = unique_wire_name("mcp__srv__read".to_string(), &mut used);
+        let third = unique_wire_name("mcp__srv__read".to_string(), &mut used);
+        assert_eq!(first, "mcp__srv__read");
+        assert_eq!(second, "mcp__srv__read_2");
+        assert_eq!(third, "mcp__srv__read_3");
+        assert_eq!(used.len(), 3);
     }
 
     #[test]

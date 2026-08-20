@@ -34,16 +34,19 @@ The desktop app currently includes:
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed
   from opencode/deepseek-harness), and the loop never executes a tool-call batch that
   the provider truncated at its output limit (borrowed from pi), re-asking instead.
-- Long runs keep a rolling summary: an extractive Goal/Progress/Latest-position
-  summary of the earlier transcript is generated at run start and injected into the
-  trusted runtime context, so the model retains the objective across compaction.
+- Long runs keep a rolling summary injected into the trusted runtime context so the
+  model retains the objective across compaction. For long transcripts a
+  model-generated summary (Goal/Constraints/Progress/Decisions/Next Steps) is
+  produced and cached by transcript fingerprint; shorter runs fall back to the
+  deterministic extractive Goal/Progress/Latest-position summary.
 - Subagent delegation (borrowed from opencode/pi/deepseek-harness): a `task` tool
   delegates to an isolated child run that sees only the delegated task (never the
   parent transcript), and its answer returns to the parent as an internal
   instruction. The child is a bounded provider completion; the read-only tool policy
-  and step budget live in `agent_runtime::subagent`. While a subagent runs, transient
-  "Subagent started/finished" progress events drive a "Running subagent" status that
-  disappears when the delegation completes.
+  and step budget live in `agent_runtime::subagent`. While subagents run, the Agent
+  actions header shows a per-subagent panel (one row each, orb while running, check
+  when done) plus a "Running subagents done/total" status; the panel collapses when
+  every delegation completes.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and
@@ -236,8 +239,12 @@ Tool visibility does not grant authority.
   locations (Claude Desktop, Claude Code, Cursor, opencode `.jsonc`/`.json`,
   a workspace `.mcp.json`), strips JSONC comments, and converts both
   string+args and array-form `command` entries (stdio) plus `url` entries
-  (http/sse). Imported servers are added as enabled with approval required;
-  existing servers and `enabled:false` entries are never overwritten/imported.
+   (http/sse). Imported servers are added as enabled with approval required;
+   existing servers and `enabled:false` entries are never overwritten/imported.
+   Each MCP tool is exposed under a stable `mcp__<server>__<tool>` wire name; when
+   two distinct tools slug to the same name, the later one gets a numeric suffix
+   instead of being silently dropped, and the raw tool name is always used for the
+   remote call.
 
 ## State, Retrieval, and Memory
 

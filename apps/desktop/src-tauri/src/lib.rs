@@ -8,6 +8,7 @@ mod agent_finalizer_runtime;
 mod agent_grounded_response_runtime;
 mod agent_loop_runtime;
 mod agent_subagent_runtime;
+mod agent_summary_runtime;
 mod agent_model_turn_runtime;
 mod agent_parallel_tool_runtime;
 mod agent_preparation_runtime;
