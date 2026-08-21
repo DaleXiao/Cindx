@@ -74,8 +74,6 @@ legacy and are not reclassified from display strings.
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, system-prompt composition, model-turn and tool-runtime semantics |
 | `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
-| `orchestrator` | Residual non-shipping crate: run decisions, routing/causal-route machinery, and evaluation contracts retained only for `orchestrator-eval`; the desktop crate no longer depends on it (planning/execution-contract/knowledge/learning-evidence types now live in `agent-core`) |
-| `orchestrator-eval` | Non-default evaluation and Fugu comparison contracts (sole remaining consumer of `orchestrator`) |
 | `agent-memory` | Memory records, retention, recall, utility attribution, and deterministic curation contracts |
 | `agent-rag` | Workspace indexing, file adapter, semantic retrieval, and vector-store integration |
 | `agent-graph` | Graph extraction, direct graph retrieval, and graph walk |
@@ -429,23 +427,17 @@ be rebuilt; a cache publication failure cannot rewrite the scientific outcome.
 
 Prompt evolution is retired. The campaign runtime, mutation, pairwise
 evaluation, learning outbox, canary/rollout, and distillation machinery have
-been removed from both `orchestrator` (policy/worker) and the desktop crate
-(provider calls, durable campaign state, and publication). `orchestrator`
-retains prompt-genome schema types and seed definitions only; the desktop
-retains seed-only prompt-profile serving and the shadow direct-judge outcome
-journal.
+been removed from the desktop crate and the (now-deleted) `orchestrator` crate.
+The prompt-genome / prompt-profile serving machinery is removed as well; a run
+carries no prompt profile at all.
 
-A run resolves its seed prompt profile once per logical run, stable across
-retries. A profile cannot alter permissions, tools, or budgets. Missing or
-invalid deployment state falls back to seed. There is no longer any machinery
-that can publish or promote a learned profile.
+The shadow direct-judge outcome journal remains as inert measurement plumbing
+with no production consumer; nothing can publish or promote a learned profile.
 
 ## Dependency Rules
 
 - Portable crates must not import Tauri or desktop state.
 - `agent-runtime` must remain provider-transport independent.
-- `orchestrator-eval` is excluded from default workspace members and must not
-  become a shipping dependency.
 - Tools declare effects; the desktop permission path grants execution.
 - Memory and workspace knowledge remain separate stores and provenance domains.
 - UI projections may cache derived state but cannot become durable truth.

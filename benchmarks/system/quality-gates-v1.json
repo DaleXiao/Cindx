@@ -31,11 +31,6 @@
       "desktop-dto-contract",
       "performance-comparator-contract",
       "paired-performance-contract",
-      "routing-contract",
-      "causal-router-v2-contract",
-      "evaluation-foundation",
-      "agent-arena-contract",
-      "fugu-pilot-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-strategy-lifecycle-contract",
@@ -60,11 +55,6 @@
     "control-plane": [
       "documentation-contract",
       "desktop-dto-contract",
-      "routing-contract",
-      "causal-router-v2-contract",
-      "evaluation-foundation",
-      "agent-arena-contract",
-      "fugu-pilot-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-strategy-lifecycle-contract",
@@ -125,11 +115,6 @@
       "paired-performance-contract",
       "browser-sidecar",
       "computer-sidecar",
-      "routing-contract",
-      "causal-router-v2-contract",
-      "evaluation-foundation",
-      "agent-arena-contract",
-      "fugu-pilot-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-strategy-lifecycle-contract",
@@ -237,159 +222,6 @@
       "command": [
         "node",
         "scripts/test-computer-sidecar.mjs"
-      ]
-    },
-    {
-      "id": "routing-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "cargo",
-        "run",
-        "--locked",
-        "-p",
-        "orchestrator-eval",
-        "--example",
-        "evaluation_lab",
-        "--",
-        "--report",
-        "target/agent-benchmark-report.json"
-      ],
-      "report": "target/agent-benchmark-report.json",
-      "assertions": [
-        {
-          "path": "baseline_passed",
-          "equals": true
-        },
-        {
-          "path": "contract.pass_rate",
-          "equals": 1
-        },
-        {
-          "path": "contract.over_orchestrated",
-          "equals": 0
-        },
-        {
-          "path": "contract.under_orchestrated",
-          "equals": 0
-        }
-      ]
-    },
-    {
-      "id": "causal-router-v2-contract",
-      "category": "correctness_and_recovery",
-      "command": [
-        "cargo",
-        "test",
-        "--locked",
-        "-p",
-        "orchestrator",
-        "causal_routing::tests::causal_router_v2_contract_gate",
-        "--",
-        "--exact",
-        "--nocapture"
-      ],
-      "required_output": [
-        "test result: ok. 1 passed; 0 failed",
-        "cindx.causal-router-v2-contract.v1"
-      ]
-    },
-    {
-      "id": "evaluation-foundation",
-      "category": "gepa",
-      "command": [
-        "cargo",
-        "run",
-        "--locked",
-        "-p",
-        "orchestrator-eval",
-        "--example",
-        "evaluation_v2_lab",
-        "--",
-        "--report",
-        "target/evaluation-v2-foundation.json"
-      ],
-      "report": "target/evaluation-v2-foundation.json",
-      "assertions": [
-        {
-          "path": "routing_contract_verified",
-          "equals": true
-        }
-      ]
-    },
-    {
-      "id": "agent-arena-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "cargo",
-        "run",
-        "--locked",
-        "-p",
-        "orchestrator-eval",
-        "--example",
-        "arena_lab",
-        "--",
-        "--report",
-        "target/agent-arena-contract.json"
-      ],
-      "report": "target/agent-arena-contract.json",
-      "assertions": [
-        {
-          "path": "cases",
-          "equals": 120
-        },
-        {
-          "path": "observed_runs",
-          "equals": 0
-        },
-        {
-          "path": "missing_runs",
-          "equals_path": "required_observations"
-        },
-        {
-          "path": "ready_for_scientific_comparison",
-          "equals": false
-        }
-      ]
-    },
-    {
-      "id": "fugu-pilot-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "cargo",
-        "run",
-        "--locked",
-        "-p",
-        "orchestrator-eval",
-        "--example",
-        "fugu_pilot_lab",
-        "--",
-        "--selftest",
-        "--report",
-        "target/fugu-pilot-gate-report.json"
-      ],
-      "report": "target/fugu-pilot-gate-report.json",
-      "assertions": [
-        {
-          "path": "planned_runs",
-          "equals": 3
-        },
-        {
-          "path": "observed_runs",
-          "equals": 3
-        },
-        {
-          "path": "ready",
-          "equals": true
-        },
-        {
-          "path": "claim_guard",
-          "equals": "harness_link_verification_only"
-        }
-      ],
-      "required_output": [
-        "cindx.fugu-pilot-suite.v1",
-        "cindx.fugu-pilot-protocol.v1",
-        "pilot selftest ok"
       ]
     },
     {

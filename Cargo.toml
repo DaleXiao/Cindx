@@ -12,8 +12,6 @@ members = [
   "crates/agent-skills",
   "crates/agent-storage",
   "crates/model-provider",
-  "crates/orchestrator",
-  "crates/orchestrator-eval",
   "crates/tools",
 ]
 default-members = [
@@ -28,7 +26,6 @@ default-members = [
   "crates/agent-skills",
   "crates/agent-storage",
   "crates/model-provider",
-  "crates/orchestrator",
   "crates/tools",
 ]
 exclude = ["apps/desktop/src-tauri"]

@@ -509,10 +509,7 @@ const agentRuntimeCargo = read("crates/agent-runtime/Cargo.toml");
 const agentToolRuntimeSource = read("crates/agent-runtime/src/tool_runtime.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
-const orchestratorSource = readRustCrateSource("orchestrator");
-const promptEvolutionSource = readRustCrateSource("orchestrator");
 const agentCoreSource = readRustCrateSource("agent-core");
-const benchmarkSource = read("crates/orchestrator-eval/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
 const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
@@ -612,14 +609,6 @@ const qualityGateById = new Map(
 );
 const qualityGateRunner = read("scripts/run-quality-gates.mjs");
 const qualityGateDoc = read("docs/DEVELOPMENT.md");
-const evaluationLabSource = read(
-  "crates/orchestrator-eval/examples/evaluation_lab.rs"
-);
-const shippingOrchestratorExamples = fs.existsSync(
-  path.join(root, "crates", "orchestrator", "examples")
-)
-  ? fs.readdirSync(path.join(root, "crates", "orchestrator", "examples"))
-  : [];
 const memoryEvaluationLabSource = read("crates/agent-memory/examples/memory_lab.rs");
 const agentEvaluationDoc = read("docs/EVALUATION.md");
 const browserControlDoc = read("docs/DEVELOPMENT.md");
@@ -858,7 +847,7 @@ const desktopEventOwnershipViolations = desktopRustModules
         source.includes(".emit("))
   )
   .map(({ entry }) => entry);
-const oversizedAgentCoreModules = ["agent-runtime", "agent-memory", "orchestrator"]
+const oversizedAgentCoreModules = ["agent-runtime", "agent-memory"]
   .flatMap((crateName) =>
     listRustSourceFiles(path.join(root, "crates", crateName, "src"))
       .filter((file) => {
@@ -1093,26 +1082,6 @@ assert(
     agentRecoveryServiceSource.includes(".list_by_task_and_kinds(") &&
     agentRecoveryServiceSource.includes("agent_events_for_session(store, &task_id, session_id)"),
   "Startup recovery must keep history reads indexed and scope-bounded"
-);
-
-assert(
-  shippingOrchestratorExamples.length === 0 &&
-    fs.existsSync(
-      path.join(root, "crates", "orchestrator-eval", "examples", "arena_lab.rs")
-    ) &&
-    fs.existsSync(
-      path.join(
-        root,
-        "crates",
-        "orchestrator-eval",
-        "examples",
-        "evaluation_v2_lab.rs"
-      )
-    ) &&
-    !orchestratorSource.includes("mod arena;") &&
-    !orchestratorSource.includes("mod benchmark;") &&
-    !orchestratorSource.includes("mod fugu_evaluation;"),
-  "Shipping orchestrator must not compile research evaluation modules or examples"
 );
 
 assert(
@@ -3324,8 +3293,8 @@ assert(
     tauriBridge.includes("effort: AgentEffort") &&
     tauriBridge.includes("export async function setSessionEffort") &&
     tauriBridge.includes("currentTime: currentAgentTimeContext(), effort, attachments") &&
-    orchestratorSource.includes("pub enum AgentPolicy") &&
-    orchestratorSource.includes("pub fn parse_persisted(value: &str) -> Option<Self>") &&
+    agentCoreSource.includes("pub enum AgentPolicy") &&
+    agentCoreSource.includes("pub fn parse_persisted(value: &str) -> Option<Self>") &&
     rustLib.includes("fn set_session_effort(") &&
     rustLib.includes("fn update_session_effort(") &&
     rustLib.includes("session_effort_updates_only_the_selected_session") &&
@@ -3874,8 +3843,8 @@ assert(
     rustLib.includes('timed_retrieval_channel("graph_walk"') &&
     rustLib.includes('timed_retrieval_channel("file_search"') &&
     rustLib.includes("plan.channels") &&
-    orchestratorSource.includes("WorkspaceRetrievalPlan") &&
-    orchestratorSource.includes("WorkspaceRetrievalChannel") &&
+    agentCoreSource.includes("WorkspaceRetrievalPlan") &&
+    agentCoreSource.includes("WorkspaceRetrievalChannel") &&
     rustLib.includes("fuse_retrieval_channels") &&
     rustLib.includes("prepare_agent_knowledge_context") &&
     ragSource.includes("search_chunks_semantic") &&
@@ -3987,40 +3956,12 @@ assert(
     agentCoreSource.includes(
       'AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1"'
     ) &&
-    orchestratorSource.includes("pub struct AgentRunDecisionHarness") &&
-    orchestratorSource.includes("pub fn planning_prompt(&self)") &&
-    orchestratorSource.includes("pub fn repair_prompt(") &&
-    orchestratorSource.includes("pub fn parse_draft(") &&
     parallelExecutionSource.includes("BoundedParallelExecutor") &&
     !parallelExecutionSource.includes("run_model_jobs_until_anytime_quorum_interruptible") &&
     !rustLib.includes("quality_gate_adaptive_output(") &&
     rustLib.includes("append_single_model_policy_guidance(") &&
-    !orchestratorSource.includes('WORKFLOW_IR_SCHEMA') &&
     !rustLib.includes("validate_and_apply_revision(") ,
-  "Primary agent must use the bounded single-model planning harness; workflow graphs stay retired"
-);
-assert(
-  orchestratorSource.includes("evaluate_routing_cases") &&
-    orchestratorSource.includes("evaluate_routing_telemetry") &&
-    orchestratorSource.includes("QualityRubricScore") &&
-    benchmarkSource.includes('AGENT_BENCHMARK_SCHEMA: &str = "cindx.agent-benchmark.v1"') &&
-    benchmarkSource.includes("AgentBenchmarkObservation") &&
-    benchmarkSource.includes("observed_mode_thresholds") &&
-    benchmarkSuite.cases.length >= 50 &&
-    benchmarkSuite.cases.length <= 100 &&
-    benchmarkBaseline.minimum_auto_contract_pass_rate === 1 &&
-    evaluationLabSource.includes("Cindx agent benchmark") &&
-    evaluationLabSource.includes("quality=not_observed") &&
-    agentEvaluationDoc.includes("## Evidence Levels") &&
-    agentEvaluationDoc.includes("## Current Decision Ledger") &&
-    qualityGateManifest.schema === "cindx.quality-gates.v1" &&
-    qualityGateManifest.profiles["ci-contract"].includes("routing-contract") &&
-    qualityGateRunner.includes("cindx.quality-gate-report.v1") &&
-    qualityGateDoc.includes("Deterministic contracts do not establish") &&
-    ciWorkflow.includes("run-quality-gates.mjs --profile ci-contract") &&
-    ciWorkflow.includes("Upload quality reports") &&
-    ciWorkflow.includes("target/agent-benchmark-report.json"),
-  "CI must run the versioned offline benchmark and retain auditable quality guidance"
+  "Primary agent must plan deterministically by effort tier; workflow graphs stay retired"
 );
 assert(
   JSON.stringify(qualityGateManifest.profiles["shipping-performance"]) ===

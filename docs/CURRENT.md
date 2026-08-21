@@ -330,8 +330,9 @@ stopping is derived from the required-lane result.
 **Removed in the phase-3 effort-tier rebuild.** The `realworld-eval` runtime
 adapter, the successor matched runner, the prompt-genome / prompt-profile
 machinery, and the GEPA campaign/evolution workers have been physically removed
-from the desktop crate and the orchestrator; the `realworld-eval` cargo feature
-and the `cindx-agent-realworld-eval` binary no longer exist. The paragraphs
+from the desktop crate and the (now-deleted) `orchestrator` crate; the
+`realworld-eval` cargo feature and the `cindx-agent-realworld-eval` binary no
+longer exist. The paragraphs
 below are retained as a historical record of the consumed evaluation protocols;
 no production or shipping code references them any longer. The trusted
 projection joins all turns to the actual lane result and externally verified
