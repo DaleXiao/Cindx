@@ -171,7 +171,7 @@ pub(super) fn ensure_planning_current(
     }
 }
 
-pub(super) fn selected_strategy_profile(
+pub(crate) fn selected_strategy_profile(
     state: &tauri::State<'_, AppState>,
     config: &ProviderConfig,
     effort: AgentPolicy,

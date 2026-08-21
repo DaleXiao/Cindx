@@ -1,9 +1,11 @@
 use agent_core::{
-    MemoryRecallPolicy, Metadata, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    MemoryRecallPlan, MemoryRecallPolicy, Metadata, WorkspaceRetrievalChannel,
+    WorkspaceRetrievalPlan,
 };
 use orchestrator::{
-    AgentRunDecision, ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy,
-    OrchestrationPolicy, TaskClass, MAX_RUN_DECISION_QUERY_CHARS,
+    sha256_hex, AgentEffectAuthority, AgentRouteRequirements, AgentRunDecision,
+    ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy, OrchestrationPolicy,
+    TaskClass, MAX_RUN_DECISION_QUERY_CHARS,
 };
 
 const WORKSPACE_RETRIEVAL_MAX_RESULTS: usize = 8;
@@ -13,7 +15,7 @@ const WORKSPACE_RETRIEVAL_MAX_RESULTS: usize = 8;
 /// the effort label, the tier-selected primary model, fixed single-model
 /// scheduling facts, and the deterministic knowledge decision. No conductor,
 /// routing, or collaboration concepts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct EffortRunPlan {
     pub(crate) effort_label: String,
     pub(crate) primary_model: String,
@@ -27,7 +29,7 @@ pub(crate) struct EffortRunPlan {
 /// The deterministic knowledge (durable memory + workspace retrieval) decision the
 /// effort planner produces for a run, replacing the conductor's memory/retrieval
 /// fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct KnowledgeDecision {
     pub(crate) memory_policy: MemoryRecallPolicy,
     pub(crate) memory_query: String,
@@ -45,23 +47,6 @@ impl KnowledgeDecision {
 
     pub(crate) fn memory_enabled(&self) -> bool {
         self.memory_policy != MemoryRecallPolicy::None
-    }
-
-    /// Transitional bridge: projects the orchestrator decision onto the effort
-    /// planner's knowledge shape while preparation still routes through the
-    /// orchestrator. The workspace query rides on `memory_query` when memory is
-    /// disabled so an enabled retrieval plan keeps its focused query.
-    pub(crate) fn from_run_decision(decision: &AgentRunDecision) -> Self {
-        let memory_query = if decision.memory.enabled() {
-            decision.memory.query.clone()
-        } else {
-            decision.retrieval.query.clone()
-        };
-        Self {
-            memory_policy: decision.memory.policy,
-            memory_query,
-            retrieve_workspace: decision.retrieval.enabled(),
-        }
     }
 
     /// The workspace retrieval plan implied by this decision: all four retrieval
@@ -124,6 +109,84 @@ pub(crate) fn knowledge_decision_for_effort(
     }
 }
 
+impl EffortRunPlan {
+    /// Stable identity of the plan: the SHA-256 of its canonical JSON. It plays the
+    /// role the execution-plan semantic digest played under the orchestrator, so the
+    /// strategy receipt and lifecycle bindings keep a plan hash to bind to.
+    pub(crate) fn plan_digest(&self) -> Result<String, String> {
+        serde_json::to_vec(self)
+            .map(|encoded| sha256_hex(&encoded))
+            .map_err(|error| format!("effort plan serialization failed: {error}"))
+    }
+
+    /// Applies the preparation-computed route requirements onto the deterministic
+    /// plan: the tool requirement is lifted to the runtime minimum, the prompt
+    /// effect authority is enforced fail-closed, and an active image input forces
+    /// vision. Mirrors the former direct-route application/validation.
+    pub(crate) fn apply_route_requirements(
+        &mut self,
+        requirements: AgentRouteRequirements,
+    ) -> Result<(), String> {
+        fn requirement_rank(value: &str) -> u8 {
+            match value {
+                "effects" => 2,
+                "read_only" => 1,
+                _ => 0,
+            }
+        }
+        let minimum = requirements.minimum_tool_requirement.label();
+        if requirement_rank(&self.tool_requirement) < requirement_rank(minimum) {
+            self.tool_requirement = minimum.to_string();
+        }
+        if requirements.effect_authority == AgentEffectAuthority::Forbidden
+            && requirement_rank(&self.tool_requirement) == 2
+        {
+            return Err("effort plan exceeds the prompt effect authority".to_string());
+        }
+        if requirements.effect_authority == AgentEffectAuthority::Required
+            && requirement_rank(&self.tool_requirement) < 2
+        {
+            return Err("effort plan omitted required effect authority".to_string());
+        }
+        if requirements.image_input_required {
+            self.vision_required = true;
+        }
+        Ok(())
+    }
+
+    /// Compatibility projection of the effort plan onto the legacy run-decision
+    /// shape so readers that still parse `run_decision` (semantic-memory curation,
+    /// permission restore, evaluation receipts) observe the effort-tier facts.
+    pub(crate) fn run_decision(&self) -> AgentRunDecision {
+        let mut decision = AgentRunDecision::direct(self.primary_model.clone());
+        decision.tool_requirement = match self.tool_requirement.as_str() {
+            "effects" => orchestrator::AgentToolRequirement::Effects,
+            "read_only" => orchestrator::AgentToolRequirement::ReadOnly,
+            _ => orchestrator::AgentToolRequirement::None,
+        };
+        decision.vision_required = self.vision_required;
+        decision.memory = MemoryRecallPlan {
+            policy: self.knowledge.memory_policy,
+            query: self.knowledge.memory_query.clone(),
+        };
+        decision.retrieval = self
+            .knowledge
+            .workspace_plan()
+            .unwrap_or_else(WorkspaceRetrievalPlan::none);
+        decision
+    }
+
+    /// The policy the run requested by effort tier: Fast runs single, Auto/Pro
+    /// historically requested the router and now resolve to the same single lane.
+    pub(crate) fn requested_policy_label(&self) -> &'static str {
+        if self.effort_label == "fast" {
+            "single"
+        } else {
+            "auto_router"
+        }
+    }
+}
+
 /// The minimal single-model execution contract for an effort tier. It keeps the
 /// loop's `conductor_contract` reader working without a conductor: one actor, no
 /// branches, and post-mutation verification required exactly on the verified-answer
@@ -155,8 +218,7 @@ pub(crate) fn effort_execution_contract(effort_label: &str) -> ConductorExecutio
 }
 
 /// Write the plan's scheduling facts into the run context using the same keys the
-/// loop and contract read, so the new planner can later replace the orchestrator
-/// writes key-for-key.
+/// loop and contract read, replacing the orchestrator writes key-for-key.
 pub(crate) fn apply_effort_plan_keys(
     plan: &EffortRunPlan,
     run_context: &mut Metadata,
@@ -180,6 +242,19 @@ pub(crate) fn apply_effort_plan_keys(
         "conductor_contract".to_string(),
         effort_execution_contract(&plan.effort_label).to_json()?,
     );
+    run_context.insert(
+        "requested_policy".to_string(),
+        plan.requested_policy_label().to_string(),
+    );
+    run_context.insert(
+        "run_decision".to_string(),
+        serde_json::to_string(&plan.run_decision())
+            .map_err(|error| format!("run decision serialization failed: {error}"))?,
+    );
+    run_context.insert(
+        "execution_plan_semantic_sha256".to_string(),
+        plan.plan_digest()?,
+    );
     Ok(())
 }
 
@@ -198,7 +273,6 @@ fn normalize_effort_label(effort_label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::MemoryRecallPlan;
 
     #[test]
     fn effort_plan_is_single_model_and_general_task() {
@@ -287,42 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn from_run_decision_projects_memory_and_retrieval() {
-        let mut decision = AgentRunDecision::direct("executor");
-        decision.memory = MemoryRecallPlan {
-            policy: MemoryRecallPolicy::Relevant,
-            query: "memory query".to_string(),
-        };
-        decision.retrieval = WorkspaceRetrievalPlan {
-            query: "retrieval query".to_string(),
-            channels: [WorkspaceRetrievalChannel::Semantic].into_iter().collect(),
-            max_results: 6,
-        };
-
-        let knowledge = KnowledgeDecision::from_run_decision(&decision);
-
-        assert_eq!(knowledge.memory_policy, MemoryRecallPolicy::Relevant);
-        assert_eq!(knowledge.memory_query, "memory query");
-        assert!(knowledge.retrieve_workspace);
-    }
-
-    #[test]
-    fn from_run_decision_keeps_the_retrieval_query_when_memory_is_off() {
-        let mut decision = AgentRunDecision::direct("executor");
-        decision.retrieval = WorkspaceRetrievalPlan {
-            query: "retrieval query".to_string(),
-            channels: [WorkspaceRetrievalChannel::Semantic].into_iter().collect(),
-            max_results: 6,
-        };
-
-        let knowledge = KnowledgeDecision::from_run_decision(&decision);
-
-        assert!(!knowledge.memory_enabled());
-        assert_eq!(knowledge.memory_query, "retrieval query");
-        assert!(knowledge.retrieve_workspace);
-    }
-
-    #[test]
     fn workspace_plan_enables_all_channels_over_the_bounded_query() {
         let knowledge = knowledge_decision_for_effort("auto", "find the session bug");
         let plan = knowledge
@@ -343,5 +381,89 @@ mod tests {
             retrieve_workspace: true,
         };
         assert_eq!(blank_query.workspace_plan(), None);
+    }
+
+    #[test]
+    fn route_requirements_lift_tool_requirement_and_force_vision() {
+        let mut plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        assert_eq!(plan.tool_requirement, "none");
+        assert!(!plan.vision_required);
+
+        plan.apply_route_requirements(AgentRouteRequirements {
+            minimum_tool_requirement: orchestrator::AgentToolRequirement::Effects,
+            effect_authority: AgentEffectAuthority::Required,
+            image_input_required: true,
+        })
+        .expect("requirements apply");
+
+        assert_eq!(plan.tool_requirement, "effects");
+        assert!(plan.vision_required);
+    }
+
+    #[test]
+    fn forbidden_effect_authority_rejects_an_effects_plan() {
+        let mut plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        plan.tool_requirement = "effects".to_string();
+        let error = plan
+            .apply_route_requirements(AgentRouteRequirements {
+                minimum_tool_requirement: orchestrator::AgentToolRequirement::None,
+                effect_authority: AgentEffectAuthority::Forbidden,
+                image_input_required: false,
+            })
+            .expect_err("forbidden authority must reject effects");
+        assert!(error.contains("effect authority"));
+    }
+
+    #[test]
+    fn required_effect_authority_rejects_a_non_effects_plan() {
+        let mut plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        let error = plan
+            .apply_route_requirements(AgentRouteRequirements {
+                minimum_tool_requirement: orchestrator::AgentToolRequirement::None,
+                effect_authority: AgentEffectAuthority::Required,
+                image_input_required: false,
+            })
+            .expect_err("required authority must demand effects");
+        assert!(error.contains("effect authority"));
+    }
+
+    #[test]
+    fn run_decision_projects_the_effort_knowledge_facts() {
+        let plan = plan_effort_run("pro", "qwen3.7-max".to_string(), "deep mission");
+        let decision = plan.run_decision();
+        assert_eq!(decision.primary_model, "qwen3.7-max");
+        assert_eq!(decision.memory.policy, MemoryRecallPolicy::Relevant);
+        assert_eq!(decision.memory.query, "deep mission");
+        assert!(decision.retrieval.enabled());
+
+        let fast = plan_effort_run("fast", "qwen3.7-flash".to_string(), "quick answer");
+        let fast_decision = fast.run_decision();
+        assert_eq!(fast_decision.memory.policy, MemoryRecallPolicy::None);
+        assert!(!fast_decision.retrieval.enabled());
+    }
+
+    #[test]
+    fn plan_digest_is_a_stable_sha256() {
+        let plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        let digest = plan.plan_digest().expect("plan digest computes");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(digest, plan.plan_digest().expect("digest is deterministic"));
+    }
+
+    #[test]
+    fn requested_policy_follows_the_effort_tier() {
+        assert_eq!(
+            plan_effort_run("fast", "m".to_string(), "p").requested_policy_label(),
+            "single"
+        );
+        assert_eq!(
+            plan_effort_run("auto", "m".to_string(), "p").requested_policy_label(),
+            "auto_router"
+        );
+        assert_eq!(
+            plan_effort_run("pro", "m".to_string(), "p").requested_policy_label(),
+            "auto_router"
+        );
     }
 }

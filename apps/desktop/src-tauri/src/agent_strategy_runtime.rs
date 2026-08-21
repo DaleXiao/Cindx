@@ -24,7 +24,8 @@ use self::recording::record_planned_agent_run as record_plan;
 #[cfg(test)]
 pub(crate) use self::preparation::should_evaluate_strategy_profile;
 pub(crate) use self::preparation::effective_prompt_objective_for_messages;
-use self::preparation::{ensure_planning_current, selected_strategy_profile};
+pub(crate) use self::preparation::selected_strategy_profile;
+use self::preparation::ensure_planning_current;
 #[cfg(test)]
 pub(crate) use self::requirements::{
     apply_default_memory_recall, apply_default_memory_recall_pair, preferred_compatible_route_model,

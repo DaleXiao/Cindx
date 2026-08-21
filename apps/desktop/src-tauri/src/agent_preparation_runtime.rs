@@ -1,14 +1,16 @@
-use crate::agent_effort_planner::KnowledgeDecision;
+use crate::agent_effort_decision_runtime::record_effort_plan_decision;
+use crate::agent_effort_planner::{apply_effort_plan_keys, plan_effort_run};
 use crate::agent_failure_terminal_runtime::{
     commit_agent_preparation_failure_terminal, AgentPreparationFailureTerminalOutcome,
 };
 use crate::agent_query_commands::{agent_run_should_stop, append_agent_progress_event};
 use crate::agent_run_engine::{
-    runtime_preparation_error, AgentRunPreparationError, PreparedAgentExecution,
+    effort_tier_model, runtime_preparation_error, AgentRunPreparationError,
+    PreparedAgentExecution,
 };
 use crate::agent_steer_runtime::{apply_pending_agent_steers, AgentSteerApplication};
 use crate::agent_strategy_runtime::{
-    effective_prompt_objective_for_messages, plan_agent_run, AgentRunPlanningRequest,
+    effective_prompt_objective_for_messages, selected_strategy_profile,
 };
 use crate::app_state::AppState;
 use crate::collaboration_service::truncate_for_collaboration;
@@ -24,6 +26,7 @@ use crate::project_instructions_runtime::append_project_instructions_context_for
 use crate::prompt_profile_serving::copy_prompt_profile_assignment;
 use crate::runtime_values::add_image_generation_run_context;
 use crate::session_context_service::prepare_session_history_context;
+use crate::workflow_routing_runtime::effort_model_candidates;
 use agent_core::{EventKind, Message, MessageRole, Metadata, TaskId};
 use agent_runtime::{
     prompt_completion_intent, prompt_replaces_prior_objective, AgentLoopState, AgentRunControl,
@@ -399,25 +402,64 @@ pub(crate) fn prepare_agent_execution_replay(
             "strategy",
             "Selecting the execution path",
         );
-        let plan = plan_agent_run(
-            state,
-            &mut run_context,
-            AgentRunPlanningRequest {
-                config,
-                task_id,
-                prompt: &planning_objective,
-                history: &history,
-                effort,
-                route_requirements,
-                cancellation,
-            },
+        let mut effort_plan = plan_effort_run(
+            effort.label(),
+            effort_tier_model(config, effort.label()),
+            &planning_objective,
         );
+        preparation_try!(effort_plan
+            .apply_route_requirements(route_requirements)
+            .map_err(|error| runtime_preparation_error(&run_context, error)));
+        preparation_try!(route_requirements
+            .validate_decision(
+                &effort_plan.run_decision(),
+                &effort_model_candidates(config, effort.label()),
+            )
+            .map_err(|error| {
+                runtime_preparation_error(
+                    &run_context,
+                    format!("effort-tier model cannot satisfy runtime route requirements: {error}"),
+                )
+            }));
+        preparation_try!(
+            apply_effort_plan_keys(&effort_plan, &mut run_context)
+                .map_err(|error| runtime_preparation_error(&run_context, error))
+        );
+        let profile_selection = preparation_try!(selected_strategy_profile(
+            state,
+            config,
+            effort,
+            &mut run_context
+        )
+        .map_err(|error| runtime_preparation_error(&run_context, error)));
+        let profile_source = profile_selection.1;
         preparation_try!(
             copy_prompt_profile_assignment(&run_context, &mut base_run_context)
                 .map_err(|error| runtime_preparation_error(&run_context, error))
         );
-        let plan = match plan {
-            Ok(plan) => plan,
+        if cancellation.has_pending_steer() {
+            prompt = preparation_try!(apply_preparation_steer(
+                state,
+                workspace_root,
+                &mut runtime,
+                &run_context,
+                &prompt,
+                cancellation,
+            ));
+            continue;
+        }
+        if agent_run_should_stop(cancellation) {
+            return Err(AgentRunPreparationError::ControlStop(run_context));
+        }
+        match record_effort_plan_decision(
+            state,
+            task_id,
+            &mut run_context,
+            &effort_plan,
+            &profile_source,
+            cancellation,
+        ) {
+            Ok(()) => {}
             Err(CollaborationStageError::SteerInterrupted) => {
                 prompt = preparation_try!(apply_preparation_steer(
                     state,
@@ -433,15 +475,14 @@ pub(crate) fn prepare_agent_execution_replay(
                 return Err(AgentRunPreparationError::ControlStop(run_context))
             }
             Err(error) => settle_failure!(runtime_preparation_error(&run_context, error.message())),
-        };
+        }
         let memory_constraint =
             preparation_try!(AgentMemoryEvaluationConstraint::from_context(&run_context)
                 .map_err(|error| runtime_preparation_error(&run_context, error)));
-        let routed_knowledge = KnowledgeDecision::from_run_decision(plan.execution_plan.action());
         let knowledge_decision = if memory_constraint.is_native() {
-            routed_knowledge
+            effort_plan.knowledge.clone()
         } else {
-            memory_constraint.apply_after_routing(&mut run_context, &routed_knowledge)
+            memory_constraint.apply_after_routing(&mut run_context, &effort_plan.knowledge)
         };
 
         let prepared_knowledge = match prepare_run_knowledge_contexts(
@@ -536,7 +577,7 @@ pub(crate) fn prepare_agent_execution_replay(
             "Preparing execution strategy",
         )
         .map_err(|error| runtime_preparation_error(&run_context, error)));
-        let collaboration_policy = plan.execution_plan.action().policy();
+        let collaboration_policy = OrchestrationPolicy::Single;
         append_single_model_policy_guidance(&mut history, &collaboration_policy);
         let collaboration: Option<AgentCollaboration> = None;
         if cancellation.has_pending_steer() {

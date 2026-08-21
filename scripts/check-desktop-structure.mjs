@@ -1705,29 +1705,21 @@ assert(
 );
 assert(
   rustLib.includes("fn prepare_run_knowledge_contexts(") &&
-    rustLib.includes("let plan = plan_agent_run(") &&
-    rustLib.includes(
-      "KnowledgeDecision::from_run_decision(plan.execution_plan.action())"
-    ) &&
+    rustLib.includes("let mut effort_plan = plan_effort_run(") &&
+    rustLib.includes("effort_tier_model(config, effort.label())") &&
+    rustLib.includes("record_effort_plan_decision(") &&
+    rustLib.includes('"decision_source".to_string(),\n            "effort_tier_planner".to_string()') &&
     rustLib.includes("let workspace_plan = knowledge.workspace_plan()") &&
     rustLib.includes("let workspace_handle = workspace_plan.as_ref().map") &&
-    rustLib.includes("if !effort.uses_conductor()") &&
     rustLib.includes("if !should_evaluate_strategy_profile(") &&
     rustLib.includes("fn fast_policy_never_enters_prompt_evolution_selection()") &&
-    rustLib.includes('"dynamic_conductor_v2"') &&
-    rustLib.includes('"dynamic_conductor_replanned"') &&
-    rustLib.includes('"dynamic_conductor_degraded_workflow"') &&
-    rustLib.includes('"dynamic_conductor_degraded_direct"') &&
-    agentConductorRuntimeSource.includes("conductor_model_sequence") &&
-    agentConductorRuntimeSource.includes("attempt_conductor_decision") &&
-    agentConductorRuntimeSource.includes("CONDUCTOR_MAX_ATTEMPTS") &&
     rustLib.includes("index_graph_chunks_cancellable") &&
     rustLib.includes("upsert_all(extractions)") &&
     ragSource.includes("index_workspace_cancellable") &&
     ragSource.includes("RAG_INDEX_CANCELLED") &&
     modelProviderSource.includes("embed_cancellable") &&
     graphSource.includes("pub fn upsert_all"),
-  "Fast must remain direct while Auto/Pro knowledge preparation flows through the effort KnowledgeDecision and stays cancellable"
+  "Run preparation must plan purely by effort tier, record one typed decision, and keep knowledge retrieval cancellable"
 );
 assert(
   appSource.includes("sessionSelectionRequestRef") &&
