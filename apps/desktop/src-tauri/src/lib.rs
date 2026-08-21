@@ -5,6 +5,10 @@ mod agent_conductor_scheduler;
 mod agent_execution_constraint;
 mod agent_failure_terminal_runtime;
 mod agent_finalizer_runtime;
+// New effort-tier planning core (phase 3). Not yet wired into preparation; the
+// orchestrator/conductor path remains active until the follow-up switch-over.
+#[allow(dead_code)]
+mod agent_effort_planner;
 mod agent_grounded_response_runtime;
 mod agent_loop_runtime;
 mod agent_subagent_runtime;
