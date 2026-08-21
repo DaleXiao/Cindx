@@ -1,6 +1,6 @@
 use super::*;
 use agent_core::{AgentRunIdentity, EventTypeV1, EVENT_TYPE_METADATA_KEY};
-use orchestrator::{
+use agent_core::{
     IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceV1,
     LearningTermination, LearningUsageCompleteness, LearningVerification,
 };

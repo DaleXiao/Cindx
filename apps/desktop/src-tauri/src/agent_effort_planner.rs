@@ -364,7 +364,7 @@ mod tests {
         assert!(!plan.vision_required);
 
         plan.apply_route_requirements(AgentRouteRequirements {
-            minimum_tool_requirement: orchestrator::AgentToolRequirement::Effects,
+            minimum_tool_requirement: agent_core::AgentToolRequirement::Effects,
             effect_authority: AgentEffectAuthority::Required,
             image_input_required: true,
         })
@@ -380,7 +380,7 @@ mod tests {
         plan.tool_requirement = "effects".to_string();
         let error = plan
             .apply_route_requirements(AgentRouteRequirements {
-                minimum_tool_requirement: orchestrator::AgentToolRequirement::None,
+                minimum_tool_requirement: agent_core::AgentToolRequirement::None,
                 effect_authority: AgentEffectAuthority::Forbidden,
                 image_input_required: false,
             })
@@ -393,7 +393,7 @@ mod tests {
         let mut plan = plan_effort_run("auto", "model".to_string(), "prompt");
         let error = plan
             .apply_route_requirements(AgentRouteRequirements {
-                minimum_tool_requirement: orchestrator::AgentToolRequirement::None,
+                minimum_tool_requirement: agent_core::AgentToolRequirement::None,
                 effect_authority: AgentEffectAuthority::Required,
                 image_input_required: false,
             })

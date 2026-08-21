@@ -69,7 +69,7 @@ pub(crate) use model_provider::{
 };
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
-pub(crate) use orchestrator::{ConductorExecutionContract, MemoryRecallPolicy};
+pub(crate) use agent_core::{ConductorExecutionContract, MemoryRecallPolicy};
 pub(crate) use agent_core::{
     parse_policy, role_label, sha256_hex, AgentPolicy, OrchestrationPolicy, RoutingOutcome,
     RoutingTelemetry, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,

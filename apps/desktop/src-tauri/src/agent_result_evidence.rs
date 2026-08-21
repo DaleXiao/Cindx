@@ -2,7 +2,7 @@ use agent_core::{Event, MessageRole, Metadata, ToolOutcomeStatus, ToolRisk, Tool
 use agent_runtime::{
     AgentGoalDelta, AgentLoopState, AgentToolRequest, PostconditionVerificationReceipt,
 };
-use orchestrator::{
+use agent_core::{
     IndependentQualitySource, LearningAttribution, LearningEvidenceV1, LearningTermination,
     LearningUsageCompleteness,
 };

@@ -74,8 +74,8 @@ legacy and are not reclassified from display strings.
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, system-prompt composition, model-turn and tool-runtime semantics |
 | `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
-| `orchestrator` | Planning execution contracts, run decisions, verification, direct-delivery judge contracts, routing evidence, and prompt-genome policy types |
-| `orchestrator-eval` | Non-default evaluation and Fugu comparison contracts |
+| `orchestrator` | Residual non-shipping crate: run decisions, routing/causal-route machinery, and evaluation contracts retained only for `orchestrator-eval`; the desktop crate no longer depends on it (planning/execution-contract/knowledge/learning-evidence types now live in `agent-core`) |
+| `orchestrator-eval` | Non-default evaluation and Fugu comparison contracts (sole remaining consumer of `orchestrator`) |
 | `agent-memory` | Memory records, retention, recall, utility attribution, and deterministic curation contracts |
 | `agent-rag` | Workspace indexing, file adapter, semantic retrieval, and vector-store integration |
 | `agent-graph` | Graph extraction, direct graph retrieval, and graph walk |
