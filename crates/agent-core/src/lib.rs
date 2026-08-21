@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+mod agent_policy;
 mod event_contract;
 mod knowledge_plan;
 mod model_attribution;
 mod model_contract;
+mod orchestration_policy;
 mod permission_policy;
 mod run_identity;
 
+pub use agent_policy::{AgentModelSelectionKind, AgentPolicy, PromptEvolutionStrategy};
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
@@ -28,6 +31,10 @@ pub use model_contract::{
     ModelResponse, ModelResponseAssessment, ModelResponseDisposition, ModelResponseTermination,
     ModelToolCall, ProviderFailureClass, GENERATION_TEMPERATURE_KEY,
 };
+pub use orchestration_policy::{
+    default_plan, parse_policy, role_label, step_prompt, OrchestrationPlan, OrchestrationPolicy,
+    OrchestrationStep,
+};
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
 };
@@ -41,6 +48,11 @@ pub use run_identity::{
 pub type Metadata = BTreeMap<String, String>;
 
 pub const TOOL_OBSERVATION_V2_SCHEMA: &str = "cindx.tool-observation.v2";
+pub const LEARNING_EVIDENCE_METADATA_KEY: &str = "learning_evidence_v1";
+
+pub fn sha256_hex(value: &[u8]) -> String {
+    format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(value))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub String);

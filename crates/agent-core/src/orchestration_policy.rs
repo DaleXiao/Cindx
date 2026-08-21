@@ -1,4 +1,4 @@
-use agent_core::{Metadata, ModelRole};
+use crate::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

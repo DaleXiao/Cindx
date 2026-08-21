@@ -15,7 +15,7 @@ use agent_application::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, Agen
 use agent_core::{Message, Metadata, ModelRole, TaskId};
 use agent_runtime::{AgentLoopState, AgentRunControl};
 use execution_providers::build_agent_execution_providers;
-use orchestrator::AgentPolicy;
+use agent_core::AgentPolicy;
 use std::path::Path;
 use std::sync::Arc;
 

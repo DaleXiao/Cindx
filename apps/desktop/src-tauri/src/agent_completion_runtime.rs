@@ -537,7 +537,7 @@ pub(crate) fn finalize_agent_completion(
                 let encoded_learning_evidence = learning_evidence.to_metadata_value();
                 if let Some(encoded) = encoded_learning_evidence {
                     terminal_metadata.insert(
-                        orchestrator::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                        agent_core::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
                         encoded,
                     );
                 }

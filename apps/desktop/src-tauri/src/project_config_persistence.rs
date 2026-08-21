@@ -9,7 +9,7 @@ use crate::{
     session_title_service::is_automatic_session_name,
 };
 use agent_application::SessionTitleState;
-use orchestrator::AgentPolicy;
+use agent_core::AgentPolicy;
 use std::{
     fs,
     io::{self, Write},

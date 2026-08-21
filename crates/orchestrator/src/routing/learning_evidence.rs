@@ -1,6 +1,6 @@
 use super::*;
 
-pub const LEARNING_EVIDENCE_METADATA_KEY: &str = "learning_evidence_v1";
+pub use agent_core::LEARNING_EVIDENCE_METADATA_KEY;
 pub const LEARNING_EVIDENCE_SCHEMA_V1: &str = "cindx.learning-evidence.v1";
 pub const LEARNING_EVIDENCE_MAX_BYTES: usize = 1_024;
 const LEARNING_EVIDENCE_FIELDS_V1: [&str; 10] = [

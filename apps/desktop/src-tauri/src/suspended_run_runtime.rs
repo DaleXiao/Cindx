@@ -10,7 +10,7 @@ use agent_core::{MessageRole, Metadata};
 use agent_runtime::{
     run_context_steer_epoch, AgentGoalDelta, AgentKernel, AgentRunControl, RunControlSnapshot,
 };
-use orchestrator::AgentPolicy;
+use agent_core::AgentPolicy;
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
 
 const SUSPENDED_AGENT_RUN_LIMIT: usize = 16;

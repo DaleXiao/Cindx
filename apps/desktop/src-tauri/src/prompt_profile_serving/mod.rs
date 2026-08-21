@@ -20,7 +20,7 @@ pub(crate) use selection::seed_prompt_profile_selection;
 pub(crate) use selection::{select_prompt_profile_for_run, should_evaluate_strategy_profile};
 pub(crate) use selection::{restore_prompt_profile_selection, selected_strategy_profile};
 
-use orchestrator::sha256_hex;
+use agent_core::sha256_hex;
 
 pub(crate) const PROMPT_PROFILE_DEPLOYMENT_NAMESPACE: &str = "cindx.prompt-profile-deployment.v1";
 pub(super) const PROMPT_PROFILE_DEPLOYMENT_SCHEMA: &str = "cindx.prompt-profile-deployment.v1";

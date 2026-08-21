@@ -8,7 +8,7 @@ use agent_core::{
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
     AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
-use orchestrator::sha256_hex;
+use agent_core::sha256_hex;
 
 pub(super) fn resolve_agent_recovery_identity(
     events: &[Event],

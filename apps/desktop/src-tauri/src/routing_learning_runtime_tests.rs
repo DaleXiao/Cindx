@@ -147,7 +147,7 @@ fn trusted_routing_cost_uses_lineage_aggregate_across_restarts_and_embeddings() 
         routing_telemetry_from_events(&routing_events(run_id, "Agent task completed", {
             let mut metadata = resource_usage_metadata("run_lineage", 185, 1, 0, 1, 0);
             metadata.insert(
-                orchestrator::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                agent_core::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
                 evidence,
             );
             metadata.insert("routing_learning_eligible".to_string(), "true".to_string());
@@ -567,7 +567,7 @@ fn malformed_resource_source_counts_censor_typed_evidence_and_keep_legacy_cost_o
         "Agent task completed",
         [
             (
-                orchestrator::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                agent_core::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
                 evidence,
             ),
             ("routing_learning_eligible".to_string(), "true".to_string()),
@@ -623,7 +623,7 @@ fn only_verified_postcondition_or_explicit_quality_gate_is_learnable() {
         "Agent task completed",
         [
             (
-                orchestrator::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                agent_core::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
                 verified_evidence,
             ),
             (
@@ -650,7 +650,7 @@ fn only_verified_postcondition_or_explicit_quality_gate_is_learnable() {
         [
             ("routing_learning_eligible".to_string(), "true".to_string()),
             (
-                orchestrator::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                agent_core::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
                 LearningEvidenceV1::independent_quality(
                     LearningTermination::Completed,
                     LearningAttribution::Workflow,
@@ -722,7 +722,7 @@ fn typed_censored_and_legacy_only_runs_cannot_be_upgraded() {
         .collect::<Metadata>();
         if let Some(typed) = typed {
             metadata.insert(
-                orchestrator::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
+                agent_core::LEARNING_EVIDENCE_METADATA_KEY.to_string(),
                 typed,
             );
         }

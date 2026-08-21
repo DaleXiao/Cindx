@@ -1,6 +1,6 @@
+use crate::sha256_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1182,10 +1182,6 @@ pub fn verify_frozen_routing_contract(
         Err(error) => errors.push(format!("frozen routing baseline JSON is invalid: {error}")),
     }
     errors
-}
-
-pub fn sha256_hex(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
 }
 
 fn is_lower_hex(value: &str, length: usize) -> bool {
