@@ -11,6 +11,7 @@ mod model_contract;
 mod orchestration_policy;
 mod permission_policy;
 mod routing_telemetry;
+pub mod run_decision_enums;
 mod run_identity;
 
 pub use agent_policy::{AgentModelSelectionKind, AgentPolicy, PromptEvolutionStrategy};
@@ -54,6 +55,7 @@ pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
 };
 pub use routing_telemetry::{RoutingOutcome, RoutingTelemetry};
+pub use run_decision_enums::{AgentExecutionMode, AgentToolRequirement, AgentVerificationPolicy};
 pub use run_identity::{
     agent_run_id, logical_agent_run_id, source_agent_run_id, AgentRunIdentity,
     AgentRunIdentityError, AgentRunLineage, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,

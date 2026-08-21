@@ -12,76 +12,14 @@ pub const AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1";
 pub const MAX_RUN_DECISION_QUERY_CHARS: usize = 2_000;
 pub const MAX_RUN_DECISION_RATIONALE_CHARS: usize = 1_200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentExecutionMode {
-    Direct,
-    Workflow,
-}
-
-// Knowledge planning types live in agent-core; the orchestrator re-exports them so
-// existing `orchestrator::` paths keep compiling until the crate is removed.
+// Knowledge planning and run-decision enum types live in agent-core; the
+// orchestrator re-exports them so existing `orchestrator::` paths keep
+// compiling until the crate is removed.
+pub use agent_core::run_decision_enums::AgentEffectAuthority;
 pub use agent_core::{
-    MemoryRecallPlan, MemoryRecallPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    AgentExecutionMode, AgentToolRequirement, AgentVerificationPolicy, MemoryRecallPlan,
+    MemoryRecallPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentVerificationPolicy {
-    None,
-    SelfCheck,
-    Independent,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentToolRequirement {
-    #[default]
-    None,
-    ReadOnly,
-    Effects,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentEffectAuthority {
-    Forbidden,
-    #[default]
-    Allowed,
-    Required,
-}
-
-impl AgentEffectAuthority {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Forbidden => "forbidden",
-            Self::Allowed => "allowed",
-            Self::Required => "required",
-        }
-    }
-}
-
-impl AgentToolRequirement {
-    const fn strength(self) -> u8 {
-        match self {
-            Self::None => 0,
-            Self::ReadOnly => 1,
-            Self::Effects => 2,
-        }
-    }
-
-    const fn satisfies(self, minimum: Self) -> bool {
-        self.strength() >= minimum.strength()
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::ReadOnly => "read_only",
-            Self::Effects => "effects",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AgentRouteRequirements {

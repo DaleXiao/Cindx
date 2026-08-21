@@ -18,7 +18,8 @@ use model_provider::{
     ModelCallMode, ModelRequest, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     MODEL_REQUEST_CANCELLED,
 };
-use orchestrator::{AgentExecutionMode, AgentRunDecision, AgentToolRequirement};
+use agent_core::{AgentExecutionMode, AgentToolRequirement};
+use orchestrator::AgentRunDecision;
 use std::path::{Path, PathBuf};
 
 #[path = "semantic_memory_event_query.rs"]
