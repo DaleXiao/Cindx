@@ -23,16 +23,16 @@ use crate::prompt_profile_serving::{copy_prompt_profile_assignment, selected_str
 use crate::runtime_values::{add_image_generation_run_context, truncate_for_collaboration};
 use crate::session_context_service::prepare_session_history_context;
 use crate::agent_model_candidates::effort_model_candidates;
-use agent_core::{EventKind, Message, MessageRole, Metadata, TaskId};
+use agent_core::run_decision_enums::AgentEffectAuthority;
+use agent_core::{
+    AgentPolicy, AgentRouteRequirements, AgentToolRequirement, EventKind, Message, MessageRole,
+    Metadata, OrchestrationPolicy, TaskId,
+};
 use agent_runtime::{
     prompt_completion_intent, prompt_replaces_prior_objective, AgentLoopState, AgentRunControl,
     PromptEffectAuthority, PromptToolRequirement, RunPreparationCommit,
 };
 use model_provider::MODEL_REQUEST_CANCELLED;
-use orchestrator::{
-    AgentEffectAuthority, AgentPolicy, AgentRouteRequirements, AgentToolRequirement,
-    OrchestrationPolicy,
-};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -364,7 +364,9 @@ pub(crate) fn prepare_agent_execution_replay(
             .map_err(|error| runtime_preparation_error(&run_context, error)));
         preparation_try!(route_requirements
             .validate_decision(
-                &effort_plan.run_decision(),
+                &effort_plan.primary_model,
+                AgentToolRequirement::from_label(&effort_plan.tool_requirement),
+                effort_plan.vision_required,
                 &effort_model_candidates(config, effort.label()),
             )
             .map_err(|error| {

@@ -8,110 +8,15 @@ use agent_core::{Metadata, ModelRole};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1";
-pub const MAX_RUN_DECISION_QUERY_CHARS: usize = 2_000;
-pub const MAX_RUN_DECISION_RATIONALE_CHARS: usize = 1_200;
-
 // Knowledge planning and run-decision enum types live in agent-core; the
 // orchestrator re-exports them so existing `orchestrator::` paths keep
 // compiling until the crate is removed.
-pub use agent_core::run_decision_enums::AgentEffectAuthority;
 pub use agent_core::{
-    AgentExecutionMode, AgentToolRequirement, AgentVerificationPolicy, MemoryRecallPlan,
-    MemoryRecallPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    AgentExecutionMode, AgentRiskLevel, AgentRouteRequirements, AgentToolRequirement,
+    AgentVerificationPolicy, MemoryRecallPlan, MemoryRecallPolicy, WorkspaceRetrievalChannel,
+    WorkspaceRetrievalPlan, AGENT_RUN_DECISION_SCHEMA, MAX_RUN_DECISION_QUERY_CHARS,
+    MAX_RUN_DECISION_RATIONALE_CHARS,
 };
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AgentRouteRequirements {
-    pub minimum_tool_requirement: AgentToolRequirement,
-    pub effect_authority: AgentEffectAuthority,
-    pub image_input_required: bool,
-}
-
-impl AgentRouteRequirements {
-    pub fn apply_to_direct(self, mut decision: AgentRunDecision) -> AgentRunDecision {
-        if !decision
-            .tool_requirement
-            .satisfies(self.minimum_tool_requirement)
-        {
-            decision.tool_requirement = self.minimum_tool_requirement;
-        }
-        decision.vision_required |= self.image_input_required;
-        decision
-    }
-
-    pub fn model_satisfies(self, model: &str, model_candidates: &[ModelCandidate]) -> bool {
-        let needs_tools = self.minimum_tool_requirement != AgentToolRequirement::None;
-        (!needs_tools
-            || model_candidates
-                .iter()
-                .any(|candidate| candidate.name.trim() == model.trim() && candidate.supports_tools))
-            && (!self.image_input_required
-                || model_candidates.iter().any(|candidate| {
-                    candidate.name.trim() == model.trim() && candidate.supports_vision
-                }))
-    }
-
-    pub fn validate_decision(
-        self,
-        decision: &AgentRunDecision,
-        model_candidates: &[ModelCandidate],
-    ) -> Result<(), String> {
-        if self.effect_authority == AgentEffectAuthority::Forbidden
-            && decision.tool_requirement == AgentToolRequirement::Effects
-        {
-            return Err("run decision exceeds the prompt effect authority".to_string());
-        }
-        if self.effect_authority == AgentEffectAuthority::Required
-            && decision.tool_requirement != AgentToolRequirement::Effects
-        {
-            return Err("run decision omitted required effect authority".to_string());
-        }
-        if !decision
-            .tool_requirement
-            .satisfies(self.minimum_tool_requirement)
-        {
-            return Err(format!(
-                "run decision tool requirement {} is below the runtime minimum {}",
-                decision.tool_requirement.label(),
-                self.minimum_tool_requirement.label(),
-            ));
-        }
-        if self.image_input_required && !decision.vision_required {
-            return Err("run decision omitted vision for the active image input".to_string());
-        }
-
-        if decision.tool_requirement != AgentToolRequirement::None
-            && !model_candidates.iter().any(|candidate| {
-                candidate.name.trim() == decision.primary_model.trim() && candidate.supports_tools
-            })
-        {
-            return Err(format!(
-                "selected model {} is not configured with tool capability",
-                decision.primary_model
-            ));
-        }
-        if decision.vision_required
-            && !model_candidates.iter().any(|candidate| {
-                candidate.name.trim() == decision.primary_model.trim() && candidate.supports_vision
-            })
-        {
-            return Err(format!(
-                "selected model {} is not configured with vision capability",
-                decision.primary_model
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRiskLevel {
-    Low,
-    Elevated,
-    High,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRunDecision {
@@ -611,9 +516,12 @@ impl AgentRunDecisionHarness {
         if required_execution.is_some_and(|required| decision.execution != required) {
             return Err("run decision violates the matched execution treatment".to_string());
         }
-        self.request
-            .route_requirements
-            .validate_decision(&decision, &self.request.model_candidates)?;
+        self.request.route_requirements.validate_decision(
+            &decision.primary_model,
+            decision.tool_requirement,
+            decision.vision_required,
+            &self.request.model_candidates,
+        )?;
         validate_primary_model_profile(&decision, &self.request.model_candidates)?;
         let snapshot = RouteFeatureSnapshotV2::from_decision_request(
             &decision,

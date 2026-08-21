@@ -394,7 +394,7 @@ fn is_self_contained_direct(context: &RoutingContext) -> bool {
 
 fn requires_ultra(context: &RoutingContext) -> bool {
     let contract =
-        ConductorExecutionContract::from_routing(context, "auto", OrchestrationPolicy::AutoRouter);
+        execution_contract_from_routing(context, "auto", OrchestrationPolicy::AutoRouter);
     context.needs_multi_model
         || (!context.latency_sensitive
             && !matches!(context.task_class, TaskClass::Browser | TaskClass::Computer)

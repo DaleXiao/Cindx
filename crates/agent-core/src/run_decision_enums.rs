@@ -63,4 +63,12 @@ impl AgentToolRequirement {
             Self::Effects => "effects",
         }
     }
+
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "effects" => Self::Effects,
+            "read_only" => Self::ReadOnly,
+            _ => Self::None,
+        }
+    }
 }

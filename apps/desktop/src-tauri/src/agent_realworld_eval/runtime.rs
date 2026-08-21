@@ -83,7 +83,7 @@ pub(super) fn run_product_task_with_execution_constraint(
             &control,
             execution_constraint,
             memory_constraint,
-            matched_route_plan_anchor,
+            matched_route_plan_anchor.is_some(),
             &mut start_gate,
         );
         if start_gate.is_some() {

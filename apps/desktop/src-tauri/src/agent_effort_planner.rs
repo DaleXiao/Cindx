@@ -1,13 +1,13 @@
 use agent_core::run_decision_enums::AgentEffectAuthority;
 use agent_core::{
-    sha256_hex, MemoryRecallPlan, MemoryRecallPolicy, Metadata, TaskClass,
-    WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    sha256_hex, AgentRouteRequirements, ConductorExecutionContract, ConductorFallbackPolicy,
+    ConductorStopPolicy, MemoryRecallPolicy, Metadata, OrchestrationPolicy, TaskClass,
+    WorkspaceRetrievalChannel, WorkspaceRetrievalPlan, MAX_RUN_DECISION_QUERY_CHARS,
 };
-use orchestrator::{
-    AgentRouteRequirements, AgentRunDecision, ConductorExecutionContract,
-    ConductorFallbackPolicy, ConductorStopPolicy, OrchestrationPolicy,
-    MAX_RUN_DECISION_QUERY_CHARS,
-};
+#[cfg(feature = "realworld-eval")]
+use agent_core::MemoryRecallPlan;
+#[cfg(feature = "realworld-eval")]
+use orchestrator::AgentRunDecision;
 
 const WORKSPACE_RETRIEVAL_MAX_RESULTS: usize = 8;
 
@@ -156,14 +156,15 @@ impl EffortRunPlan {
     }
 
     /// Compatibility projection of the effort plan onto the legacy run-decision
-    /// shape so readers that still parse `run_decision` (semantic-memory curation,
-    /// permission restore, evaluation receipts) observe the effort-tier facts.
+    /// shape, retained for the feature-gated realworld evaluation receipts that
+    /// still parse `run_decision`. Shipping runs no longer publish it.
+    #[cfg(feature = "realworld-eval")]
     pub(crate) fn run_decision(&self) -> AgentRunDecision {
         let mut decision = AgentRunDecision::direct(self.primary_model.clone());
         decision.tool_requirement = match self.tool_requirement.as_str() {
-            "effects" => orchestrator::AgentToolRequirement::Effects,
-            "read_only" => orchestrator::AgentToolRequirement::ReadOnly,
-            _ => orchestrator::AgentToolRequirement::None,
+            "effects" => agent_core::AgentToolRequirement::Effects,
+            "read_only" => agent_core::AgentToolRequirement::ReadOnly,
+            _ => agent_core::AgentToolRequirement::None,
         };
         decision.vision_required = self.vision_required;
         decision.memory = MemoryRecallPlan {
@@ -247,6 +248,11 @@ pub(crate) fn apply_effort_plan_keys(
         "requested_policy".to_string(),
         plan.requested_policy_label().to_string(),
     );
+    run_context.insert(
+        "run_knowledge_retrieval".to_string(),
+        plan.knowledge.retrieve_workspace.to_string(),
+    );
+    #[cfg(feature = "realworld-eval")]
     run_context.insert(
         "run_decision".to_string(),
         serde_json::to_string(&plan.run_decision())
@@ -428,6 +434,7 @@ mod tests {
         assert!(error.contains("effect authority"));
     }
 
+    #[cfg(feature = "realworld-eval")]
     #[test]
     fn run_decision_projects_the_effort_knowledge_facts() {
         let plan = plan_effort_run("pro", "qwen3.7-max".to_string(), "deep mission");

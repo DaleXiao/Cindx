@@ -1,13 +1,15 @@
 use super::*;
 use agent_core::{AgentRunIdentity, EventId, TaskId};
 use agent_storage::SqliteStore;
-use agent_core::{TaskClass, WorkspaceRetrievalChannel};
 
-fn run_context(decision: AgentRunDecision) -> Metadata {
-    [(
-        "run_decision".to_string(),
-        serde_json::to_string(&decision).expect("decision should serialize"),
-    )]
+fn run_context(retrieval_enabled: bool, tool_requirement: &str) -> Metadata {
+    [
+        (
+            "run_knowledge_retrieval".to_string(),
+            retrieval_enabled.to_string(),
+        ),
+        ("tool_requirement".to_string(), tool_requirement.to_string()),
+    ]
     .into_iter()
     .collect()
 }
@@ -76,48 +78,30 @@ fn scoped_identity_metadata(
 
 #[test]
 fn direct_general_text_run_skips_model_curation() {
-    let context = run_context(AgentRunDecision::direct("model"));
+    let context = run_context(false, "none");
 
     assert!(!semantic_memory_model_is_warranted(&context, &[]));
     assert!(!semantic_memory_model_is_warranted(&Metadata::new(), &[]));
 }
 
 #[test]
-fn workflow_or_retrieval_run_admits_model_curation() {
-    let mut research = AgentRunDecision::direct("model");
-    research.task_class = TaskClass::Research;
+fn retrieval_run_admits_model_curation() {
     assert!(!semantic_memory_model_is_warranted(
-        &run_context(research.clone()),
+        &run_context(false, "none"),
         &[]
     ));
-    research.execution = AgentExecutionMode::Workflow;
     assert!(semantic_memory_model_is_warranted(
-        &run_context(research),
-        &[]
-    ));
-
-    let mut retrieval = AgentRunDecision::direct("model");
-    retrieval.retrieval.query = "project decision".to_string();
-    retrieval
-        .retrieval
-        .channels
-        .insert(WorkspaceRetrievalChannel::FileSearch);
-    assert!(semantic_memory_model_is_warranted(
-        &run_context(retrieval),
+        &run_context(true, "none"),
         &[]
     ));
 }
 
 #[test]
 fn durable_effect_admits_curation_but_transient_read_does_not() {
-    let context = run_context(AgentRunDecision::direct("model"));
-    let mut planned_effect = AgentRunDecision::direct("model");
-    planned_effect.tool_requirement = AgentToolRequirement::Effects;
+    let context = run_context(false, "none");
+    let planned_effect = run_context(false, "effects");
 
-    assert!(semantic_memory_model_is_warranted(
-        &run_context(planned_effect),
-        &[]
-    ));
+    assert!(semantic_memory_model_is_warranted(&planned_effect, &[]));
     assert!(semantic_memory_model_is_warranted(
         &context,
         &[successful_tool("file.write", "src/lib.rs")]

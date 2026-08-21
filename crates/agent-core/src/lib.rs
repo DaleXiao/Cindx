@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod agent_policy;
 mod direct_judge;
 mod event_contract;
+pub mod execution_contract;
 mod knowledge_plan;
 mod learning_evidence;
 mod model_attribution;
@@ -10,9 +11,11 @@ mod model_candidate;
 mod model_contract;
 mod orchestration_policy;
 mod permission_policy;
+mod prompt_genome_types;
 mod routing_telemetry;
 pub mod run_decision_enums;
 mod run_identity;
+mod run_requirements;
 
 pub use agent_policy::{AgentModelSelectionKind, AgentPolicy, PromptEvolutionStrategy};
 pub use direct_judge::{
@@ -23,6 +26,11 @@ pub use direct_judge::{
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
+};
+pub use execution_contract::{
+    minimum_team_uplift_bps, minimum_workflow_steps, ConductorExecutionContract,
+    ConductorFallbackPolicy, ConductorStopPolicy, AUTO_COLLABORATION_MIN_CONFIDENCE_BPS,
+    AUTO_COLLABORATION_MIN_UPLIFT_BPS, MAX_PLANNING_STEPS, PRO_MIN_TEAM_UPLIFT_BPS,
 };
 pub use knowledge_plan::{
     MemoryRecallPlan, MemoryRecallPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
@@ -54,6 +62,7 @@ pub use orchestration_policy::{
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
 };
+pub use prompt_genome_types::PromptCommitStrategy;
 pub use routing_telemetry::{RoutingOutcome, RoutingTelemetry};
 pub use run_decision_enums::{AgentExecutionMode, AgentToolRequirement, AgentVerificationPolicy};
 pub use run_identity::{
@@ -61,6 +70,10 @@ pub use run_identity::{
     AgentRunIdentityError, AgentRunLineage, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,
     AGENT_RUN_IDENTITY_V1_SCHEMA, AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
     SOURCE_AGENT_RUN_ID_METADATA_KEY,
+};
+pub use run_requirements::{
+    AgentRiskLevel, AgentRouteRequirements, AGENT_RUN_DECISION_SCHEMA,
+    MAX_RUN_DECISION_QUERY_CHARS, MAX_RUN_DECISION_RATIONALE_CHARS,
 };
 
 pub type Metadata = BTreeMap<String, String>;

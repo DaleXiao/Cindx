@@ -37,10 +37,6 @@ pub(crate) fn record_effort_plan_decision(
         ),
         ("decision_attempts".to_string(), "0".to_string()),
         (
-            "decision".to_string(),
-            serde_json::to_string(&plan.run_decision()).unwrap_or_default(),
-        ),
-        (
             "execution_plan_semantic_sha256".to_string(),
             plan_sha256,
         ),
@@ -55,6 +51,11 @@ pub(crate) fn record_effort_plan_decision(
     ]
     .into_iter()
     .collect::<Metadata>();
+    #[cfg(feature = "realworld-eval")]
+    decision_metadata.insert(
+        "decision".to_string(),
+        serde_json::to_string(&plan.run_decision()).unwrap_or_default(),
+    );
     insert_run_objectives(&mut decision_metadata, run_context);
     receipt
         .insert_into(&mut decision_metadata)

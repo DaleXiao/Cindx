@@ -4,15 +4,20 @@
 #![cfg_attr(not(feature = "realworld-eval"), allow(dead_code))]
 
 use agent_core::Metadata;
-use orchestrator::{
-    AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentToolRequirement,
-    CausalRouteSelectionV2, MemoryRecallPlan, MemoryRecallPolicy,
-};
+use agent_core::AgentExecutionMode;
+#[cfg(feature = "realworld-eval")]
+use agent_core::AgentPolicy;
+#[cfg(feature = "realworld-eval")]
+use agent_core::{AgentToolRequirement, MemoryRecallPlan, MemoryRecallPolicy};
+#[cfg(feature = "realworld-eval")]
+use orchestrator::{AgentRunDecision, CausalRouteSelectionV2};
+#[cfg(feature = "realworld-eval")]
 use serde::{Deserialize, Serialize};
 
 pub(crate) const AGENT_EXECUTION_CONSTRAINT_KEY: &str = "execution_constraint";
 pub(crate) const MATCHED_ROUTE_PLAN_ANCHOR_KEY: &str = "matched_route_plan_anchor";
 
+#[cfg(feature = "realworld-eval")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MatchedRoutePlanAnchor {
@@ -20,6 +25,7 @@ pub(crate) struct MatchedRoutePlanAnchor {
     pub(crate) compatibility_route: CausalRouteSelectionV2,
 }
 
+#[cfg(feature = "realworld-eval")]
 impl MatchedRoutePlanAnchor {
     pub(crate) fn validate(&self) -> Result<(), String> {
         Err(
@@ -116,6 +122,7 @@ impl AgentExecutionConstraint {
         }
     }
 
+    #[cfg(feature = "realworld-eval")]
     pub(crate) fn apply(
         self,
         decision: AgentRunDecision,
@@ -168,6 +175,7 @@ impl AgentExecutionConstraint {
         }
     }
 
+    #[cfg(feature = "realworld-eval")]
     pub(crate) fn quarantine_conductor_candidate(
         self,
         candidate: AgentRunDecision,
@@ -183,6 +191,7 @@ impl AgentExecutionConstraint {
     }
 }
 
+#[cfg(feature = "realworld-eval")]
 const fn execution_mode_label(mode: AgentExecutionMode) -> &'static str {
     match mode {
         AgentExecutionMode::Direct => "direct",
@@ -199,6 +208,7 @@ pub(crate) fn execution_constraints_text(workflow_enabled: bool) -> String {
     }
 }
 
+#[cfg(feature = "realworld-eval")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,8 +18,6 @@ use model_provider::{
     ModelCallMode, ModelRequest, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     MODEL_REQUEST_CANCELLED,
 };
-use agent_core::{AgentExecutionMode, AgentToolRequirement};
-use orchestrator::AgentRunDecision;
 use std::path::{Path, PathBuf};
 
 #[path = "semantic_memory_event_query.rs"]
@@ -38,15 +36,15 @@ pub(crate) fn semantic_memory_model_is_warranted(run_context: &Metadata, events:
     if events.iter().any(is_durable_tool_memory_source) {
         return true;
     }
-    let Some(decision) = run_context
-        .get("run_decision")
-        .and_then(|value| serde_json::from_str::<AgentRunDecision>(value).ok())
-    else {
-        return false;
-    };
-    decision.execution == AgentExecutionMode::Workflow
-        || decision.retrieval.enabled()
-        || decision.tool_requirement == AgentToolRequirement::Effects
+    // Workflow execution is retired, so the warrant derives from the effort-tier
+    // knowledge/tool facts directly instead of parsing the legacy run decision.
+    let retrieval_enabled = run_context
+        .get("run_knowledge_retrieval")
+        .map(String::as_str)
+        == Some("true");
+    let effects_required =
+        run_context.get("tool_requirement").map(String::as_str) == Some("effects");
+    retrieval_enabled || effects_required
 }
 
 pub(crate) fn refresh_deterministic_memory_projection(

@@ -60,13 +60,7 @@ pub enum PromptRoleStrategy {
     DiverseSpecialists,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptCommitStrategy {
-    Adaptive,
-    Quorum,
-    Exhaustive,
-}
+pub use agent_core::PromptCommitStrategy;
 
 fn default_prompt_tool_policy() -> PromptToolPolicy {
     PromptToolPolicy::EvidenceOnly

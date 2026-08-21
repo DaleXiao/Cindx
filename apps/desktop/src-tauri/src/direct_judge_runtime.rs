@@ -14,16 +14,16 @@ pub(crate) fn plan_direct_judge(
     objective: &str,
     candidate_answer: &str,
 ) -> Option<DirectJudgePlan> {
-    if !orchestrator::direct_judge_eligible(effort, verification_required) {
+    if !agent_core::direct_judge_eligible(effort, verification_required) {
         return None;
     }
     if candidate_answer.trim().is_empty() {
         return None;
     }
-    let judge_model = orchestrator::direct_judge_model(executor_model, reviewer_model)?;
+    let judge_model = agent_core::direct_judge_model(executor_model, reviewer_model)?;
     Some(DirectJudgePlan {
         judge_model: judge_model.to_string(),
-        prompt: orchestrator::direct_judge_prompt(objective, candidate_answer),
+        prompt: agent_core::direct_judge_prompt(objective, candidate_answer),
     })
 }
 
@@ -146,7 +146,7 @@ pub(crate) fn direct_judge_prompt_with_facts(
 ) -> String {
     format!(
         "{}\n\n{}",
-        orchestrator::direct_judge_prompt(objective, candidate),
+        agent_core::direct_judge_prompt(objective, candidate),
         direct_judge_execution_summary(runtime)
     )
 }
@@ -203,7 +203,7 @@ pub(crate) fn apply_direct_judge_gate(
         "The following candidate answer was produced for this objective but requires revision before delivery. Return ONLY the complete corrected answer text, nothing else.\n\nObjective:\n{}\n\nCandidate answer:\n{}\n\n{}",
         objective,
         candidate.content,
-        orchestrator::direct_judge_repair_directive(&receipt)
+        agent_core::direct_judge_repair_directive(&receipt)
     );
     let repaired_output = match dispatch_direct_judge_call(
         state,

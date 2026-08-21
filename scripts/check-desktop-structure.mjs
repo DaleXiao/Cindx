@@ -517,6 +517,7 @@ const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const orchestratorSource = readRustCrateSource("orchestrator");
 const promptEvolutionSource = readRustCrateSource("orchestrator");
+const agentCoreSource = readRustCrateSource("agent-core");
 const benchmarkSource = read("crates/orchestrator-eval/src/benchmark.rs");
 const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
 const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
@@ -4006,7 +4007,7 @@ assert(
 );
 assert(
     collaborationServiceSource.includes("struct CollaborationCompletion") &&
-    orchestratorSource.includes(
+    agentCoreSource.includes(
       'AGENT_RUN_DECISION_SCHEMA: &str = "cindx.agent-run-decision.v1"'
     ) &&
     orchestratorSource.includes("pub struct AgentRunDecisionHarness") &&

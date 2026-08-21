@@ -3,7 +3,7 @@ use super::run_identity::{
     assign_continuation_agent_run_identity, assign_initial_agent_run_identity,
     inherited_agent_run_identity, inherited_agent_run_identity_from_events,
 };
-use crate::agent_execution_constraint::{AgentExecutionConstraint, MatchedRoutePlanAnchor};
+use crate::agent_execution_constraint::AgentExecutionConstraint;
 use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
@@ -92,7 +92,7 @@ pub(crate) fn run_agent_task_blocking(
         &cancellation,
         AgentExecutionConstraint::Native,
         AgentMemoryEvaluationConstraint::Native,
-        None,
+        false,
         &mut start_gate,
     );
     if start_gate.is_some() {
@@ -119,7 +119,7 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     cancellation: &Arc<AgentRunControl>,
     execution_constraint: AgentExecutionConstraint,
     memory_constraint: AgentMemoryEvaluationConstraint,
-    matched_route_plan_anchor: Option<&MatchedRoutePlanAnchor>,
+    matched_route_plan_anchor_present: bool,
     start_gate: &mut Option<std::sync::MutexGuard<'_, ()>>,
 ) -> Result<AgentState, String> {
     let effort = AgentPolicy::parse_ingress(&input.effort);
@@ -165,7 +165,7 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     assign_initial_agent_run_identity(&mut run_context)?;
     execution_constraint.write_to_context(&mut run_context);
-    if let Some(_anchor) = matched_route_plan_anchor {
+    if matched_route_plan_anchor_present {
         return Err(
             "matched route plan anchors are retired with workflow collaboration".to_string(),
         );
