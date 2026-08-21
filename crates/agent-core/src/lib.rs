@@ -11,6 +11,7 @@ mod model_candidate;
 mod model_contract;
 mod orchestration_policy;
 mod permission_policy;
+mod prompt_fitness;
 mod prompt_genome_types;
 mod routing_telemetry;
 pub mod run_decision_enums;
@@ -61,6 +62,10 @@ pub use orchestration_policy::{
 };
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
+};
+pub use prompt_fitness::{
+    admitted_direct_judge_fitness_into_prompt_fitness, AdmittedDirectJudgeFitness, PromptFitness,
+    ADMITTED_DIRECT_JUDGE_TASK_CLASS,
 };
 pub use prompt_genome_types::PromptCommitStrategy;
 pub use routing_telemetry::{RoutingOutcome, RoutingTelemetry};

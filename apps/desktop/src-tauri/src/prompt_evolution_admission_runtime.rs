@@ -33,7 +33,7 @@ pub(crate) struct PromptEvolutionAdmissionState {
     pub(crate) window_size: usize,
     pub(crate) scored_runs: usize,
     pub(crate) average_reward_bps: u16,
-    pub(crate) fitness: orchestrator::PromptFitness,
+    pub(crate) fitness: agent_core::PromptFitness,
 }
 
 pub(crate) fn prompt_evolution_admission_config_path_for(data_root: &Path) -> PathBuf {

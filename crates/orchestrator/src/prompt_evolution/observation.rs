@@ -2,6 +2,7 @@ use super::{
     AutoTeacherSourceContextV1, ConductorPromptGenome, PromptProToAutoDistillationProvenanceV1,
 };
 use crate::AgentEvaluationReflectionPacket;
+pub use agent_core::PromptFitness;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -627,25 +628,6 @@ pub fn prompt_transfer_reflection_packets(
     limit: usize,
 ) -> Vec<AgentEvaluationReflectionPacket> {
     super::reflection_selection::prompt_transfer_reflection_packets(observations, profile_id, limit)
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PromptFitness {
-    pub runs: usize,
-    pub paired_runs: usize,
-    pub replay_runs: usize,
-    pub execution_runs: usize,
-    pub average_reward: f64,
-    pub average_relative_reward: f64,
-    pub average_step_credit: f64,
-    pub format_valid_rate: f64,
-    pub success_rate: f64,
-    pub average_quality: f64,
-    pub average_latency_ms: f64,
-    pub average_total_tokens: f64,
-    pub average_cost_microusd: f64,
-    pub safety_violations: u64,
-    pub task_class_coverage: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

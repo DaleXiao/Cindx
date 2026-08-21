@@ -119,7 +119,7 @@ pub(crate) fn admit_direct_judge_shadow_fitness(
 ) -> Result<
     (
         agent_application::DirectJudgeFitnessAdmissionV1,
-        orchestrator::PromptFitness,
+        agent_core::PromptFitness,
     ),
     String,
 > {
@@ -128,11 +128,11 @@ pub(crate) fn admit_direct_judge_shadow_fitness(
         .map_err(|error| error.to_string())?;
     let admission = agent_application::admit_direct_judge_fitness_window(&signals, &receipt)
         .map_err(|error| error.to_string())?;
-    let admitted = orchestrator::AdmittedDirectJudgeFitness {
+    let admitted = agent_core::AdmittedDirectJudgeFitness {
         scored_runs: admission.scored_runs,
         passed_runs: admission.passed_runs,
         average_reward_bps: admission.average_reward_bps,
     };
-    let fitness = orchestrator::admitted_direct_judge_fitness_into_prompt_fitness(&admitted);
+    let fitness = agent_core::admitted_direct_judge_fitness_into_prompt_fitness(&admitted);
     Ok((admission, fitness))
 }
