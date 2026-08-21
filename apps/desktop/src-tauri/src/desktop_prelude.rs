@@ -5,10 +5,10 @@ pub(crate) use agent_application::{
     AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState, SessionTitleState,
 };
 pub(crate) use agent_core::{
-    AgentActor, AgentEffectAuthority, AgentModelAttribution, AgentModelProfile, AgentService,
-    AgentStage, Event, EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision,
-    PermissionRequest, PermissionRequestId, PermissionResolution, PermissionRisk, TaskId,
-    ToolArtifact, ToolContent, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    AgentActor, AgentEffectAuthority, AgentModelAttribution, AgentModelProfile, AgentStage, Event,
+    EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision, PermissionRequest,
+    PermissionRequestId, PermissionResolution, PermissionRisk, TaskId, ToolArtifact, ToolContent,
+    ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
 #[cfg(test)]
 pub(crate) use agent_core::EventId;
@@ -63,23 +63,23 @@ pub(crate) use base64::Engine;
 #[cfg(test)]
 pub(crate) use model_provider::ModelError;
 pub(crate) use model_provider::{
-    model_supports_vision_content, EmbeddingRequest, ModelCallMode, ModelRequest, ModelResponse,
-    OpenAiCompatibleConfig, OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider,
-    OpenAiCompatibleProvider, PreparedStreamingModelRequest, StreamingModelProvider,
-    MODEL_REQUEST_CANCELLED,
+    EmbeddingRequest, ModelCallMode, ModelRequest, ModelResponse, OpenAiCompatibleConfig,
+    OpenAiCompatibleImageConfig, OpenAiCompatibleImageProvider, OpenAiCompatibleProvider,
+    PreparedStreamingModelRequest, StreamingModelProvider, MODEL_REQUEST_CANCELLED,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 pub(crate) use orchestrator::{
     default_plan, parse_policy, role_label, sha256_hex, step_prompt, AgentPolicy,
-    ConductorExecutionContract, LearnedModelRouter, MemoryRecallPolicy, ModelCandidate,
-    ModelCapabilitySource, OrchestrationPolicy, RoutingContext, RoutingDecision, RoutingOutcome,
-    RoutingTelemetry, RuleBasedRouter, TaskClass, WorkspaceRetrievalChannel,
-    WorkspaceRetrievalPlan,
+    ConductorExecutionContract, MemoryRecallPolicy, OrchestrationPolicy, RoutingContext,
+    RoutingDecision, RoutingOutcome, RoutingTelemetry, RuleBasedRouter,
+    WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
 };
+#[cfg(test)]
+pub(crate) use orchestrator::TaskClass;
 #[cfg(any(test, feature = "realworld-eval"))]
 pub(crate) use orchestrator::AgentRunDecision;
-#[cfg(any(test, feature = "realworld-eval"))]
+#[cfg(feature = "realworld-eval")]
 pub(crate) use orchestrator::ConductorPromptGenome;
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use std::collections::{BTreeMap, BTreeSet};
@@ -100,8 +100,7 @@ pub(crate) use tools::{
 
 pub(crate) use crate::agent_resource_snapshot::AgentResourceCheckpoint;
 pub(crate) use crate::collaboration_service::{
-    truncate_for_collaboration, AgentCollaboration, CollaborationCompletion,
-    COLLABORATION_STEER_INTERRUPTED,
+    AgentCollaboration, CollaborationCompletion, COLLABORATION_STEER_INTERRUPTED,
 };
 pub(crate) use crate::permission_service::{
     agent_session_permission_granted, pending_agent_permissions_for_run, permission_decision_label,
@@ -112,6 +111,7 @@ pub(crate) use crate::queue_service::{
     PendingQueuedAgentMessage, QueuedAgentMessageActionReceipt, QueuedAgentMessagePayload,
     QueuedAgentMessageReceipt, QueuedAgentMessageView,
 };
+pub(crate) use crate::runtime_values::truncate_for_collaboration;
 pub(crate) use crate::schedule::{
     initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
     timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,

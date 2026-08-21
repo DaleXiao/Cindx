@@ -7,7 +7,6 @@ pub(crate) enum CollaborationStageError {
     AttemptDeadline,
     StageDeadline,
     ModelFailure(AgentFailure),
-    DecisionRejected(String),
     Failed(String),
 }
 
@@ -21,7 +20,6 @@ impl CollaborationStageError {
             }
             Self::StageDeadline => "collaboration stage deadline exhausted".to_string(),
             Self::ModelFailure(failure) => failure.message,
-            Self::DecisionRejected(error) => error,
             Self::Failed(error) => error,
         }
     }
@@ -255,39 +253,6 @@ pub(crate) fn run_collaboration_stage(
         |_| {},
     )
     .map_err(CollaborationStageError::message)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_conductor_collaboration_stage(
-    state: &tauri::State<'_, AppState>,
-    config: &ProviderConfig,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    collaboration_id: &str,
-    stage: &str,
-    role: ModelRole,
-    model: &str,
-    prompt: String,
-    limits: CollaborationCallLimits,
-) -> Result<String, CollaborationStageError> {
-    run_collaboration_stage_typed(
-        state,
-        config,
-        task_id,
-        run_context,
-        collaboration_id,
-        stage,
-        role,
-        model,
-        prompt,
-        AgentModelAttribution::service(
-            AgentService::Conductor,
-            AgentStage::Plan,
-            AgentModelProfile::Reasoning,
-        ),
-        limits,
-        |_| {},
-    )
 }
 
 #[allow(clippy::too_many_arguments)]

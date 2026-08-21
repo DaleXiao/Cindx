@@ -858,12 +858,14 @@ pub(crate) struct AgentHistoryPage {
     pub(crate) messages: Vec<ChatMessageView>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RoutingTelemetryEntry {
     pub(crate) run_id: String,
     pub(crate) telemetry: RoutingTelemetry,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RoutingTelemetryReadModel {
     pub(crate) schema: String,

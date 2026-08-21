@@ -616,11 +616,7 @@ fn duration_ms(value: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{
-        insert_event_type_v1, AgentActor, AgentEffectAuthority, AgentModelAttribution,
-        AgentModelProfile, AgentService, AgentStage, EventId, TaskId,
-    };
-    use orchestrator::ModelCapabilitySource;
+    use agent_core::{insert_event_type_v1, AgentModelAttribution, EventId, TaskId};
 
     fn event(summary: &str, kind: EventKind, metadata: Metadata) -> Event {
         Event {

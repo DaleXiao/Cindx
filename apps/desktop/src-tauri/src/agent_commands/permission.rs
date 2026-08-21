@@ -1,5 +1,5 @@
 use crate::agent_run_engine::PreparedAgentExecution;
-use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
+use crate::agent_preparation_runtime::effective_prompt_objective_for_messages;
 use crate::suspended_run_runtime::{
     append_observations_to_suspended_run, remember_suspended_agent_run,
     suspended_agent_run_control_snapshot, suspended_agent_run_policy, take_suspended_agent_run,

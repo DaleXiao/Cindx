@@ -382,3 +382,11 @@ pub(crate) fn truncate_for_timeline(value: &str) -> String {
     truncated.push_str("...");
     truncated
 }
+
+pub(crate) fn truncate_for_collaboration(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("\n[truncated]");
+    }
+    output
+}

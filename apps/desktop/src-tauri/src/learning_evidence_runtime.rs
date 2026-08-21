@@ -33,6 +33,7 @@ pub(crate) fn learning_budget_fingerprint(metadata: &Metadata) -> Option<String>
     Some(sha256_hex(canonical.as_bytes()))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn learning_usage_completeness(events: &[&Event]) -> LearningUsageCompleteness {
     let model_events = events
         .iter()
@@ -64,12 +65,14 @@ fn learning_usage_completeness(events: &[&Event]) -> LearningUsageCompleteness {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LearningResourceUsage {
     pub(crate) completeness: LearningUsageCompleteness,
     pub(crate) total_tokens: u64,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn learning_lineage_usage_from_metadata(
     metadata: &Metadata,
 ) -> Option<LearningResourceUsage> {
@@ -125,6 +128,7 @@ pub(crate) fn learning_lineage_usage_from_metadata(
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn routing_learning_evidence(
     run_events: &[&Event],
     decision: &Event,
@@ -183,6 +187,7 @@ pub(crate) fn routing_learning_evidence(
     persisted
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn terminal_outcome_ledger_has_blocking_denial(terminal: &Event) -> bool {
     let Some(ledger) = agent_runtime::OutcomeLedgerShadow::from_terminal_metadata(
         &terminal.metadata,

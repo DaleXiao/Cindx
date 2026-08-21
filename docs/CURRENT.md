@@ -77,52 +77,54 @@ The three effort tiers form a compute ladder over one kernel and one
 quality spine; they differ by budget, iteration depth, and verification
 strength, not by permission authority:
 
-- **Fast** (quick direct answer): skips the planning decision and runs one
-  direct model call with a small budget and no delivery judge.
-- **Auto** (verified answer, default): the session model produces one typed
-  plan in a planning decision; execution is adaptive direct work followed by
-  the independent delivery judge with one bounded repair round when eligible.
-- **Pro** (deep mission): the same decision contract with a much larger
+- **Fast** (quick direct answer): runs one direct model call with a small
+  budget and no delivery judge.
+- **Auto** (verified answer, default): execution is adaptive direct work
+  followed by the independent delivery judge with one bounded repair round
+  when eligible.
+- **Pro** (deep mission): the same single-model shape with a much larger
   budget for deep, multi-iteration work, plus the most capable prompt
   genome.
+
+Planning is deterministic for every tier: an effort-tier planner builds the
+run plan (effort label, tier-selected model, single-model scheduling facts,
+and the knowledge decision) with no planning model call. Prompt-derived route
+requirements still lift tool/effect/vision constraints fail-closed during
+preparation.
 
 Each tier can pin a configured default model (`fast_model`, `auto_model`,
 `pro_model` in the provider configuration). The Settings Models panel exposes
 the three tier pins plus the legacy compatibility fallback slot; the legacy
 per-stage role slots (Primary/Reasoning/Verifier/Utility and the planning
-override) are no longer surfaced there. They remain persisted provider fields
-and still act as saved per-stage overrides behind the tier pins, so existing
-configurations keep their validated behavior. A pinned model anchors Fast's
-direct route and the planning decision's `primary_model` choice for Auto/Pro
-without removing routing authority. When a tier is unpinned, the provider catalog's
+override) are no longer surfaced there. They remain persisted provider fields;
+the executor-role slot is the fallback when a tier is unpinned. A pinned model
+anchors the tier's primary model directly. When a tier is unpinned, the provider catalog's
 tier default applies instead — for the DashScope provider that is a flash-class
 model for Fast, a plus-class model for Auto, and a max-class model for Pro —
 and providers without catalog tier defaults keep the legacy role-slot behavior.
 
-Auto and Pro do not automatically run every configured model. One planning
-decision of the session model selects the route, model roles, retrieval needs,
-decomposition, and verification requirements in one validated execution plan.
+Auto and Pro do not automatically run every configured model; one model
+executes the effort plan.
 **Multi-model workflow collaboration is retired and physically removed.**
 Natural workflow routing never triggered in production, every historical forced
 collaboration campaign closed no-go, invalid, or censored, and the owner
 decision is permanent retirement, not evidence-gated reconsideration. The
 workflow execution chain, the owner-execution graph validator (including the
-former read-only two-Specialist widening), and the GEPA campaign/evolution
-worker machinery have all been removed from the tree. A residual workflow
-decision fails closed, and the planning prompt states that workflow
-collaboration is retired. The run timeline presents planning steps as
-"Planning" / "Planning repair"; Conductor, Collaboration, Workflow, and GEPA
-semantics no longer appear in the product UI. Remaining `Conductor*` Rust
-identifiers are legacy internal naming for the planning contract and prompt
-profiles — there is no separate conductor model.
+former read-only two-Specialist widening), the conductor planning runtime,
+and the GEPA campaign/evolution worker machinery have all been removed from
+the tree. A residual workflow decision fails closed. Conductor, Collaboration,
+Workflow, and GEPA semantics no longer appear in the product UI. Remaining
+`Conductor*`/`collaboration_*` Rust identifiers are legacy internal naming for
+the execution contract, prompt profiles, and the bounded stage-call plumbing
+the delivery judge still uses — there is no separate conductor model and no
+collaboration lane.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
-persistence, and terminal-commit paths. Their planning budgets differ; their
-effect authority does not. There is no multi-model workflow lane. Auto and Pro
-additionally default memory recall to `relevant` (keyed on the run prompt)
-whenever the planning decision declines memory entirely, so durable project
-memory participates in every non-trivial task; Fast keeps the planning
-decision's choice, and explicit Relevant/Comprehensive decisions are preserved.
+persistence, and terminal-commit paths. Their budgets differ; their effect
+authority does not. There is no multi-model workflow lane. Auto and Pro
+recall durable project memory with the `relevant` policy (keyed on the
+bounded run prompt) and retrieve workspace context by effort default; Fast
+answers without memory recall or workspace retrieval.
 
 The Finalizer role is retired: single-model sessions deliver through the
 actor, and a forced stop runs at most one toolless wrap-up turn of the same
@@ -166,8 +168,9 @@ as absent-target evidence, so a task whose requested workspace file does not
 Current Agent model events also carry an additive typed attribution projection:
 the acting subject is Owner, Specialist, or Independent Verifier; the stage is
 plan, evidence, act, verify, or finalize; and the model profile is Primary,
-Reasoning, Verifier, or Utility. The planning decision and background learning
-utilities are recorded as services, not Actors.
+Reasoning, Verifier, or Utility. Background learning
+utilities are recorded as services, not Actors; effort-tier planning is
+deterministic and produces no model event.
 
 Settings presents the persisted model allocation as configuration slots rather
 than permanent Agent roles. The compatibility model is preferred by Fast and
@@ -198,13 +201,15 @@ keep their provider defaults. There is no runtime or per-effort toggle yet.
 4. Run control applies cancellation, steer, turn, stage, and deadline budgets;
    `agent-harness` prevents duplicate active work for the same key.
 5. The effective objective and bounded history are compiled into context.
-6. Fast creates a direct plan; Auto and Pro validate the session model's typed
-   plan. Required
+6. The effort-tier planner deterministically builds the run plan (no model
+   call) and preparation applies the prompt-derived route requirements onto it.
+   Required
    tools, image input, effects, capability, and budget remain hard constraints.
-   The router event and selected decision are committed in one SQLite
+   The selected decision is committed in one SQLite
    transaction behind the active preparation epoch before treatment execution
    can advance.
-7. Durable memory and requested workspace retrieval are prepared separately.
+7. Durable memory and workspace retrieval follow the plan's knowledge decision
+   and are prepared separately.
    Semantic search, file search, graph-direct lookup, and graph walk may run in
    parallel and retain source provenance.
 8. A validated workflow may execute one read-only Specialist and, when planned,

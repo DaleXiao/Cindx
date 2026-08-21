@@ -1,3 +1,7 @@
+//! Routing-telemetry read model: inert measurement plumbing kept alive by its
+//! contract tests after the conductor learning path was removed.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use agent_application::AgentRunEvent;
@@ -5,7 +9,7 @@ use agent_core::{
     AgentRunIdentity, AgentRunLineage, Event, EventKind, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
 use agent_storage::{EventStore, SqliteStore, StorageError};
-use orchestrator::{parse_policy, RoutingTelemetry};
+use orchestrator::{parse_policy, RoutingTelemetry, TaskClass};
 
 use crate::learning_evidence_runtime::{
     learning_lineage_usage_from_metadata, routing_learning_evidence,
@@ -17,7 +21,18 @@ use crate::runtime_constants::{
 };
 use crate::runtime_values::phase16_task_id;
 use crate::view_models::{RoutingTelemetryEntry, RoutingTelemetryReadModel};
-use crate::workflow_routing_runtime::parse_task_class_label;
+
+fn parse_task_class_label(value: &str) -> Option<TaskClass> {
+    match value {
+        "general" => Some(TaskClass::General),
+        "coding" => Some(TaskClass::Coding),
+        "research" => Some(TaskClass::Research),
+        "retrieval" => Some(TaskClass::Retrieval),
+        "browser" => Some(TaskClass::Browser),
+        "computer" => Some(TaskClass::Computer),
+        _ => None,
+    }
+}
 
 fn grouped_agent_run_events(events: &[Event]) -> BTreeMap<String, Vec<&Event>> {
     let Ok(lineage) = AgentRunLineage::from_events(events) else {

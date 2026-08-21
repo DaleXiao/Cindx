@@ -29,8 +29,9 @@ role names as one ontology:
 - **Actor:** Owner, Specialist, or Independent Verifier.
 - **Stage:** plan, evidence, act, verify, or finalize.
 - **Model profile:** Primary, Reasoning, Verifier, or Utility.
-- **Service:** Conductor planning and background learning utilities are
-  services and are never recorded as Actors.
+- **Service:** Background learning utilities are services and are never recorded
+  as Actors. Effort-tier planning is deterministic and makes no model call, so
+  it is not a stage participant at all.
 
 The Owner alone owns permission-gated effects and final user delivery.
 Specialists contribute bounded internal plans or evidence. Independent
@@ -48,16 +49,16 @@ product semantics are explicit:
 - `planner_model` is the Reasoning profile.
 - `reviewer_model` is the Verifier profile.
 - `summarizer_model` is the Utility profile.
-- `conductor_model` is a planning-service override, not an Actor profile.
+- `conductor_model` is a legacy persisted slot; the effort-tier planner makes
+  no planning model call, so it no longer selects anything.
 
 These slots do not assign permanent Actors to models. A concrete model may be
 configured in more than one slot, but each call is admitted by the slot needed
 for that lane: Primary and Reasoning models may execute the direct or Specialist
 path, a Verifier model may enter only the verification lane, and a model
-configured only as Utility cannot enter production routing, workflow execution,
-or Conductor fallback. The compatibility model can be copied to all four
-profiles only through an explicit Settings action; it does not overwrite the
-planning-service override.
+configured only as Utility cannot enter production routing or workflow
+execution. The compatibility model can be copied to all four profiles only
+through an explicit Settings action.
 
 These fields are an event-local sidecar on current Agent model request events.
 Started and finished events reuse the same explicit attribution selected at the
@@ -126,22 +127,27 @@ instruction files (`AGENTS.md` between the workspace root and the Git root,
 plus `.cindx/instructions/*.md`) join the prepared context as a protected,
 untrusted guidance source carrying a provenance receipt.
 
-Fast creates a fixed direct candidate. Auto and Pro request one typed Conductor
-candidate. `orchestrator` validates route, task class, model capabilities,
-effects, retrieval, graph, and verification under a bounded execution contract.
-A Workflow candidate must include its executable branch graph in the same
-decision response; a second planner does not silently replace it.
-
-The persisted execution plan binds candidate, final action, authority, hard
-constraints, context and profile fingerprints, and optional workflow identity.
-A compatibility router may produce shadow evidence, but it does not override a
-valid Conductor action.
+Planning is deterministic and effort-tier based; it makes no model call. The
+desktop effort planner (`agent_effort_planner`) builds one `EffortRunPlan` per
+preparation: the effort label, the tier-selected primary model
+(`effort_tier_model` — the tier's pinned default or the executor-role
+fallback), fixed single-model scheduling facts, and the knowledge decision
+(Fast: no memory recall or workspace retrieval; Auto/Pro: relevant memory
+recall keyed on the bounded run prompt plus workspace retrieval). Preparation
+applies the prompt-derived route requirements onto the plan fail-closed (tool
+requirement lift, effect authority, image-input vision) and validates the
+tier-selected model's capabilities against the configured candidate pool. The
+plan's facts are written key-for-key into the run context (including a
+compatibility `run_decision` projection and the plan digest as
+`execution_plan_semantic_sha256`), so the loop and contract read the same keys
+they read before the conductor was removed.
 
 The selected plan also produces a strategy receipt bound to task, session,
-physical run, steer epoch, and semantic plan digest. Run control serializes a
+physical run, steer epoch, and plan digest. Run control serializes a
 preparation checkpoint without entering execution, while one immediate SQLite
-transaction writes both the router event and selected decision. A cancellation
-or steer that wins first prevents that stale decision from being committed.
+transaction writes the typed "Agent run decision selected" event. A
+cancellation or steer that wins first prevents that stale decision from being
+committed.
 
 Model request generation follows the effort policy: chat requests and the
 credential probe disable provider-side thinking for model families whose
@@ -167,10 +173,12 @@ canonical chat history.
 
 Multi-model workflow collaboration has been physically removed. There is no
 owner-execution graph materializer, no workflow checkpoint, no read-only
-Specialist/Verifier widening, and no verification-repair wave. Every run is a
-single-model Owner execution; the planning decision validates route, retrieval,
-and verification requirements, and the foreground Owner owns all effects and
-final delivery. A residual workflow decision fails closed rather than executing.
+Specialist/Verifier widening, no verification-repair wave, and no conductor
+planning model call. Every run is a single-model Owner execution planned
+deterministically by effort tier; the preparation-time route requirements lift
+and capability validation keep tool, effect, and vision constraints enforced,
+and the foreground Owner owns all effects and final delivery. A residual
+workflow decision fails closed rather than executing.
 
 ### 5. Kernel and effects
 

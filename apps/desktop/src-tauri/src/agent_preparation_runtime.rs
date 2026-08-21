@@ -9,11 +9,7 @@ use crate::agent_run_engine::{
     PreparedAgentExecution,
 };
 use crate::agent_steer_runtime::{apply_pending_agent_steers, AgentSteerApplication};
-use crate::agent_strategy_runtime::{
-    effective_prompt_objective_for_messages, selected_strategy_profile,
-};
 use crate::app_state::AppState;
-use crate::collaboration_service::truncate_for_collaboration;
 use crate::collaboration_service::AgentCollaboration;
 use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::configuration_models::ProviderConfig;
@@ -23,10 +19,10 @@ use crate::memory_runtime::{
     prepare_run_knowledge_contexts, MEMORY_RECALL_STALE_ERROR,
 };
 use crate::project_instructions_runtime::append_project_instructions_context_for_run;
-use crate::prompt_profile_serving::copy_prompt_profile_assignment;
-use crate::runtime_values::add_image_generation_run_context;
+use crate::prompt_profile_serving::{copy_prompt_profile_assignment, selected_strategy_profile};
+use crate::runtime_values::{add_image_generation_run_context, truncate_for_collaboration};
 use crate::session_context_service::prepare_session_history_context;
-use crate::workflow_routing_runtime::effort_model_candidates;
+use crate::agent_model_candidates::effort_model_candidates;
 use agent_core::{EventKind, Message, MessageRole, Metadata, TaskId};
 use agent_runtime::{
     prompt_completion_intent, prompt_replaces_prior_objective, AgentLoopState, AgentRunControl,
@@ -37,6 +33,7 @@ use orchestrator::{
     AgentEffectAuthority, AgentPolicy, AgentRouteRequirements, AgentToolRequirement,
     OrchestrationPolicy,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -210,62 +207,17 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "task_class",
         "tool_requirement",
         "vision_required",
-        "route_minimum_tool_requirement",
-        "route_image_input_required",
-        "route_effect_authority",
-        "pre_decision_context_fingerprint",
-        "pre_decision_task_class",
-        "route_requirements_fingerprint",
-        "causal_route_policy",
-        "route_prompt_profile_sha256",
-        "causal_route_candidate",
-        "causal_route_selected",
-        "causal_route_selected_action_id",
-        "causal_route_shadow_selected",
-        "causal_route_shadow_selected_action_id",
-        "causal_route_reason",
-        "causal_route_shadow_reason",
-        "causal_route_receipt_sha256",
-        "decision_calibration",
-        "decision_calibration_reason",
-        "candidate_route_tier",
-        "selected_route_tier",
-        "computation_verdict",
-        "computation_benefit_bps",
-        "computation_required_value_bps",
-        "computation_net_value_bps",
-        "computation_units",
-        "computation_matched_examples",
-        "routing_signature",
         "collaboration_policy",
-        "collaboration_profile",
         "conductor_contract",
-        "expected_collaboration_uplift_bps",
+        "requested_policy",
         "agent_model",
-        "router_model",
-        "router_examples",
-        "router_source",
-        "conductor_degraded",
-        "conductor_failure",
         "run_decision",
-        "execution_plan",
-        "execution_plan_sha256",
         "execution_plan_semantic_sha256",
-        "execution_plan_authority",
-        "run_decision_attempts",
-        "conductor_models_attempted",
-        "conductor_selected_model",
         "agent_strategy_receipt_schema",
         "agent_strategy_receipt_status",
         "agent_strategy_receipt_key",
         "agent_strategy_receipt_steer_epoch",
         "agent_strategy_receipt_plan_sha256",
-        "conductor_configured_models",
-        "conductor_health_routing",
-        "conductor_health_candidate_models",
-        "conductor_health_observations",
-        "conductor_health_attempts",
-        "conductor_hedge_enabled",
         "memory_ids",
         "memory_selected_count",
         "routed_memory_policy",
@@ -679,4 +631,148 @@ fn apply_preparation_steer(
             Err(AgentRunPreparationError::ControlStop(run_context.clone()))
         }
     }
+}
+
+const EFFECTIVE_OBJECTIVE_MAX_CHARS: usize = 6_000;
+const EFFECTIVE_OBJECTIVE_INITIAL_FLOOR: usize = 3_000;
+
+fn compact_objective_text(value: &str, max_chars: usize) -> String {
+    let length = value.chars().count();
+    if length <= max_chars {
+        return value.to_string();
+    }
+    const OMISSION: &str = "\n[...omitted...]\n";
+    let omission_chars = OMISSION.chars().count();
+    if max_chars <= omission_chars {
+        return value.chars().take(max_chars).collect();
+    }
+    let retained = max_chars - omission_chars;
+    let head_chars = retained.saturating_mul(2) / 3;
+    let tail_chars = retained - head_chars;
+    let tail = value
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!(
+        "{}{}{}",
+        value.chars().take(head_chars).collect::<String>(),
+        OMISSION,
+        tail
+    )
+}
+
+fn fair_turn_budgets(lengths: &[usize], total_budget: usize) -> Vec<usize> {
+    let mut budgets = vec![0; lengths.len()];
+    let mut pending = (0..lengths.len()).collect::<Vec<_>>();
+    let mut remaining = total_budget;
+    while !pending.is_empty() && remaining > 0 {
+        let share = remaining / pending.len();
+        let completed = pending
+            .iter()
+            .copied()
+            .filter(|index| lengths[*index] <= share)
+            .collect::<Vec<_>>();
+        if completed.is_empty() {
+            for (offset, index) in pending.iter().copied().enumerate() {
+                budgets[index] = share + usize::from(offset < remaining % pending.len());
+            }
+            break;
+        }
+        for index in &completed {
+            budgets[*index] = lengths[*index];
+            remaining = remaining.saturating_sub(lengths[*index]);
+        }
+        pending.retain(|index| !completed.contains(index));
+    }
+    budgets
+}
+
+pub(crate) fn cumulative_effective_prompt_objective(
+    turns: impl IntoIterator<Item = String>,
+) -> Option<String> {
+    let mut seen = BTreeSet::new();
+    let turns = turns
+        .into_iter()
+        .map(|turn| turn.trim().to_string())
+        .filter(|turn| !turn.is_empty())
+        .filter(|turn| seen.insert(turn.clone()))
+        .collect::<Vec<_>>();
+    if turns.is_empty() {
+        return None;
+    }
+    if turns.len() == 1 {
+        return Some(compact_objective_text(
+            &turns[0],
+            EFFECTIVE_OBJECTIVE_MAX_CHARS,
+        ));
+    }
+
+    let labels = (0..turns.len())
+        .map(|index| {
+            if index == 0 {
+                "Initial request:\n".to_string()
+            } else {
+                format!("\n\nAccepted steering {index}:\n")
+            }
+        })
+        .collect::<Vec<_>>();
+    let label_chars = labels
+        .iter()
+        .map(|label| label.chars().count())
+        .sum::<usize>();
+    let content_budget = EFFECTIVE_OBJECTIVE_MAX_CHARS.saturating_sub(label_chars);
+    let steering_lengths = turns[1..]
+        .iter()
+        .map(|turn| turn.chars().count())
+        .collect::<Vec<_>>();
+    let initial_floor = content_budget.min(EFFECTIVE_OBJECTIVE_INITIAL_FLOOR);
+    let steering_budget = content_budget.saturating_sub(initial_floor);
+    let steering_budgets = if steering_lengths.iter().sum::<usize>() <= steering_budget {
+        steering_lengths.clone()
+    } else {
+        fair_turn_budgets(&steering_lengths, steering_budget)
+    };
+    let initial_budget = content_budget.saturating_sub(steering_budgets.iter().sum::<usize>());
+    let mut objective = String::new();
+    for (index, turn) in turns.iter().enumerate() {
+        objective.push_str(&labels[index]);
+        let budget = if index == 0 {
+            initial_budget
+        } else {
+            steering_budgets[index - 1]
+        };
+        objective.push_str(&compact_objective_text(turn, budget));
+    }
+    Some(compact_objective_text(
+        &objective,
+        EFFECTIVE_OBJECTIVE_MAX_CHARS,
+    ))
+}
+
+pub(crate) fn effective_prompt_objective_for_messages(
+    initial_prompt: &str,
+    messages: &[Message],
+) -> String {
+    cumulative_effective_prompt_objective(
+        std::iter::once(initial_prompt.to_string()).chain(
+            messages
+                .iter()
+                .filter(|message| message.role == MessageRole::User)
+                .filter(|message| {
+                    message.metadata.get("queue_mode").map(String::as_str) == Some("steer")
+                })
+                .map(|message| {
+                    message
+                        .metadata
+                        .get("display_content")
+                        .cloned()
+                        .unwrap_or_else(|| message.content.clone())
+                }),
+        ),
+    )
+    .unwrap_or_else(|| truncate_for_collaboration(initial_prompt, 6_000))
 }

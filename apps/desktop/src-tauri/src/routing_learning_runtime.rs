@@ -5,12 +5,14 @@ pub(crate) use crate::learning_evidence_runtime::LEARNING_BUDGET_KEYS;
 
 mod agent_run_projection;
 
+#[cfg(test)]
 pub(crate) use agent_run_projection::load_routing_telemetry_read_model;
 #[cfg(test)]
 pub(crate) use agent_run_projection::{
     load_routing_telemetry_read_model_snapshot, routing_telemetry_from_events,
 };
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn routing_quality_signals(run_events: &[&Event], terminal: &Event) -> (Option<f32>, Option<bool>) {
     if let Some(delivery) = run_events
         .iter()
@@ -93,6 +95,7 @@ pub(crate) fn completion_learning_signal(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn routing_outcome_for_run(
     run_events: &[&Event],
     terminal: &Event,

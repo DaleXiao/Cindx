@@ -412,9 +412,6 @@ const desktopAgentToolRuntimeSource = read(
 const agentRecoveryServiceSource = read(
   "apps/desktop/src-tauri/src/agent_recovery_service.rs"
 );
-const agentConductorRuntimeSource = read(
-  "apps/desktop/src-tauri/src/agent_conductor_runtime.rs"
-);
 const agentTaskCommandSource = read(
   "apps/desktop/src-tauri/src/agent_commands/task.rs"
 );
@@ -435,15 +432,6 @@ const promptProfileServingSource = readRustSourceTree(
 );
 const promptProfileSelectionSource = read(
   "apps/desktop/src-tauri/src/prompt_profile_serving/selection.rs"
-);
-const agentStrategyPreparationSource = read(
-  "apps/desktop/src-tauri/src/agent_strategy_preparation.rs"
-);
-const agentStrategyCausalRouteSource = read(
-  "apps/desktop/src-tauri/src/agent_strategy_causal_route.rs"
-);
-const agentStrategyRuntimeSource = read(
-  "apps/desktop/src-tauri/src/agent_strategy_runtime.rs"
 );
 const parallelExecutionSource = read(
   "apps/desktop/src-tauri/src/parallel_execution.rs"
@@ -617,13 +605,6 @@ const manualPerformanceProofs = new Map([
     [
       "context_governor::tests::long_history_context_governor_scaling_diagnostic",
       "cindx.context-governor-diagnostic.v1"
-    ]
-  ],
-  [
-    "conductor-health-scaling",
-    [
-      "conductor_health_runtime::tests::conductor_health_scaling_diagnostic",
-      "cindx.conductor-health-diagnostic.v1"
     ]
   ],
   [
@@ -824,9 +805,6 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["attachment_commands.rs", 190],
   ["attachment_upload_batches.rs", 170],
   ["agent_run_engine.rs", 250],
-  ["agent_conductor_runtime.rs", 140],
-  ["agent_strategy_context.rs", 140],
-  ["agent_strategy_runtime.rs", 430],
   ["agent_loop_runtime.rs", 560],
   ["agent_recovery_service.rs", 550],
   ["agent_runtime_snapshot.rs", 220],
@@ -1208,8 +1186,10 @@ assert(
 for (const requiredModule of [
   "attachment_commands.rs",
   "attachment_upload_batches.rs",
-  "agent_conductor_runtime.rs",
+  "agent_effort_decision_runtime.rs",
+  "agent_effort_planner.rs",
   "agent_loop_runtime.rs",
+  "agent_model_candidates.rs",
   "agent_runtime_snapshot.rs",
   "configuration_persistence.rs",
   "desktop_prelude.rs",
@@ -3644,18 +3624,15 @@ assert(
   "Agent trace must expose the real model, latency, evidence, and completion status for each collaboration role"
 );
 assert(
-  !agentStrategyPreparationSource.includes("prompt_evolution_evaluation_for_run") &&
-    !agentStrategyPreparationSource.includes("evaluate_prompt_evolution_read_model") &&
-    !agentStrategyPreparationSource.includes("reconcile_prompt_rollout") &&
-    agentStrategyPreparationSource.includes("select_prompt_profile_for_run") &&
+  !promptProfileSelectionSource.includes("prompt_evolution_evaluation_for_run") &&
+    !promptProfileSelectionSource.includes("evaluate_prompt_evolution_read_model") &&
+    !promptProfileSelectionSource.includes("reconcile_prompt_rollout") &&
+    promptProfileSelectionSource.includes("select_prompt_profile_for_run") &&
+    promptProfileSelectionSource.includes("pub(crate) fn selected_strategy_profile(") &&
     (promptProfileSelectionSource.match(/load_read_model\(/g)?.length ?? 0) === 1 &&
     !promptProfileSelectionSource.includes("append_event") &&
     !promptProfileSelectionSource.includes("reconcile_prompt_rollout") &&
     !promptProfileSelectionSource.includes("prompt_learning_outbox") &&
-    !agentStrategyPreparationSource.includes("route_decision_directive") &&
-    agentStrategyRuntimeSource.includes("route_decision_profile_sha256") &&
-    agentStrategyCausalRouteSource.includes("run_decision_evolved_directive") &&
-    agentStrategyCausalRouteSource.includes("route_decision_directive") &&
     promptProfileServingSource.includes("LOGICAL_AGENT_RUN_ID_METADATA_KEY") &&
     promptProfileServingSource.includes("MAX_ASSIGNMENT_RECEIPT_BYTES") &&
     promptProfileServingSource.includes("PromptProfileDistillationLease"),

@@ -2,7 +2,6 @@ use crate::desktop_prelude::*;
 use crate::rag_operation_runtime::RagOperationControl;
 use crate::{
     attachment_upload_batches::AttachmentUploadBatches,
-    conductor_health_runtime::ConductorHealthLedger,
     configuration_models::{ProjectSessionConfig, ProviderConfig, SidecarConfig, WorkspaceConfig},
     schedule::ScheduleConfig,
     session_output_cache_store::SessionOutputCache,
@@ -34,7 +33,6 @@ pub(crate) struct AppState {
     pub(crate) workspace_knowledge_cache: Mutex<BTreeMap<String, WorkspaceKnowledgeCacheEntry>>,
     pub(crate) process_manager: Arc<ProcessManager>,
     pub(crate) tool_registry_cache: Mutex<ToolRegistryCache>,
-    pub(crate) conductor_health: Mutex<ConductorHealthLedger>,
     pub(crate) tool_registry_generation: AtomicU64,
     pub(crate) allow_exit: AtomicBool,
     pub(crate) quit_prompt_active: AtomicBool,

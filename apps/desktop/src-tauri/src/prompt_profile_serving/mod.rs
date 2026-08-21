@@ -10,14 +10,15 @@ pub(crate) use continuity::{
 };
 pub(crate) use model::{
     PromptProfileAssignmentSource, PromptProfileDeployment, PromptProfileFallback,
-    PromptProfileSelection,
 };
 pub(crate) use persistence::delete_prompt_profile_deployments_for_scope_in_transaction;
-#[cfg(any(test, feature = "realworld-eval"))]
+#[cfg(test)]
 pub(crate) use selection::frozen_prompt_profile_selection;
-pub(crate) use selection::{
-    restore_prompt_profile_selection, seed_prompt_profile_selection, select_prompt_profile_for_run,
-};
+#[cfg(test)]
+pub(crate) use selection::seed_prompt_profile_selection;
+#[cfg(test)]
+pub(crate) use selection::{select_prompt_profile_for_run, should_evaluate_strategy_profile};
+pub(crate) use selection::{restore_prompt_profile_selection, selected_strategy_profile};
 
 use orchestrator::sha256_hex;
 

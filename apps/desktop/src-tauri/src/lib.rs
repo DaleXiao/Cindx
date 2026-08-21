@@ -1,11 +1,5 @@
 mod agent_commands;
 mod agent_completion_runtime;
-// Phase 3: bypassed by the effort-tier planner in run preparation; removed with
-// the rest of the conductor surface in layer 4.
-#[allow(dead_code)]
-mod agent_conductor_runtime;
-#[allow(dead_code)]
-mod agent_conductor_scheduler;
 mod agent_effort_decision_runtime;
 // Effort-tier planning core (phase 3): the deterministic planner that replaces
 // the orchestrator/conductor planning surface in run preparation.
@@ -15,6 +9,7 @@ mod agent_failure_terminal_runtime;
 mod agent_finalizer_runtime;
 mod agent_grounded_response_runtime;
 mod agent_loop_runtime;
+mod agent_model_candidates;
 mod agent_subagent_runtime;
 mod agent_summary_runtime;
 mod agent_model_turn_runtime;
@@ -33,10 +28,6 @@ mod agent_runtime_snapshot;
 mod agent_runtime_snapshot_cursor;
 mod agent_steer_runtime;
 mod agent_strategy_receipt_runtime;
-// Phase 3: the orchestrator-driven planning path is bypassed by the effort-tier
-// planner; removed in layer 4 (profile selection and objective helpers survive).
-#[allow(dead_code)]
-mod agent_strategy_runtime;
 mod agent_terminal_commit_runtime;
 mod agent_tool_runtime;
 mod app_bootstrap;
@@ -47,10 +38,6 @@ mod background_work_runtime;
 mod collaboration_execution;
 mod collaboration_service;
 mod collaboration_stage_runtime;
-// Phase 3: conductor health tracking is bypassed with the conductor; removed in
-// layer 4.
-#[allow(dead_code)]
-mod conductor_health_runtime;
 mod configuration_models;
 mod configuration_persistence;
 mod custom_commands_runtime;
@@ -66,9 +53,6 @@ mod knowledge_commands;
 mod knowledge_embedding_runtime;
 mod knowledge_generation_runtime;
 mod knowledge_runtime;
-// Phase 3: routing-learning evidence plumbing fed by the retired conductor path;
-// removed in layer 4.
-#[allow(dead_code)]
 mod learning_evidence_runtime;
 mod managed_artifact_lifecycle;
 mod manual_tool_execution;
@@ -121,13 +105,10 @@ mod tool_execution;
 mod tool_runtime_service;
 mod view_models;
 mod voice_commands;
-// Phase 3: the conductor-facing routing helpers are bypassed by the effort-tier
-// planner; removed in layer 4 (the effort model-candidate helper survives).
-#[allow(dead_code)]
-mod workflow_routing_runtime;
 mod workspace_undo_runtime;
 use agent_commands::*;
 use agent_loop_runtime::*;
+use agent_model_candidates::*;
 use agent_query_commands::*;
 use agent_read_model::*;
 #[cfg(feature = "realworld-eval")]
@@ -176,7 +157,6 @@ use tool_commands::*;
 use tool_execution::*;
 use view_models::*;
 use voice_commands::*;
-use workflow_routing_runtime::*;
 #[cfg(test)]
 mod direct_judge_shadow_runtime_tests;
 #[cfg(test)]

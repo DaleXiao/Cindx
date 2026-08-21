@@ -224,9 +224,6 @@ pub(super) fn build_evaluation_app(
         workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
         process_manager: Arc::new(ProcessManager::new()),
         tool_registry_cache: Mutex::new(ToolRegistryCache::default()),
-        conductor_health: Mutex::new(
-            crate::conductor_health_runtime::ConductorHealthLedger::default(),
-        ),
         tool_registry_generation: AtomicU64::new(0),
         allow_exit: AtomicBool::new(false),
         quit_prompt_active: AtomicBool::new(false),

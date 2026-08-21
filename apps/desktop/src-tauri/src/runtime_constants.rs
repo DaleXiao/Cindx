@@ -22,6 +22,7 @@ pub(crate) const PROJECT_INSTRUCTIONS_MAX_ADDITIONAL_GLOBS: usize = 8;
 pub(crate) const AGENT_MAX_OUTPUT_TOKENS: u64 = 32_768;
 pub(crate) const MAX_AGENT_MODEL_TRANSPORT_ATTEMPTS: usize = 4;
 pub(crate) const COLLABORATION_MAX_OUTPUT_TOKENS: u64 = 4_096;
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const ADAPTIVE_QUALITY_PASS_SCORE: f32 = 0.72;
 pub(crate) const BACKGROUND_WORK_IDLE_GRACE_MS: u64 = 30_000;
 pub(crate) const AGENT_SESSION_READ_MODEL_NAMESPACE: &str = "agent-session-v2";
@@ -35,6 +36,7 @@ pub(crate) const MEMORY_VECTOR_MANIFEST_SCHEMA: &str = "cindx.memory-vector.v1";
 pub(crate) const MEMORY_VECTOR_FALLBACK_RETRY_MS: u64 = 5 * 60 * 1_000;
 pub(crate) const ROUTING_TELEMETRY_READ_MODEL_NAMESPACE: &str = "routing-telemetry-v5";
 pub(crate) const LEGACY_ROUTING_TELEMETRY_READ_MODEL_NAMESPACE: &str = "routing-telemetry-v4";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const ROUTING_TELEMETRY_READ_MODEL_KEY: &str = "global";
 pub(crate) const ROUTING_TELEMETRY_MAX_RUNS: usize = 2_048;
 pub(crate) const PROMPT_EVOLUTION_READ_MODEL_NAMESPACE: &str = "prompt-evolution-v2";

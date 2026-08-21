@@ -8,7 +8,7 @@ use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
-use crate::agent_strategy_runtime::effective_prompt_objective_for_messages;
+use crate::agent_preparation_runtime::effective_prompt_objective_for_messages;
 use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
 use crate::prompt_profile_serving::prompt_profile_assignment_from_events;
 use crate::suspended_run_runtime::{

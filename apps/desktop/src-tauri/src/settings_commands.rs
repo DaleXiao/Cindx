@@ -151,11 +151,6 @@ pub(crate) async fn save_provider_config(
             .map_err(|error| format!("workspace knowledge cache lock poisoned: {error}"))?
             .clear();
         invalidate_tool_registry_cache(&state)?;
-        state
-            .conductor_health
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
 
         let mut store = state
             .store

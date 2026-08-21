@@ -221,3 +221,17 @@ pub(crate) fn run_orchestration(
 
     phase6_state(&store, None).map_err(|error| error.to_string())
 }
+
+fn orchestration_model_for_step(
+    config: &ProviderConfig,
+    role: &ModelRole,
+    routing_decision: &RoutingDecision,
+) -> String {
+    if *role == ModelRole::Executor && routing_decision.policy == OrchestrationPolicy::Single {
+        config.model_for_agent_policy(&routing_decision.policy)
+    } else if *role == ModelRole::Executor && !routing_decision.model.trim().is_empty() {
+        routing_decision.model.clone()
+    } else {
+        config.model_for_role(role)
+    }
+}

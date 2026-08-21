@@ -1,4 +1,4 @@
-use agent_core::{Message, MessageRole, Metadata};
+use agent_core::Metadata;
 use agent_runtime::AgentFailure;
 use serde::{Deserialize, Serialize};
 pub(crate) const COLLABORATION_TOOL_EVIDENCE_SCHEMA: &str = "cindx.collaboration-tool-evidence.v1";
@@ -81,42 +81,4 @@ impl CollaborationCompletion {
             evidence: Vec::new(),
         }
     }
-}
-pub(crate) fn truncate_for_collaboration(value: &str, max_chars: usize) -> String {
-    let mut output = value.chars().take(max_chars).collect::<String>();
-    if value.chars().count() > max_chars {
-        output.push_str("\n[truncated]");
-    }
-    output
-}
-fn message_role_label(role: &MessageRole) -> &'static str {
-    match role {
-        MessageRole::System => "system",
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-        MessageRole::Tool => "tool",
-        MessageRole::Reviewer => "reviewer",
-    }
-}
-pub(crate) fn collaboration_recent_context(history: &[Message]) -> String {
-    history
-        .iter()
-        .rev()
-        .take(8)
-        .rev()
-        .map(|message| {
-            let max_chars =
-                if message.metadata.get("kind").map(String::as_str) == Some("knowledge_context") {
-                    6_000
-                } else {
-                    1_200
-                };
-            format!(
-                "{}: {}",
-                message_role_label(&message.role),
-                truncate_for_collaboration(&message.content, max_chars)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }

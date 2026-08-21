@@ -1,3 +1,8 @@
+//! Execution-constraint plumbing: shipping runs are always `Native`; the matched
+//! and grounded-direct arms exist for the feature-gated realworld evaluation, so
+//! the non-native surface is inert outside eval builds.
+#![cfg_attr(not(feature = "realworld-eval"), allow(dead_code))]
+
 use agent_core::Metadata;
 use orchestrator::{
     AgentExecutionMode, AgentPolicy, AgentRunDecision, AgentToolRequirement,
