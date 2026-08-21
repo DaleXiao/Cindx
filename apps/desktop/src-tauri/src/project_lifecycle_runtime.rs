@@ -20,7 +20,6 @@ use crate::{
         app_data_root, context_checkpoint_manifest_path_for_session,
         context_checkpoint_path_for_session, secure_directory,
     },
-    prompt_profile_serving::delete_prompt_profile_deployments_for_scope_in_transaction,
     queue_service::{pending_queued_agent_messages, QueuedAgentMessagePayload},
     runtime_constants::{
         AGENT_MEMORY_READ_MODEL_NAMESPACE, AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
@@ -764,7 +763,6 @@ fn cleanup_deleted_project_storage(
             }
             transaction.delete_records_by_metadata_in_transaction("project_id", project_id)?;
             delete_project_memory_read_models(transaction, project_id)?;
-            delete_prompt_profile_deployments_for_scope_in_transaction(transaction, project_id)?;
             delete_global_projection_caches(transaction)
         })
         .map_err(|error| error.to_string())

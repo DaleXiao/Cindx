@@ -10,7 +10,6 @@ use crate::agent_run_engine::{
 };
 use crate::agent_preparation_runtime::effective_prompt_objective_for_messages;
 use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
-use crate::prompt_profile_serving::prompt_profile_assignment_from_events;
 use crate::suspended_run_runtime::{
     clear_suspended_agent_run, suspended_agent_run_control_snapshot, suspended_agent_run_policy,
     take_suspended_agent_run, SuspendedAgentRun,
@@ -699,12 +698,11 @@ pub(crate) fn retry_agent_task_blocking_inner(
         applied_steer_epoch,
         initial_objective,
         effective_objective,
-        prompt_contract_epoch,
-        inherited_identity,
-        prompt_profile_assignment,
-        history,
-        artifact_manifest,
-    ) = {
+            prompt_contract_epoch,
+            inherited_identity,
+            history,
+            artifact_manifest,
+        ) = {
         let store = state
             .store
             .lock()
@@ -763,13 +761,6 @@ pub(crate) fn retry_agent_task_blocking_inner(
                 )
             })
             .or(active_inherited_identity);
-        let prompt_profile_assignment = inherited_identity
-            .as_ref()
-            .map(|(logical_run_id, _)| {
-                prompt_profile_assignment_from_events(&events, logical_run_id)
-            })
-            .transpose()?
-            .unwrap_or_default();
         let session_events = session_id
             .as_deref()
             .map(|session_id| agent_session_events(&events, session_id))
@@ -787,7 +778,6 @@ pub(crate) fn retry_agent_task_blocking_inner(
             effective_objective,
             prompt_contract_epoch,
             inherited_identity,
-            prompt_profile_assignment,
             history,
             artifact_manifest,
         )
@@ -825,7 +815,6 @@ pub(crate) fn retry_agent_task_blocking_inner(
     } else {
         assign_initial_agent_run_identity(&mut run_context)?;
     }
-    run_context.extend(prompt_profile_assignment);
     let requested_policy = effort.requested_policy();
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
     add_image_generation_run_context(&mut run_context, &config, &prompt);

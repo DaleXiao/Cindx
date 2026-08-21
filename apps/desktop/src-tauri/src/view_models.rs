@@ -846,17 +846,6 @@ pub(crate) struct RoutingTelemetryReadModel {
     pub(crate) entries: Vec<RoutingTelemetryEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct PromptDistillationCanaryLeaseV1 {
-    pub(crate) schema: String,
-    pub(crate) candidate_profile_id: String,
-    pub(crate) candidate_profile_sha256: String,
-    pub(crate) stable_profile_id: String,
-    pub(crate) stable_profile_sha256: String,
-    pub(crate) cohort_sha256: String,
-    pub(crate) paired_evidence_sha256: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentTraceState {

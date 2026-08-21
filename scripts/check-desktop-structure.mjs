@@ -427,12 +427,6 @@ const sessionOutputCacheStoreSource = read(
 const memoryProjectionRuntimeSource = read(
   "apps/desktop/src-tauri/src/memory_projection_runtime.rs"
 );
-const promptProfileServingSource = readRustSourceTree(
-  path.join(desktopRustSourceDirectory, "prompt_profile_serving")
-);
-const promptProfileSelectionSource = read(
-  "apps/desktop/src-tauri/src/prompt_profile_serving/selection.rs"
-);
 const parallelExecutionSource = read(
   "apps/desktop/src-tauri/src/parallel_execution.rs"
 );
@@ -1692,8 +1686,6 @@ assert(
     rustLib.includes('"decision_source".to_string(),\n            "effort_tier_planner".to_string()') &&
     rustLib.includes("let workspace_plan = knowledge.workspace_plan()") &&
     rustLib.includes("let workspace_handle = workspace_plan.as_ref().map") &&
-    rustLib.includes("if !should_evaluate_strategy_profile(") &&
-    rustLib.includes("fn fast_policy_never_enters_prompt_evolution_selection()") &&
     rustLib.includes("index_graph_chunks_cancellable") &&
     rustLib.includes("upsert_all(extractions)") &&
     ragSource.includes("index_workspace_cancellable") &&
@@ -3623,21 +3615,6 @@ assert(
     inspectorSource.includes('aria-label="Model role activity"') &&
     inspectorSource.includes("TTFT"),
   "Agent trace must expose the real model, latency, evidence, and completion status for each collaboration role"
-);
-assert(
-  !promptProfileSelectionSource.includes("prompt_evolution_evaluation_for_run") &&
-    !promptProfileSelectionSource.includes("evaluate_prompt_evolution_read_model") &&
-    !promptProfileSelectionSource.includes("reconcile_prompt_rollout") &&
-    promptProfileSelectionSource.includes("select_prompt_profile_for_run") &&
-    promptProfileSelectionSource.includes("pub(crate) fn selected_strategy_profile(") &&
-    (promptProfileSelectionSource.match(/load_read_model\(/g)?.length ?? 0) === 1 &&
-    !promptProfileSelectionSource.includes("append_event") &&
-    !promptProfileSelectionSource.includes("reconcile_prompt_rollout") &&
-    !promptProfileSelectionSource.includes("prompt_learning_outbox") &&
-    promptProfileServingSource.includes("LOGICAL_AGENT_RUN_ID_METADATA_KEY") &&
-    promptProfileServingSource.includes("MAX_ASSIGNMENT_RECEIPT_BYTES") &&
-    promptProfileServingSource.includes("PromptProfileDistillationLease"),
-  "Foreground prompt-profile selection must stay O(1), read-only, retry-stable, and isolated from route authority"
 );
 
 

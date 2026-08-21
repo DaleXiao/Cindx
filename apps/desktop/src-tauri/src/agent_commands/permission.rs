@@ -30,7 +30,6 @@ const PERMISSION_RUN_CONTEXT_KEYS: &[&str] = &[
     "vision_required",
     "collaboration_profile",
     "conductor_contract",
-    "run_decision",
     "verification_required",
     "queue_id",
     "recovery_resume_key",
@@ -1293,8 +1292,7 @@ mod tests {
     #[test]
     fn permission_cold_recovery_preserves_verification_contract() {
         let mut run_context = Metadata::new();
-        let conductor_contract = AgentRunDecision::direct("executor")
-            .execution_contract("auto")
+        let conductor_contract = crate::agent_effort_planner::effort_execution_contract("auto")
             .to_json()
             .expect("contract serializes");
         let request_metadata = [
@@ -2172,8 +2170,7 @@ mod tests {
     #[test]
     fn cold_permission_recovery_reconstructs_verified_workspace_postcondition() {
         let mut run_context = permission_run_context(0, 0);
-        let conductor_contract = AgentRunDecision::direct("executor")
-            .execution_contract("auto")
+        let conductor_contract = crate::agent_effort_planner::effort_execution_contract("auto")
             .to_json()
             .expect("contract serializes");
         run_context.insert("conductor_contract".to_string(), conductor_contract);

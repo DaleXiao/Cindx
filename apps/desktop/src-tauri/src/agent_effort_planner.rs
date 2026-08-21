@@ -4,10 +4,6 @@ use agent_core::{
     ConductorStopPolicy, MemoryRecallPolicy, Metadata, OrchestrationPolicy, TaskClass,
     WorkspaceRetrievalChannel, WorkspaceRetrievalPlan, MAX_RUN_DECISION_QUERY_CHARS,
 };
-#[cfg(feature = "realworld-eval")]
-use agent_core::MemoryRecallPlan;
-#[cfg(feature = "realworld-eval")]
-use orchestrator::AgentRunDecision;
 
 const WORKSPACE_RETRIEVAL_MAX_RESULTS: usize = 8;
 
@@ -155,29 +151,6 @@ impl EffortRunPlan {
         Ok(())
     }
 
-    /// Compatibility projection of the effort plan onto the legacy run-decision
-    /// shape, retained for the feature-gated realworld evaluation receipts that
-    /// still parse `run_decision`. Shipping runs no longer publish it.
-    #[cfg(feature = "realworld-eval")]
-    pub(crate) fn run_decision(&self) -> AgentRunDecision {
-        let mut decision = AgentRunDecision::direct(self.primary_model.clone());
-        decision.tool_requirement = match self.tool_requirement.as_str() {
-            "effects" => agent_core::AgentToolRequirement::Effects,
-            "read_only" => agent_core::AgentToolRequirement::ReadOnly,
-            _ => agent_core::AgentToolRequirement::None,
-        };
-        decision.vision_required = self.vision_required;
-        decision.memory = MemoryRecallPlan {
-            policy: self.knowledge.memory_policy,
-            query: self.knowledge.memory_query.clone(),
-        };
-        decision.retrieval = self
-            .knowledge
-            .workspace_plan()
-            .unwrap_or_else(WorkspaceRetrievalPlan::none);
-        decision
-    }
-
     /// The policy the run requested by effort tier: Fast runs single, Auto/Pro
     /// historically requested the router and now resolve to the same single lane.
     pub(crate) fn requested_policy_label(&self) -> &'static str {
@@ -251,12 +224,6 @@ pub(crate) fn apply_effort_plan_keys(
     run_context.insert(
         "run_knowledge_retrieval".to_string(),
         plan.knowledge.retrieve_workspace.to_string(),
-    );
-    #[cfg(feature = "realworld-eval")]
-    run_context.insert(
-        "run_decision".to_string(),
-        serde_json::to_string(&plan.run_decision())
-            .map_err(|error| format!("run decision serialization failed: {error}"))?,
     );
     run_context.insert(
         "execution_plan_semantic_sha256".to_string(),
@@ -432,22 +399,6 @@ mod tests {
             })
             .expect_err("required authority must demand effects");
         assert!(error.contains("effect authority"));
-    }
-
-    #[cfg(feature = "realworld-eval")]
-    #[test]
-    fn run_decision_projects_the_effort_knowledge_facts() {
-        let plan = plan_effort_run("pro", "qwen3.7-max".to_string(), "deep mission");
-        let decision = plan.run_decision();
-        assert_eq!(decision.primary_model, "qwen3.7-max");
-        assert_eq!(decision.memory.policy, MemoryRecallPolicy::Relevant);
-        assert_eq!(decision.memory.query, "deep mission");
-        assert!(decision.retrieval.enabled());
-
-        let fast = plan_effort_run("fast", "qwen3.7-flash".to_string(), "quick answer");
-        let fast_decision = fast.run_decision();
-        assert_eq!(fast_decision.memory.policy, MemoryRecallPolicy::None);
-        assert!(!fast_decision.retrieval.enabled());
     }
 
     #[test]

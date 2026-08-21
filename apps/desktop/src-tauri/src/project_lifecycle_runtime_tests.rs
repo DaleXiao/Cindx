@@ -2,7 +2,6 @@ use super::*;
 use crate::{
     agent_read_model::{active_agent_events_for_session, agent_state_for_session},
     configuration_models::ProjectSessionConfig,
-    prompt_profile_serving::{prompt_profile_deployment_key, PROMPT_PROFILE_DEPLOYMENT_NAMESPACE},
     queue_service::{pending_queued_agent_messages, QueuedAgentMessagePayload},
     view_models::AgentAttachmentView,
 };
@@ -96,45 +95,6 @@ fn project_cleanup_deletes_current_and_legacy_routing_projection_namespaces() {
             .load_read_model(namespace, ROUTING_TELEMETRY_READ_MODEL_KEY)
             .expect("routing projection should load")
             .is_none());
-    }
-}
-
-#[test]
-fn project_cleanup_deletes_only_the_projects_prompt_profile_deployments() {
-    let mut store = SqliteStore::in_memory().expect("store should open");
-    let deleted_project = "project-prompt-profile-cleanup";
-    let retained_project = "project-prompt-profile-retained";
-    for project_id in [deleted_project, retained_project] {
-        for effort in ["auto", "pro"] {
-            store
-                .save_read_model(
-                    PROMPT_PROFILE_DEPLOYMENT_NAMESPACE,
-                    &prompt_profile_deployment_key(project_id, effort),
-                    1,
-                    "derived prompt deployment",
-                )
-                .expect("prompt deployment should persist");
-        }
-    }
-
-    cleanup_deleted_project_storage(&mut store, deleted_project, &[])
-        .expect("project storage cleanup should succeed");
-
-    for effort in ["auto", "pro"] {
-        assert!(store
-            .load_read_model(
-                PROMPT_PROFILE_DEPLOYMENT_NAMESPACE,
-                &prompt_profile_deployment_key(deleted_project, effort),
-            )
-            .expect("deleted deployment should load")
-            .is_none());
-        assert!(store
-            .load_read_model(
-                PROMPT_PROFILE_DEPLOYMENT_NAMESPACE,
-                &prompt_profile_deployment_key(retained_project, effort),
-            )
-            .expect("retained deployment should load")
-            .is_some());
     }
 }
 

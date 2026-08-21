@@ -170,33 +170,38 @@ contracts had no production consumer. Learning evidence that remains is the
 terminal `learning_evidence_v1` used by memory extraction/retention and
 recall-to-terminal attribution, which is unrelated to collaboration learning.
 
-`agent-collaboration-successor-protocol-contract` also enables only
-`realworld-eval`. Its nine deterministic tests validate the tracked successor
+The `realworld-eval`-only collaboration-successor and desktop
+delivery-verification gates were removed in the phase-3 effort-tier rebuild
+along with the `realworld-eval` feature and binaries. The paragraphs below are
+retained as a historical record of what those gates validated.
+
+`agent-collaboration-successor-protocol-contract` enabled only
+`realworld-eval`. Its nine deterministic tests validated the tracked successor
 suite and protocol manifest, three-pair / six-run matrix, exact case and budget
 digests, sole 5,000-to-7,500-bps context candidate, redacted full model-catalog
 binding, external-path isolation, pair projection, and the non-authorizing
 preflight boundary.
 
-`agent-collaboration-successor-execution-contract` contains 17 provider-free
+`agent-collaboration-successor-execution-contract` contained 17 provider-free
 tests for the exact execute-binary authorization binding, fixed 15-minute
 window, private one-shot output root, campaign/cell/arm reservations, strict
 baseline-candidate-holdout ordering, terminal independent-review/freeze/censor
 outcomes, accounting limits, and crash/tamper/concurrency recovery without a
-provider retry. Both successor gates are in `ci-contract`, `control-plane`, and
-`full`, but not `quick`; they perform no provider call and prove no uplift.
+provider retry.
 
-`agent-delivery-verification-core-contract` runs 12 portable receipt and state
-tests. `agent-delivery-verification-contract` enables only `realworld-eval`
-with default desktop features disabled and runs 22 exact request and attempt
-projection tests. Together they bind the exact frozen seeded candidate as the
-matched control, preserve its bytes, and constrain treatment to three model
-stages: one initial Reviewer decision, at most one Owner repair when activated,
-and one Reviewer recheck after repair. They fail closed on model-visible output
+`agent-delivery-verification-core-contract` still runs 12 portable receipt and
+state tests. The removed `agent-delivery-verification-contract` enabled only
+`realworld-eval` with default desktop features disabled and ran 22 exact request
+and attempt projection tests. Together they bound the exact frozen seeded
+candidate as the matched control, preserved its bytes, and constrained treatment
+to three model stages: one initial Reviewer decision, at most one Owner repair
+when activated, and one Reviewer recheck after repair. They failed closed on
+model-visible output
 contract, objective, evidence, request, reference, attempt-slot, or stopping
-violations while keeping the exact oracle values model-hidden. Both are
-included in `ci-contract`, `control-plane`, and `full`, but not `quick`;
-neither exercises the production finalizer or GEPA or proves natural quality
-uplift.
+violations while keeping the exact oracle values model-hidden. The surviving
+core contract is included in `ci-contract`, `control-plane`, and `full`, but not
+`quick`; it does not exercise the production finalizer or GEPA or prove natural
+quality uplift.
 
 `agent-delivery-verification-protocol-contract` runs 19 additional
 provider-free tests over the tracked eight-case calibration / 24-case holdout
@@ -243,35 +248,12 @@ intelligence uplift.
 ```sh
 cargo test --locked -p agent-runtime \
   delivery_verification_contract_ -- --nocapture
-
-cargo test --locked \
-  --manifest-path apps/desktop/src-tauri/Cargo.toml \
-  --no-default-features --features realworld-eval \
-  agent_delivery_verification_contract_ --lib -- --nocapture
-
-cargo test --locked \
-  --manifest-path apps/desktop/src-tauri/Cargo.toml \
-  --no-default-features --features realworld-eval \
-  agent_delivery_verification_protocol_contract_ --lib -- --nocapture
-
-cargo test --locked \
-  --manifest-path apps/desktop/src-tauri/Cargo.toml \
-  --no-default-features --features realworld-eval \
-  --lib \
-  --bin cindx-delivery-verification-preflight \
-  --bin cindx-delivery-verification-authorize \
-  --bin cindx-delivery-verification-execute \
-  --bin cindx-delivery-verification-v2-preflight \
-  --bin cindx-delivery-verification-v2-authorize \
-  --bin cindx-delivery-verification-v2-execute \
-  --bin cindx-delivery-verification-v3-preflight \
-  --bin cindx-delivery-verification-v3-authorize \
-  --bin cindx-delivery-verification-v3-execute \
-  --bin cindx-delivery-verification-v4-preflight \
-  --bin cindx-delivery-verification-v4-authorize \
-  --bin cindx-delivery-verification-v4-execute \
-  agent_delivery_verification_execution_contract_ -- --nocapture
 ```
+
+The desktop `realworld-eval` delivery-verification tests and the
+`cindx-delivery-verification-*` / `cindx-agent-realworld-eval` binaries were
+removed in the phase-3 effort-tier rebuild; only the portable `agent-runtime`
+receipt/state contract above remains.
 
 ```sh
 node scripts/run-quality-gates.mjs \
@@ -309,31 +291,26 @@ Do not rerun the frozen Workflow GEPA V12 attempt. Its one-shot evidence is
 invalid; a successor requires a corrected lifecycle instrument and a new frozen
 protocol. See [EVALUATION.md](EVALUATION.md).
 
-The Goal 3D preflight remains provider-free. After the source is committed and
-clean, it may be run with two new private paths outside the repository:
-
-```sh
-CINDX_COLLABORATION_SUCCESSOR_OUTPUT_ROOT=/private/path/new-output-root \
-CINDX_COLLABORATION_SUCCESSOR_PREFLIGHT_RECEIPT=/private/path/new-preflight.json \
-cargo run --locked \
-  --manifest-path apps/desktop/src-tauri/Cargo.toml \
-  --no-default-features --features realworld-eval \
-  --bin cindx-collaboration-successor-preflight
-```
-
-The command accepts no execution flag, constructs no provider transport, and
-writes `provider_calls_performed=0` and `execution_authorized=false`. It validates
+The Goal 3D preflight was provider-free. Its `cindx-collaboration-successor-preflight`
+binary (and the Goal 3E authorize/execute and Delivery Verification binaries)
+were removed in the phase-3 effort-tier rebuild along with the `realworld-eval`
+feature; the text below is retained as a historical record. After the source was
+committed and clean, it could be run with two new private paths outside the
+repository; it accepted no execution flag, constructed no provider transport, and
+wrote `provider_calls_performed=0` and `execution_authorized=false`, validating
 that configured credentials exist only to bind the redacted provider and full
-model catalog; secrets and model names are not written. This receipt is not an
+model catalog (secrets and model names were not written). This receipt was not an
 online authorization.
 
-Goal 3E adds separate feature-gated `cindx-collaboration-successor-authorize`
-and `cindx-collaboration-successor-execute` binaries. Authorization is itself
-provider-free and binds the canonical preflight, current clean source and
+Goal 3E added separate feature-gated `cindx-collaboration-successor-authorize`
+and `cindx-collaboration-successor-execute` binaries; both were removed in the
+phase-3 effort-tier rebuild and the following is a historical record. Authorization
+was itself
+provider-free and bound the canonical preflight, current clean source and
 provider/model configuration, exact execute binary, fixed matrix and budgets,
-and new output root for 15 minutes. Execution revalidates and consumes that
-private capability and output root once, reserves the campaign/cell/arm before
-model work, and never retries a started physical run after interruption.
+and new output root for 15 minutes. Execution revalidated and consumed that
+private capability and output root once, reserved the campaign/cell/arm before
+model work, and never retried a started physical run after interruption.
 
 The frozen Goal 3E instance was authorized and consumed once on source
 `12a3ea2`. It stopped `CENSORED` after reserving the first baseline Direct arm
@@ -350,18 +327,20 @@ terminal producer-to-projector seam in `agent-strategy-lifecycle-contract`.
 This is a classifier repair only: no Goal 3F or provider run is authorized, and
 deterministic green gates do not establish uplift.
 
-Delivery Verification retains separate feature-gated v1
+Delivery Verification retained separate feature-gated v1
 `cindx-delivery-verification-preflight`,
 `cindx-delivery-verification-authorize`, and
-`cindx-delivery-verification-execute` binaries plus the separately named v2 and
-v3 triples. All nine old binaries are retired and permanently reject their
-consumed protocols before reading arguments, environment, paths, configuration,
-or live state. The tracked v4 implementation uses
+`cindx-delivery-verification-execute` binaries plus the separately named v2,
+v3, and v4 triples; all twelve binaries required `realworld-eval` and were
+removed in the phase-3 effort-tier rebuild, and the following is a historical
+record. The nine old binaries were already retired and permanently rejected
+their consumed protocols before reading arguments, environment, paths,
+configuration, or live state. The tracked v4 implementation used
 `cindx-delivery-verification-v4-preflight`,
 `cindx-delivery-verification-v4-authorize`, and
 `cindx-delivery-verification-v4-execute` plus
-`CINDX_DELIVERY_VERIFICATION_V4_*` paths. All twelve binaries require
-`realworld-eval` and are compiled by the provider-free contract gate.
+`CINDX_DELIVERY_VERIFICATION_V4_*` paths, compiled by the provider-free
+contract gate.
 
 The consumed v4 instance built the three binaries together from clean merged
 source into one new private target root outside the repository. Its preflight

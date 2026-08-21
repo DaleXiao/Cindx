@@ -19,7 +19,6 @@ use crate::memory_runtime::{
     prepare_run_knowledge_contexts, MEMORY_RECALL_STALE_ERROR,
 };
 use crate::project_instructions_runtime::append_project_instructions_context_for_run;
-use crate::prompt_profile_serving::{copy_prompt_profile_assignment, selected_strategy_profile};
 use crate::runtime_values::{add_image_generation_run_context, truncate_for_collaboration};
 use crate::session_context_service::prepare_session_history_context;
 use crate::agent_model_candidates::effort_model_candidates;
@@ -72,10 +71,6 @@ fn settle_preparation_failure(
 
 mod memory_evaluation_constraint;
 pub(crate) use memory_evaluation_constraint::AgentMemoryEvaluationConstraint;
-#[cfg(feature = "realworld-eval")]
-pub(crate) use memory_evaluation_constraint::{
-    AGENT_MEMORY_EVALUATION_CONSTRAINT_KEY, EFFECTIVE_MEMORY_POLICY_KEY, ROUTED_MEMORY_POLICY_KEY,
-};
 
 fn append_single_model_policy_guidance(history: &mut Vec<Message>, policy: &OrchestrationPolicy) {
     if *policy != OrchestrationPolicy::PlanExecuteReview {
@@ -246,7 +241,7 @@ pub(crate) fn prepare_agent_execution_replay(
     effort: AgentPolicy,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PreparedAgentExecution, AgentRunPreparationError> {
-    let mut base_run_context = run_context.clone();
+    let base_run_context = run_context.clone();
     if !cancellation.begin_preparation() {
         return Err(AgentRunPreparationError::ControlStop(run_context));
     }
@@ -379,18 +374,6 @@ pub(crate) fn prepare_agent_execution_replay(
             apply_effort_plan_keys(&effort_plan, &mut run_context)
                 .map_err(|error| runtime_preparation_error(&run_context, error))
         );
-        let profile_selection = preparation_try!(selected_strategy_profile(
-            state,
-            config,
-            effort,
-            &mut run_context
-        )
-        .map_err(|error| runtime_preparation_error(&run_context, error)));
-        let profile_source = profile_selection.1;
-        preparation_try!(
-            copy_prompt_profile_assignment(&run_context, &mut base_run_context)
-                .map_err(|error| runtime_preparation_error(&run_context, error))
-        );
         if cancellation.has_pending_steer() {
             prompt = preparation_try!(apply_preparation_steer(
                 state,
@@ -410,7 +393,6 @@ pub(crate) fn prepare_agent_execution_replay(
             task_id,
             &mut run_context,
             &effort_plan,
-            &profile_source,
             cancellation,
         ) {
             Ok(()) => {}

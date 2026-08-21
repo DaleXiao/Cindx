@@ -18,7 +18,6 @@ pub(crate) fn record_effort_plan_decision(
     task_id: &TaskId,
     run_context: &mut Metadata,
     plan: &EffortRunPlan,
-    profile_source: &str,
     cancellation: &AgentRunControl,
 ) -> Result<(), CollaborationStageError> {
     let plan_sha256 = plan
@@ -40,22 +39,9 @@ pub(crate) fn record_effort_plan_decision(
             "execution_plan_semantic_sha256".to_string(),
             plan_sha256,
         ),
-        (
-            "prompt_profile".to_string(),
-            run_context
-                .get("prompt_profile")
-                .cloned()
-                .unwrap_or_default(),
-        ),
-        ("profile_source".to_string(), profile_source.to_string()),
     ]
     .into_iter()
     .collect::<Metadata>();
-    #[cfg(feature = "realworld-eval")]
-    decision_metadata.insert(
-        "decision".to_string(),
-        serde_json::to_string(&plan.run_decision()).unwrap_or_default(),
-    );
     insert_run_objectives(&mut decision_metadata, run_context);
     receipt
         .insert_into(&mut decision_metadata)

@@ -35,10 +35,7 @@
       "causal-router-v2-contract",
       "evaluation-foundation",
       "agent-arena-contract",
-      "agent-realworld-contract",
       "fugu-pilot-contract",
-      "direct-finalizer-causal-contract",
-      "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-strategy-lifecycle-contract",
@@ -47,7 +44,6 @@
       "agent-outcome-evidence-contract",
       "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
-      "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
       "context-compiler-contract",
@@ -68,10 +64,7 @@
       "causal-router-v2-contract",
       "evaluation-foundation",
       "agent-arena-contract",
-      "agent-realworld-contract",
       "fugu-pilot-contract",
-      "direct-finalizer-causal-contract",
-      "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-strategy-lifecycle-contract",
@@ -80,7 +73,6 @@
       "agent-outcome-evidence-contract",
       "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
-      "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
       "context-compiler-contract",
@@ -137,10 +129,7 @@
       "causal-router-v2-contract",
       "evaluation-foundation",
       "agent-arena-contract",
-      "agent-realworld-contract",
       "fugu-pilot-contract",
-      "direct-finalizer-causal-contract",
-      "direct-finalizer-evolution-contract",
       "agent-memory-effect-contract",
       "agent-run-lineage-contract",
       "agent-strategy-lifecycle-contract",
@@ -149,7 +138,6 @@
       "agent-outcome-evidence-contract",
       "direct-judge-outcome-contract",
       "agent-delivery-verification-core-contract",
-      "agent-logical-tool-receipts-contract",
       "process-session-contract",
       "agent-cognitive-loop-scaling",
       "context-compiler-contract",
@@ -364,16 +352,6 @@
       ]
     },
     {
-      "id": "agent-realworld-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "node",
-        "--test",
-        "scripts/agent-realworld-contract.test.mjs",
-        "scripts/agent-realworld-claims.test.mjs"
-      ]
-    },
-    {
       "id": "fugu-pilot-contract",
       "category": "evaluation_contract",
       "command": [
@@ -415,44 +393,6 @@
       ]
     },
     {
-      "id": "direct-finalizer-causal-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "cargo",
-        "test",
-        "--locked",
-        "--manifest-path",
-        "apps/desktop/src-tauri/Cargo.toml",
-        "--features",
-        "realworld-eval",
-        "direct_finalizer",
-        "--lib",
-        "--",
-        "--nocapture"
-      ],
-      "required_output": [
-        "test result: ok. 9 passed; 0 failed"
-      ]
-    },
-    {
-      "id": "direct-finalizer-evolution-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "cargo",
-        "test",
-        "--locked",
-        "-p",
-        "orchestrator",
-        "direct_finalizer",
-        "--lib",
-        "--",
-        "--nocapture"
-      ],
-      "required_output": [
-        "test result: ok. 10 passed; 0 failed"
-      ]
-    },
-    {
       "id": "agent-memory-effect-contract",
       "category": "evaluation_contract",
       "command": [
@@ -481,26 +421,6 @@
       ]
     },
     {
-      "id": "agent-logical-tool-receipts-contract",
-      "category": "evaluation_contract",
-      "command": [
-        "cargo",
-        "test",
-        "--locked",
-        "--manifest-path",
-        "apps/desktop/src-tauri/Cargo.toml",
-        "--features",
-        "realworld-eval",
-        "agent_realworld_eval::tool_receipts::tests::legacy_multi_attempt_continuations_share_one_logical_receipt_scope",
-        "--",
-        "--exact",
-        "--nocapture"
-      ],
-      "required_output": [
-        "test result: ok. 1 passed; 0 failed"
-      ]
-    },
-    {
       "id": "agent-strategy-lifecycle-contract",
       "category": "correctness_and_recovery",
       "command": [
@@ -509,14 +429,12 @@
         "--locked",
         "--manifest-path",
         "apps/desktop/src-tauri/Cargo.toml",
-        "--features",
-        "realworld-eval",
         "agent_strategy_lifecycle_contract",
         "--",
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 7 passed; 0 failed",
+        "test result: ok. 5 passed; 0 failed",
         "cindx.agent-strategy-lifecycle.v1"
       ]
     },

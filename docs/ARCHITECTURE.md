@@ -260,9 +260,12 @@ preservation-breaking outcomes remain zero-score evidence. The receipt is
 shadow-only and has no production routing, prompt, memory, permission, or
 serving consumer.
 
-Delivery Verification remains a separate `realworld-eval` authority. V1, v2,
-and v3 are consumed lineages: all nine of their preflight, authorization, and
-execute entrypoints return a consumed-protocol error before reading arguments,
+Delivery Verification was a separate `realworld-eval` authority; its desktop
+runtime adapter, the `realworld-eval` cargo feature, and the
+`cindx-agent-realworld-eval` binary were physically removed in the phase-3
+effort-tier rebuild. V1, v2, and v3 are consumed lineages: all nine of their
+preflight, authorization, and execute entrypoints return a consumed-protocol
+error before reading arguments,
 environment, configuration, paths, or live control-plane state. V1 exposed the
 semantic/wire digest instrumentation defect. V2 fixed that defect, completed all
 eight calibration pairs once, and closed `terminal_futility`. V3 made one
@@ -356,13 +359,15 @@ authorize only a narrow offline validation record; there is no conversion to
 production learning evidence, prompt genomes, snapshots, routing, canary, or
 serving.
 
-The desktop `realworld-eval` adapter is the only runtime producer. Its explicit
-successor-only entry installs a matched-arm policy, commits Direct assignment
+The desktop `realworld-eval` adapter was the only runtime producer; it was
+removed in the phase-3 effort-tier rebuild and the paragraph below is retained
+as a historical record. Its explicit
+successor-only entry installed a matched-arm policy, committed Direct assignment
 with the durable strategy decision or Workflow assignment with the materialized
-plan, applies the assigned context budget and fail-fast attempt bound, and
-commits only the SHA-256 identity and size of the exact encoded request before
-dispatch. Raw request contents are never added to the learning receipt. The
-adapter retains the run event slice outside the frozen report schema and derives
+plan, applied the assigned context budget and fail-fast attempt bound, and
+committed only the SHA-256 identity and size of the exact encoded request before
+dispatch. Raw request contents were never added to the learning receipt. The
+adapter retained the run event slice outside the frozen report schema and derived
 the comparison binding from the actual pair plus a pre-frozen source/cohort
 authority.
 

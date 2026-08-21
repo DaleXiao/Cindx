@@ -5,13 +5,9 @@ mod candidate_selection;
 mod causal_routing;
 mod computation_value;
 mod evaluation;
-mod evolution_campaign;
 mod execution_constraint;
 mod execution_contract;
 mod execution_plan;
-mod prompt_distillation_gate;
-mod prompt_evolution;
-mod prompt_promotion_gate;
 mod routing;
 mod run_decision;
 
@@ -32,12 +28,8 @@ pub use candidate_selection::*;
 pub use causal_routing::*;
 pub use computation_value::*;
 pub use evaluation::*;
-pub use evolution_campaign::*;
 pub use execution_contract::*;
 pub use execution_plan::*;
-pub use prompt_distillation_gate::*;
-pub use prompt_evolution::*;
-pub use prompt_promotion_gate::*;
 pub use routing::*;
 pub use run_decision::*;
 

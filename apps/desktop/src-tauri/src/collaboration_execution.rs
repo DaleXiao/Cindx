@@ -195,55 +195,6 @@ pub(crate) fn record_collaboration_stage_started(
     Ok(())
 }
 
-#[cfg(feature = "realworld-eval")]
-pub(crate) fn complete_collaboration_model_with_control(
-    config: ProviderConfig,
-    role: ModelRole,
-    model: String,
-    system_prompt: String,
-    prompt: String,
-    cancellation: Option<Arc<AgentRunControl>>,
-    on_delta: impl FnMut(&str),
-) -> CollaborationCompletion {
-    let stage = role_label(&role).to_string();
-    complete_collaboration_model_for_stage_with_control(
-        config,
-        stage,
-        role,
-        model,
-        system_prompt,
-        prompt,
-        cancellation,
-        on_delta,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-#[cfg(feature = "realworld-eval")]
-pub(crate) fn complete_collaboration_model_for_stage_with_control(
-    config: ProviderConfig,
-    stage: String,
-    role: ModelRole,
-    model: String,
-    system_prompt: String,
-    prompt: String,
-    cancellation: Option<Arc<AgentRunControl>>,
-    on_delta: impl FnMut(&str),
-) -> CollaborationCompletion {
-    complete_collaboration_model_for_stage_with_recovery_control(
-        config,
-        stage,
-        role,
-        model,
-        system_prompt,
-        prompt,
-        cancellation,
-        CollaborationCallLimits::default(),
-        None,
-        on_delta,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn complete_collaboration_model_for_stage_with_recovery_control(
     config: ProviderConfig,

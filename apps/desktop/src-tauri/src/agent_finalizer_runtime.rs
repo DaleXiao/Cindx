@@ -5,12 +5,6 @@ use agent_runtime::{
 };
 use model_provider::ModelResponse;
 
-// Dormant pending physical removal with a prompt-genome schema migration: the
-// Finalizer role and its evolved phenotype policy are retired; single-model
-// sessions deliver through the actor and the grounded-completion contract.
-#[path = "agent_direct_finalizer_policy.rs"]
-#[allow(dead_code)]
-pub(crate) mod direct_finalizer_policy;
 #[path = "agent_terminal_finalizer_runtime.rs"]
 pub(crate) mod terminal_runtime;
 

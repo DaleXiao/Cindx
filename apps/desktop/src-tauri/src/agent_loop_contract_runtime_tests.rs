@@ -537,8 +537,6 @@ fn explicit_software_change_infers_effect_and_postcondition_without_conductor_me
 
 #[test]
 fn fast_direct_decision_cannot_weaken_or_invent_an_evidence_scope() {
-    let direct = serde_json::to_string(&AgentRunDecision::direct("executor"))
-        .expect("direct decision serializes");
     for (objective, expected) in [
         (
             "Audit this repository",
@@ -553,21 +551,11 @@ fn fast_direct_decision_cannot_weaken_or_invent_an_evidence_scope() {
             Some(PromptEvidenceScope::Visual),
         ),
     ] {
-        let mut context = run_context(objective, 0);
-        context.insert("run_decision".to_string(), direct.clone());
+        let context = run_context(objective, 0);
         assert_eq!(prompt_evidence_scope(&context), expected);
     }
 
-    let mut retrieval = AgentRunDecision::direct("executor");
-    retrieval
-        .retrieval
-        .channels
-        .insert(WorkspaceRetrievalChannel::FileSearch);
-    let mut ordinary = run_context("Tell me a short joke", 0);
-    ordinary.insert(
-        "run_decision".to_string(),
-        serde_json::to_string(&retrieval).expect("retrieval decision serializes"),
-    );
+    let ordinary = run_context("Tell me a short joke", 0);
     assert_eq!(prompt_evidence_scope(&ordinary), None);
 }
 

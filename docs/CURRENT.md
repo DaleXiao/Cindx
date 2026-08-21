@@ -325,10 +325,15 @@ The source also defines bounded offline collaboration learning. The initial
 matched Direct/Workflow gate decides whether one read-only Specialist is
 useful. A later candidate keeps that topology fixed and changes exactly one of
 two context allocations, independent verification, or one same-lane repair;
-stopping is derived from the required-lane result. Under the opt-in
-`realworld-eval` feature, a successor-only matched runner can persist the
-assigned policy before any Owner or worker call and record a digest and byte
-count for the exact encoded worker request before dispatch. The trusted
+stopping is derived from the required-lane result.
+
+**Removed in the phase-3 effort-tier rebuild.** The `realworld-eval` runtime
+adapter, the successor matched runner, the prompt-genome / prompt-profile
+machinery, and the GEPA campaign/evolution workers have been physically removed
+from the desktop crate and the orchestrator; the `realworld-eval` cargo feature
+and the `cindx-agent-realworld-eval` binary no longer exist. The paragraphs
+below are retained as a historical record of the consumed evaluation protocols;
+no production or shipping code references them any longer. The trusted
 projection joins all turns to the actual lane result and externally verified
 outcome. A separate
 offline feature reconstructs bounded Pair/Censor records into an append-only

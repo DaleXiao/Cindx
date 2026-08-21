@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import test from "node:test";
 import { analyzeMemoryEffect } from "./agent-memory-effect-contract.mjs";
-import { validatePreflight } from "./run-agent-realworld.mjs";
+import { validatePreflight } from "./agent-realworld-protocol.mjs";
 
 const suite = JSON.parse(fs.readFileSync(new URL("../benchmarks/agent/memory-effect-v1.json", import.meta.url)));
 const suiteV2 = JSON.parse(fs.readFileSync(new URL("../benchmarks/agent/memory-effect-v2.json", import.meta.url)));

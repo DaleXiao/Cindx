@@ -17,8 +17,6 @@ mod agent_parallel_tool_runtime;
 mod agent_preparation_runtime;
 mod agent_query_commands;
 mod agent_read_model;
-#[cfg(feature = "realworld-eval")]
-mod agent_realworld_eval;
 mod agent_recovery_identity;
 mod agent_recovery_service;
 mod agent_resource_snapshot;
@@ -80,7 +78,6 @@ mod project_instructions_runtime;
 mod project_lifecycle_runtime;
 mod project_session_persistence;
 mod prompt_evolution_admission_runtime;
-mod prompt_profile_serving;
 mod provider_profiles;
 mod queue_service;
 mod rag_operation_runtime;
@@ -111,8 +108,6 @@ use agent_loop_runtime::*;
 use agent_model_candidates::*;
 use agent_query_commands::*;
 use agent_read_model::*;
-#[cfg(feature = "realworld-eval")]
-pub use agent_realworld_eval::*;
 use agent_recovery_service::*;
 use agent_run_engine::continue_agent_loop;
 use agent_runtime_snapshot::*;

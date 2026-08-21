@@ -8,7 +8,6 @@ use crate::collaboration_execution::collaboration_model_failure;
 use crate::collaboration_stage_runtime::{
     collaboration_stage_result, collaboration_stage_terminal_presentation, CollaborationStageError,
 };
-use crate::prompt_profile_serving::should_evaluate_strategy_profile;
 use crate::semantic_memory_runtime::contains_completed_agent_run;
 use agent_core::{EventTypeV1, EVENT_TYPE_METADATA_KEY};
 use agent_core::run_decision_enums::AgentEffectAuthority;
@@ -3269,16 +3268,6 @@ fn image_generation_route_follows_additive_and_replacement_steers() {
         .minimum_tool_requirement,
         AgentToolRequirement::Effects
     );
-}
-
-
-
-#[test]
-fn fast_policy_never_enters_prompt_evolution_selection() {
-    assert!(!should_evaluate_strategy_profile(AgentPolicy::Fast, true));
-    assert!(!should_evaluate_strategy_profile(AgentPolicy::Auto, false));
-    assert!(should_evaluate_strategy_profile(AgentPolicy::Auto, true));
-    assert!(should_evaluate_strategy_profile(AgentPolicy::Pro, true));
 }
 
 #[test]

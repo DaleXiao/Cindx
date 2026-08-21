@@ -40,8 +40,6 @@ pub(crate) const ROUTING_TELEMETRY_READ_MODEL_KEY: &str = "global";
 pub(crate) const ROUTING_TELEMETRY_MAX_RUNS: usize = 2_048;
 pub(crate) const PROMPT_EVOLUTION_READ_MODEL_NAMESPACE: &str = "prompt-evolution-v2";
 pub(crate) const PROMPT_EVOLUTION_READ_MODEL_KEY: &str = "global";
-pub(crate) const PROMPT_DISTILLATION_CANARY_LEASE_SCHEMA_V1: &str =
-    "cindx.prompt-distillation-canary-lease.v1";
 pub(crate) const AGENT_HISTORY_INITIAL_PAGE_SIZE: usize = 120;
 pub(crate) const AGENT_HISTORY_MAX_PAGE_SIZE: usize = 600;
 pub(crate) const AGENT_HISTORY_MAX_TOOL_METADATA_BYTES: usize = 512 * 1024;
