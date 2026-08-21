@@ -5,7 +5,7 @@ use agent_runtime::{
     CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
 };
 use model_provider::{estimate_request_tokens, estimate_text_tokens, ModelRequest, ModelResponse};
-use orchestrator::LearningUsageCompleteness;
+use agent_core::LearningUsageCompleteness;
 use std::sync::Arc;
 
 #[must_use = "a reserved physical model attempt must be settled"]

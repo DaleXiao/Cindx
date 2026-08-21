@@ -1,64 +1,8 @@
 use super::*;
 
 mod evaluation;
-mod learning_evidence;
 
 pub use evaluation::*;
-pub use learning_evidence::*;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskClass {
-    General,
-    Coding,
-    Research,
-    Retrieval,
-    Browser,
-    Computer,
-}
-
-impl TaskClass {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::General => "general",
-            Self::Coding => "coding",
-            Self::Research => "research",
-            Self::Retrieval => "retrieval",
-            Self::Browser => "browser",
-            Self::Computer => "computer",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelCandidate {
-    pub name: String,
-    pub role: ModelRole,
-    pub supports_tools: bool,
-    pub supports_vision: bool,
-    pub tools_capability_source: ModelCapabilitySource,
-    pub vision_capability_source: ModelCapabilitySource,
-    pub cost_tier: u8,
-    pub latency_tier: u8,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelCapabilitySource {
-    ProviderCatalog,
-    Configured,
-    CompatibilityAssumption,
-}
-
-impl ModelCapabilitySource {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::ProviderCatalog => "provider_catalog",
-            Self::Configured => "configured",
-            Self::CompatibilityAssumption => "compatibility_assumption",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingContext {
@@ -392,48 +336,6 @@ pub struct RoutingDecision {
     pub retrieval_mode: String,
     pub explanation: String,
     pub metadata: Metadata,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutingOutcome {
-    Succeeded,
-    Failed,
-    UserRejected,
-}
-
-impl RoutingOutcome {
-    pub fn is_success(&self) -> bool {
-        matches!(self, Self::Succeeded)
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::UserRejected => "user_rejected",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RoutingTelemetry {
-    pub task_class: TaskClass,
-    pub context_signature: String,
-    pub selected_policy: OrchestrationPolicy,
-    pub selected_model: String,
-    pub latency_ms: u64,
-    pub outcome: RoutingOutcome,
-    #[serde(default)]
-    pub quality_score: Option<f32>,
-    #[serde(default)]
-    pub verification_passed: Option<bool>,
-    #[serde(default)]
-    pub learning_evidence: LearningEvidenceV1,
-    pub cost_proxy: u64,
-    pub tool_count: u64,
-    pub retrieval_count: u64,
-    pub user_override: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

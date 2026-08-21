@@ -29,8 +29,8 @@ pub(crate) fn plan_direct_judge(
 
 pub(crate) fn resolve_direct_judge_output(
     output: &str,
-) -> Result<orchestrator::DirectJudgeReceipt, String> {
-    let receipt = orchestrator::DirectJudgeReceipt::from_judge_output(output)
+) -> Result<agent_core::DirectJudgeReceipt, String> {
+    let receipt = agent_core::DirectJudgeReceipt::from_judge_output(output)
         .ok_or_else(|| "direct judge returned no receipt".to_string())?;
     receipt.validate()?;
     Ok(receipt)
@@ -195,7 +195,7 @@ pub(crate) fn apply_direct_judge_gate(
         Ok(receipt) => receipt,
         Err(_) => return (candidate, "direct_judge_inconclusive".to_string()),
     };
-    if receipt.verdict == orchestrator::DirectJudgeVerdict::Pass {
+    if receipt.verdict == agent_core::DirectJudgeVerdict::Pass {
         return (candidate, "direct_judge_passed".to_string());
     }
 
@@ -244,8 +244,8 @@ pub(crate) fn apply_direct_judge_gate(
     .ok()
     .and_then(|output| resolve_direct_judge_output(&output).ok())
     .map(|recheck| match recheck.verdict {
-        orchestrator::DirectJudgeVerdict::Pass => "direct_judge_recheck_passed".to_string(),
-        orchestrator::DirectJudgeVerdict::Revise => "direct_judge_recheck_exhausted".to_string(),
+        agent_core::DirectJudgeVerdict::Pass => "direct_judge_recheck_passed".to_string(),
+        agent_core::DirectJudgeVerdict::Revise => "direct_judge_recheck_exhausted".to_string(),
     }) {
         Some(disposition) => disposition,
         None => "direct_judge_recheck_inconclusive".to_string(),
@@ -334,15 +334,15 @@ mod tests {
     fn direct_judge_output_resolution_enforces_the_receipt_contract() {
         let line = format!(
             "CINDX_DIRECT_JUDGE: {{\"schema\":\"{}\",\"verdict\":\"revise\",\"findings\":[\"gap\"]}}",
-            orchestrator::DIRECT_JUDGE_RECEIPT_SCHEMA
+            agent_core::DIRECT_JUDGE_RECEIPT_SCHEMA
         );
         let receipt = resolve_direct_judge_output(&format!("audit\n{line}")).unwrap();
-        assert_eq!(receipt.verdict, orchestrator::DirectJudgeVerdict::Revise);
+        assert_eq!(receipt.verdict, agent_core::DirectJudgeVerdict::Revise);
 
         assert!(resolve_direct_judge_output("no receipt here").is_err());
         let passing_with_findings = format!(
             "CINDX_DIRECT_JUDGE: {{\"schema\":\"{}\",\"verdict\":\"pass\",\"findings\":[\"x\"]}}",
-            orchestrator::DIRECT_JUDGE_RECEIPT_SCHEMA
+            agent_core::DIRECT_JUDGE_RECEIPT_SCHEMA
         );
         assert!(resolve_direct_judge_output(&passing_with_findings).is_err());
     }

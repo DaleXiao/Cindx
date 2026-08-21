@@ -1,5 +1,5 @@
 use super::*;
-use orchestrator::{
+use agent_core::{
     LearningAttribution, LearningEvidenceV1, LearningTermination, LearningUsageCompleteness,
 };
 

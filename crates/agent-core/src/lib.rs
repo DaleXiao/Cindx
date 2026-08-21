@@ -1,21 +1,35 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod agent_policy;
+mod direct_judge;
 mod event_contract;
 mod knowledge_plan;
+mod learning_evidence;
 mod model_attribution;
+mod model_candidate;
 mod model_contract;
 mod orchestration_policy;
 mod permission_policy;
+mod routing_telemetry;
 mod run_identity;
 
 pub use agent_policy::{AgentModelSelectionKind, AgentPolicy, PromptEvolutionStrategy};
+pub use direct_judge::{
+    direct_judge_eligible, direct_judge_model, direct_judge_prompt, direct_judge_repair_directive,
+    DirectJudgeReceipt, DirectJudgeVerdict, DIRECT_JUDGE_MAX_REPAIR_ROUNDS,
+    DIRECT_JUDGE_RECEIPT_SCHEMA,
+};
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
 };
 pub use knowledge_plan::{
     MemoryRecallPlan, MemoryRecallPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+};
+pub use learning_evidence::{
+    IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceSchema,
+    LearningEvidenceV1, LearningTermination, LearningUsageCompleteness, LearningVerification,
+    LEARNING_EVIDENCE_MAX_BYTES, LEARNING_EVIDENCE_SCHEMA_V1,
 };
 pub use model_attribution::{
     AgentActor, AgentEffectAuthority, AgentModelAttribution, AgentModelAttributionError,
@@ -26,6 +40,7 @@ pub use model_attribution::{
     AGENT_MODEL_PROFILE_METADATA_KEY, AGENT_OUTPUT_TRUST_METADATA_KEY, AGENT_SERVICE_METADATA_KEY,
     AGENT_STAGE_METADATA_KEY,
 };
+pub use model_candidate::{ModelCandidate, ModelCapabilitySource, TaskClass};
 pub use model_contract::{
     classify_provider_failure, tool_function_name, ModelCallMode, ModelError, ModelRequest,
     ModelResponse, ModelResponseAssessment, ModelResponseDisposition, ModelResponseTermination,
@@ -38,6 +53,7 @@ pub use orchestration_policy::{
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
 };
+pub use routing_telemetry::{RoutingOutcome, RoutingTelemetry};
 pub use run_identity::{
     agent_run_id, logical_agent_run_id, source_agent_run_id, AgentRunIdentity,
     AgentRunIdentityError, AgentRunLineage, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,

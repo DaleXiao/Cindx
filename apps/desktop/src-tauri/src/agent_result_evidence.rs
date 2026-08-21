@@ -358,7 +358,7 @@ mod tests {
         ToolEffectSemantics, ToolPostconditionEvidence,
     };
     use agent_runtime::{AgentRunControl, ModelAttemptUsage, ModelUsageSource, RunStageClass};
-    use orchestrator::{LearningDisposition, LearningVerification};
+    use agent_core::{LearningDisposition, LearningVerification};
 
     fn tool_message<const N: usize>(metadata: [(&str, &str); N]) -> Message {
         Message {

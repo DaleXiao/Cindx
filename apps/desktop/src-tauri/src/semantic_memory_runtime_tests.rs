@@ -1,7 +1,7 @@
 use super::*;
 use agent_core::{AgentRunIdentity, EventId, TaskId};
 use agent_storage::SqliteStore;
-use orchestrator::{TaskClass, WorkspaceRetrievalChannel};
+use agent_core::{TaskClass, WorkspaceRetrievalChannel};
 
 fn run_context(decision: AgentRunDecision) -> Metadata {
     [(

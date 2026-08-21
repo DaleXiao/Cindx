@@ -1,7 +1,7 @@
 use crate::configuration_models::ProviderConfig;
 use crate::provider_profiles::{provider_model_supports_tools, provider_model_supports_vision};
 use model_provider::model_supports_vision_content;
-use orchestrator::{ModelCandidate, ModelCapabilitySource};
+use agent_core::{ModelCandidate, ModelCapabilitySource};
 use agent_core::ModelRole;
 
 /// The configured model pool as capability candidates: the compatibility model,

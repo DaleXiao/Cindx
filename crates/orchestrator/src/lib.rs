@@ -1,11 +1,9 @@
 use agent_core::{Metadata, ModelRole};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod candidate_selection;
 mod causal_routing;
 mod computation_value;
-mod direct_judge;
 mod evaluation;
 mod evolution_campaign;
 mod execution_constraint;
@@ -18,14 +16,19 @@ mod routing;
 mod run_decision;
 
 pub use agent_core::{
-    default_plan, parse_policy, role_label, sha256_hex, step_prompt, AgentModelSelectionKind,
-    AgentPolicy, OrchestrationPlan, OrchestrationPolicy, OrchestrationStep,
-    PromptEvolutionStrategy,
+    default_plan, direct_judge_eligible, direct_judge_model, direct_judge_prompt,
+    direct_judge_repair_directive, parse_policy, role_label, sha256_hex, step_prompt,
+    AgentModelSelectionKind, AgentPolicy, DirectJudgeReceipt, DirectJudgeVerdict,
+    IndependentQualitySource, LearningAttribution, LearningDisposition, LearningEvidenceSchema,
+    LearningEvidenceV1, LearningTermination, LearningUsageCompleteness, LearningVerification,
+    ModelCandidate, ModelCapabilitySource, OrchestrationPlan, OrchestrationPolicy,
+    OrchestrationStep, PromptEvolutionStrategy, RoutingOutcome, RoutingTelemetry, TaskClass,
+    DIRECT_JUDGE_MAX_REPAIR_ROUNDS, DIRECT_JUDGE_RECEIPT_SCHEMA, LEARNING_EVIDENCE_MAX_BYTES,
+    LEARNING_EVIDENCE_METADATA_KEY, LEARNING_EVIDENCE_SCHEMA_V1,
 };
 pub use candidate_selection::*;
 pub use causal_routing::*;
 pub use computation_value::*;
-pub use direct_judge::*;
 pub use evaluation::*;
 pub use evolution_campaign::*;
 pub use execution_contract::*;
