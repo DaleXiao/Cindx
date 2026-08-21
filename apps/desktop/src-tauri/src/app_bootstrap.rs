@@ -258,8 +258,6 @@ pub fn run() -> Result<(), String> {
             get_phase5_state,
             run_tool,
             resolve_tool_permission,
-            get_phase6_state,
-            run_orchestration,
             get_phase7_state,
             memory_management_runtime::get_project_memory_state,
             memory_management_runtime::update_project_memory,

@@ -6,6 +6,7 @@ use agent_core::ModelRole;
 
 /// The configured model pool as capability candidates: the compatibility model,
 /// the per-role models, and (when pinned) the effort-tier default model.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn model_candidates_for_config(config: &ProviderConfig) -> Vec<ModelCandidate> {
     effort_model_candidates(config, "")
 }

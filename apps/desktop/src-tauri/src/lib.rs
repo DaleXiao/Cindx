@@ -67,7 +67,6 @@ mod memory_vector_refresh_coordinator;
 mod memory_vector_refresh_generation;
 mod model_resource_runtime;
 mod native_commands;
-mod orchestration_commands;
 mod parallel_execution;
 mod permission_service;
 mod persisted_event_contract;
@@ -108,6 +107,7 @@ mod voice_commands;
 mod workspace_undo_runtime;
 use agent_commands::*;
 use agent_loop_runtime::*;
+#[cfg(test)]
 use agent_model_candidates::*;
 use agent_query_commands::*;
 use agent_read_model::*;
@@ -135,7 +135,6 @@ use memory_runtime::*;
 #[cfg(test)]
 use memory_vector_generation_runtime::*;
 use native_commands::*;
-use orchestration_commands::*;
 use persistence_runtime::*;
 use personalization_persistence::*;
 use platform_runtime::*;

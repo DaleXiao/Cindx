@@ -3678,8 +3678,8 @@ assert(settingsPageSource.includes("Pending Reviews"), "App must render pending 
 assert(
   !settingsPageSource.includes("<h2>Orchestration</h2>") &&
     !settingsPageSource.includes("Manual workflow test") &&
-    tauriBridge.includes('invoke<Phase6State>("run_orchestration"'),
-  "Manual orchestration must stay out of user settings while remaining available to diagnostics"
+    !tauriBridge.includes("run_orchestration"),
+  "The retired Phase 6 orchestration demo must stay out of settings and the bridge"
 );
 assert(settingsPageSource.includes("Provider"), "App must render provider UI");
 assert(settingsPageSource.includes("Save workspace"), "App must render workspace save action");
@@ -3773,14 +3773,6 @@ assert(
 assert(
   tauriBridge.includes('invoke<Phase5State>("resolve_tool_permission"'),
   "Frontend bridge must invoke resolve_tool_permission"
-);
-assert(
-  tauriBridge.includes('invoke<Phase6State>("get_phase6_state")'),
-  "Frontend bridge must invoke get_phase6_state"
-);
-assert(
-  tauriBridge.includes('invoke<Phase6State>("run_orchestration"'),
-  "Frontend bridge must invoke run_orchestration"
 );
 assert(
   tauriBridge.includes('invoke<Phase7State>("get_phase7_state")'),
@@ -4185,8 +4177,6 @@ assert(
   rustLib.includes("fn resolve_tool_permission("),
   "Phase 5 tool permission command is missing"
 );
-assert(rustLib.includes("fn get_phase6_state("), "Phase 6 state command is missing");
-assert(rustLib.includes("fn run_orchestration("), "Phase 6 orchestration command is missing");
 assert(rustLib.includes("fn get_phase7_state("), "Phase 7 state command is missing");
 assert(
   rustLib.includes("async fn index_workspace_rag(") &&
@@ -4214,8 +4204,6 @@ assert(
     rustLib.includes("get_phase5_state") &&
     rustLib.includes("run_tool") &&
     rustLib.includes("resolve_tool_permission") &&
-    rustLib.includes("get_phase6_state") &&
-    rustLib.includes("run_orchestration") &&
     rustLib.includes("get_phase7_state") &&
     rustLib.includes("index_workspace_rag") &&
     rustLib.includes("search_rag") &&
@@ -4240,10 +4228,6 @@ assert(
 assert(
   rustLib.includes("ToolRegistry") && rustLib.includes("file.list"),
   "Rust bridge must connect the Phase 5 tool runtime"
-);
-assert(
-  rustLib.includes("default_plan") && rustLib.includes("step_prompt"),
-  "Rust bridge must connect the Phase 6 orchestration runtime"
 );
 assert(
   rustLib.includes("FileRagAdapter") && rustLib.includes("build_grounded_answer_prompt"),

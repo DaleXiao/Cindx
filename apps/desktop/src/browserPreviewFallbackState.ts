@@ -1,4 +1,4 @@
-import type { AgentState, AgentTraceState, ContextCheckpointView, ContextState, PersonalizationConfig, Phase3State, Phase4State, Phase5State, Phase6State, Phase7State, Phase8State, ProjectSessionState, ScheduleState, SidecarState, WebSearchConfigState } from "./tauriTypes";
+import type { AgentState, AgentTraceState, ContextCheckpointView, ContextState, PersonalizationConfig, Phase3State, Phase4State, Phase5State, Phase7State, Phase8State, ProjectSessionState, ScheduleState, SidecarState, WebSearchConfigState } from "./tauriTypes";
 
 export function newBrowserSessionId(): string {
   const randomId = globalThis.crypto?.randomUUID?.();
@@ -292,14 +292,6 @@ return {
   ],
   pendingApprovals: [],
   results: [],
-  lastError: null
-};
-}
-
-export function createInitialPhase6State(): Phase6State {
-return {
-  timeline: [],
-  steps: [],
   lastError: null
 };
 }

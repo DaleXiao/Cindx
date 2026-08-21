@@ -7,7 +7,6 @@ use std::{
 pub(crate) const PHASE3_TASK_ID: &str = "phase-3-demo";
 pub(crate) const PHASE4_TASK_ID: &str = "phase-4-demo";
 pub(crate) const PHASE5_TASK_ID: &str = "phase-5-tools";
-pub(crate) const PHASE6_TASK_ID: &str = "phase-6-orchestration";
 pub(crate) const PHASE7_TASK_ID: &str = "phase-7-rag";
 pub(crate) const PHASE8_TASK_ID: &str = "phase-8-browser";
 pub(crate) const PHASE15_TASK_ID: &str = "phase-15-context";

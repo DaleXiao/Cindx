@@ -198,28 +198,3 @@ pub(crate) fn tool_approval_from_audit(record: PermissionAuditRecord) -> Option<
         can_allow_session,
     })
 }
-
-pub(crate) fn orchestration_step_from_event(event: &Event) -> Option<OrchestrationStepView> {
-    if event.kind != EventKind::ModelRequestFinished {
-        return None;
-    }
-    let orchestration_id = event.metadata.get("orchestration_id")?.to_string();
-
-    Some(OrchestrationStepView {
-        orchestration_id,
-        policy: event.metadata.get("policy")?.to_string(),
-        step_index: event.metadata.get("step_index")?.parse().ok()?,
-        role: event.metadata.get("role")?.to_string(),
-        model: event.metadata.get("model")?.to_string(),
-        output: event
-            .metadata
-            .get("output")
-            .map(|value| redact_sensitive_text(value))
-            .unwrap_or_default(),
-        latency_ms: event
-            .metadata
-            .get("latency_ms")
-            .and_then(|value| value.parse().ok()),
-        timestamp_ms: event.timestamp_ms,
-    })
-}

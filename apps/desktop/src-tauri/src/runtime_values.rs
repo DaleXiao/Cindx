@@ -2,7 +2,7 @@ use crate::{
     configuration_models::ProviderConfig,
     runtime_constants::{
         LEGACY_AGENT_SYSTEM_PROMPT, NEXT_ID, PHASE15_TASK_ID, PHASE16_TASK_ID, PHASE3_TASK_ID,
-        PHASE4_TASK_ID, PHASE5_TASK_ID, PHASE6_TASK_ID, PHASE7_TASK_ID, PHASE8_TASK_ID,
+        PHASE4_TASK_ID, PHASE5_TASK_ID, PHASE7_TASK_ID, PHASE8_TASK_ID,
     },
 };
 use agent_core::{
@@ -31,10 +31,6 @@ pub(crate) fn phase5_task_id() -> TaskId {
     TaskId(PHASE5_TASK_ID.to_string())
 }
 
-pub(crate) fn phase6_task_id() -> TaskId {
-    TaskId(PHASE6_TASK_ID.to_string())
-}
-
 pub(crate) fn phase7_task_id() -> TaskId {
     TaskId(PHASE7_TASK_ID.to_string())
 }
@@ -56,7 +52,6 @@ pub(crate) fn context_task_ids() -> Vec<TaskId> {
         phase3_task_id(),
         phase4_task_id(),
         phase5_task_id(),
-        phase6_task_id(),
         phase7_task_id(),
         phase8_task_id(),
         phase15_task_id(),

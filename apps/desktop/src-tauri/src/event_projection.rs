@@ -319,28 +319,6 @@ pub(crate) fn phase5_state(
     })
 }
 
-pub(crate) fn phase6_state(
-    store: &SqliteStore,
-    last_error: Option<String>,
-) -> Result<Phase6State, StorageError> {
-    let events = store.list_by_task(&phase6_task_id())?;
-    let timeline = events
-        .iter()
-        .cloned()
-        .map(|event| timeline_entry(event, &[]))
-        .collect();
-    let steps = events
-        .iter()
-        .filter_map(orchestration_step_from_event)
-        .collect();
-
-    Ok(Phase6State {
-        timeline,
-        steps,
-        last_error,
-    })
-}
-
 pub(crate) fn graph_count_summary_for_index_events(
     events: &[Event],
     active_index_path: &Path,

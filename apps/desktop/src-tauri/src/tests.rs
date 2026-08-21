@@ -3566,36 +3566,6 @@ fn phase5_state_lists_pending_tool_approvals() {
 }
 
 #[test]
-fn phase6_state_lists_orchestration_steps() {
-    let mut store = SqliteStore::in_memory().expect("store should open");
-    append_event(
-        &mut store,
-        &phase6_task_id(),
-        EventKind::ModelRequestFinished,
-        "planner step finished",
-        [
-            ("orchestration_id".to_string(), "orch-1".to_string()),
-            ("policy".to_string(), "plan_execute_review".to_string()),
-            ("step_index".to_string(), "0".to_string()),
-            ("role".to_string(), "planner".to_string()),
-            ("model".to_string(), "model-a".to_string()),
-            ("latency_ms".to_string(), "12".to_string()),
-            ("output".to_string(), "Plan first.".to_string()),
-        ]
-        .into_iter()
-        .collect(),
-    )
-    .expect("event should append");
-
-    let state = phase6_state(&store, None).expect("state should load");
-
-    assert_eq!(state.steps.len(), 1);
-    assert_eq!(state.steps[0].policy, "plan_execute_review");
-    assert_eq!(state.steps[0].role, "planner");
-    assert_eq!(state.steps[0].output, "Plan first.");
-}
-
-#[test]
 fn workspace_index_falls_back_to_local_embeddings_when_cloud_fails() {
     struct FailingEmbedder;
 

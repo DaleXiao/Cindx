@@ -594,34 +594,6 @@ pub(crate) struct ToolRunInput {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OrchestrationStepView {
-    pub(crate) orchestration_id: String,
-    pub(crate) policy: String,
-    pub(crate) step_index: u64,
-    pub(crate) role: String,
-    pub(crate) model: String,
-    pub(crate) output: String,
-    pub(crate) latency_ms: Option<u64>,
-    pub(crate) timestamp_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Phase6State {
-    pub(crate) timeline: Vec<TimelineEntry>,
-    pub(crate) steps: Vec<OrchestrationStepView>,
-    pub(crate) last_error: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OrchestrationRunInput {
-    pub(crate) policy: String,
-    pub(crate) prompt: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct RagStatsView {
     pub(crate) files_indexed: usize,
     pub(crate) chunks_indexed: usize,

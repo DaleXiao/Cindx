@@ -441,23 +441,6 @@ export type Phase5State = {
   lastError: string | null;
 };
 
-export type OrchestrationStepView = {
-  orchestrationId: string;
-  policy: string;
-  stepIndex: number;
-  role: string;
-  model: string;
-  output: string;
-  latencyMs: number | null;
-  timestampMs: number;
-};
-
-export type Phase6State = {
-  timeline: TimelineEntry[];
-  steps: OrchestrationStepView[];
-  lastError: string | null;
-};
-
 export type RagStatsView = {
   filesIndexed: number;
   chunksIndexed: number;

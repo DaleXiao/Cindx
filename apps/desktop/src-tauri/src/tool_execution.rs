@@ -23,29 +23,6 @@ pub(crate) fn phase8_state_with_error(
     phase8_state(&store, Some(message)).map_err(|error| error.to_string())
 }
 
-pub(crate) fn phase6_state_with_error(
-    state: &tauri::State<'_, AppState>,
-    message: impl Into<String>,
-) -> Result<Phase6State, String> {
-    let message = message.into();
-    let mut store = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))?;
-    append_event(
-        &mut store,
-        &phase6_task_id(),
-        EventKind::Error,
-        "Orchestration failed",
-        [("error".to_string(), message.clone())]
-            .into_iter()
-            .collect(),
-    )
-    .map_err(|error| error.to_string())?;
-
-    phase6_state(&store, Some(message)).map_err(|error| error.to_string())
-}
-
 pub(crate) fn phase5_state_with_error(
     state: &tauri::State<'_, AppState>,
     message: impl Into<String>,

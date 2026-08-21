@@ -58,8 +58,6 @@ import type {
   ToolRunView,
   ToolApprovalView,
   Phase5State,
-  OrchestrationStepView,
-  Phase6State,
   RagStatsView,
   MemoryStatsView,
   RagSourceView,
@@ -86,7 +84,7 @@ import type {
 } from "./tauriTypes";
 import type { RagOperationProgress } from "./ragOperationModel";
 
-import { createBrowserContextCheckpoint, createInitialAgentState, createInitialAgentTraceState, createInitialContextState, createInitialPersonalizationConfig, createInitialPhase3State, createInitialPhase4State, createInitialPhase5State, createInitialPhase6State, createInitialPhase7State, createInitialPhase8State, createInitialProjectSessionState, createInitialScheduleState, createInitialSidecarState, createInitialWebSearchConfig, newBrowserSessionId } from "./browserPreviewFallbackState.ts";
+import { createBrowserContextCheckpoint, createInitialAgentState, createInitialAgentTraceState, createInitialContextState, createInitialPersonalizationConfig, createInitialPhase3State, createInitialPhase4State, createInitialPhase5State, createInitialPhase7State, createInitialPhase8State, createInitialProjectSessionState, createInitialScheduleState, createInitialSidecarState, createInitialWebSearchConfig, newBrowserSessionId } from "./browserPreviewFallbackState.ts";
 
 const browserDefaultSessionId = newBrowserSessionId();
 let browserPhase3State: Phase3State = createInitialPhase3State();
@@ -97,7 +95,6 @@ let browserProjectSessionState: ProjectSessionState = createInitialProjectSessio
 let browserScheduleState: ScheduleState = createInitialScheduleState();
 let browserPhase4State: Phase4State = createInitialPhase4State();
 let browserPhase5State: Phase5State = createInitialPhase5State();
-let browserPhase6State: Phase6State = createInitialPhase6State();
 let browserPhase7State: Phase7State = createInitialPhase7State();
 let browserPhase8State: Phase8State = createInitialPhase8State();
 let browserContextState: ContextState = createInitialContextState();
@@ -1864,39 +1861,6 @@ export async function resolveToolPermission(
       lastError: null
     };
     return browserPhase5State;
-  }
-}
-
-export async function getPhase6State(): Promise<Phase6State> {
-  try {
-    return await invoke<Phase6State>("get_phase6_state");
-  } catch (error) {
-    requireBrowserPreviewFallback(error);
-    return browserPhase6State;
-  }
-}
-
-export async function runOrchestration(policy: string, prompt: string): Promise<Phase6State> {
-  try {
-    return await invoke<Phase6State>("run_orchestration", { input: { policy, prompt } });
-  } catch (error) {
-    requireBrowserPreviewFallback(error);
-    const now = Date.now();
-    browserPhase6State = {
-      ...browserPhase6State,
-      timeline: [
-        ...browserPhase6State.timeline,
-        {
-          label: "Error",
-          detail: "Browser preview cannot run orchestration. Open the Tauri app to call the provider.",
-          kind: "message",
-          state: "pending",
-          timestampMs: now
-        }
-      ],
-      lastError: "Browser preview cannot run orchestration. Open the Tauri app to call the provider."
-    };
-    return browserPhase6State;
   }
 }
 
