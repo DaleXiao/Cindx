@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 mod event_contract;
+mod knowledge_plan;
 mod model_attribution;
 mod model_contract;
 mod permission_policy;
@@ -9,6 +10,9 @@ mod run_identity;
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
+};
+pub use knowledge_plan::{
+    MemoryRecallPlan, MemoryRecallPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
 };
 pub use model_attribution::{
     AgentActor, AgentEffectAuthority, AgentModelAttribution, AgentModelAttributionError,

@@ -71,12 +71,14 @@ pub(crate) use model_provider::{
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 pub(crate) use orchestrator::{
-    default_plan, parse_policy, role_label, sha256_hex, step_prompt, AgentPolicy, AgentRunDecision,
+    default_plan, parse_policy, role_label, sha256_hex, step_prompt, AgentPolicy,
     ConductorExecutionContract, LearnedModelRouter, MemoryRecallPolicy, ModelCandidate,
     ModelCapabilitySource, OrchestrationPolicy, RoutingContext, RoutingDecision, RoutingOutcome,
     RoutingTelemetry, RuleBasedRouter, TaskClass, WorkspaceRetrievalChannel,
     WorkspaceRetrievalPlan,
 };
+#[cfg(any(test, feature = "realworld-eval"))]
+pub(crate) use orchestrator::AgentRunDecision;
 #[cfg(any(test, feature = "realworld-eval"))]
 pub(crate) use orchestrator::ConductorPromptGenome;
 pub(crate) use serde::{Deserialize, Serialize};

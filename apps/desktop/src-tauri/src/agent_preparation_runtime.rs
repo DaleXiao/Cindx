@@ -1,3 +1,4 @@
+use crate::agent_effort_planner::KnowledgeDecision;
 use crate::agent_failure_terminal_runtime::{
     commit_agent_preparation_failure_terminal, AgentPreparationFailureTerminalOutcome,
 };
@@ -436,12 +437,12 @@ pub(crate) fn prepare_agent_execution_replay(
         let memory_constraint =
             preparation_try!(AgentMemoryEvaluationConstraint::from_context(&run_context)
                 .map_err(|error| runtime_preparation_error(&run_context, error)));
-        let effective_knowledge_decision = (!memory_constraint.is_native()).then(|| {
-            memory_constraint.apply_after_routing(&mut run_context, plan.execution_plan.action())
-        });
-        let knowledge_decision = effective_knowledge_decision
-            .as_ref()
-            .unwrap_or_else(|| plan.execution_plan.action());
+        let routed_knowledge = KnowledgeDecision::from_run_decision(plan.execution_plan.action());
+        let knowledge_decision = if memory_constraint.is_native() {
+            routed_knowledge
+        } else {
+            memory_constraint.apply_after_routing(&mut run_context, &routed_knowledge)
+        };
 
         let prepared_knowledge = match prepare_run_knowledge_contexts(
             state,
@@ -449,7 +450,7 @@ pub(crate) fn prepare_agent_execution_replay(
             &run_context,
             workspace_root,
             config,
-            knowledge_decision,
+            &knowledge_decision,
             cancellation,
             preparation_epoch,
         ) {

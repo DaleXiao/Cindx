@@ -18,6 +18,7 @@ pub(crate) use crate::memory_vector_refresh_coordinator::{
 #[cfg(test)]
 pub(crate) use crate::memory_vector_refresh_generation::memory_rag_index;
 use crate::{
+    agent_effort_planner::KnowledgeDecision,
     agent_query_commands::append_agent_progress_event,
     app_state::AppState,
     configuration_models::ProviderConfig,
@@ -184,13 +185,13 @@ pub(crate) fn prepare_run_knowledge_contexts(
     run_context: &Metadata,
     workspace_root: &Path,
     config: &ProviderConfig,
-    decision: &AgentRunDecision,
+    knowledge: &KnowledgeDecision,
     cancellation: &Arc<AgentRunControl>,
     expected_epoch: u64,
 ) -> Result<PreparedRunKnowledgeContexts, String> {
-    let recall_memory = !matches!(decision.memory.policy, MemoryRecallPolicy::None);
-    let retrieve_workspace = decision.retrieval.enabled();
-    if !recall_memory && !retrieve_workspace {
+    let recall_memory = knowledge.memory_enabled();
+    let workspace_plan = knowledge.workspace_plan();
+    if !recall_memory && workspace_plan.is_none() {
         return Ok(PreparedRunKnowledgeContexts::default());
     }
     if recall_memory {
@@ -200,7 +201,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
             "Recalling relevant project memory",
         );
     }
-    if retrieve_workspace {
+    if workspace_plan.is_some() {
         cancellation.mark_progress_at(expected_epoch, "retrieval", "Preparing workspace knowledge");
         append_agent_progress_event(state, task_id, run_context, "Preparing workspace knowledge")?;
     }
@@ -214,14 +215,14 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     run_context,
                     workspace_root,
                     config,
-                    &decision.memory.query,
-                    decision.memory.policy,
+                    &knowledge.memory_query,
+                    knowledge.memory_policy,
                     cancellation,
                     expected_epoch,
                 )
             })
         });
-        let workspace_handle = retrieve_workspace.then(|| {
+        let workspace_handle = workspace_plan.as_ref().map(|plan| {
             scope.spawn(|| {
                 prepare_agent_knowledge_context(
                     state,
@@ -229,7 +230,7 @@ pub(crate) fn prepare_run_knowledge_contexts(
                     task_id,
                     run_context,
                     workspace_root,
-                    &decision.retrieval,
+                    plan,
                     cancellation,
                     expected_epoch,
                 )

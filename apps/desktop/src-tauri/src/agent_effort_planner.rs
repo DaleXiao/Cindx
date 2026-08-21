@@ -1,8 +1,12 @@
-use agent_core::Metadata;
-use orchestrator::{
-    ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy,
-    MemoryRecallPolicy, OrchestrationPolicy, TaskClass, MAX_RUN_DECISION_QUERY_CHARS,
+use agent_core::{
+    MemoryRecallPolicy, Metadata, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
 };
+use orchestrator::{
+    AgentRunDecision, ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy,
+    OrchestrationPolicy, TaskClass, MAX_RUN_DECISION_QUERY_CHARS,
+};
+
+const WORKSPACE_RETRIEVAL_MAX_RESULTS: usize = 8;
 
 /// The minimal, effort-tier run plan that replaces the orchestrator/conductor
 /// planning surface. It carries only what the loop and preparation actually need:
@@ -41,6 +45,44 @@ impl KnowledgeDecision {
 
     pub(crate) fn memory_enabled(&self) -> bool {
         self.memory_policy != MemoryRecallPolicy::None
+    }
+
+    /// Transitional bridge: projects the orchestrator decision onto the effort
+    /// planner's knowledge shape while preparation still routes through the
+    /// orchestrator. The workspace query rides on `memory_query` when memory is
+    /// disabled so an enabled retrieval plan keeps its focused query.
+    pub(crate) fn from_run_decision(decision: &AgentRunDecision) -> Self {
+        let memory_query = if decision.memory.enabled() {
+            decision.memory.query.clone()
+        } else {
+            decision.retrieval.query.clone()
+        };
+        Self {
+            memory_policy: decision.memory.policy,
+            memory_query,
+            retrieve_workspace: decision.retrieval.enabled(),
+        }
+    }
+
+    /// The workspace retrieval plan implied by this decision: all four retrieval
+    /// channels over the bounded query when workspace retrieval is enabled with a
+    /// focused query; otherwise no retrieval.
+    pub(crate) fn workspace_plan(&self) -> Option<WorkspaceRetrievalPlan> {
+        if !self.retrieve_workspace || self.memory_query.trim().is_empty() {
+            return None;
+        }
+        Some(WorkspaceRetrievalPlan {
+            query: self.memory_query.clone(),
+            channels: [
+                WorkspaceRetrievalChannel::Semantic,
+                WorkspaceRetrievalChannel::FileSearch,
+                WorkspaceRetrievalChannel::GraphDirect,
+                WorkspaceRetrievalChannel::GraphWalk,
+            ]
+            .into_iter()
+            .collect(),
+            max_results: WORKSPACE_RETRIEVAL_MAX_RESULTS,
+        })
     }
 }
 
@@ -156,6 +198,7 @@ fn normalize_effort_label(effort_label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::MemoryRecallPlan;
 
     #[test]
     fn effort_plan_is_single_model_and_general_task() {
@@ -241,5 +284,64 @@ mod tests {
         assert!(pro.verification_required);
         assert_eq!(pro.effort, "pro");
         assert_eq!(pro.terminal_model_call_reserve, 3);
+    }
+
+    #[test]
+    fn from_run_decision_projects_memory_and_retrieval() {
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.memory = MemoryRecallPlan {
+            policy: MemoryRecallPolicy::Relevant,
+            query: "memory query".to_string(),
+        };
+        decision.retrieval = WorkspaceRetrievalPlan {
+            query: "retrieval query".to_string(),
+            channels: [WorkspaceRetrievalChannel::Semantic].into_iter().collect(),
+            max_results: 6,
+        };
+
+        let knowledge = KnowledgeDecision::from_run_decision(&decision);
+
+        assert_eq!(knowledge.memory_policy, MemoryRecallPolicy::Relevant);
+        assert_eq!(knowledge.memory_query, "memory query");
+        assert!(knowledge.retrieve_workspace);
+    }
+
+    #[test]
+    fn from_run_decision_keeps_the_retrieval_query_when_memory_is_off() {
+        let mut decision = AgentRunDecision::direct("executor");
+        decision.retrieval = WorkspaceRetrievalPlan {
+            query: "retrieval query".to_string(),
+            channels: [WorkspaceRetrievalChannel::Semantic].into_iter().collect(),
+            max_results: 6,
+        };
+
+        let knowledge = KnowledgeDecision::from_run_decision(&decision);
+
+        assert!(!knowledge.memory_enabled());
+        assert_eq!(knowledge.memory_query, "retrieval query");
+        assert!(knowledge.retrieve_workspace);
+    }
+
+    #[test]
+    fn workspace_plan_enables_all_channels_over_the_bounded_query() {
+        let knowledge = knowledge_decision_for_effort("auto", "find the session bug");
+        let plan = knowledge
+            .workspace_plan()
+            .expect("auto retrieves workspace context");
+        assert_eq!(plan.query, "find the session bug");
+        assert_eq!(plan.max_results, WORKSPACE_RETRIEVAL_MAX_RESULTS);
+        assert_eq!(plan.channels.len(), 4);
+        assert!(plan.enabled());
+    }
+
+    #[test]
+    fn workspace_plan_stays_none_without_retrieval_or_query() {
+        assert_eq!(KnowledgeDecision::none().workspace_plan(), None);
+        let blank_query = KnowledgeDecision {
+            memory_policy: MemoryRecallPolicy::Relevant,
+            memory_query: "   ".to_string(),
+            retrieve_workspace: true,
+        };
+        assert_eq!(blank_query.workspace_plan(), None);
     }
 }

@@ -1,5 +1,5 @@
-use agent_core::Metadata;
-use orchestrator::{AgentRunDecision, MemoryRecallPlan};
+use crate::agent_effort_planner::KnowledgeDecision;
+use agent_core::{MemoryRecallPolicy, Metadata};
 
 pub(crate) const AGENT_MEMORY_EVALUATION_CONSTRAINT_KEY: &str = "memory_evaluation_constraint";
 pub(crate) const ROUTED_MEMORY_POLICY_KEY: &str = "routed_memory_policy";
@@ -60,13 +60,15 @@ impl AgentMemoryEvaluationConstraint {
     pub(crate) fn apply_after_routing(
         self,
         run_context: &mut Metadata,
-        routed: &AgentRunDecision,
-    ) -> AgentRunDecision {
+        routed: &KnowledgeDecision,
+    ) -> KnowledgeDecision {
         debug_assert!(!self.is_native());
-        let routed_policy = memory_policy_label(routed);
+        let routed_policy = memory_policy_label(routed.memory_policy);
         let mut effective = routed.clone();
         if self == Self::MemoryOff {
-            effective.memory = MemoryRecallPlan::none();
+            // The workspace query and retrieval flag ride along, so turning memory
+            // off ablates memory recall without touching workspace knowledge.
+            effective.memory_policy = MemoryRecallPolicy::None;
         }
         run_context.insert(
             ROUTED_MEMORY_POLICY_KEY.to_string(),
@@ -74,16 +76,14 @@ impl AgentMemoryEvaluationConstraint {
         );
         run_context.insert(
             EFFECTIVE_MEMORY_POLICY_KEY.to_string(),
-            memory_policy_label(&effective).to_string(),
+            memory_policy_label(effective.memory_policy).to_string(),
         );
         effective
     }
 }
 
-fn memory_policy_label(decision: &AgentRunDecision) -> &'static str {
-    use orchestrator::MemoryRecallPolicy;
-
-    match decision.memory.policy {
+fn memory_policy_label(policy: MemoryRecallPolicy) -> &'static str {
+    match policy {
         MemoryRecallPolicy::None => "none",
         MemoryRecallPolicy::Relevant => "relevant",
         MemoryRecallPolicy::Comprehensive => "comprehensive",
@@ -93,14 +93,13 @@ fn memory_policy_label(decision: &AgentRunDecision) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator::{MemoryRecallPlan, MemoryRecallPolicy};
 
     #[test]
     fn memory_off_changes_only_the_routed_memory_plan() {
-        let mut routed = AgentRunDecision::direct("executor");
-        routed.memory = MemoryRecallPlan {
-            policy: MemoryRecallPolicy::Relevant,
-            query: "durable release constraint".to_string(),
+        let routed = KnowledgeDecision {
+            memory_policy: MemoryRecallPolicy::Relevant,
+            memory_query: "durable release constraint".to_string(),
+            retrieve_workspace: false,
         };
         let mut context = Metadata::new();
         AgentMemoryEvaluationConstraint::MemoryOff.write_to_context(&mut context);
@@ -108,17 +107,34 @@ mod tests {
         let effective =
             AgentMemoryEvaluationConstraint::MemoryOff.apply_after_routing(&mut context, &routed);
 
-        assert_eq!(effective.memory, MemoryRecallPlan::none());
         let mut expected = routed.clone();
-        expected.memory = MemoryRecallPlan::none();
+        expected.memory_policy = MemoryRecallPolicy::None;
         assert_eq!(effective, expected);
         assert_eq!(context.get(ROUTED_MEMORY_POLICY_KEY).unwrap(), "relevant");
         assert_eq!(context.get(EFFECTIVE_MEMORY_POLICY_KEY).unwrap(), "none");
     }
 
     #[test]
+    fn memory_off_preserves_workspace_retrieval() {
+        let routed = KnowledgeDecision {
+            memory_policy: MemoryRecallPolicy::Relevant,
+            memory_query: "workspace implementation evidence".to_string(),
+            retrieve_workspace: true,
+        };
+        let mut context = Metadata::new();
+
+        let effective =
+            AgentMemoryEvaluationConstraint::MemoryOff.apply_after_routing(&mut context, &routed);
+
+        assert_eq!(effective.memory_policy, MemoryRecallPolicy::None);
+        assert!(!effective.memory_enabled());
+        assert!(effective.retrieve_workspace);
+        assert!(effective.workspace_plan().is_some());
+    }
+
+    #[test]
     fn memory_on_preserves_routed_none_without_forcing_recall() {
-        let routed = AgentRunDecision::direct("executor");
+        let routed = KnowledgeDecision::none();
         let mut context = Metadata::new();
         AgentMemoryEvaluationConstraint::MemoryOn.write_to_context(&mut context);
 

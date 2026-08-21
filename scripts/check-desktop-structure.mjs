@@ -1706,9 +1706,11 @@ assert(
 assert(
   rustLib.includes("fn prepare_run_knowledge_contexts(") &&
     rustLib.includes("let plan = plan_agent_run(") &&
-    rustLib.includes("plan.execution_plan.action()") &&
-    rustLib.includes("let retrieve_workspace = decision.retrieval.enabled()") &&
-    rustLib.includes("let workspace_handle = retrieve_workspace.then") &&
+    rustLib.includes(
+      "KnowledgeDecision::from_run_decision(plan.execution_plan.action())"
+    ) &&
+    rustLib.includes("let workspace_plan = knowledge.workspace_plan()") &&
+    rustLib.includes("let workspace_handle = workspace_plan.as_ref().map") &&
     rustLib.includes("if !effort.uses_conductor()") &&
     rustLib.includes("if !should_evaluate_strategy_profile(") &&
     rustLib.includes("fn fast_policy_never_enters_prompt_evolution_selection()") &&
@@ -1725,7 +1727,7 @@ assert(
     ragSource.includes("RAG_INDEX_CANCELLED") &&
     modelProviderSource.includes("embed_cancellable") &&
     graphSource.includes("pub fn upsert_all"),
-  "Fast must remain direct while Auto/Pro retrieval is conductor-planned and cancellable"
+  "Fast must remain direct while Auto/Pro knowledge preparation flows through the effort KnowledgeDecision and stays cancellable"
 );
 assert(
   appSource.includes("sessionSelectionRequestRef") &&
@@ -3585,9 +3587,7 @@ assert(
     rustLib.includes("MemoryStatsView") &&
     rustLib.includes('"Project memory recalled"') &&
     rustLib.includes('"Project memory utilization measured"') &&
-    rustLib.includes(
-      "let recall_memory = !matches!(decision.memory.policy, MemoryRecallPolicy::None)"
-    ) &&
+    rustLib.includes("let recall_memory = knowledge.memory_enabled()") &&
     rustLib.includes("project_memory_hybrid_fallback") &&
     agentMemorySource.includes("validate_semantic_memory_batch") &&
     agentMemorySource.includes("source_event_ids") &&
@@ -3941,7 +3941,7 @@ assert(
     rustLib.includes("prepare_agent_knowledge_context") &&
     ragSource.includes("search_chunks_semantic") &&
     ragSource.includes("search_chunks_literal"),
-  "Knowledge retrieval must execute the conductor-selected channels, fuse results, and feed the agent"
+  "Knowledge retrieval must execute the planned channels, fuse results, and feed the agent"
 );
 assert(
   settingsPageSource.includes("Graph Explorer") &&
