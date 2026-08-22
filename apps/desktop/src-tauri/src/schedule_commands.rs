@@ -462,6 +462,7 @@ pub(crate) fn ensure_schedule_execution_session(
         title_state: SessionTitleState::Manual,
         detail: SCHEDULE_EXECUTION_SESSION_DETAIL.to_string(),
         effort: AgentPolicy::parse_ingress(effort).label().to_string(),
+        agent_model: String::new(),
         seen_event_sequence: 0,
         created_at_ms: now,
         updated_at_ms: now,

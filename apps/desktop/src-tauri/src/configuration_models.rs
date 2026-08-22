@@ -329,6 +329,9 @@ pub(crate) struct SessionRecord {
     pub(crate) title_state: SessionTitleState,
     pub(crate) detail: String,
     pub(crate) effort: String,
+    /// The model the user picked in the composer for this session; empty means
+    /// the provider's effort-tier default applies.
+    pub(crate) agent_model: String,
     pub(crate) seen_event_sequence: u64,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
@@ -362,6 +365,7 @@ impl ProjectSessionConfig {
                 title_state: SessionTitleState::Pending,
                 detail: "timeline + chat".to_string(),
                 effort: default_agent_effort(),
+                agent_model: String::new(),
                 seen_event_sequence: 0,
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -408,6 +412,7 @@ impl ProjectSessionConfig {
                 title_state: SessionTitleState::Pending,
                 detail: "timeline + chat".to_string(),
                 effort: default_agent_effort(),
+                agent_model: String::new(),
                 seen_event_sequence: 0,
                 created_at_ms: now,
                 updated_at_ms: now,

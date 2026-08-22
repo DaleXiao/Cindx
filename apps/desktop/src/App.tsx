@@ -83,6 +83,7 @@ import {
   selectProject,
   selectSession,
   setSessionEffort,
+  setSessionModel,
   steerQueuedAgentMessage,
   subscribeToSessionTitleUpdates,
   queueAgentMessage
@@ -1337,6 +1338,49 @@ export function App() {
     }
   }
 
+  async function handleSessionModelChange(agentModel: string) {
+    const sessionId = activeSession?.id;
+    if (!sessionId) return;
+    const previousModel = activeSession?.agentModel ?? "";
+    setProjectSessionState((current) =>
+      current
+        ? {
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.id === sessionId ? { ...session, agentModel } : session
+            )
+          }
+        : current
+    );
+    try {
+      const next = await setSessionModel(sessionId, agentModel);
+      const persisted =
+        next.sessions.find((session) => session.id === sessionId)?.agentModel ?? agentModel;
+      setProjectSessionState((current) =>
+        current
+          ? {
+              ...current,
+              sessions: current.sessions.map((session) =>
+                session.id === sessionId ? { ...session, agentModel: persisted } : session
+              )
+            }
+          : next
+      );
+    } catch (error) {
+      setProjectSessionState((current) =>
+        current
+          ? {
+              ...current,
+              sessions: current.sessions.map((session) =>
+                session.id === sessionId ? { ...session, agentModel: previousModel } : session
+              )
+            }
+          : current
+      );
+      setComposerError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function handleRenameProject(projectId: string, name: string) {
     setProjectSessionBusy(true);
     setComposerError(null);
@@ -2146,12 +2190,19 @@ export function App() {
                 attachments={composerAttachments}
                 attachmentBusy={attachmentBusy}
                 effort={agentEffort}
+                agentModel={activeSession?.agentModel ?? ""}
+                modelOptions={
+                  (phase4?.provider.enabledModels?.length ?? 0) > 0
+                    ? phase4!.provider.enabledModels
+                    : providerModelOptions.chat
+                }
                 sessionId={activeSession?.id ?? null}
                 voiceConfigured={voiceConfigured}
                 voiceTransport={voiceTransport}
                 providerReadiness={providerReadiness}
                 onChange={setActiveComposerDraft}
                 onEffortChange={(effort) => void handleSessionEffortChange(effort)}
+                onModelChange={(model) => void handleSessionModelChange(model)}
                 onVoiceTranscript={appendComposerDraftForSession}
                 onVoiceError={(message) => setComposerError(message)}
                 onProviderRequired={(readiness) => setComposerError(providerReadinessMessage(readiness))}

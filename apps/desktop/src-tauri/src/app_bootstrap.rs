@@ -212,6 +212,7 @@ pub fn run() -> Result<(), String> {
             delete_project,
             rename_session,
             set_session_effort,
+            set_session_model,
             generate_session_title,
             stage_agent_attachment,
             abort_agent_attachment_batch,

@@ -661,6 +661,7 @@ export async function createProject(name: string, root: string): Promise<Project
             name: `${name} Session`,
             detail: "timeline + chat",
             effort: "default",
+            agentModel: "",
             status: "Ready",
             titleState: "pending",
             activity: "idle",
@@ -706,6 +707,7 @@ export async function createSession(
             name,
             detail: "timeline + chat",
             effort: "default",
+            agentModel: "",
             status: "Ready",
             titleState: "pending",
             activity: "idle",
@@ -870,6 +872,26 @@ export async function setSessionEffort(
   }
 }
 
+export async function setSessionModel(
+  sessionId: string,
+  agentModel: string
+): Promise<ProjectSessionState> {
+  try {
+    return await invoke<ProjectSessionState>("set_session_model", {
+      input: { sessionId, agentModel }
+    });
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
+    browserProjectSessionState = {
+      ...browserProjectSessionState,
+      sessions: browserProjectSessionState.sessions.map((session) =>
+        session.id === sessionId ? { ...session, agentModel } : session
+      )
+    };
+    return browserProjectSessionState;
+  }
+}
+
 export async function generateSessionTitle(
   sessionId: string,
   prompt: string,
@@ -981,6 +1003,7 @@ function ensureBrowserOpenSession(
     name: "New Session",
     detail: "timeline + chat",
     effort: "default",
+    agentModel: "",
     status: "Ready",
     titleState: "pending",
     activity: "idle",

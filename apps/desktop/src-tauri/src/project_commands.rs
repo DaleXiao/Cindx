@@ -83,6 +83,7 @@ pub(crate) fn create_project(
         title_state: SessionTitleState::Pending,
         detail: "timeline + chat".to_string(),
         effort: default_agent_effort(),
+        agent_model: String::new(),
         seen_event_sequence: 0,
         created_at_ms: now,
         updated_at_ms: now,
@@ -133,6 +134,7 @@ pub(crate) fn create_session(
         name,
         detail: "timeline + chat".to_string(),
         effort: default_agent_effort(),
+        agent_model: String::new(),
         seen_event_sequence: 0,
         created_at_ms: now,
         updated_at_ms: now,
@@ -350,6 +352,42 @@ pub(crate) fn update_session_effort(
     true
 }
 
+pub(crate) fn update_session_model(
+    config: &mut ProjectSessionConfig,
+    session_id: &str,
+    agent_model: &str,
+) -> bool {
+    let Some(session) = config
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == session_id && session.archived_at_ms.is_none())
+    else {
+        return false;
+    };
+    session.agent_model = agent_model.to_string();
+    true
+}
+
+#[tauri::command]
+pub(crate) fn set_session_model(
+    state: tauri::State<'_, AppState>,
+    input: SessionModelInput,
+) -> Result<ProjectSessionState, String> {
+    let mut config = state
+        .project_session_config
+        .lock()
+        .map_err(|error| format!("project session config lock poisoned: {error}"))?;
+    let mut candidate = config.clone();
+    if !update_session_model(&mut candidate, &input.session_id, &input.agent_model) {
+        return Ok(project_session_state(
+            &config,
+            Some("session not found".to_string()),
+        ));
+    }
+    commit_project_session_config(&mut config, candidate).map_err(|error| error.to_string())?;
+    Ok(project_session_state(&config, None))
+}
+
 #[tauri::command]
 pub(crate) async fn generate_session_title(
     app: tauri::AppHandle,
@@ -518,6 +556,7 @@ pub(crate) fn fork_session(
             title_state: SessionTitleState::Manual,
             detail: format!("Fork of {}", source.name),
             effort: default_agent_effort(),
+            agent_model: String::new(),
             seen_event_sequence: 0,
             created_at_ms: now,
             updated_at_ms: now,
@@ -898,6 +937,7 @@ pub(crate) fn select_project(
                     title_state: SessionTitleState::Pending,
                     detail: "timeline + chat".to_string(),
                     effort: default_agent_effort(),
+                    agent_model: String::new(),
                     seen_event_sequence: 0,
                     created_at_ms: now,
                     updated_at_ms: now,

@@ -411,6 +411,26 @@
   animation: composer-effort-menu-in 140ms var(--ease-out-quart);
 }
 
+.composer-effort-group {
+  display: grid;
+  gap: 2px;
+}
+
+.composer-effort-group + .composer-effort-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.07);
+}
+
+.composer-effort-group-label {
+  padding: 4px 9px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .composer-effort-menu > button {
   display: grid;
   width: 100%;

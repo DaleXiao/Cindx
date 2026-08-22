@@ -25,6 +25,7 @@ fn session_config(root: &Path, session_ids: &[&str]) -> ProjectSessionConfig {
             title_state: agent_application::SessionTitleState::Manual,
             detail: "timeline + chat".to_string(),
             effort: "auto".to_string(),
+            agent_model: String::new(),
             seen_event_sequence: 0,
             created_at_ms: 1,
             updated_at_ms: 1,

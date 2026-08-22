@@ -349,9 +349,18 @@ pub(crate) fn prepare_agent_execution_replay(
             "strategy",
             "Selecting the execution path",
         );
+        let session_model = run_context
+            .get("session_agent_model")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let primary_model = match session_model {
+            Some(model) => model.to_string(),
+            None => effort_tier_model(config, effort.label()),
+        };
         let mut effort_plan = plan_effort_run(
             effort.label(),
-            effort_tier_model(config, effort.label()),
+            primary_model,
             &planning_objective,
         );
         preparation_try!(effort_plan

@@ -113,6 +113,7 @@ return {
       name: "Runtime Session",
       detail: "timeline + chat",
       effort: "default",
+      agentModel: "",
       status: "Active",
       titleState: "manual",
       activity: "idle",

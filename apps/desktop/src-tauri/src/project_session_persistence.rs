@@ -50,6 +50,7 @@ pub(crate) fn project_session_state(
                 title_state: session.title_state.label().to_string(),
                 detail: session.detail.clone(),
                 effort: session.effort.clone(),
+                agent_model: session.agent_model.clone(),
                 status: if session.id == config.active_session_id {
                     "Active".to_string()
                 } else if session.archived_at_ms.is_some() {
@@ -191,6 +192,7 @@ pub(crate) fn ensure_open_session_for_project(
         title_state: SessionTitleState::Pending,
         detail: "timeline + chat".to_string(),
         effort: default_agent_effort(),
+        agent_model: String::new(),
         seen_event_sequence: 0,
         created_at_ms: now,
         updated_at_ms: now,
@@ -263,6 +265,10 @@ pub(crate) fn project_session_metadata_for_session(
         ("project_root".to_string(), project.root.clone()),
         ("session_id".to_string(), session.id.clone()),
         ("session_name".to_string(), session.name.clone()),
+        (
+            "session_agent_model".to_string(),
+            session.agent_model.clone(),
+        ),
     ]
     .into_iter()
     .collect())

@@ -107,12 +107,15 @@ type ComposerProps = {
   attachments: AgentAttachment[];
   attachmentBusy: boolean;
   effort: AgentEffort;
+  agentModel: string;
+  modelOptions: string[];
   sessionId: string | null;
   voiceConfigured: boolean;
   voiceTransport: ProviderVoiceTransport;
   providerReadiness: ProviderReadiness;
   onChange: (value: string) => void;
   onEffortChange: (effort: AgentEffort) => void;
+  onModelChange: (model: string) => void;
   onVoiceTranscript: (sessionId: string, text: string) => void;
   onVoiceError: (message: string) => void;
   onProviderRequired: (readiness: ProviderReadiness) => void;
@@ -142,12 +145,15 @@ export function Composer({
   attachments,
   attachmentBusy,
   effort,
+  agentModel,
+  modelOptions,
   sessionId,
   voiceConfigured,
   voiceTransport,
   providerReadiness,
   onChange,
   onEffortChange,
+  onModelChange,
   onVoiceTranscript,
   onVoiceError,
   onProviderRequired,
@@ -184,6 +190,7 @@ export function Composer({
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
   const providerPreflight = providerSubmissionPreflight(providerReadiness);
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
+  const activeModelLabel = agentModel.trim() || "Default model";
   const approvalInput = approvalInputSummary(pendingApproval);
 
   useEffect(() => {
@@ -491,7 +498,7 @@ export function Composer({
                   <button
                     className="composer-effort-trigger"
                     type="button"
-                    aria-label={`Effort: ${activeEffort.label}`}
+                    aria-label={`Model: ${activeModelLabel}, Reasoning: ${activeEffort.label}`}
                     aria-haspopup="listbox"
                     aria-expanded={effortMenuOpen}
                     title={activeEffort.description}
@@ -499,12 +506,43 @@ export function Composer({
                     ref={effortTriggerRef}
                     onClick={() => setEffortMenuOpen((current) => !current)}
                   >
-                    <span>{activeEffort.label}</span>
+                    <span>{activeModelLabel} · {activeEffort.label}</span>
                     <ChevronUp aria-hidden="true" />
                   </button>
                   {effortMenuOpen && (
-                    <div className="composer-effort-menu" role="listbox" aria-label="Cindx effort">
-                      {EFFORT_OPTIONS.map((option) => (
+                    <div className="composer-effort-menu" role="listbox" aria-label="Model and reasoning">
+                      {modelOptions.length > 0 && (
+                        <div className="composer-effort-group" role="group" aria-label="Model">
+                          <p className="composer-effort-group-label">Model</p>
+                          {modelOptions.map((model) => (
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={model === agentModel}
+                              data-selected={model === agentModel}
+                              key={model}
+                              onClick={(event) => {
+                                const restoreKeyboardFocus = event.detail === 0;
+                                onModelChange(model);
+                                setEffortMenuOpen(false);
+                                if (restoreKeyboardFocus) {
+                                  window.requestAnimationFrame(() =>
+                                    effortTriggerRef.current?.focus({ preventScroll: true })
+                                  );
+                                }
+                              }}
+                            >
+                              <span>
+                                <strong>{model}</strong>
+                              </span>
+                              {model === agentModel && <Check aria-hidden="true" />}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="composer-effort-group" role="group" aria-label="Reasoning">
+                        <p className="composer-effort-group-label">Reasoning</p>
+                        {EFFORT_OPTIONS.map((option) => (
                         <button
                           type="button"
                           role="option"
@@ -529,6 +567,7 @@ export function Composer({
                           {option.value === effort && <Check aria-hidden="true" />}
                         </button>
                       ))}
+                      </div>
                     </div>
                   )}
                 </div>

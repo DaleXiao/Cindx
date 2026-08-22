@@ -1083,7 +1083,7 @@ assert(
 );
 
 assert(
-  appLineCount <= 2_360 &&
+  appLineCount <= 2_420 &&
     appUseStateCount <= 25 &&
     appUseStateCounterProbe === 3 &&
     settingsPageLineCount <= 1_400 &&

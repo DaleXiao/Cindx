@@ -134,6 +134,8 @@ export type SessionView = {
   name: string;
   detail: string;
   effort: AgentEffort;
+  /** The model the user picked in the composer; empty means the provider default applies. */
+  agentModel: string;
   status: string;
   titleState: "pending" | "automatic" | "manual";
   activity: "idle" | "working" | "complete" | "attention";

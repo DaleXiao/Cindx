@@ -21,6 +21,7 @@ fn config_for(root: &Path, suffix: &str) -> ProjectSessionConfig {
             title_state: SessionTitleState::Manual,
             detail: "timeline + chat".to_string(),
             effort: "default".to_string(),
+            agent_model: String::new(),
             seen_event_sequence: 9,
             created_at_ms: 11,
             updated_at_ms: 21,

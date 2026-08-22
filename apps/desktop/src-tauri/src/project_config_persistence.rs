@@ -159,6 +159,11 @@ fn load_project_session_config_from_path(
                         .get(8)
                         .map(|value| AgentPolicy::parse_ingress(value).label().to_string())
                         .unwrap_or_else(default_agent_effort),
+                    agent_model: fields
+                        .get(11)
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_default(),
                     seen_event_sequence: fields
                         .get(10)
                         .and_then(|value| value.parse::<u64>().ok())
@@ -240,7 +245,7 @@ fn project_session_config_text(config: &ProjectSessionConfig) -> String {
             ""
         };
         text.push_str(&format!(
-            "session\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "session\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             sanitize_record_field(&session.id),
             sanitize_record_field(&session.project_id),
             sanitize_record_field(&session.name),
@@ -251,7 +256,8 @@ fn project_session_config_text(config: &ProjectSessionConfig) -> String {
             session.archived_at_ms.unwrap_or_default(),
             sanitize_record_field(&session.effort),
             session.title_state.label(),
-            session.seen_event_sequence
+            session.seen_event_sequence,
+            sanitize_record_field(&session.agent_model)
         ));
     }
 

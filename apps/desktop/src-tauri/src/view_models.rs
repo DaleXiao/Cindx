@@ -112,6 +112,9 @@ pub(crate) struct SessionView {
     pub(crate) title_state: String,
     pub(crate) detail: String,
     pub(crate) effort: String,
+    /// The model the user picked in the composer for this session; empty means
+    /// the provider's effort-tier default applies.
+    pub(crate) agent_model: String,
     pub(crate) status: String,
     pub(crate) activity: String,
     pub(crate) attention_reason: Option<String>,
@@ -188,6 +191,13 @@ pub(crate) struct RenameSessionInput {
 pub(crate) struct SessionEffortInput {
     pub(crate) session_id: String,
     pub(crate) effort: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionModelInput {
+    pub(crate) session_id: String,
+    pub(crate) agent_model: String,
 }
 
 #[derive(Debug, Deserialize)]
