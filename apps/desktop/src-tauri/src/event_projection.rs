@@ -218,62 +218,8 @@ pub(crate) fn phase4_state(
         .filter_map(message_view_from_event)
         .collect::<Vec<_>>();
 
-    let admitted_fitness = crate::prompt_evolution_admission_runtime::admitted_direct_judge_fitness_state(
-        &app_data_root(),
-    );
-    let evolution_efforts = ["fast", "auto", "pro"]
-        .into_iter()
-        .map(|effort| PromptEvolutionEffortState {
-            effort: effort.to_string(),
-            applicable: false,
-            status: "retired".to_string(),
-            champion_id: None,
-            champion_score: None,
-            stagnant_generations: 0,
-            evaluated_generations: 0,
-            freeze_reason: Some("prompt evolution retired".to_string()),
-            shadow_rate_percent: 0,
-            next_mode: "disabled".to_string(),
-            paired_runs: 0,
-            replay_runs: 0,
-            reflection_packets: 0,
-            learned_profiles: 0,
-            ready_profiles: 0,
-            evaluation_inflight: false,
-            stable_profile_id: String::new(),
-            canary_profile_id: None,
-            canary_percent: 0,
-            promotion_confidence: None,
-            rollback_count: 0,
-            rollout_status: "retired".to_string(),
-            readiness: "retired".to_string(),
-            campaign_stage: "retired".to_string(),
-            campaign_next_action: "none".to_string(),
-            campaign_resume_token: String::new(),
-            dataset_cases: 0,
-            dataset_train_cases: 0,
-            dataset_holdout_cases: 0,
-            required_paired_runs: 0,
-            required_replay_runs: 0,
-            admitted_direct_judge_fitness: admitted_fitness.clone(),
-        })
-        .collect::<Vec<_>>();
     Ok(Phase4State {
         provider: provider_config_state(config),
-        prompt_evolution: PromptEvolutionState {
-            enabled: false,
-            observed_runs: 0,
-            generation: 0,
-            population_size: 0,
-            frontier_profiles: 0,
-            paired_runs: 0,
-            replay_runs: 0,
-            reflection_packets: 0,
-            learned_profiles: 0,
-            evaluation_inflight: false,
-            efforts: evolution_efforts,
-            profiles: Vec::new(),
-        },
         timeline,
         messages,
         last_error,

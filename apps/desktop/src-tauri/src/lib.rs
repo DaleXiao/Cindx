@@ -77,7 +77,6 @@ mod project_config_persistence;
 mod project_instructions_runtime;
 mod project_lifecycle_runtime;
 mod project_session_persistence;
-mod prompt_evolution_admission_runtime;
 mod provider_profiles;
 mod queue_service;
 mod rag_operation_runtime;

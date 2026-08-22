@@ -97,6 +97,10 @@ fn read_direct_judge_shadow_journal_lines(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+
+/// Reads the shadow journal back. Test-only: production records the journal but
+/// never reads it (inert measurement plumbing).
+#[cfg(test)]
 pub(crate) fn load_direct_judge_shadow_signals(
     path: &Path,
 ) -> Result<Vec<agent_application::DirectJudgeFitnessSignalV1>, String> {
@@ -107,32 +111,4 @@ pub(crate) fn load_direct_judge_shadow_signals(
         signals.push(signal);
     }
     Ok(signals)
-}
-
-/// Admits the bounded journal window into prompt-evolution fitness when the
-/// approving review receipt binds exactly that window. Returns the admission
-/// record and its conservative PromptFitness mapping; both remain ineligible
-/// for production promotion.
-pub(crate) fn admit_direct_judge_shadow_fitness(
-    journal_path: &Path,
-    review_receipt_json: &str,
-) -> Result<
-    (
-        agent_application::DirectJudgeFitnessAdmissionV1,
-        agent_core::PromptFitness,
-    ),
-    String,
-> {
-    let signals = load_direct_judge_shadow_signals(journal_path)?;
-    let receipt = agent_application::DirectJudgeReviewReceiptV1::from_json(review_receipt_json)
-        .map_err(|error| error.to_string())?;
-    let admission = agent_application::admit_direct_judge_fitness_window(&signals, &receipt)
-        .map_err(|error| error.to_string())?;
-    let admitted = agent_core::AdmittedDirectJudgeFitness {
-        scored_runs: admission.scored_runs,
-        passed_runs: admission.passed_runs,
-        average_reward_bps: admission.average_reward_bps,
-    };
-    let fitness = agent_core::admitted_direct_judge_fitness_into_prompt_fitness(&admitted);
-    Ok((admission, fitness))
 }

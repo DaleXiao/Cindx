@@ -141,8 +141,6 @@ jobs:
             target/performance-regression/baseline.json
             target/performance-regression/candidate.json
             target/performance-regression/comparison.json
-            target/agent-benchmark-report.json
-            target/evaluation-v2-foundation.json
             target/memory-evaluation.json
           if-no-files-found: error
           retention-days: 30

@@ -25,7 +25,6 @@ use crate::{
         AGENT_MEMORY_READ_MODEL_NAMESPACE, AGENT_RESOURCE_SNAPSHOT_READ_MODEL_NAMESPACE,
         AGENT_RUNTIME_SNAPSHOT_READ_MODEL_NAMESPACE, AGENT_SESSION_READ_MODEL_NAMESPACE,
         LEGACY_AGENT_MEMORY_READ_MODEL_NAMESPACE, LEGACY_ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
-        PROMPT_EVOLUTION_READ_MODEL_KEY, PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
         ROUTING_TELEMETRY_READ_MODEL_KEY, ROUTING_TELEMETRY_READ_MODEL_NAMESPACE,
     },
     runtime_values::{phase16_task_id, unique_id},
@@ -826,10 +825,7 @@ fn delete_global_projection_caches(store: &mut SqliteStore) -> Result<(), Storag
     ] {
         store.delete_read_model(namespace, ROUTING_TELEMETRY_READ_MODEL_KEY)?;
     }
-    store.delete_read_model(
-        PROMPT_EVOLUTION_READ_MODEL_NAMESPACE,
-        PROMPT_EVOLUTION_READ_MODEL_KEY,
-    )
+    Ok(())
 }
 
 fn managed_attachment_dir(project_root: &Path, session_id: &str) -> PathBuf {

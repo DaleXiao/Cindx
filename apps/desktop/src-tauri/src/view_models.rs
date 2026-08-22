@@ -457,89 +457,9 @@ pub(crate) struct ChatMessageView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Phase4State {
     pub(crate) provider: ProviderConfigState,
-    pub(crate) prompt_evolution: PromptEvolutionState,
     pub(crate) timeline: Vec<TimelineEntry>,
     pub(crate) messages: Vec<ChatMessageView>,
     pub(crate) last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PromptEvolutionProfileState {
-    pub(crate) id: String,
-    pub(crate) effort: String,
-    pub(crate) generation: u32,
-    pub(crate) runs: usize,
-    pub(crate) train_runs: usize,
-    pub(crate) holdout_runs: usize,
-    pub(crate) reflection_runs: usize,
-    pub(crate) success_rate: f64,
-    pub(crate) average_reward: Option<f64>,
-    pub(crate) average_relative_reward: Option<f64>,
-    pub(crate) average_step_credit: Option<f64>,
-    pub(crate) average_quality: Option<f64>,
-    pub(crate) average_latency_ms: u64,
-    pub(crate) average_tokens: u64,
-    pub(crate) frontier: bool,
-    pub(crate) champion: bool,
-    pub(crate) learned: bool,
-    pub(crate) next: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PromptEvolutionEffortState {
-    pub(crate) effort: String,
-    pub(crate) applicable: bool,
-    pub(crate) status: String,
-    pub(crate) champion_id: Option<String>,
-    pub(crate) champion_score: Option<f64>,
-    pub(crate) stagnant_generations: usize,
-    pub(crate) evaluated_generations: usize,
-    pub(crate) freeze_reason: Option<String>,
-    pub(crate) shadow_rate_percent: u8,
-    pub(crate) next_mode: String,
-    pub(crate) paired_runs: usize,
-    pub(crate) replay_runs: usize,
-    pub(crate) reflection_packets: usize,
-    pub(crate) learned_profiles: usize,
-    pub(crate) ready_profiles: usize,
-    pub(crate) evaluation_inflight: bool,
-    pub(crate) stable_profile_id: String,
-    pub(crate) canary_profile_id: Option<String>,
-    pub(crate) canary_percent: u8,
-    pub(crate) promotion_confidence: Option<f64>,
-    pub(crate) rollback_count: usize,
-    pub(crate) rollout_status: String,
-    pub(crate) readiness: String,
-    pub(crate) campaign_stage: String,
-    pub(crate) campaign_next_action: String,
-    pub(crate) campaign_resume_token: String,
-    pub(crate) dataset_cases: usize,
-    pub(crate) dataset_train_cases: usize,
-    pub(crate) dataset_holdout_cases: usize,
-    pub(crate) required_paired_runs: usize,
-    pub(crate) required_replay_runs: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) admitted_direct_judge_fitness:
-        Option<crate::prompt_evolution_admission_runtime::PromptEvolutionAdmissionState>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PromptEvolutionState {
-    pub(crate) enabled: bool,
-    pub(crate) observed_runs: usize,
-    pub(crate) generation: u32,
-    pub(crate) population_size: usize,
-    pub(crate) frontier_profiles: usize,
-    pub(crate) paired_runs: usize,
-    pub(crate) replay_runs: usize,
-    pub(crate) reflection_packets: usize,
-    pub(crate) learned_profiles: usize,
-    pub(crate) evaluation_inflight: bool,
-    pub(crate) efforts: Vec<PromptEvolutionEffortState>,
-    pub(crate) profiles: Vec<PromptEvolutionProfileState>,
 }
 
 #[derive(Debug, Clone, Serialize)]

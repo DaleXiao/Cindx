@@ -510,8 +510,6 @@ const agentToolRuntimeSource = read("crates/agent-runtime/src/tool_runtime.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const agentCoreSource = readRustCrateSource("agent-core");
-const benchmarkSuite = JSON.parse(read("benchmarks/agent/core-v1.json"));
-const benchmarkBaseline = JSON.parse(read("benchmarks/agent/core-v1-baseline.json"));
 const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
 const qualityGateManifest = JSON.parse(
   read("benchmarks/system/quality-gates-v1.json")
@@ -3001,7 +2999,7 @@ assert(
   tauriBridge.includes("conductorModel: string") &&
     rustLib.includes("conductor_model: String") &&
     rustLib.includes("model_for_conductor"),
-  "Models settings must persist and use a dedicated Conductor model"
+  "Models settings must persist the legacy conductor_model compatibility slot"
 );
 assert(
   workspaceChromeSource.includes("context-usage") &&
@@ -3279,7 +3277,7 @@ assert(
     composerSource.includes(
       'description: "Deepest thinking for complex, multi-step work"'
     ) &&
-    !composerSource.includes("One model"),
+    !composerSource.includes("One model") &&
     composerSource.includes('className="composer-effort-menu"') &&
     composerSource.includes('role="listbox"') &&
     composerSource.includes('role="option"') &&

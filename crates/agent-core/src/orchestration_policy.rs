@@ -1,4 +1,4 @@
-use crate::{Metadata, ModelRole};
+use crate::ModelRole;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8,20 +8,6 @@ pub enum OrchestrationPolicy {
     PlanExecuteReview,
     BestOfN { candidates: usize },
     AutoRouter,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrchestrationStep {
-    pub role: ModelRole,
-    pub instruction: String,
-    pub metadata: Metadata,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrchestrationPlan {
-    pub policy: OrchestrationPolicy,
-    pub steps: Vec<OrchestrationStep>,
-    pub metadata: Metadata,
 }
 
 impl OrchestrationPolicy {
@@ -52,84 +38,5 @@ pub fn role_label(role: &ModelRole) -> &'static str {
         ModelRole::Reviewer => "reviewer",
         ModelRole::Summarizer => "summarizer",
         ModelRole::Embedder => "embedder",
-    }
-}
-
-pub fn step_prompt(
-    plan: &OrchestrationPlan,
-    step_index: usize,
-    user_prompt: &str,
-    previous_outputs: &[String],
-) -> Option<String> {
-    let step = plan.steps.get(step_index)?;
-    let mut prompt = String::new();
-    prompt.push_str("You are running inside Cindx orchestration.\n");
-    prompt.push_str(&format!("Policy: {}\n", plan.policy.label()));
-    prompt.push_str(&format!("Role: {}\n", role_label(&step.role)));
-    prompt.push_str(&format!("Step instruction: {}\n\n", step.instruction));
-    prompt.push_str("User request:\n");
-    prompt.push_str(user_prompt);
-    prompt.push('\n');
-
-    if !previous_outputs.is_empty() {
-        prompt.push_str("\nPrevious step outputs:\n");
-        for (index, output) in previous_outputs.iter().enumerate() {
-            prompt.push_str(&format!("Step {}:\n{}\n", index + 1, output));
-        }
-    }
-
-    Some(prompt)
-}
-
-pub fn default_plan(policy: OrchestrationPolicy) -> OrchestrationPlan {
-    let steps = match policy {
-        OrchestrationPolicy::Single => vec![OrchestrationStep {
-            role: ModelRole::Executor,
-            instruction: "Answer or act directly with tool support when needed.".to_string(),
-            metadata: Metadata::new(),
-        }],
-        OrchestrationPolicy::PlanExecuteReview => vec![
-            OrchestrationStep {
-                role: ModelRole::Planner,
-                instruction: "Create a concise, checkable plan.".to_string(),
-                metadata: Metadata::new(),
-            },
-            OrchestrationStep {
-                role: ModelRole::Executor,
-                instruction: "Execute the approved plan through local tools.".to_string(),
-                metadata: Metadata::new(),
-            },
-            OrchestrationStep {
-                role: ModelRole::Reviewer,
-                instruction: "Review the result against the request and evidence.".to_string(),
-                metadata: Metadata::new(),
-            },
-        ],
-        OrchestrationPolicy::BestOfN { candidates } => vec![
-            OrchestrationStep {
-                role: ModelRole::Planner,
-                instruction: format!("Generate {candidates} independent candidate approaches."),
-                metadata: Metadata::new(),
-            },
-            OrchestrationStep {
-                role: ModelRole::Reviewer,
-                instruction:
-                    "Select or synthesize the best candidate using external evidence when possible."
-                        .to_string(),
-                metadata: Metadata::new(),
-            },
-        ],
-        OrchestrationPolicy::AutoRouter => vec![OrchestrationStep {
-            role: ModelRole::Executor,
-            instruction: "Answer or act directly after the router selects a concrete policy."
-                .to_string(),
-            metadata: Metadata::new(),
-        }],
-    };
-
-    OrchestrationPlan {
-        policy,
-        steps,
-        metadata: Metadata::new(),
     }
 }

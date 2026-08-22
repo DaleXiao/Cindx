@@ -10,21 +10,6 @@ pub enum AgentPolicy {
     Pro,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentModelSelectionKind {
-    DefaultConfigured,
-    RoutedExecutor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptEvolutionStrategy {
-    Disabled,
-    NativePromotion,
-    AutoTransferPromotion,
-}
-
 impl AgentPolicy {
     pub fn generation_temperature(self) -> Option<&'static str> {
         match self {
@@ -64,40 +49,6 @@ impl AgentPolicy {
             Self::Auto | Self::Pro => OrchestrationPolicy::AutoRouter,
         }
     }
-
-    pub const fn uses_conductor(self) -> bool {
-        !matches!(self, Self::Fast)
-    }
-
-    pub const fn max_parallelism(self) -> usize {
-        match self {
-            Self::Fast => 1,
-            Self::Auto => 2,
-            Self::Pro => 3,
-        }
-    }
-
-    pub const fn model_selection(self) -> AgentModelSelectionKind {
-        match self {
-            Self::Fast => AgentModelSelectionKind::DefaultConfigured,
-            Self::Auto | Self::Pro => AgentModelSelectionKind::RoutedExecutor,
-        }
-    }
-
-    pub const fn uses_default_model(self) -> bool {
-        matches!(
-            self.model_selection(),
-            AgentModelSelectionKind::DefaultConfigured
-        )
-    }
-
-    pub const fn prompt_evolution(self) -> PromptEvolutionStrategy {
-        match self {
-            Self::Fast => PromptEvolutionStrategy::Disabled,
-            Self::Auto => PromptEvolutionStrategy::NativePromotion,
-            Self::Pro => PromptEvolutionStrategy::AutoTransferPromotion,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -130,44 +81,19 @@ mod tests {
     }
 
     #[test]
-    fn policy_matrix_is_coherent() {
-        let matrix = [
-            (
-                AgentPolicy::Fast,
-                OrchestrationPolicy::Single,
-                false,
-                1,
-                AgentModelSelectionKind::DefaultConfigured,
-                PromptEvolutionStrategy::Disabled,
-            ),
-            (
-                AgentPolicy::Auto,
-                OrchestrationPolicy::AutoRouter,
-                true,
-                2,
-                AgentModelSelectionKind::RoutedExecutor,
-                PromptEvolutionStrategy::NativePromotion,
-            ),
-            (
-                AgentPolicy::Pro,
-                OrchestrationPolicy::AutoRouter,
-                true,
-                3,
-                AgentModelSelectionKind::RoutedExecutor,
-                PromptEvolutionStrategy::AutoTransferPromotion,
-            ),
-        ];
-
-        for (policy, requested, conductor, parallelism, model, evolution) in matrix {
-            assert_eq!(policy.requested_policy(), requested);
-            assert_eq!(policy.uses_conductor(), conductor);
-            assert_eq!(policy.max_parallelism(), parallelism);
-            assert_eq!(policy.model_selection(), model);
-            assert_eq!(policy.uses_default_model(), policy == AgentPolicy::Fast);
-            assert_eq!(policy.prompt_evolution(), evolution);
-            assert_eq!(AgentPolicy::parse_persisted(policy.label()), Some(policy));
-            assert_eq!(policy.uses_conductor(), parallelism > 1);
-        }
+    fn requested_policy_follows_the_effort_tier() {
+        assert_eq!(
+            AgentPolicy::Fast.requested_policy(),
+            OrchestrationPolicy::Single
+        );
+        assert_eq!(
+            AgentPolicy::Auto.requested_policy(),
+            OrchestrationPolicy::AutoRouter
+        );
+        assert_eq!(
+            AgentPolicy::Pro.requested_policy(),
+            OrchestrationPolicy::AutoRouter
+        );
     }
 
     #[test]
