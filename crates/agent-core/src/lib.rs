@@ -11,7 +11,6 @@ mod model_candidate;
 mod model_contract;
 mod orchestration_policy;
 mod permission_policy;
-mod prompt_fitness;
 mod routing_telemetry;
 pub mod run_decision_enums;
 mod run_identity;
@@ -56,10 +55,6 @@ pub use model_contract::{
 pub use orchestration_policy::{parse_policy, role_label, OrchestrationPolicy};
 pub use permission_policy::{
     permission_can_allow_session, permission_capability_matches, permission_requires_exact_scope,
-};
-pub use prompt_fitness::{
-    admitted_direct_judge_fitness_into_prompt_fitness, AdmittedDirectJudgeFitness, PromptFitness,
-    ADMITTED_DIRECT_JUDGE_TASK_CLASS,
 };
 pub use routing_telemetry::{RoutingOutcome, RoutingTelemetry};
 pub use run_decision_enums::AgentToolRequirement;
