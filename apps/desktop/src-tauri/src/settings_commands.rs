@@ -563,3 +563,8 @@ pub(crate) fn send_model_prompt(
         }
     }
 }
+
+#[tauri::command]
+pub(crate) fn model_supports_thinking(model: String) -> bool {
+    model_provider::model_disables_thinking_by_default(&model)
+}

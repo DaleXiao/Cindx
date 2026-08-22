@@ -1221,6 +1221,15 @@ export async function resolvePermission(
   }
 }
 
+export async function modelSupportsThinking(model: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>("model_supports_thinking", { model });
+  } catch (error) {
+    requireBrowserPreviewFallback(error);
+    return false;
+  }
+}
+
 export async function getPhase4State(): Promise<Phase4State> {
   try {
     return await invoke<Phase4State>("get_phase4_state");

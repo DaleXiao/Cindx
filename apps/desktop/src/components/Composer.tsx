@@ -16,7 +16,12 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useArtifactImagePreview } from "../controllers/useArtifactImagePreview";
-import type { AgentAttachment, AgentEffort, ToolApprovalView } from "../tauri";
+import {
+  modelSupportsThinking,
+  type AgentAttachment,
+  type AgentEffort,
+  type ToolApprovalView
+} from "../tauri";
 import type { VoiceInputStatus } from "../voice/voiceInputModel";
 import type { ProviderVoiceTransport } from "../providerProfiles";
 import {
@@ -192,6 +197,21 @@ export function Composer({
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
   const activeModelLabel = agentModel.trim() || "Default model";
   const approvalInput = approvalInputSummary(pendingApproval);
+  const [modelThinks, setModelThinks] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!agentModel.trim()) {
+      setModelThinks(true);
+      return;
+    }
+    void modelSupportsThinking(agentModel).then((supported) => {
+      if (!cancelled) setModelThinks(supported);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentModel]);
 
   useEffect(() => {
     if (pendingApproval) setVoiceStatus("idle");
@@ -542,31 +562,40 @@ export function Composer({
                       )}
                       <div className="composer-effort-group" role="group" aria-label="Reasoning">
                         <p className="composer-effort-group-label">Reasoning</p>
-                        {EFFORT_OPTIONS.map((option) => (
-                        <button
-                          type="button"
-                          role="option"
-                          aria-selected={option.value === effort}
-                          data-selected={option.value === effort}
-                          key={option.value}
-                          onClick={(event) => {
-                            const restoreKeyboardFocus = event.detail === 0;
-                            onEffortChange(option.value);
-                            setEffortMenuOpen(false);
-                            if (restoreKeyboardFocus) {
-                              window.requestAnimationFrame(() =>
-                                effortTriggerRef.current?.focus({ preventScroll: true })
-                              );
-                            }
-                          }}
-                        >
-                          <span>
-                            <strong>{option.label}</strong>
-                            <small>{option.description}</small>
-                          </span>
-                          {option.value === effort && <Check aria-hidden="true" />}
-                        </button>
-                      ))}
+                        {EFFORT_OPTIONS.map((option) => {
+                          const needsThinking = option.value === "high" || option.value === "xhigh";
+                          const unsupported = needsThinking && !modelThinks;
+                          return (
+                          <button
+                            type="button"
+                            role="option"
+                            aria-selected={option.value === effort}
+                            data-selected={option.value === effort}
+                            key={option.value}
+                            disabled={unsupported}
+                            onClick={(event) => {
+                              const restoreKeyboardFocus = event.detail === 0;
+                              onEffortChange(option.value);
+                              setEffortMenuOpen(false);
+                              if (restoreKeyboardFocus) {
+                                window.requestAnimationFrame(() =>
+                                  effortTriggerRef.current?.focus({ preventScroll: true })
+                                );
+                              }
+                            }}
+                          >
+                            <span>
+                              <strong>{option.label}</strong>
+                              <small>
+                                {unsupported
+                                  ? "Not supported by this model"
+                                  : option.description}
+                              </small>
+                            </span>
+                            {option.value === effort && <Check aria-hidden="true" />}
+                          </button>
+                          );
+                        })}
                       </div>
                     </div>
                   )}

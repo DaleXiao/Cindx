@@ -232,6 +232,7 @@ pub fn run() -> Result<(), String> {
             request_mock_permission,
             resolve_permission,
             get_phase4_state,
+            model_supports_thinking,
             get_personalization_config,
             save_personalization_config,
             save_provider_config,
