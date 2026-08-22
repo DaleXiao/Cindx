@@ -123,6 +123,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
         supports_vision,
         &mut image_data_url,
         None,
+        None,
     )
 }
 
@@ -136,6 +137,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
     supports_vision: bool,
     image_resolver: &mut dyn FnMut(&str) -> Option<Arc<str>>,
     temperature: Option<f64>,
+    reasoning_effort: Option<&str>,
 ) -> Result<String, ModelError> {
     let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
@@ -194,11 +196,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
         .filter(|value| *value > 0)
         .map(|value| format!(",\"max_tokens\":{value}"))
         .unwrap_or_default();
-    let thinking_json = if model_disables_thinking_by_default(model) {
-        ",\"enable_thinking\":false"
-    } else {
-        ""
-    };
+    let thinking_json = thinking_json_for(model, reasoning_effort);
     let temperature_json = temperature
         .map(|value| value.clamp(0.0, 2.0))
         .map(|value| format!(",\"temperature\":{value}"))
@@ -231,6 +229,22 @@ pub fn model_disables_thinking_by_default(model: &str) -> bool {
         || model.starts_with("glm")
         || model.starts_with("kimi")
         || model.contains("deepseek")
+}
+
+/// Maps the run's reasoning level to the provider's thinking params. For the
+/// models that think by default (qwen/qwq/glm/kimi/deepseek), Fast keeps
+/// thinking off; Default/High/Xhigh enable thinking with a growing token budget.
+/// Other models are untouched.
+fn thinking_json_for(model: &str, reasoning_effort: Option<&str>) -> &'static str {
+    if !model_disables_thinking_by_default(model) {
+        return "";
+    }
+    match reasoning_effort {
+        Some("default") => ",\"enable_thinking\":true,\"thinking_budget\":1024",
+        Some("high") => ",\"enable_thinking\":true,\"thinking_budget\":4096",
+        Some("xhigh") => ",\"enable_thinking\":true,\"thinking_budget\":16384",
+        _ => ",\"enable_thinking\":false",
+    }
 }
 
 fn message_content_json(

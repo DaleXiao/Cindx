@@ -16,6 +16,10 @@ impl OpenAiCompatibleProvider {
             .filter(|value| *value > 0);
         let generation_temperature =
             crate::request_builder::generation_temperature_from_metadata(&request.metadata);
+        let reasoning_effort = request
+            .metadata
+            .get(agent_core::REASONING_EFFORT_KEY)
+            .map(String::as_str);
         let estimated_prompt_tokens = estimate_request_tokens(&request.messages, &request.tools);
         let request_body =
             crate::request_builder::build_chat_request_json_with_tools_output_limit_vision_and_images(
@@ -27,6 +31,7 @@ impl OpenAiCompatibleProvider {
             self.config.supports_vision_content(),
             &mut |path| self.image_cache.resolve(path),
             generation_temperature,
+            reasoning_effort,
         )?;
         Ok(PreparedStreamingModelRequest::encoded(
             request_body,
@@ -293,6 +298,7 @@ mod tests {
                 Some(Arc::<str>::from("data:image/png;base64,unused"))
             },
             None,
+            None,
         )
         .expect("text request should encode");
 
@@ -327,6 +333,7 @@ mod tests {
                     base64::engine::general_purpose::STANDARD.encode(path)
                 )))
             },
+            None,
             None,
         )
         .expect("vision request should encode");

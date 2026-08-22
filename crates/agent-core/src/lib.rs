@@ -50,7 +50,7 @@ pub use model_candidate::{ModelCandidate, ModelCapabilitySource, TaskClass};
 pub use model_contract::{
     classify_provider_failure, tool_function_name, ModelCallMode, ModelError, ModelRequest,
     ModelResponse, ModelResponseAssessment, ModelResponseDisposition, ModelResponseTermination,
-    ModelToolCall, ProviderFailureClass, GENERATION_TEMPERATURE_KEY,
+    ModelToolCall, ProviderFailureClass, GENERATION_TEMPERATURE_KEY, REASONING_EFFORT_KEY,
 };
 pub use orchestration_policy::{parse_policy, role_label, OrchestrationPolicy};
 pub use permission_policy::{

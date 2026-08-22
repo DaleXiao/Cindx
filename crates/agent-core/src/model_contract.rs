@@ -1,6 +1,7 @@
 use crate::{Message, Metadata, ModelRole, ToolSpec};
 
 pub const GENERATION_TEMPERATURE_KEY: &str = "generation_temperature";
+pub const REASONING_EFFORT_KEY: &str = "reasoning_effort";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCallMode {

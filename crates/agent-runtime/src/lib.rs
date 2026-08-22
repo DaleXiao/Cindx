@@ -215,6 +215,9 @@ pub struct AgentLoopState {
     adaptive_loop_cursor: AdaptiveLoopCursor,
     context_token_ledger: context_token_ledger::ContextTokenLedger,
     pub generation_temperature: Option<String>,
+    /// The run's reasoning level (fast/default/high/xhigh); maps to the
+    /// provider's thinking/reasoning effort parameter.
+    pub reasoning_effort: Option<String>,
 }
 
 impl AgentLoopState {
@@ -441,6 +444,7 @@ pub fn start_agent_loop(
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
         generation_temperature: None,
+        reasoning_effort: None,
     }
 }
 
@@ -469,6 +473,7 @@ pub fn start_agent_loop_with_history(
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
         generation_temperature: None,
+        reasoning_effort: None,
     }
 }
 
@@ -513,6 +518,7 @@ pub fn resume_agent_loop_from_messages(
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
         generation_temperature: None,
+        reasoning_effort: None,
     };
     rebuild_interaction_verification_state(&mut state);
     state
@@ -611,6 +617,12 @@ pub fn model_request_for_turn_with_context_budget_and_overlays(
         metadata.insert(
             agent_core::GENERATION_TEMPERATURE_KEY.to_string(),
             temperature,
+        );
+    }
+    if let Some(reasoning_effort) = state.reasoning_effort.clone() {
+        metadata.insert(
+            agent_core::REASONING_EFFORT_KEY.to_string(),
+            reasoning_effort,
         );
     }
     report.insert_metadata(&mut metadata);

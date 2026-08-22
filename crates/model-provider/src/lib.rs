@@ -1131,6 +1131,60 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_maps_to_thinking_budget_for_thinking_default_models() {
+        let build = |reasoning_effort: Option<&str>| {
+            let body = build_chat_request_json_with_tools_output_limit_vision_and_images(
+                "qwen3.8-max",
+                &[Message {
+                    role: MessageRole::User,
+                    content: "hello".to_string(),
+                    metadata: Metadata::new(),
+                }],
+                false,
+                &[],
+                None,
+                false,
+                &mut |_| None,
+                None,
+                reasoning_effort,
+            )
+            .expect("body should encode");
+            serde_json::from_str::<serde_json::Value>(&body).expect("valid request JSON")
+        };
+
+        // Fast keeps thinking off.
+        assert_eq!(build(Some("fast"))["enable_thinking"], false);
+        // Default/High/Xhigh enable thinking with a growing budget.
+        assert_eq!(build(Some("default"))["enable_thinking"], true);
+        assert_eq!(build(Some("default"))["thinking_budget"], 1024);
+        assert_eq!(build(Some("high"))["thinking_budget"], 4096);
+        assert_eq!(build(Some("xhigh"))["thinking_budget"], 16384);
+        // Absent reasoning effort keeps thinking off (unchanged default).
+        assert_eq!(build(None)["enable_thinking"], false);
+
+        // Non-thinking-default models are untouched by reasoning effort.
+        let body = build_chat_request_json_with_tools_output_limit_vision_and_images(
+            "model-a",
+            &[Message {
+                role: MessageRole::User,
+                content: "hello".to_string(),
+                metadata: Metadata::new(),
+            }],
+            false,
+            &[],
+            None,
+            false,
+            &mut |_| None,
+            None,
+            Some("high"),
+        )
+        .expect("body should encode");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
+        assert!(value.get("enable_thinking").is_none());
+        assert!(value.get("thinking_budget").is_none());
+    }
+
+    #[test]
     fn thinking_default_predicate_covers_configured_dashscope_families() {
         for model in [
             "qwen3.8-max",
@@ -1167,6 +1221,7 @@ mod tests {
             false,
             &mut |_| None,
             Some(0.0),
+            None,
         )
         .expect("body should encode");
 
@@ -1188,6 +1243,7 @@ mod tests {
             None,
             false,
             &mut |_| None,
+            None,
             None,
         )
         .expect("body should encode");
@@ -1211,6 +1267,7 @@ mod tests {
             false,
             &mut |_| None,
             Some(9.0),
+            None,
         )
         .expect("body should encode");
 

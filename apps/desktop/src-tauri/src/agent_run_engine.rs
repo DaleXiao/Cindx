@@ -81,6 +81,7 @@ impl<'app, 'state> AgentExecutionService<'app, 'state> {
     ) -> Result<AgentState, String> {
         prepared.runtime.generation_temperature =
             effort.generation_temperature().map(str::to_string);
+        prepared.runtime.reasoning_effort = Some(effort.label().to_string());
         let mut executor = DesktopAgentRunExecutor {
             app: self.app,
             state: self.state,
