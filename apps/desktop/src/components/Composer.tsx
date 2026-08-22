@@ -2,6 +2,7 @@ import {
   Check,
   CheckCheck,
   ChevronLeft,
+  ChevronRight,
   ChevronUp,
   CircleCheck,
   FileText,
@@ -169,7 +170,7 @@ export function Composer({
   const imeEnterSeenDuringCompositionRef = useRef(false);
   const suppressImeEnterUntilRef = useRef(0);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
-  const [menuStep, setMenuStep] = useState<"model" | "effort">("model");
+  const [menuStep, setMenuStep] = useState<"main" | "model" | "effort">("main");
   const [voiceStatus, setVoiceStatus] = useState<VoiceInputStatus>("idle");
   const hasInput = Boolean(value.trim() || attachments.length);
   const agentActive = working || canStop;
@@ -242,7 +243,7 @@ export function Composer({
 
   useEffect(() => {
     if (!effortMenuOpen) {
-      setMenuStep("model");
+      setMenuStep("main");
       return;
     }
     const closeOnPointerDown = (event: globalThis.PointerEvent) => {
@@ -514,14 +515,43 @@ export function Composer({
                     ref={effortTriggerRef}
                     onClick={() => setEffortMenuOpen((current) => !current)}
                   >
-                    <span>{activeModelLabel} · {activeEffort.label}</span>
+                    <span>{activeModelLabel} {activeEffort.label}</span>
                     <ChevronUp aria-hidden="true" />
                   </button>
                   {effortMenuOpen && (
                     <div className="composer-effort-menu" role="listbox" aria-label="Model and reasoning">
-                      {menuStep === "model" ? (
+                      {menuStep === "main" && (
+                        <div className="composer-effort-rows" role="group" aria-label="Model and reasoning">
+                          <button
+                            type="button"
+                            className="composer-effort-row"
+                            onClick={() => setMenuStep("model")}
+                          >
+                            <span className="composer-effort-row-label">Model</span>
+                            <span className="composer-effort-row-value">{activeModelLabel}</span>
+                            <ChevronRight aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            className="composer-effort-row"
+                            onClick={() => setMenuStep("effort")}
+                          >
+                            <span className="composer-effort-row-label">Effort</span>
+                            <span className="composer-effort-row-value">{activeEffort.label}</span>
+                            <ChevronRight aria-hidden="true" />
+                          </button>
+                        </div>
+                      )}
+                      {menuStep === "model" && (
                         <div className="composer-effort-group" role="group" aria-label="Model">
-                          <p className="composer-effort-group-label">Model</p>
+                          <button
+                            type="button"
+                            className="composer-effort-back"
+                            onClick={() => setMenuStep("main")}
+                          >
+                            <ChevronLeft aria-hidden="true" />
+                            <span>Model</span>
+                          </button>
                           {modelOptions.map((model) => (
                             <button
                               type="button"
@@ -547,17 +577,17 @@ export function Composer({
                             </button>
                           ))}
                         </div>
-                      ) : (
+                      )}
+                      {menuStep === "effort" && (
                         <div className="composer-effort-group" role="group" aria-label="Reasoning">
                           <button
                             type="button"
                             className="composer-effort-back"
-                            onClick={() => setMenuStep("model")}
+                            onClick={() => setMenuStep("main")}
                           >
                             <ChevronLeft aria-hidden="true" />
-                            <span>Model: {activeModelLabel}</span>
+                            <span>Effort</span>
                           </button>
-                          <p className="composer-effort-group-label">Reasoning</p>
                           {EFFORT_OPTIONS.map((option) => {
                             const needsThinking = option.value === "high" || option.value === "xhigh";
                             const unsupported = needsThinking && !modelThinks;
@@ -573,7 +603,7 @@ export function Composer({
                                 const restoreKeyboardFocus = event.detail === 0;
                                 onEffortChange(option.value);
                                 setEffortMenuOpen(false);
-                                setMenuStep("model");
+                                setMenuStep("main");
                                 if (restoreKeyboardFocus) {
                                   window.requestAnimationFrame(() =>
                                     effortTriggerRef.current?.focus({ preventScroll: true })
