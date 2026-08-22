@@ -275,14 +275,6 @@ export type TimelineEntry = {
   toolName?: string;
   state: "done" | "pending" | "idle";
   timestampMs: number;
-  workflowProgress?: {
-    completedSteps: number;
-    totalSteps: number;
-    currentStepId: string | null;
-    stepStatus: string | null;
-    continuations: number;
-    recoverable: boolean;
-  };
 };
 
 export type PermissionAudit = {
@@ -340,7 +332,6 @@ export type ProviderConfigState = {
   imageEndpoint: string;
   voiceModel: string;
   collaborationPolicy: string;
-  promptEvolutionEnabled: boolean;
   contextWindowTokens: number;
   agentSystemPrompt: string;
   ready: boolean;
@@ -368,7 +359,6 @@ export type ProviderConfigInput = {
   imageEndpoint: string;
   voiceModel: string;
   collaborationPolicy: string;
-  promptEvolutionEnabled: boolean;
   contextWindowTokens: number;
   agentSystemPrompt: string;
 };

@@ -5,7 +5,7 @@ use crate::view_models::{
     AgentAttachmentView, AgentRunBudgetView, AgentRunBudgetsView, AgentState, ChatMessageView,
     ModelStreamDelta, PermissionReviewItem, PermissionReviewState, ProjectSessionState,
     ProjectView, ProviderConfigInput, ProviderConfigState, RuntimeStatus, SessionView,
-    TimelineEntry, ToolApprovalView, WorkflowProgressView,
+    TimelineEntry, ToolApprovalView,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -97,7 +97,6 @@ fn provider_state(auth_verified_at_ms: Option<u64>) -> ProviderConfigState {
         image_endpoint: String::new(),
         voice_model: if configured { "voice-contract" } else { "" }.to_string(),
         collaboration_policy: if configured { "auto_router" } else { "single" }.to_string(),
-        prompt_evolution_enabled: configured,
         context_window_tokens: if configured { 128_000 } else { 4_096 },
         agent_system_prompt: if configured { "Contract prompt" } else { "" }.to_string(),
         ready: configured,
@@ -226,14 +225,6 @@ fn agent_state_values() -> Vec<Value> {
             tool_name: Some("shell.run".to_string()),
             state: "pending".to_string(),
             timestamp_ms: 51,
-            workflow_progress: Some(WorkflowProgressView {
-                completed_steps: 1,
-                total_steps: 2,
-                current_step_id: Some("step-2".to_string()),
-                step_status: Some("running".to_string()),
-                continuations: 0,
-                recoverable: true,
-            }),
         },
         TimelineEntry {
             sequence: 8,
@@ -243,7 +234,6 @@ fn agent_state_values() -> Vec<Value> {
             tool_name: None,
             state: "pending".to_string(),
             timestamp_ms: 52,
-            workflow_progress: None,
         },
         TimelineEntry {
             sequence: 9,
@@ -253,14 +243,6 @@ fn agent_state_values() -> Vec<Value> {
             tool_name: None,
             state: "idle".to_string(),
             timestamp_ms: 53,
-            workflow_progress: Some(WorkflowProgressView {
-                completed_steps: 2,
-                total_steps: 2,
-                current_step_id: None,
-                step_status: None,
-                continuations: 1,
-                recoverable: false,
-            }),
         },
     ];
     let messages = vec![
@@ -478,7 +460,6 @@ fn validate_provider_input(value: Value) {
     assert_eq!(input.image_endpoint, "");
     assert_eq!(input.voice_model, "voice-contract");
     assert_eq!(input.collaboration_policy, "auto_router");
-    assert!(input.prompt_evolution_enabled);
     assert_eq!(input.context_window_tokens, 64_000);
     assert_eq!(input.agent_system_prompt, "Contract prompt");
 }

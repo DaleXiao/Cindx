@@ -102,7 +102,6 @@ pub(crate) struct AgentRecoveryEnvelope {
     pub(crate) effort: String,
     pub(crate) policy: String,
     pub(crate) queue_id: Option<String>,
-    pub(crate) workflow_resume_key: Option<String>,
     pub(crate) state: AgentRecoveryState,
     pub(crate) reason: AgentRecoveryReason,
     pub(crate) attempts: u32,

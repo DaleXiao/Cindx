@@ -69,13 +69,6 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
     let identity = resolve_agent_recovery_identity(events, run_context)?.identity;
     let prior = latest_agent_recovery_envelope(events)
         .filter(|envelope| envelope.identity.matches(&identity));
-    let workflow_resume_key = events.iter().rev().find_map(|event| {
-        event
-            .metadata
-            .get("workflow_resume_key")
-            .filter(|value| !value.trim().is_empty())
-            .cloned()
-    });
     let latest_counter = |keys: &[&str]| {
         events.iter().rev().find_map(|event| {
             keys.iter().find_map(|key| {
@@ -99,7 +92,6 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
             .cloned()
             .unwrap_or_else(|| "auto_router".to_string()),
         queue_id: run_context.get("queue_id").cloned(),
-        workflow_resume_key,
         state,
         reason,
         attempts: prior

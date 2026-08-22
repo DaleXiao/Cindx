@@ -50,7 +50,6 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     imageEndpoint: provider.imageEndpoint,
     voiceModel: provider.voiceModel,
     collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
-    promptEvolutionEnabled: provider.promptEvolutionEnabled,
     contextWindowTokens: provider.contextWindowTokens,
     agentSystemPrompt: provider.agentSystemPrompt
   };

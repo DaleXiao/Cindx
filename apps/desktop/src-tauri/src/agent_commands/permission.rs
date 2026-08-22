@@ -1467,7 +1467,6 @@ mod tests {
             effort: "auto".to_string(),
             policy: "auto_router".to_string(),
             queue_id: None,
-            workflow_resume_key: None,
             state: AgentRecoveryState::Blocked,
             reason: AgentRecoveryReason::WaitingForPermission,
             attempts: 0,

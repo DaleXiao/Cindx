@@ -352,19 +352,6 @@ pub(crate) struct TimelineEntry {
     pub(crate) tool_name: Option<String>,
     pub(crate) state: String,
     pub(crate) timestamp_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) workflow_progress: Option<WorkflowProgressView>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WorkflowProgressView {
-    pub(crate) completed_steps: usize,
-    pub(crate) total_steps: usize,
-    pub(crate) current_step_id: Option<String>,
-    pub(crate) step_status: Option<String>,
-    pub(crate) continuations: usize,
-    pub(crate) recoverable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -432,7 +419,6 @@ pub(crate) struct ProviderConfigState {
     pub(crate) image_endpoint: String,
     pub(crate) voice_model: String,
     pub(crate) collaboration_policy: String,
-    pub(crate) prompt_evolution_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     pub(crate) ready: bool,
@@ -893,16 +879,8 @@ pub(crate) struct ProviderConfigInput {
     #[serde(default)]
     pub(crate) voice_model: String,
     pub(crate) collaboration_policy: String,
-    #[serde(default = "default_prompt_evolution_enabled")]
-    pub(crate) prompt_evolution_enabled: bool,
-    #[serde(default)]
-    pub(crate) workflow_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
-}
-
-pub(crate) fn default_prompt_evolution_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize)]

@@ -731,7 +731,6 @@ pub(crate) fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> 
             .iter()
             .any(|audit| audit.request.id.0 == *id && audit.resolution.is_none())
     });
-    let workflow_progress = timeline_workflow_progress(&event);
     let detail = match event.kind {
         EventKind::MessageAdded => event
             .metadata
@@ -818,39 +817,7 @@ pub(crate) fn timeline_entry(event: Event, audits: &[PermissionAuditRecord]) -> 
         tool_name: event.metadata.get("tool").cloned(),
         state: event_state(&event.kind, permission_is_pending).to_string(),
         timestamp_ms: event.timestamp_ms,
-        workflow_progress,
     }
-}
-
-pub(crate) fn timeline_workflow_progress(event: &Event) -> Option<WorkflowProgressView> {
-    let total_steps = event
-        .metadata
-        .get("workflow_steps")?
-        .parse::<usize>()
-        .ok()?;
-    if total_steps == 0 || !event.metadata.contains_key("workflow_checkpoint_schema") {
-        return None;
-    }
-    let completed_steps = event
-        .metadata
-        .get("completed_steps")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or_default()
-        .min(total_steps);
-    let step_status = event.metadata.get("step_status").cloned();
-    Some(WorkflowProgressView {
-        completed_steps,
-        total_steps,
-        current_step_id: event.metadata.get("step_id").cloned(),
-        continuations: event
-            .metadata
-            .get("workflow_continuations")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or_default(),
-        recoverable: completed_steps < total_steps
-            && event.summary != "Collaboration workflow checkpoint finalized",
-        step_status,
-    })
 }
 
 pub(crate) fn permission_audit(record: PermissionAuditRecord) -> PermissionAudit {

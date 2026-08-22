@@ -931,7 +931,6 @@ pub(crate) fn provider_config_state(config: &ProviderConfig) -> ProviderConfigSt
         image_endpoint: config.image_endpoint.clone(),
         voice_model: config.voice_model.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
-        prompt_evolution_enabled: config.prompt_evolution_enabled,
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
         ready: config.is_ready(),

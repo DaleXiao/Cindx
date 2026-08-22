@@ -1239,7 +1239,6 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         imageEndpoint: profile.imageEndpoint,
         voiceModel: input.voiceModel,
         collaborationPolicy: input.collaborationPolicy || "auto_router",
-        promptEvolutionEnabled: input.promptEvolutionEnabled,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
         ready: Boolean(profile.baseUrl.trim() && apiKeySet && executorModel.trim()),

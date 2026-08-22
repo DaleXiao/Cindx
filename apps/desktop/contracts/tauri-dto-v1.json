@@ -173,7 +173,6 @@
           "imageEndpoint": "",
           "voiceModel": "voice-contract",
           "collaborationPolicy": "auto_router",
-          "promptEvolutionEnabled": true,
           "contextWindowTokens": 128000,
           "agentSystemPrompt": "Contract prompt",
           "ready": true,
@@ -199,7 +198,6 @@
           "imageEndpoint": "",
           "voiceModel": "",
           "collaborationPolicy": "single",
-          "promptEvolutionEnabled": false,
           "contextWindowTokens": 4096,
           "agentSystemPrompt": "",
           "ready": false,
@@ -233,7 +231,6 @@
           "imageEndpoint": "",
           "voiceModel": "voice-contract",
           "collaborationPolicy": "auto_router",
-          "promptEvolutionEnabled": true,
           "contextWindowTokens": 64000,
           "agentSystemPrompt": "Contract prompt"
         }
@@ -278,15 +275,7 @@
               "kind": "tool",
               "toolName": "shell.run",
               "state": "pending",
-              "timestampMs": 51,
-              "workflowProgress": {
-                "completedSteps": 1,
-                "totalSteps": 2,
-                "currentStepId": "step-2",
-                "stepStatus": "running",
-                "continuations": 0,
-                "recoverable": true
-              }
+              "timestampMs": 51
             },
             {
               "sequence": 8,
@@ -302,15 +291,7 @@
               "detail": "Contract nullable workflow fields",
               "kind": "model",
               "state": "idle",
-              "timestampMs": 53,
-              "workflowProgress": {
-                "completedSteps": 2,
-                "totalSteps": 2,
-                "currentStepId": null,
-                "stepStatus": null,
-                "continuations": 1,
-                "recoverable": false
-              }
+              "timestampMs": 53
             }
           ],
           "messages": [
