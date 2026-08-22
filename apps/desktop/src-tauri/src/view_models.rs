@@ -426,6 +426,9 @@ pub(crate) struct ProviderConfigState {
     pub(crate) api_key_set: bool,
     pub(crate) auth_verified: bool,
     pub(crate) auth_verified_at_ms: Option<u64>,
+    /// The models the user enabled in Settings; the composer offers exactly
+    /// these for a run. Empty means "all catalog models".
+    pub(crate) enabled_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -882,6 +885,10 @@ pub(crate) struct ProviderConfigInput {
     pub(crate) collaboration_policy: String,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
+    /// The models the user enabled in Settings; the composer offers exactly
+    /// these for a run. Empty means "all catalog models".
+    #[serde(default)]
+    pub(crate) enabled_models: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

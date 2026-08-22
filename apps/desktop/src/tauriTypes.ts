@@ -338,6 +338,8 @@ export type ProviderConfigState = {
   apiKeySet: boolean;
   authVerified: boolean;
   authVerifiedAtMs: number | null;
+  /** The models the user enabled in Settings; the composer offers exactly these. Empty = all catalog models. */
+  enabledModels: string[];
 };
 
 export type ProviderConfigInput = {
@@ -361,6 +363,8 @@ export type ProviderConfigInput = {
   collaborationPolicy: string;
   contextWindowTokens: number;
   agentSystemPrompt: string;
+  /** The models the user enabled in Settings; the composer offers exactly these. Empty = all catalog models. */
+  enabledModels: string[];
 };
 
 export type ProviderModelsState = {

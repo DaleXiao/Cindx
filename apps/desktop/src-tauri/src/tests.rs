@@ -2376,6 +2376,7 @@ fn provider_config_input_preserves_existing_key_when_blank() {
             collaboration_policy: "auto_router".to_string(),
             context_window_tokens: 128_000,
             agent_system_prompt: "Be concise.\nUse Chinese when asked.".to_string(),
+            enabled_models: Vec::new(),
         },
     );
 
@@ -2415,6 +2416,7 @@ fn provider_input_from_config(config: &ProviderConfig) -> ProviderConfigInput {
         collaboration_policy: config.collaboration_policy.clone(),
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
+        enabled_models: config.enabled_models.clone(),
     }
 }
 

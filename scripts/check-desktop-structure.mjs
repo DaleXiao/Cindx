@@ -3036,18 +3036,23 @@ assert(
     !settingsModelsPanelSource.includes('label="Verifier"') &&
     !settingsModelsPanelSource.includes('label="Utility"') &&
     !settingsModelsPanelSource.includes("Planning service override") &&
-    settingsPageSource.includes("Effort tier defaults") &&
-    settingsPageSource.includes('label="Fast tier"') &&
-    settingsPageSource.includes('label="Auto tier"') &&
-    settingsPageSource.includes('label="Pro tier"') &&
+    settingsPageSource.includes("Enabled models") &&
+    settingsPageSource.includes("settings-checkbox-list") &&
+    settingsPageSource.includes("settings-checkbox-row") &&
+    settingsPageSource.includes('type="checkbox"') &&
     settingsPageSource.includes("Fallback model") &&
+    settingsPageSource.includes("enabledModels") &&
+    !settingsPageSource.includes('label="Fast tier"') &&
+    !settingsPageSource.includes('label="Auto tier"') &&
+    !settingsPageSource.includes('label="Pro tier"') &&
+    !settingsPageSource.includes("Effort tier defaults") &&
     !settingsPageSource.includes("Compatibility fallback") &&
     !settingsPageSource.includes("Apply to all profiles") &&
     !settingsPageSource.includes("Empty uses") &&
     !settingsPageSource.includes("does not overwrite the profiles above") &&
     !settingsModelsPanelSource.includes("Default effort") &&
     !settingsModelsPanelSource.includes("4 worker roles"),
-  "Provider settings must expose model profiles and services without legacy role semantics"
+  "Provider settings must offer a direct enabled-model checklist plus a fallback model, without legacy tier-pin semantics"
 );
 assert(settingsPageSource.includes("Archived sessions"), "Settings must expose archived session recovery");
 assert(

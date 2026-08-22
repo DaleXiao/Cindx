@@ -183,7 +183,8 @@
           "ready": true,
           "apiKeySet": true,
           "authVerified": true,
-          "authVerifiedAtMs": 40
+          "authVerifiedAtMs": 40,
+          "enabledModels": []
         },
         {
           "providerId": "custom",
@@ -208,7 +209,8 @@
           "ready": false,
           "apiKeySet": false,
           "authVerified": false,
-          "authVerifiedAtMs": null
+          "authVerifiedAtMs": null,
+          "enabledModels": []
         }
       ]
     },
@@ -237,7 +239,8 @@
           "voiceModel": "voice-contract",
           "collaborationPolicy": "auto_router",
           "contextWindowTokens": 64000,
-          "agentSystemPrompt": "Contract prompt"
+          "agentSystemPrompt": "Contract prompt",
+          "enabledModels": []
         }
       ]
     },

@@ -95,6 +95,9 @@ pub(crate) struct ProviderConfig {
     pub(crate) collaboration_policy: String,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
+    /// The models the user enabled in Settings; the composer offers exactly
+    /// these for a run. An empty list means "all catalog models".
+    pub(crate) enabled_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -154,6 +157,7 @@ impl Default for ProviderConfig {
             collaboration_policy: "auto_router".to_string(),
             context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),
+            enabled_models: Vec::new(),
         }
     }
 }

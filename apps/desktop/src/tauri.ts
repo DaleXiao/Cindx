@@ -1243,7 +1243,8 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         agentSystemPrompt: input.agentSystemPrompt,
         ready: Boolean(profile.baseUrl.trim() && apiKeySet && executorModel.trim()),
         apiKeySet,
-        authVerified: false, authVerifiedAtMs: null
+        authVerified: false, authVerifiedAtMs: null,
+        enabledModels: input.enabledModels
       },
       timeline: [
         ...browserPhase4State.timeline,

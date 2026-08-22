@@ -51,7 +51,8 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     voiceModel: provider.voiceModel,
     collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
     contextWindowTokens: provider.contextWindowTokens,
-    agentSystemPrompt: provider.agentSystemPrompt
+    agentSystemPrompt: provider.agentSystemPrompt,
+    enabledModels: provider.enabledModels
   };
 }
 

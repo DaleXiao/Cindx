@@ -103,6 +103,7 @@ fn provider_state(auth_verified_at_ms: Option<u64>) -> ProviderConfigState {
         api_key_set: configured,
         auth_verified: configured,
         auth_verified_at_ms,
+        enabled_models: Vec::new(),
     }
 }
 

@@ -162,7 +162,8 @@ return {
     contextWindowTokens: 1047576,
     agentSystemPrompt:
       "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.",
-    ready: false, apiKeySet: false, authVerified: false, authVerifiedAtMs: null
+    ready: false, apiKeySet: false, authVerified: false, authVerifiedAtMs: null,
+    enabledModels: []
   },
   timeline: [],
   messages: [],

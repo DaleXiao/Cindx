@@ -22,55 +22,67 @@ export function SettingsEffortModelFields({
   providerModels,
   setProviderDraft
 }: SettingsEffortModelFieldsProps) {
-  const chatStatus = (model: string, tier: string) => ({
-    available: providerModels.includes(model),
-    label: `${tier} model available through the latest authenticated provider connection`,
-    title: `The selected ${tier} model is present in the latest authenticated model catalog`
-  });
+  const enabled = new Set(providerDraft.enabledModels);
+  const catalog = providerModelOptions.chat;
+
+  const toggle = (model: string) => {
+    const next = new Set(enabled);
+    if (next.has(model)) {
+      next.delete(model);
+    } else {
+      next.add(model);
+    }
+    setProviderDraft({
+      ...providerDraft,
+      enabledModels: [...next].sort()
+    });
+  };
+
   return (
     <>
       <div className="provider-form provider-model-group">
         <div>
           <p className="settings-section-copy">
-            <strong>Effort tier defaults</strong>
+            <strong>Enabled models</strong>
             <br />
-            Pinned defaults for the Fast, Auto, and Pro compute tiers. An
-            empty pin uses the provider catalog tier default.
+            Check the models you want to use. Checked models appear in the
+            composer model picker; with nothing checked, every catalog model is
+            offered.
           </p>
         </div>
-        <ModelSelect
-          label="Fast tier"
-          description="Quick direct answer tier."
-          value={providerDraft.fastModel}
-          options={providerModelOptions.chat}
-          disabled={providerBusy}
-          status={chatStatus(providerDraft.fastModel, "Fast tier")}
-          onChange={(fastModel) =>
-            setProviderDraft({ ...providerDraft, fastModel })
-          }
-        />
-        <ModelSelect
-          label="Auto tier"
-          description="Adaptive verified tier."
-          value={providerDraft.autoModel}
-          options={providerModelOptions.chat}
-          disabled={providerBusy}
-          status={chatStatus(providerDraft.autoModel, "Auto tier")}
-          onChange={(autoModel) =>
-            setProviderDraft({ ...providerDraft, autoModel })
-          }
-        />
-        <ModelSelect
-          label="Pro tier"
-          description="Deep mission tier."
-          value={providerDraft.proModel}
-          options={providerModelOptions.chat}
-          disabled={providerBusy}
-          status={chatStatus(providerDraft.proModel, "Pro tier")}
-          onChange={(proModel) =>
-            setProviderDraft({ ...providerDraft, proModel })
-          }
-        />
+        <div className="settings-checkbox-list" role="group" aria-label="Enabled models">
+          {catalog.length === 0 ? (
+            <p className="settings-field-copy">
+              Load the provider's model catalog to pick models.
+            </p>
+          ) : (
+            catalog.map((model) => {
+              const available = providerModels.includes(model);
+              return (
+                <label
+                  key={model}
+                  className="settings-checkbox-row"
+                  title={
+                    available
+                      ? `${model} is available through the latest authenticated provider connection`
+                      : `${model} is not in the latest authenticated model catalog`
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={enabled.has(model)}
+                    disabled={providerBusy}
+                    onChange={() => toggle(model)}
+                  />
+                  <span className={available ? undefined : "settings-checkbox-unavailable"}>
+                    {model}
+                    {!available && <small> (not in catalog)</small>}
+                  </span>
+                </label>
+              );
+            })
+          )}
+        </div>
       </div>
       <div className="provider-form provider-model-group">
         <ModelSelect
@@ -79,10 +91,16 @@ export function SettingsEffortModelFields({
               ? "Fallback deployment"
               : "Fallback model"
           }
+          description="Used when no model is explicitly selected for a run."
           value={providerDraft.model}
           options={providerModelOptions.chat}
           disabled={providerBusy}
-          status={chatStatus(providerDraft.model, "Fallback")}
+          status={{
+            available: providerModels.includes(providerDraft.model),
+            label: "Fallback model available through the latest authenticated provider connection",
+            title:
+              "The fallback model is present in the latest authenticated model catalog"
+          }}
           onChange={(model) =>
             setProviderDraft(
               selectFastFallbackModel(

@@ -92,6 +92,12 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
     config.fast_model = normalized_config_value(&input.fast_model);
     config.auto_model = normalized_config_value(&input.auto_model);
     config.pro_model = normalized_config_value(&input.pro_model);
+    config.enabled_models = input
+        .enabled_models
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
     config.embedding_model = resolve_model(
         &input.embedding_model,
         &config.embedding_model,
@@ -229,6 +235,14 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
             "context_window_tokens" => {
                 config.context_window_tokens = value.parse().unwrap_or(128_000)
             }
+            "enabled_models" => {
+                config.enabled_models = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
             "agent_system_prompt_hex" => {
                 if let Some(prompt) = config_hex_decode(value) {
                     config.agent_system_prompt = normalized_agent_instructions(&prompt);
@@ -356,7 +370,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
 
 pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
     format!(
-        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\n",
+        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
         sanitize_config_value(&config.provider_id),
         sanitize_config_value(&config.provider_resource),
         sanitize_config_value(&config.base_url),
@@ -377,6 +391,7 @@ pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
         config.auth_verified_at_ms.unwrap_or_default(),
         sanitize_config_value(&config.collaboration_policy),
         config.context_window_tokens,
-        config_hex_encode(&config.agent_system_prompt)
+        config_hex_encode(&config.agent_system_prompt),
+        config.enabled_models.join(",")
     )
 }
