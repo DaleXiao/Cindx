@@ -57,8 +57,9 @@ const cadenceOptions: Array<{ value: ScheduleCadence; label: string }> = [
 
 const effortOptions: Array<{ value: AgentEffort; label: string }> = [
   { value: "fast", label: "Fast" },
-  { value: "auto", label: "Auto" },
-  { value: "pro", label: "Pro" }
+  { value: "default", label: "Default" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra High" }
 ];
 
 const weekdayOptions = [
@@ -120,7 +121,7 @@ function draftForNew(): ScheduleDraft {
     projectId: "",
     sessionId: "",
     prompt: "",
-    effort: "auto",
+    effort: "default",
     timezone: currentTimeZone(),
     cadence: "once",
     startLocal: defaultStartValue(),

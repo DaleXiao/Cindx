@@ -660,7 +660,7 @@ export async function createProject(name: string, root: string): Promise<Project
             projectId,
             name: `${name} Session`,
             detail: "timeline + chat",
-            effort: "auto",
+            effort: "default",
             status: "Ready",
             titleState: "pending",
             activity: "idle",
@@ -705,7 +705,7 @@ export async function createSession(
             projectId: activeProjectId,
             name,
             detail: "timeline + chat",
-            effort: "auto",
+            effort: "default",
             status: "Ready",
             titleState: "pending",
             activity: "idle",
@@ -797,7 +797,7 @@ export async function forkSession(sessionId: string): Promise<ProjectSessionStat
       id: newBrowserSessionId(),
       name: `${source.name} Fork`,
       detail: `Fork of ${source.name}`,
-      effort: "auto" as AgentEffort,
+      effort: "default" as AgentEffort,
       status: "Ready",
       titleState: "manual" as const,
       activity: "idle" as const,
@@ -980,7 +980,7 @@ function ensureBrowserOpenSession(
     projectId,
     name: "New Session",
     detail: "timeline + chat",
-    effort: "auto",
+    effort: "default",
     status: "Ready",
     titleState: "pending",
     activity: "idle",
@@ -1450,7 +1450,7 @@ export async function runAgentTask(
   prompt: string,
   sessionId: string,
   attachments: AgentAttachment[] = [],
-  effort: AgentEffort = "auto"
+  effort: AgentEffort = "default"
 ): Promise<AgentState> {
   try {
     return await invoke<NativeAgentState>("run_agent_task", {
@@ -1486,7 +1486,7 @@ export async function queueAgentMessage(
   prompt: string,
   sessionId: string,
   attachments: AgentAttachment[] = [],
-  effort: AgentEffort = "auto",
+  effort: AgentEffort = "default",
   queueId?: string
 ): Promise<QueuedAgentMessageReceipt> {
   try {

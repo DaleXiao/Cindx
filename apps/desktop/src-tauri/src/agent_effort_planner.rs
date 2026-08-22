@@ -170,7 +170,8 @@ pub(crate) fn effort_execution_contract(effort_label: &str) -> ConductorExecutio
     let effort = normalize_effort_label(effort_label);
     let terminal_model_call_reserve = match effort.as_str() {
         "fast" => 1,
-        "pro" => 3,
+        "high" => 3,
+        "xhigh" => 4,
         _ => 2,
     };
     ConductorExecutionContract {
@@ -239,8 +240,11 @@ fn bounded_memory_query(prompt: &str) -> String {
 fn normalize_effort_label(effort_label: &str) -> String {
     match effort_label.trim().to_ascii_lowercase().as_str() {
         "fast" => "fast".to_string(),
-        "pro" => "pro".to_string(),
-        _ => "auto".to_string(),
+        "high" => "high".to_string(),
+        "xhigh" => "xhigh".to_string(),
+        "pro" => "high".to_string(),
+        "auto" => "default".to_string(),
+        _ => "default".to_string(),
     }
 }
 
@@ -250,8 +254,8 @@ mod tests {
 
     #[test]
     fn effort_plan_is_single_model_and_general_task() {
-        let plan = plan_effort_run("auto", "qwen3.7-plus".to_string(), "fix the login bug");
-        assert_eq!(plan.effort_label, "auto");
+        let plan = plan_effort_run("default", "qwen3.7-plus".to_string(), "fix the login bug");
+        assert_eq!(plan.effort_label, "default");
         assert_eq!(plan.primary_model, "qwen3.7-plus");
         assert_eq!(plan.collaboration_policy, "single");
         assert_eq!(plan.task_class, "general");
@@ -261,7 +265,7 @@ mod tests {
 
     #[test]
     fn apply_writes_the_keys_the_loop_reads() {
-        let plan = plan_effort_run("pro", "qwen3.7-max".to_string(), "deep mission");
+        let plan = plan_effort_run("high", "qwen3.7-max".to_string(), "deep mission");
         let mut run_context = Metadata::new();
         apply_effort_plan_keys(&plan, &mut run_context).expect("plan keys should apply");
 
@@ -269,7 +273,7 @@ mod tests {
             run_context.get("agent_model").map(String::as_str),
             Some("qwen3.7-max")
         );
-        assert_eq!(run_context.get("agent_effort").map(String::as_str), Some("pro"));
+        assert_eq!(run_context.get("agent_effort").map(String::as_str), Some("high"));
         assert_eq!(
             run_context.get("collaboration_policy").map(String::as_str),
             Some("single")
@@ -303,7 +307,7 @@ mod tests {
 
     #[test]
     fn auto_and_pro_recall_relevant_memory_and_retrieve_workspace() {
-        for effort in ["auto", "pro"] {
+        for effort in ["default", "high"] {
             let decision = knowledge_decision_for_effort(effort, "Why does login expire early?");
             assert_eq!(decision.memory_policy, MemoryRecallPolicy::Relevant);
             assert_eq!(decision.memory_query, "Why does login expire early?");
@@ -314,7 +318,7 @@ mod tests {
     #[test]
     fn memory_query_stays_inside_the_recall_budget() {
         let long_prompt = "x".repeat(MAX_RUN_DECISION_QUERY_CHARS + 500);
-        let decision = knowledge_decision_for_effort("auto", &long_prompt);
+        let decision = knowledge_decision_for_effort("default", &long_prompt);
         assert_eq!(decision.memory_query.chars().count(), MAX_RUN_DECISION_QUERY_CHARS);
     }
 
@@ -324,19 +328,19 @@ mod tests {
         assert!(!fast.verification_required);
         assert_eq!(fast.terminal_model_call_reserve, 1);
 
-        let auto = effort_execution_contract("auto");
-        assert!(auto.verification_required);
-        assert_eq!(auto.terminal_model_call_reserve, 2);
+        let default = effort_execution_contract("default");
+        assert!(default.verification_required);
+        assert_eq!(default.terminal_model_call_reserve, 2);
 
-        let pro = effort_execution_contract("PRO");
-        assert!(pro.verification_required);
-        assert_eq!(pro.effort, "pro");
-        assert_eq!(pro.terminal_model_call_reserve, 3);
+        let high = effort_execution_contract("HIGH");
+        assert!(high.verification_required);
+        assert_eq!(high.effort, "high");
+        assert_eq!(high.terminal_model_call_reserve, 3);
     }
 
     #[test]
     fn workspace_plan_enables_all_channels_over_the_bounded_query() {
-        let knowledge = knowledge_decision_for_effort("auto", "find the session bug");
+        let knowledge = knowledge_decision_for_effort("default", "find the session bug");
         let plan = knowledge
             .workspace_plan()
             .expect("auto retrieves workspace context");
@@ -359,7 +363,7 @@ mod tests {
 
     #[test]
     fn route_requirements_lift_tool_requirement_and_force_vision() {
-        let mut plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        let mut plan = plan_effort_run("default", "model".to_string(), "prompt");
         assert_eq!(plan.tool_requirement, "none");
         assert!(!plan.vision_required);
 
@@ -376,7 +380,7 @@ mod tests {
 
     #[test]
     fn forbidden_effect_authority_rejects_an_effects_plan() {
-        let mut plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        let mut plan = plan_effort_run("default", "model".to_string(), "prompt");
         plan.tool_requirement = "effects".to_string();
         let error = plan
             .apply_route_requirements(AgentRouteRequirements {
@@ -390,7 +394,7 @@ mod tests {
 
     #[test]
     fn required_effect_authority_rejects_a_non_effects_plan() {
-        let mut plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        let mut plan = plan_effort_run("default", "model".to_string(), "prompt");
         let error = plan
             .apply_route_requirements(AgentRouteRequirements {
                 minimum_tool_requirement: agent_core::AgentToolRequirement::None,
@@ -403,7 +407,7 @@ mod tests {
 
     #[test]
     fn plan_digest_is_a_stable_sha256() {
-        let plan = plan_effort_run("auto", "model".to_string(), "prompt");
+        let plan = plan_effort_run("default", "model".to_string(), "prompt");
         let digest = plan.plan_digest().expect("plan digest computes");
         assert_eq!(digest.len(), 64);
         assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
@@ -417,11 +421,11 @@ mod tests {
             "single"
         );
         assert_eq!(
-            plan_effort_run("auto", "m".to_string(), "p").requested_policy_label(),
+            plan_effort_run("default", "m".to_string(), "p").requested_policy_label(),
             "auto_router"
         );
         assert_eq!(
-            plan_effort_run("pro", "m".to_string(), "p").requested_policy_label(),
+            plan_effort_run("high", "m".to_string(), "p").requested_policy_label(),
             "auto_router"
         );
     }

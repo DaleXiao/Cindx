@@ -90,6 +90,12 @@ pub struct RunBudget {
 
 impl RunBudget {
     pub fn for_effort(effort: &str) -> Self {
+        // Normalize legacy tier labels onto the reasoning-level labels.
+        let effort = match effort {
+            "auto" => "default",
+            "pro" => "high",
+            other => other,
+        };
         match effort {
             "fast" => Self {
                 max_duration: Duration::from_secs(5 * 60),
@@ -116,7 +122,7 @@ impl RunBudget {
                     2,
                 ),
             },
-            "pro" => Self {
+            "high" => Self {
                 max_duration: Duration::from_secs(4 * 60 * 60),
                 model_call_timeout: Duration::from_secs(15 * 60),
                 tool_call_timeout: Duration::from_secs(60 * 60),
@@ -139,6 +145,31 @@ impl RunBudget {
                 terminal_token_reserve: default_terminal_token_reserve(8),
                 terminal_physical_model_attempt_reserve: default_terminal_physical_attempt_reserve(
                     8,
+                ),
+            },
+            "xhigh" => Self {
+                max_duration: Duration::from_secs(6 * 60 * 60),
+                model_call_timeout: Duration::from_secs(15 * 60),
+                tool_call_timeout: Duration::from_secs(60 * 60),
+                initial_model_calls: 64,
+                max_model_calls: 512,
+                model_calls_per_extension: 64,
+                initial_tool_calls: 128,
+                max_tool_calls: 1024,
+                tool_calls_per_extension: 128,
+                no_progress_timeout: Duration::from_secs(5 * 60),
+                max_identical_actions: 4,
+                initial_agent_turns: 64,
+                max_agent_turns: 512,
+                agent_turns_per_extension: 64,
+                max_repair_attempts: 12,
+                terminal_model_call_reserve: 12,
+                terminal_time_reserve: Duration::from_secs(15 * 60),
+                max_total_tokens: default_total_token_budget(512),
+                max_physical_model_attempts: default_physical_attempt_budget(512),
+                terminal_token_reserve: default_terminal_token_reserve(12),
+                terminal_physical_model_attempt_reserve: default_terminal_physical_attempt_reserve(
+                    12,
                 ),
             },
             _ => Self {
@@ -284,7 +315,7 @@ mod tests {
 
     #[test]
     fn actor_uses_the_main_loop_budget_and_preserves_terminal_resources() {
-        for effort in ["fast", "auto", "pro"] {
+        for effort in ["fast", "default", "high", "xhigh"] {
             let budget = RunBudget::for_effort(effort);
             assert_eq!(
                 budget.stage_budget(RunStageClass::Actor),
@@ -312,7 +343,7 @@ mod tests {
 
     #[test]
     fn finalizer_owns_a_complete_model_call_window() {
-        for effort in ["fast", "auto", "pro"] {
+        for effort in ["fast", "default", "high", "xhigh"] {
             let budget = RunBudget::for_effort(effort);
             assert!(budget.finalizer_model_call_reserve() > 0);
             assert!(budget.finalizer_model_call_reserve() <= budget.terminal_model_call_reserve);
@@ -329,8 +360,9 @@ mod tests {
     fn effort_profiles_preserve_the_published_run_limits() {
         for (effort, expected) in [
             ("fast", (5 * 60, 6, 12, 12, 24)),
-            ("auto", (45 * 60, 18, 72, 36, 144)),
-            ("pro", (4 * 60 * 60, 48, 384, 96, 768)),
+            ("default", (45 * 60, 18, 72, 36, 144)),
+            ("high", (4 * 60 * 60, 48, 384, 96, 768)),
+            ("xhigh", (6 * 60 * 60, 64, 512, 128, 1024)),
         ] {
             let budget = RunBudget::for_effort(effort);
             assert_eq!(

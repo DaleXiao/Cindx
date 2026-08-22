@@ -516,7 +516,7 @@ pub(crate) fn resolve_agent_permission_blocking(
         }
         (Some(requested), _) => requested,
         (None, Some(suspended)) => suspended,
-        (None, None) => AgentPolicy::Auto,
+        (None, None) => AgentPolicy::Default,
     };
     let run_control_lease = if let Some(snapshot) = snapshot {
         begin_agent_run_control_for_effort(&state, &session_id, effort.label(), Some(snapshot))?

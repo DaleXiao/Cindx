@@ -130,6 +130,8 @@ pub(crate) fn provider_effort_default_model(provider_id: &str, effort_label: &st
     };
     match effort_label {
         "fast" => defaults.fast.as_str(),
+        "default" => defaults.auto.as_str(),
+        "high" | "xhigh" => defaults.pro.as_str(),
         "auto" => defaults.auto.as_str(),
         "pro" => defaults.pro.as_str(),
         _ => "",

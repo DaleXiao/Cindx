@@ -30,7 +30,7 @@ fn queue_message(mode: &str, updated_at_ms: u64) -> QueuedAgentMessageView {
             mime_type: "text/plain".to_string(),
             size_bytes: 6,
         }],
-        effort: "auto".to_string(),
+        effort: "default".to_string(),
         mode: mode.to_string(),
         created_at_ms: 53,
         updated_at_ms,
@@ -123,7 +123,7 @@ fn project_session_values() -> Vec<Value> {
         name: "Session A".to_string(),
         title_state: "automatic".to_string(),
         detail: "Contract session".to_string(),
-        effort: "auto".to_string(),
+        effort: "default".to_string(),
         status: "Ready".to_string(),
         activity: "idle".to_string(),
         attention_reason: None,
@@ -141,7 +141,7 @@ fn project_session_values() -> Vec<Value> {
         name: "Session B".to_string(),
         title_state: "manual".to_string(),
         detail: "Archived contract session".to_string(),
-        effort: "pro".to_string(),
+        effort: "high".to_string(),
         status: "Complete".to_string(),
         activity: "attention".to_string(),
         attention_reason: Some("Unread result".to_string()),
@@ -350,15 +350,20 @@ fn output_contract_values() -> BTreeMap<&'static str, Vec<Value>> {
             max_model_calls: 24,
             max_tool_calls: 48,
         },
-        auto: AgentRunBudgetView {
+        default: AgentRunBudgetView {
             max_duration_ms: 2_700_000,
             max_model_calls: 128,
             max_tool_calls: 256,
         },
-        pro: AgentRunBudgetView {
+        high: AgentRunBudgetView {
             max_duration_ms: 14_400_000,
             max_model_calls: 384,
             max_tool_calls: 768,
+        },
+        xhigh: AgentRunBudgetView {
+            max_duration_ms: 21_600_000,
+            max_model_calls: 512,
+            max_tool_calls: 1024,
         },
     };
     BTreeMap::from([

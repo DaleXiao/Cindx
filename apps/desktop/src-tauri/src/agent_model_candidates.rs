@@ -20,7 +20,8 @@ pub(crate) fn effort_model_candidates(
     if !pinned.is_empty() && !candidates.iter().any(|candidate| candidate.name == pinned) {
         let (cost_tier, latency_tier) = match effort_label {
             "fast" => (1, 1),
-            "pro" => (3, 1),
+            "high" => (3, 1),
+            "xhigh" => (4, 1),
             _ => (2, 1),
         };
         let name = pinned;

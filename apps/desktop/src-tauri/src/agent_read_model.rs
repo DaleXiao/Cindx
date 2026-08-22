@@ -487,7 +487,7 @@ pub(crate) fn agent_run_budget_from_start_event(event: &Event) -> RunBudget {
         .metadata
         .get("agent_effort")
         .map(|value| AgentPolicy::parse_ingress(value))
-        .unwrap_or(AgentPolicy::Auto);
+        .unwrap_or(AgentPolicy::Default);
     RunBudget::for_effort(effort.label())
 }
 

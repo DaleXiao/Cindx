@@ -3267,16 +3267,10 @@ assert(
 );
 assert(
   composerSource.includes("const EFFORT_OPTIONS") &&
-    composerSource.includes('label: "Cindx Fast"') &&
-    composerSource.includes('description: "Think fast, get a quick answer"') &&
-    composerSource.includes('label: "Cindx Auto"') &&
-    composerSource.includes(
-      'description: "Thinks it through, acts, and double-checks the result"'
-    ) &&
-    composerSource.includes('label: "Cindx Pro"') &&
-    composerSource.includes(
-      'description: "Deepest thinking for complex, multi-step work"'
-    ) &&
+    composerSource.includes('value: "fast"') &&
+    composerSource.includes('value: "default"') &&
+    composerSource.includes('value: "high"') &&
+    composerSource.includes('value: "xhigh"') &&
     !composerSource.includes("One model") &&
     composerSource.includes('className="composer-effort-menu"') &&
     composerSource.includes('role="listbox"') &&
@@ -3287,7 +3281,9 @@ assert(
     appSource.includes("handleSessionEffortChange") &&
     appSource.includes("setSessionEffort(sessionId, effort)") &&
     !appSource.includes('useState<AgentEffort>("auto")') &&
-    tauriBridge.includes('export type AgentEffort = "fast" | "auto" | "pro"') &&
+    tauriBridge.includes(
+      'export type AgentEffort = "fast" | "default" | "high" | "xhigh"'
+    ) &&
     tauriBridge.includes("effort: AgentEffort") &&
     tauriBridge.includes("export async function setSessionEffort") &&
     tauriBridge.includes("currentTime: currentAgentTimeContext(), effort, attachments") &&
@@ -3312,8 +3308,9 @@ assert(
     !appShellModelSource.includes("runBudgetForEffort") &&
     rustLib.includes("agent_run_budgets: AgentRunBudgetsView") &&
     rustLib.includes('fast: agent_run_budget_view("fast")') &&
-    rustLib.includes('auto: agent_run_budget_view("auto")') &&
-    rustLib.includes('pro: agent_run_budget_view("pro")'),
+    rustLib.includes('default: agent_run_budget_view("default")') &&
+    rustLib.includes('high: agent_run_budget_view("high")') &&
+    rustLib.includes('xhigh: agent_run_budget_view("xhigh")'),
   "Agent run budgets must flow from the Rust runtime catalog into optimistic UI state"
 );
 assert(

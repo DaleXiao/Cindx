@@ -1257,8 +1257,9 @@ fn runtime_status_exposes_authoritative_agent_run_budgets() {
 
     for (effort, exposed) in [
         ("fast", status.agent_run_budgets.fast),
-        ("auto", status.agent_run_budgets.auto),
-        ("pro", status.agent_run_budgets.pro),
+        ("default", status.agent_run_budgets.default),
+        ("high", status.agent_run_budgets.high),
+        ("xhigh", status.agent_run_budgets.xhigh),
     ] {
         let authoritative = RunBudget::for_effort(effort);
         assert_eq!(
@@ -2978,9 +2979,9 @@ fn agent_effort_keeps_auto_and_pro_under_dynamic_policy_selection() {
         AgentPolicy::parse_ingress("pro").requested_policy(),
         OrchestrationPolicy::AutoRouter
     );
-    assert_eq!(AgentPolicy::parse_ingress("unknown"), AgentPolicy::Auto);
-    assert_eq!(persisted_agent_policy(None), Ok(AgentPolicy::Auto));
-    assert_eq!(persisted_agent_policy(Some("pro")), Ok(AgentPolicy::Pro));
+    assert_eq!(AgentPolicy::parse_ingress("unknown"), AgentPolicy::Default);
+    assert_eq!(persisted_agent_policy(None), Ok(AgentPolicy::Default));
+    assert_eq!(persisted_agent_policy(Some("pro")), Ok(AgentPolicy::High));
     assert!(persisted_agent_policy(Some("Pro")).is_err());
     assert!(persisted_agent_policy(Some("future")).is_err());
 }
@@ -3282,7 +3283,7 @@ fn retry_recovers_effort_from_the_active_run() {
 
     assert_eq!(
         persisted_agent_policy_from_active_events(std::slice::from_ref(&event)),
-        Ok(AgentPolicy::Pro)
+        Ok(AgentPolicy::High)
     );
 
     event
@@ -3291,7 +3292,7 @@ fn retry_recovers_effort_from_the_active_run() {
     assert!(persisted_agent_policy_from_active_events(&[event]).is_err());
     assert_eq!(
         persisted_agent_policy_from_active_events(&[]),
-        Ok(AgentPolicy::Auto)
+        Ok(AgentPolicy::Default)
     );
 }
 
@@ -6726,7 +6727,7 @@ fn queued_agent_message_start_and_restore_are_replay_safe() {
     let restored = pending_queued_agent_messages(&events, "session-a");
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].view.prompt, "continue safely");
-    assert_eq!(restored[0].view.effort, "pro");
+    assert_eq!(restored[0].view.effort, "high");
 }
 
 #[test]
@@ -7593,7 +7594,7 @@ fn project_session_state_defaults_to_active_workspace() {
     assert_eq!(state.projects[0].root, root.display().to_string());
     assert!(state.projects[0].active);
     assert!(state.sessions[0].active);
-    assert_eq!(state.sessions[0].effort, "auto");
+    assert_eq!(state.sessions[0].effort, "default");
     assert_eq!(state.active_project_id, "project-cindx");
     assert_eq!(state.active_session_id, session_id);
     assert!(state.active_session_id.starts_with("sess_"));
@@ -7669,7 +7670,7 @@ fn session_effort_updates_only_the_selected_session() {
         "pro"
     ));
     assert_eq!(config.sessions[0].effort, "pro");
-    assert_eq!(config.sessions[1].effort, "auto");
+    assert_eq!(config.sessions[1].effort, "default");
     assert!(!update_session_effort(&mut config, "missing", "high"));
 }
 

@@ -1,4 +1,4 @@
-export type AgentEffort = "fast" | "auto" | "pro";
+export type AgentEffort = "fast" | "default" | "high" | "xhigh";
 
 export type AgentRunBudget = {
   maxDurationMs: number;

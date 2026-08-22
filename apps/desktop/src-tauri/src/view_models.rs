@@ -24,8 +24,9 @@ pub(crate) struct AgentRunBudgetView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentRunBudgetsView {
     pub(crate) fast: AgentRunBudgetView,
-    pub(crate) auto: AgentRunBudgetView,
-    pub(crate) pro: AgentRunBudgetView,
+    pub(crate) default: AgentRunBudgetView,
+    pub(crate) high: AgentRunBudgetView,
+    pub(crate) xhigh: AgentRunBudgetView,
 }
 
 #[derive(Debug, Clone, Serialize)]

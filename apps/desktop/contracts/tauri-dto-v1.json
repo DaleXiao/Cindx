@@ -26,15 +26,20 @@
               "maxModelCalls": 24,
               "maxToolCalls": 48
             },
-            "auto": {
+            "default": {
               "maxDurationMs": 2700000,
               "maxModelCalls": 128,
               "maxToolCalls": 256
             },
-            "pro": {
+            "high": {
               "maxDurationMs": 14400000,
               "maxModelCalls": 384,
               "maxToolCalls": 768
+            },
+            "xhigh": {
+              "maxDurationMs": 21600000,
+              "maxModelCalls": 512,
+              "maxToolCalls": 1024
             }
           }
         }
@@ -65,7 +70,7 @@
               "name": "Session A",
               "titleState": "automatic",
               "detail": "Contract session",
-              "effort": "auto",
+              "effort": "default",
               "status": "Ready",
               "activity": "idle",
               "attentionReason": null,
@@ -83,7 +88,7 @@
               "name": "Session B",
               "titleState": "manual",
               "detail": "Archived contract session",
-              "effort": "pro",
+              "effort": "high",
               "status": "Complete",
               "activity": "attention",
               "attentionReason": "Unread result",
@@ -349,7 +354,7 @@
                   "sizeBytes": 6
                 }
               ],
-              "effort": "auto",
+              "effort": "default",
               "mode": "queue",
               "createdAtMs": 53,
               "updatedAtMs": 53
@@ -436,7 +441,7 @@
                 "sizeBytes": 6
               }
             ],
-            "effort": "auto",
+            "effort": "default",
             "mode": "queue",
             "createdAtMs": 53,
             "updatedAtMs": 53
@@ -467,7 +472,7 @@
                 "sizeBytes": 6
               }
             ],
-            "effort": "auto",
+            "effort": "default",
             "mode": "steer",
             "createdAtMs": 53,
             "updatedAtMs": 55

@@ -112,7 +112,7 @@ return {
       projectId: "project-cindx",
       name: "Runtime Session",
       detail: "timeline + chat",
-      effort: "auto",
+      effort: "default",
       status: "Active",
       titleState: "manual",
       activity: "idle",

@@ -116,12 +116,12 @@ impl Default for PersonalizationConfig {
 }
 
 pub(crate) fn default_agent_effort() -> String {
-    AgentPolicy::Auto.label().to_string()
+    AgentPolicy::Default.label().to_string()
 }
 
 pub(crate) fn persisted_agent_policy(value: Option<&str>) -> Result<AgentPolicy, String> {
     match value {
-        None => Ok(AgentPolicy::Auto),
+        None => Ok(AgentPolicy::Default),
         Some(value) => AgentPolicy::parse_persisted(value)
             .ok_or_else(|| format!("persisted agent policy is invalid: {value}")),
     }

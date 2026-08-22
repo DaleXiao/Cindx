@@ -47,8 +47,9 @@ function runBudget(value: unknown, path: string): NativeAgentRunBudgetView {
 function runBudgets(value: unknown): NativeAgentRunBudgetsView {
   const source = record(value, "RuntimeStatus.agentRunBudgets");
   runBudget(source.fast, "RuntimeStatus.agentRunBudgets.fast");
-  runBudget(source.auto, "RuntimeStatus.agentRunBudgets.auto");
-  runBudget(source.pro, "RuntimeStatus.agentRunBudgets.pro");
+  runBudget(source.default, "RuntimeStatus.agentRunBudgets.default");
+  runBudget(source.high, "RuntimeStatus.agentRunBudgets.high");
+  runBudget(source.xhigh, "RuntimeStatus.agentRunBudgets.xhigh");
   return source as NativeAgentRunBudgetsView;
 }
 

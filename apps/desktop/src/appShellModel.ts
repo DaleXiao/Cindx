@@ -40,8 +40,10 @@ export function loadIgnoredPermissionReviewIds() {
 }
 
 export function normalizedSessionEffort(effort: string | undefined): AgentEffort {
-  if (effort === "fast" || effort === "pro") return effort;
-  return "auto";
+  if (effort === "fast" || effort === "high" || effort === "xhigh") return effort;
+  // Legacy tier labels migrate onto the reasoning levels.
+  if (effort === "pro") return "high";
+  return "default";
 }
 
 export function clampSidebarWidth(width: number) {

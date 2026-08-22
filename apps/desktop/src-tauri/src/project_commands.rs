@@ -1139,8 +1139,9 @@ pub(crate) fn runtime_status_for_root(root: PathBuf) -> RuntimeStatus {
         ],
         agent_run_budgets: AgentRunBudgetsView {
             fast: agent_run_budget_view("fast"),
-            auto: agent_run_budget_view("auto"),
-            pro: agent_run_budget_view("pro"),
+            default: agent_run_budget_view("default"),
+            high: agent_run_budget_view("high"),
+            xhigh: agent_run_budget_view("xhigh"),
         },
     }
 }

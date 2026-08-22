@@ -20,7 +20,7 @@ fn config_for(root: &Path, suffix: &str) -> ProjectSessionConfig {
             name: format!("Session {suffix}"),
             title_state: SessionTitleState::Manual,
             detail: "timeline + chat".to_string(),
-            effort: "auto".to_string(),
+            effort: "default".to_string(),
             seen_event_sequence: 9,
             created_at_ms: 11,
             updated_at_ms: 21,

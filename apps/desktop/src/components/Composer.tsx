@@ -57,18 +57,23 @@ const EFFORT_OPTIONS: Array<{
 }> = [
   {
     value: "fast",
-    label: "Cindx Fast",
-    description: "Think fast, get a quick answer"
+    label: "Fast",
+    description: "Quick direct answer with a small budget"
   },
   {
-    value: "auto",
-    label: "Cindx Auto",
-    description: "Thinks it through, acts, and double-checks the result"
+    value: "default",
+    label: "Default",
+    description: "Balanced reasoning with verification and memory"
   },
   {
-    value: "pro",
-    label: "Cindx Pro",
-    description: "Deepest thinking for complex, multi-step work"
+    value: "high",
+    label: "High",
+    description: "Deeper reasoning with a larger budget"
+  },
+  {
+    value: "xhigh",
+    label: "Extra High",
+    description: "Maximum reasoning depth for complex, multi-step work"
   }
 ];
 
@@ -472,7 +477,7 @@ export function Composer({
                 <CustomCommandsMenu
                   disabled={working || canStop}
                   onApply={(command: CustomCommandView) => {
-                    if (command.effort === "fast" || command.effort === "auto" || command.effort === "pro") {
+                    if (command.effort === "fast" || command.effort === "default" || command.effort === "high" || command.effort === "xhigh") {
                       onEffortChange(command.effort);
                     }
                     onChange(applyCustomCommandTemplate(command.template, value));
