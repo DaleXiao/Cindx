@@ -15,16 +15,16 @@ the audit trail.
   permission suspension/resume.
 - Workspace retrieval across semantic, file, graph-direct, and graph-walk
   channels, plus a separate durable memory system.
-- Background, evidence-gated prompt evolution for future runs.
 
-Fast is the direct single-model path. Auto and Pro ask a configured Conductor
-for a typed direct-or-workflow decision; Pro has a larger bounded collaboration
-budget. All modes use the same permission, tool, persistence, and completion
-paths.
+Fast, Auto, and Pro are effort tiers planned deterministically by the run
+preparation: a fixed single-model plan per tier with no planning model call.
+Fast is a quick direct answer; Auto and Pro add a bounded delivery judge and
+larger budgets. All modes use the same permission, tool, persistence, and
+completion paths.
 
 The checked-in evidence does **not** prove that Auto or Pro generally outperform
-Fast, that GEPA currently improves production quality, or that Cindx matches
-Fugu Ultra. The exact boundary is documented in
+Fast, or that any prompt-evolution or multi-model collaboration improves
+production quality. The exact boundary is documented in
 [Evaluation](docs/EVALUATION.md).
 
 ## Repository Map
@@ -35,7 +35,6 @@ crates/agent-core/        Shared transport-free contracts
 crates/agent-runtime/     Kernel, run control, context, task, and tool loop
 crates/agent-application/ Run/reprepare driver
 crates/agent-harness/     Active-run and exclusive-work registries
-crates/orchestrator/      Conductor decisions, workflows, task graph, evolution
 crates/agent-memory/      Durable memory production, retention, and recall
 crates/agent-rag/         Workspace indexing and vector retrieval
 crates/agent-graph/       Graph extraction and graph-guided retrieval
@@ -44,7 +43,6 @@ crates/model-provider/    Provider transport
 crates/tools/             Tool contracts and portable implementations
 crates/agent-mcp/         MCP transport and catalog adapter
 crates/agent-skills/      Skill discovery, trust, and loading
-crates/orchestrator-eval/ Non-shipping evaluation harness
 benchmarks/               Versioned deterministic contracts
 scripts/                  Checks, builds, and release helpers
 ```

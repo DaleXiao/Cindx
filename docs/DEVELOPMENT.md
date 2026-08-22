@@ -115,32 +115,10 @@ independent review receipt: admission requires an approving receipt whose
 window digest binds the exact signal window in order, and the resulting
 admission record hardcodes `production_eligible=false` and
 `promotion_eligible=false`. The desktop recorder appends signals to a private
-capped journal best-effort and never disturbs delivery; the desktop admission
-glue maps an admitted window into the conservative prompt-evolution fitness
-shape, and its contract tests run inside the desktop suite. The
-prompt-evolution read path wires the admitted window through
-`prompt_evolution_admission_runtime`: a `prompt_evolution.json` configuration
-switch (off by default; corrupt configuration falls back to off) gates
-resolution of the journal plus review receipt, validates both at every read,
-and exposes the admitted fitness block on the evolution effort state;
-champion and convergence mathematics are unchanged. It is included in
-`ci-contract`, `control-plane`, and `full`.
-
-`fugu-pilot-contract` runs the provider-free `fugu_pilot_lab` selftest bound to
-`benchmarks/fugu/fugu-pilot-v1.json` and
-`benchmarks/fugu/fugu-pilot-protocol-v1.json`. Its benchmark is GPQA-Diamond,
-which had been retired as an evaluation direction before the pilot; the suite
-remains tracked solely as a harness-link artifact and must not be read as
-reinstating GPQA as an evaluation direction. It pins the pilot suite to the
-frozen 12-case GPQA-Diamond sample and the cindx_fast / cindx_auto / cindx_pro
-single-replicate matrix, proves the protocol manifest binds the exact suite
-SHA-256 plus the pinned case authority and prompt-profile digests, keeps the
-run plan equal to the protocol run order, projects a bound synthetic
-external-effect report into a ready pilot with zero safety violations, and
-fails closed on a missing run, a drifted case authority, or an unknown
-treatment label. The tracked protocol stays `execution_authorized=false`, so
-the gate verifies the observation-to-scoring link, not parity, uplift, or
-promotion. It is included in `ci-contract`, `control-plane`, and `full`.
+capped journal best-effort and never disturbs delivery; the prompt-evolution
+admission read path (`prompt_evolution_admission_runtime`) has been physically
+removed with the prompt-genome mechanism. It is included in `ci-contract`,
+`control-plane`, and `full`.
 
 `workspace-undo-contract` runs 10 provider-free desktop tests covering undo
 entry projection from tool events, undo/redo of created, overwritten, and

@@ -274,26 +274,21 @@ Tool visibility does not grant authority.
 
 ## Prompt Evolution
 
-Prompt evolution is retired. The background workers that consumed redacted
-completed evidence, evaluated candidate profiles, and published stable/canary
-deployments have been removed from the tree. Foreground runs now always resolve
-a seed prompt profile for their effort tier.
+Prompt evolution is retired and physically removed. The background workers that
+consumed redacted completed evidence, evaluated candidate profiles, and
+published stable/canary deployments have been removed from the tree, and the
+prompt-genome / prompt-profile serving machinery is gone with them: a run
+carries no prompt profile at all.
 
-Fast remains seed-only. A profile cannot broaden tool authority, permissions,
-context limits, or run budgets, and cannot alter an in-flight run. Missing,
-stale, invalid, or inconsistent deployment state fails closed to the seed
-profile.
-
-Continuous evolution spend is retired and the workflow collaboration path is
-retired. The Settings evolution panel and its toggle are removed from the UI,
-and the `set_prompt_evolution_enabled` command is retired with them. The
-background evolution machinery (campaign runtime, mutation, pairwise
-evaluation, learning outbox, canary/rollout, and distillation) has been
-physically removed from the tree; only inert prompt-profile seed serving and
-the shadow judge-outcome measurement plumbing remain. Current checked-in
-provider evidence does not show that a learned workflow or finalizer profile
-improves production quality, and no profile from the historical experiments was
-promoted.
+The Settings evolution panel and its toggle are removed from the UI, and the
+`set_prompt_evolution_enabled` command is retired with them. The background
+evolution machinery (campaign runtime, mutation, pairwise evaluation, learning
+outbox, canary/rollout, and distillation), the genome schema, and the
+seed-profile serving path have all been physically removed from the tree; only
+the shadow judge-outcome measurement plumbing remains (an inert journal with no
+production consumer). Current checked-in provider evidence does not show that a
+learned workflow or finalizer profile improves production quality, and no
+profile from the historical experiments was promoted.
 
 ## Current Evidence Boundary
 
@@ -482,20 +477,19 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   pure, node-tested models (`composerSizingModel`, `attachmentLimitsModel`).
   `App.tsx`, `tauri.ts`, settings, inspector, and thread styling remain large
   change surfaces.
-- Evaluation binaries still compile through the desktop adapter when the
-  `realworld-eval` feature is enabled. `orchestrator-eval` is non-shipping, but
-  the provider campaign surface is not fully isolated from desktop code.
+- The `realworld-eval` feature and the `orchestrator`/`orchestrator-eval`
+  crates are physically removed; there is no provider evaluation surface in the
+  product build.
 - Delivery Verification's no-clobber consumption marker is a local filesystem
   authority. It fails closed across output-root relocation and normal crashes,
   but it is not an external anti-rollback service against an actor able to
   delete or restore every private control-plane file under the same user ID.
 - Current evidence does not establish general Auto/Pro superiority, successful
-  GEPA self-improvement, or Fugu Ultra parity.
+  prompt-evolution self-improvement, or external-benchmark parity.
 - The per-request `generation_temperature` override is produced by the
   executor loop: Fast and Auto pin deterministic sampling (`0`), Pro keeps
-  provider defaults. Collaboration worker, Conductor, and utility calls still
-  use provider defaults.
+  provider defaults.
 
-- The installed `0.2.34` validation build and published `v0.2.30` archive are
-  Apple Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution
-  still needs the appropriate Apple signing and notarization path.
+- The installed `0.2.77` build and the published `v0.2.77` archive are Apple
+  Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution still
+  needs the appropriate Apple signing and notarization path.
