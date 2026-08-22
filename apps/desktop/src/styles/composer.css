@@ -411,6 +411,32 @@
   animation: composer-effort-menu-in 140ms var(--ease-out-quart);
 }
 
+.composer-effort-back {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.composer-effort-back:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.composer-effort-back svg {
+  width: 12px;
+  height: 12px;
+}
+
 .composer-effort-group {
   display: grid;
   gap: 2px;

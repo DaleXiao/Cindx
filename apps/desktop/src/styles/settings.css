@@ -304,33 +304,145 @@
   line-height: 1.5;
 }
 
-.settings-checkbox-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 280px;
-  overflow-y: auto;
-  padding: 4px 0;
+.settings-model-picker {
+  position: relative;
 }
 
-.settings-checkbox-row {
+.settings-model-picker-trigger {
   display: flex;
+  width: 100%;
   align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  cursor: pointer;
   font-size: 12px;
-}
-
-.settings-checkbox-row:hover {
-  background: var(--panel-hover);
-}
-
-.settings-checkbox-row input {
-  accent-color: var(--accent);
   cursor: pointer;
+}
+
+.settings-model-picker-trigger > svg {
+  width: 12px;
+  height: 12px;
+  color: var(--muted);
+  transition: transform 160ms var(--ease-out-quart);
+}
+
+.settings-model-picker-trigger[aria-expanded="true"] > svg {
+  transform: rotate(180deg);
+}
+
+.settings-model-picker-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgb(0 0 0 / 10%);
+  display: grid;
+  gap: 2px;
+}
+
+.settings-model-picker-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.settings-model-picker-option:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.settings-model-picker-option[data-selected="true"] {
+  color: var(--text);
+}
+
+.settings-model-picker-check {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+
+.settings-model-picker-check svg {
+  width: 14px;
+  height: 14px;
+}
+
+.settings-model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.settings-model-chip-check {
+  width: 13px;
+  height: 13px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.settings-model-chip-name {
+  white-space: nowrap;
+}
+
+.settings-model-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.settings-model-chip-remove:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.settings-model-chip-remove svg {
+  width: 11px;
+  height: 11px;
 }
 
 .settings-checkbox-unavailable {

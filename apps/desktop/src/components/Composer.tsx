@@ -1,6 +1,7 @@
 import {
   Check,
   CheckCheck,
+  ChevronLeft,
   ChevronUp,
   CircleCheck,
   FileText,
@@ -58,28 +59,11 @@ function approvalInputSummary(approval: ToolApprovalView | null) {
 const EFFORT_OPTIONS: Array<{
   value: AgentEffort;
   label: string;
-  description: string;
 }> = [
-  {
-    value: "fast",
-    label: "Fast",
-    description: "Quick direct answer with a small budget"
-  },
-  {
-    value: "default",
-    label: "Default",
-    description: "Balanced reasoning with verification and memory"
-  },
-  {
-    value: "high",
-    label: "High",
-    description: "Deeper reasoning with a larger budget"
-  },
-  {
-    value: "xhigh",
-    label: "Extra High",
-    description: "Maximum reasoning depth for complex, multi-step work"
-  }
+  { value: "fast", label: "Fast" },
+  { value: "default", label: "Default" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra High" }
 ];
 
 function ComposerAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
@@ -185,6 +169,7 @@ export function Composer({
   const imeEnterSeenDuringCompositionRef = useRef(false);
   const suppressImeEnterUntilRef = useRef(0);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
+  const [menuStep, setMenuStep] = useState<"model" | "effort">("model");
   const [voiceStatus, setVoiceStatus] = useState<VoiceInputStatus>("idle");
   const hasInput = Boolean(value.trim() || attachments.length);
   const agentActive = working || canStop;
@@ -256,7 +241,10 @@ export function Composer({
   }, [value]);
 
   useEffect(() => {
-    if (!effortMenuOpen) return;
+    if (!effortMenuOpen) {
+      setMenuStep("model");
+      return;
+    }
     const closeOnPointerDown = (event: globalThis.PointerEvent) => {
       if (!effortControlRef.current?.contains(event.target as Node)) {
         setEffortMenuOpen(false);
@@ -521,7 +509,7 @@ export function Composer({
                     aria-label={`Model: ${activeModelLabel}, Reasoning: ${activeEffort.label}`}
                     aria-haspopup="listbox"
                     aria-expanded={effortMenuOpen}
-                    title={activeEffort.description}
+                    title={activeEffort.label}
                     disabled={working || canStop}
                     ref={effortTriggerRef}
                     onClick={() => setEffortMenuOpen((current) => !current)}
@@ -531,7 +519,7 @@ export function Composer({
                   </button>
                   {effortMenuOpen && (
                     <div className="composer-effort-menu" role="listbox" aria-label="Model and reasoning">
-                      {modelOptions.length > 0 && (
+                      {menuStep === "model" ? (
                         <div className="composer-effort-group" role="group" aria-label="Model">
                           <p className="composer-effort-group-label">Model</p>
                           {modelOptions.map((model) => (
@@ -544,7 +532,7 @@ export function Composer({
                               onClick={(event) => {
                                 const restoreKeyboardFocus = event.detail === 0;
                                 onModelChange(model);
-                                setEffortMenuOpen(false);
+                                setMenuStep("effort");
                                 if (restoreKeyboardFocus) {
                                   window.requestAnimationFrame(() =>
                                     effortTriggerRef.current?.focus({ preventScroll: true })
@@ -559,44 +547,50 @@ export function Composer({
                             </button>
                           ))}
                         </div>
-                      )}
-                      <div className="composer-effort-group" role="group" aria-label="Reasoning">
-                        <p className="composer-effort-group-label">Reasoning</p>
-                        {EFFORT_OPTIONS.map((option) => {
-                          const needsThinking = option.value === "high" || option.value === "xhigh";
-                          const unsupported = needsThinking && !modelThinks;
-                          return (
+                      ) : (
+                        <div className="composer-effort-group" role="group" aria-label="Reasoning">
                           <button
                             type="button"
-                            role="option"
-                            aria-selected={option.value === effort}
-                            data-selected={option.value === effort}
-                            key={option.value}
-                            disabled={unsupported}
-                            onClick={(event) => {
-                              const restoreKeyboardFocus = event.detail === 0;
-                              onEffortChange(option.value);
-                              setEffortMenuOpen(false);
-                              if (restoreKeyboardFocus) {
-                                window.requestAnimationFrame(() =>
-                                  effortTriggerRef.current?.focus({ preventScroll: true })
-                                );
-                              }
-                            }}
+                            className="composer-effort-back"
+                            onClick={() => setMenuStep("model")}
                           >
-                            <span>
-                              <strong>{option.label}</strong>
-                              <small>
-                                {unsupported
-                                  ? "Not supported by this model"
-                                  : option.description}
-                              </small>
-                            </span>
-                            {option.value === effort && <Check aria-hidden="true" />}
+                            <ChevronLeft aria-hidden="true" />
+                            <span>Model: {activeModelLabel}</span>
                           </button>
-                          );
-                        })}
-                      </div>
+                          <p className="composer-effort-group-label">Reasoning</p>
+                          {EFFORT_OPTIONS.map((option) => {
+                            const needsThinking = option.value === "high" || option.value === "xhigh";
+                            const unsupported = needsThinking && !modelThinks;
+                            return (
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={option.value === effort}
+                              data-selected={option.value === effort}
+                              key={option.value}
+                              disabled={unsupported}
+                              onClick={(event) => {
+                                const restoreKeyboardFocus = event.detail === 0;
+                                onEffortChange(option.value);
+                                setEffortMenuOpen(false);
+                                setMenuStep("model");
+                                if (restoreKeyboardFocus) {
+                                  window.requestAnimationFrame(() =>
+                                    effortTriggerRef.current?.focus({ preventScroll: true })
+                                  );
+                                }
+                              }}
+                            >
+                              <span>
+                                <strong>{option.label}</strong>
+                                {unsupported && <small>Not supported by this model</small>}
+                              </span>
+                              {option.value === effort && <Check aria-hidden="true" />}
+                            </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
