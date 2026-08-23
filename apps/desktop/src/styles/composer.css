@@ -499,11 +499,10 @@
 }
 
 .composer-effort-menu > button {
-  display: grid;
+  display: flex;
   width: 100%;
-  grid-template-columns: minmax(0, 1fr) 14px;
   align-items: center;
-  justify-items: start;
+  justify-content: flex-start;
   gap: 8px;
   padding: 8px 9px;
   color: var(--text);
@@ -514,7 +513,13 @@
 }
 
 .composer-effort-menu > button > span {
-  justify-self: start;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.composer-effort-menu > button > svg {
+  flex: 0 0 auto;
 }
 
 .composer-effort-menu > button:hover,
@@ -524,9 +529,9 @@
 }
 
 .composer-effort-menu > button > span {
-  display: grid;
+  display: block;
   min-width: 0;
-  gap: 2px;
+  text-align: left;
 }
 
 .composer-effort-menu strong {

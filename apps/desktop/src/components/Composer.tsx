@@ -517,7 +517,7 @@ export function Composer({
                     ref={effortTriggerRef}
                     onClick={() => setEffortMenuOpen((current) => !current)}
                   >
-                    <span>{activeModelLabel} {activeEffort.label}</span>
+                    <span>{activeModelLabel} · {activeEffort.label}</span>
                     <ChevronUp aria-hidden="true" />
                   </button>
                   {effortMenuOpen && (
