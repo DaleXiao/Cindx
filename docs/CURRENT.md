@@ -40,6 +40,10 @@ The desktop app currently includes:
   (Goal/Constraints/Progress/Decisions/Next Steps), cached by transcript fingerprint;
   everything else uses the cheap deterministic extractive
   Goal/Progress/Latest-position summary, so routine runs never block at startup.
+  Context token usage (compaction trigger, budget allocation, attempt
+  reservation) is counted with a real `cl100k_base` BPE tokenizer held as a
+  lazy singleton, not a character heuristic; the heuristic remains only as a
+  fallback if tokenizer initialization fails.
 - Subagent delegation (borrowed from opencode/pi/deepseek-harness): a `task` tool
   delegates to an isolated child run that sees only the delegated task (never the
   parent transcript), and its answer returns to the parent as an internal

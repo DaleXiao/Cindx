@@ -47,6 +47,7 @@ mod task_contract;
 mod task_state;
 mod task_state_lineage;
 mod task_state_wire;
+mod token_counter;
 mod tool_runtime;
 mod turn_budget;
 mod worker_policy;
@@ -66,9 +67,10 @@ pub use context_compiler::{
 };
 pub use context_engine::{
     compaction_summary_instruction, context_prompt_reserve, estimate_context_tokens,
-    estimate_message_tokens, estimate_text_tokens, extractive_rolling_summary, is_user_turn_start,
-    serialize_transcript_for_compaction, ContextCompactionPlan, ContextCompactionPolicy,
-    ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
+    estimate_message_tokens, estimate_request_tokens, estimate_text_tokens,
+    extractive_rolling_summary, is_user_turn_start, serialize_transcript_for_compaction,
+    ContextCompactionPlan, ContextCompactionPolicy, ContextEngine, ContextSourceKind,
+    CONTEXT_SOURCE_SCHEMA,
 };
 pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
@@ -156,6 +158,9 @@ pub use task_state::{
 pub use task_state_lineage::{AgentTaskStateLineage, AgentTranscriptFingerprintAccumulator};
 pub use task_state_wire::{
     PersistedInteractionSurface, PersistedInteractionVerification, PreparedTaskStateCheckpoint,
+};
+pub use token_counter::{
+    count_text_tokens, token_counter_kind, Cl100kTokenCounter, HeuristicTokenCounter, TokenCounter,
 };
 pub use tool_runtime::{
     apply_tool_spec_runtime_metadata, decode_persisted_tool_artifacts,

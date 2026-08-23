@@ -583,7 +583,13 @@ fn context_estimate_accounts_for_multibyte_text_and_prompt_reserve() {
             >= estimate_text_tokens_for_context("inspect these images") + 2_048
     );
 
-    let large_history = vec![test_message(MessageRole::User, "a".repeat(220_000))];
+    // Token usage is counted with a real BPE tokenizer, which compresses
+    // repeated characters heavily; use prose-like text so the history still
+    // presses the context window.
+    let large_history = vec![test_message(
+        MessageRole::User,
+        "lorem ipsum dolor sit amet ".repeat(14_000),
+    )];
     let plan = session_compaction_plan(&large_history, 100_000);
     assert!(plan.should_compact);
     assert!(plan.estimated_request_tokens > plan.estimated_history_tokens);

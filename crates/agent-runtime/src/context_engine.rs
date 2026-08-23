@@ -351,30 +351,11 @@ impl ContextEngine {
     }
 }
 
+/// Estimate model tokens for a piece of text through the process-wide
+/// [`crate::token_counter::TokenCounter`] (real `cl100k_base` BPE, degrading to
+/// the legacy character heuristic if the tokenizer cannot initialize).
 pub fn estimate_text_tokens(value: &str) -> u64 {
-    if value.is_ascii() {
-        return (value.len() as u64)
-            .saturating_add(2)
-            .checked_div(3)
-            .unwrap_or_default()
-            .saturating_add(u64::from(!value.is_empty()));
-    }
-
-    let mut ascii = 0_u64;
-    let mut non_ascii = 0_u64;
-    for character in value.chars() {
-        if character.is_ascii() {
-            ascii += 1;
-        } else {
-            non_ascii += 1;
-        }
-    }
-    ascii
-        .saturating_add(2)
-        .checked_div(3)
-        .unwrap_or_default()
-        .saturating_add(non_ascii)
-        .saturating_add(u64::from(!value.is_empty()))
+    crate::token_counter::count_text_tokens(value)
 }
 
 pub fn estimate_message_tokens(message: &Message) -> u64 {
@@ -407,6 +388,22 @@ pub fn estimate_context_tokens(messages: &[Message]) -> u64 {
         return 0;
     }
     CONTEXT_BASE_TOKENS.saturating_add(messages.iter().map(estimate_message_tokens).sum::<u64>())
+}
+
+/// Estimate the prompt tokens of a chat request (messages plus tool surface)
+/// through the process-wide token counter. Used for budget reservation.
+pub fn estimate_request_tokens(messages: &[Message], tools: &[agent_core::ToolSpec]) -> u64 {
+    let message_tokens = messages.iter().fold(0_u64, |total, message| {
+        total
+            .saturating_add(4)
+            .saturating_add(estimate_text_tokens(&message.content))
+    });
+    tools.iter().fold(message_tokens, |total, tool| {
+        total
+            .saturating_add(estimate_text_tokens(&tool.name))
+            .saturating_add(estimate_text_tokens(&tool.description))
+            .saturating_add(estimate_text_tokens(&tool.input_schema_json))
+    })
 }
 
 pub fn context_prompt_reserve(context_window_tokens: u64) -> u64 {
