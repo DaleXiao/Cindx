@@ -43,13 +43,23 @@ The desktop app currently includes:
 - Subagent delegation (borrowed from opencode/pi/deepseek-harness): a `task` tool
   delegates to an isolated child run that sees only the delegated task (never the
   parent transcript), and its answer returns to the parent as an internal
-  instruction. The child is a bounded provider completion; the read-only tool policy
-  and step budget live in `agent_runtime::subagent`. Multiple delegations in one
-  batch run concurrently (results rejoined in call order) and honour the parent run's
-  cancellation, so stopping a run aborts its subagents. While subagents run, the
-  Agent actions header shows a per-subagent panel (one row each, orb while running,
-  check when done) plus a "Running subagents done/total" status; the panel collapses
-  when every delegation completes.
+  instruction. The child runs a bounded read-only tool loop (not a single
+  completion): each step it may call whitelisted read-only discovery tools
+  (`file.read`, `file.list`, `file.search`, `web.search`), whose observations are
+  appended to its own isolated message history, until it answers without a tool
+  call or exhausts `SUBAGENT_MAX_STEPS`. The whitelist is enforced both when the
+  tool surface is built and again per call, and the registry additionally refuses
+  any non-read-only or permission-requiring tool, so an effectful or out-of-policy
+  call becomes a denied observation rather than an execution. Every child model
+  call is charged to the parent run's bounded Worker stage budget, so subagents
+  share the run's budget and cannot run unbounded; the child is asked to cite
+  file findings as `path:line`. The read-only tool policy and step budget live in
+  `agent_runtime::subagent`. Multiple delegations in one batch run concurrently
+  (results rejoined in call order) and honour the parent run's cancellation, so
+  stopping a run aborts its subagents. While subagents run, the Agent actions
+  header shows a per-subagent panel (one row each, orb while running, check when
+  done) plus a "Running subagents done/total" status; the panel collapses when
+  every delegation completes.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and

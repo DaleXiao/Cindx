@@ -512,12 +512,13 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 }
             }
             AgentAdvance::ToolCalls { calls } => {
-                let normal_calls = crate::agent_subagent_runtime::execute_subagent_delegations(
+let normal_calls = crate::agent_subagent_runtime::execute_subagent_delegations(
                     &mut runtime,
                     actor_provider,
                     state,
                     &run_context,
                     cancellation,
+                    &registry,
                     calls,
                 );
                 if normal_calls.is_empty() {

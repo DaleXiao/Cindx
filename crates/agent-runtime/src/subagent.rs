@@ -17,7 +17,7 @@ pub const SUBAGENT_ALLOWED_TOOLS: &[&str] = &[
 ];
 
 pub fn subagent_system_prompt() -> &'static str {
-    "You are a subagent handling one delegated task in an isolated context. Work it to completion using only read-only discovery tools, then answer concisely with the concrete result (findings, file paths, or a short summary). Do not ask the user questions; if blocked, say what is blocked."
+    "You are a subagent handling one delegated task in an isolated context. Work it to completion using only the read-only discovery tools provided, then answer concisely with the concrete result (findings, file paths, or a short summary). When you report findings from files, cite each one as path:line so the parent can reference the exact location. Do not ask the user questions; if blocked, say what is blocked."
 }
 
 /// Build the isolated child prompt: only the delegated description/prompt, never the
