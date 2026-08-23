@@ -14,6 +14,7 @@ mod agent_subagent_runtime;
 mod agent_summary_runtime;
 mod agent_model_turn_runtime;
 mod agent_parallel_tool_runtime;
+mod agent_plan_mode_runtime;
 mod agent_preparation_runtime;
 mod agent_query_commands;
 mod agent_read_model;

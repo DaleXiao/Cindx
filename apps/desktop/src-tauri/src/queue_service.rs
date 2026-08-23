@@ -12,6 +12,8 @@ pub(crate) struct QueuedAgentMessageView {
     pub(crate) attachments: Vec<AgentAttachmentView>,
     pub(crate) effort: String,
     pub(crate) mode: String,
+    #[serde(default)]
+    pub(crate) plan_mode: bool,
     pub(crate) created_at_ms: u64,
     pub(crate) updated_at_ms: u64,
 }
@@ -44,6 +46,8 @@ pub(crate) struct QueuedAgentMessagePayload {
     pub(crate) attachments: Vec<AgentAttachmentView>,
     pub(crate) effort: String,
     pub(crate) current_time: String,
+    #[serde(default)]
+    pub(crate) plan_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +126,7 @@ fn apply_queue_event_to_views(messages: &mut Vec<QueuedAgentMessageView>, event:
                     .label()
                     .to_string(),
                 mode,
+                plan_mode: payload.plan_mode,
                 created_at_ms,
                 updated_at_ms: event.timestamp_ms,
             });
@@ -136,6 +141,7 @@ fn apply_queue_event_to_views(messages: &mut Vec<QueuedAgentMessageView>, event:
                 message.effort = AgentPolicy::parse_ingress(&payload.effort)
                     .label()
                     .to_string();
+                message.plan_mode = payload.plan_mode;
                 message.updated_at_ms = event.timestamp_ms;
             }
         }
@@ -226,6 +232,7 @@ pub(crate) fn pending_queued_agent_messages(
                                 .label()
                                 .to_string(),
                             mode,
+                            plan_mode: payload.plan_mode,
                             created_at_ms,
                             updated_at_ms: event.timestamp_ms,
                         },

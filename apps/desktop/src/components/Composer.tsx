@@ -7,6 +7,7 @@ import {
   CircleCheck,
   FileText,
   Image,
+  ListChecks,
   LoaderCircle,
   Plus,
   RotateCcw,
@@ -32,6 +33,7 @@ import {
 } from "../providerReadinessModel";
 import { applyCustomCommandTemplate } from "../customCommandsModel";
 import { composerTextareaSizing } from "../composerSizingModel";
+import { planModeAvailable } from "../planModeModel";
 import type { CustomCommandView } from "../tauriTypes";
 import { permissionFocusTarget } from "./accessibilityFocusModel";
 import { CustomCommandsMenu } from "./CustomCommandsMenu";
@@ -110,7 +112,7 @@ type ComposerProps = {
   onVoiceError: (message: string) => void;
   onProviderRequired: (readiness: ProviderReadiness) => void;
   onConfigureProvider: () => void;
-  onSend: (prompt: string) => void;
+  onSend: (prompt: string, planMode: boolean) => void;
   onPickAttachments: (files: File[]) => void;
   onRemoveAttachment: (attachment: AgentAttachment) => void;
   onCancel: () => void;
@@ -172,6 +174,9 @@ export function Composer({
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const [menuStep, setMenuStep] = useState<"main" | "model" | "effort">("main");
   const [voiceStatus, setVoiceStatus] = useState<VoiceInputStatus>("idle");
+  const [planMode, setPlanMode] = useState(false);
+  const planModeOffered = planModeAvailable(effort);
+  const planModeActive = planModeOffered && planMode;
   const hasInput = Boolean(value.trim() || attachments.length);
   const agentActive = working || canStop;
   const showStop = agentActive && !hasInput;
@@ -271,6 +276,10 @@ export function Composer({
   }, [canStop, working]);
 
   useEffect(() => {
+    if (!planModeOffered) setPlanMode(false);
+  }, [planModeOffered]);
+
+  useEffect(() => {
     if (focusRequest <= 0 || pendingApproval) return;
     textareaRef.current?.focus();
     textareaRef.current?.setSelectionRange(value.length, value.length);
@@ -284,7 +293,7 @@ export function Composer({
       onProviderRequired(providerReadiness);
       return;
     }
-    onSend(prompt);
+    onSend(prompt, planModeActive);
     if (providerPreflight.clearDraft) onChange("");
   }
 
@@ -492,6 +501,21 @@ export function Composer({
                 )}
               </button>
               <div className="composer-toolbar-actions">
+                {planModeOffered && (
+                  <button
+                    className="composer-plan-toggle"
+                    type="button"
+                    aria-label="Plan first"
+                    aria-pressed={planModeActive}
+                    data-active={planModeActive}
+                    title="Plan first: draft a read-only plan and wait for your approval before executing"
+                    disabled={working || canStop}
+                    onClick={() => setPlanMode((current) => !current)}
+                  >
+                    <ListChecks aria-hidden="true" />
+                    <span>Plan</span>
+                  </button>
+                )}
                 <CustomCommandsMenu
                   disabled={working || canStop}
                   onApply={(command: CustomCommandView) => {

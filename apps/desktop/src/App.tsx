@@ -12,6 +12,7 @@ import {
 import { CheckCircle2 } from "lucide-react";
 import { Inspector } from "./components/Inspector";
 import { Composer } from "./components/Composer";
+import { PlanConfirmationCard } from "./components/PlanConfirmationCard";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceChrome } from "./components/WorkspaceChrome";
@@ -838,7 +839,8 @@ export function App() {
   const agentApprovals = activeAgentState?.pendingApprovals ?? [];
   const agentCanCancel = Boolean(activeAgentState?.canCancel || activeSessionBusy);
   const agentCanRetry = Boolean(activeAgentState?.canRetry);
-  const agentCanContinue = Boolean(activeAgentState?.canContinue);
+  const pendingPlanConfirmation = activeAgentState?.pendingPlanConfirmation ?? null;
+  const agentCanContinue = Boolean(activeAgentState?.canContinue) && !pendingPlanConfirmation;
   const agentWorking = Boolean(activeSessionBusy || activeAgentState?.status === "running");
   function markSessionBusy(sessionId: string, busy: boolean) {
     setBusySessionIds((current) => {
@@ -1734,7 +1736,7 @@ export function App() {
     }
   }
 
-  async function handleSendPrompt(value: string) {
+  async function handleSendPrompt(value: string, planMode = false) {
     const nextPrompt = value.trim();
     const sessionId = activeSession?.id;
     const attachments = composerAttachments;
@@ -1767,6 +1769,7 @@ export function App() {
         attachments,
         effort: agentEffort,
         mode: "queue",
+        planMode,
         createdAtMs: queuedAt,
         updatedAtMs: queuedAt
       };
@@ -1781,13 +1784,7 @@ export function App() {
       );
       clearAttachments(sessionId);
       try {
-        const receipt = await queueAgentMessage(
-          nextPrompt,
-          sessionId,
-          attachments,
-          agentEffort,
-          queueId
-        );
+        const receipt = await queueAgentMessage(nextPrompt, sessionId, attachments, agentEffort, queueId, planMode);
         optimisticQueuedMessagesRef.current.delete(queueId);
         applyQueuedMessageReceiptForSession(sessionId, receipt);
       } catch (error) {
@@ -1847,7 +1844,7 @@ export function App() {
     let completedState: AgentState | null = null;
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort);
+      const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort, planMode);
       completedState = next;
       acknowledgeOptimisticUserMessage(sessionId, next.messages);
       updateSessionStatus(sessionId, next.status, next.canContinue);
@@ -2177,6 +2174,9 @@ export function App() {
                 onEdit={handleEditQueuedMessage}
                 onDelete={handleDeleteQueuedMessage}
               />
+              {pendingPlanConfirmation && activeSession?.id && (
+                <PlanConfirmationCard sessionId={activeSession.id} confirmation={pendingPlanConfirmation} onResolved={applyAgentStateForSession} onError={setComposerError} />
+              )}
               <Composer
                 value={composerDraft}
                 working={agentWorking}
@@ -2210,7 +2210,7 @@ export function App() {
                   openSettingsCategory("models");
                   void loadProviderState();
                 }}
-                onSend={(value) => void handleSendPrompt(value)}
+                onSend={(value, planMode) => void handleSendPrompt(value, planMode)}
                 onPickAttachments={(files) => void handlePickAttachments(files)}
                 onRemoveAttachment={handleRemoveAttachment}
                 onCancel={() => void handleCancelAgentTask()}

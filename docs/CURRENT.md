@@ -102,6 +102,27 @@ and the knowledge decision) with no planning model call. Prompt-derived route
 requirements still lift tool/effect/vision constraints fail-closed during
 preparation.
 
+Plan mode (plan-then-confirm) is an opt-in interaction feature, not a planning
+system. The Composer shows a "Plan" toggle only for High and Extra High
+effort; Fast and Default never expose or honor it. When enabled, the run
+drafts a plan before any preparation or execution: a bounded read-only loop
+(the same `file.read`/`file.list`/`file.search`/`web.search` whitelist and
+per-call enforcement as subagent delegation) whose model calls are charged to
+the run's Worker stage budget. The drafted plan — an ordered step list plus
+the involved files, as bounded plain markdown — is persisted with the run
+events and the run pauses for an explicit user decision: approve and execute,
+discard and execute, or cancel the run. Approving injects the plan into the
+execution context through the project-instructions pipeline pattern (a
+protected internal source with a provenance digest receipt and
+untrusted-guidance boundary text); the plan is context content only and
+carries no scheduling authority. Discarding runs the ordinary path with the
+drafting budget still charged; cancelling terminates the run. The wait is the
+existing nonterminal pause with a durable recovery envelope, so an app restart
+re-presents the same pending confirmation, and resolving resumes the run
+through the ordinary paused-run continuation path. A plan-drafting failure
+(provider error, empty plan, or an exhausted Worker stage budget) is recorded
+and the run proceeds without a plan.
+
 Each tier can pin a configured default model (`fast_model`, `auto_model`,
 `pro_model` in the provider configuration). The Settings Models panel exposes
 the three tier pins plus the legacy compatibility fallback slot; the legacy

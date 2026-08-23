@@ -362,7 +362,8 @@
               "effort": "default",
               "mode": "queue",
               "createdAtMs": 53,
-              "updatedAtMs": 53
+              "updatedAtMs": 53,
+              "planMode": false
             }
           ],
           "latestAnswer": "Waiting",
@@ -449,7 +450,8 @@
             "effort": "default",
             "mode": "queue",
             "createdAtMs": 53,
-            "updatedAtMs": 53
+            "updatedAtMs": 53,
+            "planMode": false
           },
           "eventCount": 10,
           "latestSequence": 10,
@@ -480,7 +482,8 @@
             "effort": "default",
             "mode": "steer",
             "createdAtMs": 53,
-            "updatedAtMs": 55
+            "updatedAtMs": 55,
+            "planMode": false
           },
           "eventCount": 11,
           "latestSequence": 11,

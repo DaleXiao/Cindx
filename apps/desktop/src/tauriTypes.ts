@@ -240,6 +240,7 @@ export type QueuedAgentMessage = {
   attachments: AgentAttachment[];
   effort: AgentEffort;
   mode: "queue" | "steer";
+  planMode?: boolean;
   createdAtMs: number;
   updatedAtMs: number;
 };
@@ -560,6 +561,12 @@ export type ContextState = {
   lastError: string | null;
 };
 
+export type PendingPlanConfirmationView = {
+  planMarkdown: string;
+  planDigest: string;
+  proposedAtMs: number;
+};
+
 export type AgentState = {
   taskId: string;
   projectId: string | null;
@@ -596,6 +603,7 @@ export type AgentState = {
   messages: ChatMessageView[];
   pendingApprovals: ToolApprovalView[];
   queuedMessages: QueuedAgentMessage[];
+  pendingPlanConfirmation?: PendingPlanConfirmationView | null;
   latestAnswer: string | null;
   lastError: string | null;
 };

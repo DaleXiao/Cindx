@@ -2981,8 +2981,9 @@ assert(
   appSource.includes("providerStatusText(providerReadiness)") &&
     composerSource.includes("providerSubmissionPreflight(providerReadiness)") &&
     composerSource.indexOf("if (!providerPreflight.allowSubmit)") <
-      composerSource.indexOf("onSend(prompt)") &&
-    composerSource.indexOf("onSend(prompt)") < composerSource.indexOf('onChange("")') &&
+      composerSource.indexOf("onSend(prompt, planModeActive)") &&
+    composerSource.indexOf("onSend(prompt, planModeActive)") <
+      composerSource.indexOf('onChange("")') &&
     composerSource.includes("Configure Models") &&
     appSource.includes('openSettingsCategory("models")') &&
     settingsModelsPanelSource.includes("providerSettingsError") &&

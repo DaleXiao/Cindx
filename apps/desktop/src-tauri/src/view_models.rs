@@ -312,6 +312,8 @@ pub(crate) struct QueueAgentMessageInput {
     pub(crate) effort: String,
     #[serde(default)]
     pub(crate) attachments: Vec<AgentAttachmentView>,
+    #[serde(default)]
+    pub(crate) plan_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -719,8 +721,20 @@ pub(crate) struct AgentState {
     pub(crate) pending_approvals: Vec<ToolApprovalView>,
     #[serde(default)]
     pub(crate) queued_messages: Vec<QueuedAgentMessageView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_plan_confirmation: Option<PendingPlanConfirmationView>,
     pub(crate) latest_answer: Option<String>,
     pub(crate) last_error: Option<String>,
+}
+
+/// A run parked at the plan-then-confirm gate: the drafted plan awaiting the
+/// user's approve/discard/cancel decision. Projected from durable run events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingPlanConfirmationView {
+    pub(crate) plan_markdown: String,
+    pub(crate) plan_digest: String,
+    pub(crate) proposed_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -855,6 +869,10 @@ pub(crate) struct AgentTaskInput {
     pub(crate) effort: String,
     #[serde(default)]
     pub(crate) attachments: Vec<AgentAttachmentView>,
+    /// Plan-then-confirm toggle from the Composer. Honored only for High/Xhigh
+    /// effort; a request on any other tier is dropped at admission.
+    #[serde(default)]
+    pub(crate) plan_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -189,6 +189,7 @@ pub(crate) fn remove_stale_preparation_context(history: &mut Vec<Message>) {
                     | "agent_evidence_packet"
                     | "collaboration_tool_evidence"
                     | "workflow_execution_contract"
+                    | "confirmed_plan"
             )
         );
         !preparation_kind && !message.metadata.contains_key("collaboration_stage")
@@ -222,6 +223,8 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
         "project_instructions_digest",
         "project_instructions_truncated",
         "project_instructions_omitted_json",
+        "confirmed_plan_schema",
+        "confirmed_plan_digest",
     ] {
         run_context.remove(key);
     }
@@ -482,6 +485,28 @@ pub(crate) fn prepare_agent_execution_replay(
             &mut history
         )
         .map_err(|error| runtime_preparation_error(&run_context, error)));
+        // A user-confirmed plan rides the same protected-context pipeline as
+        // project instructions: it is injected here from durable run events on
+        // every (re)preparation and carries no scheduling authority.
+        if crate::agent_plan_mode_runtime::plan_mode_requested_in_context(&run_context) {
+            let events = preparation_try!(match state.store.lock() {
+                Ok(store) => crate::agent_read_model::agent_events_for_session(
+                    &store,
+                    task_id,
+                    run_context.get("session_id").map(String::as_str),
+                )
+                .map_err(|error| runtime_preparation_error(&run_context, error.to_string())),
+                Err(error) => Err(runtime_preparation_error(
+                    &run_context,
+                    format!("store lock poisoned: {error}")
+                )),
+            });
+            crate::agent_plan_mode_runtime::append_confirmed_plan_context(
+                &events,
+                &mut run_context,
+                &mut history,
+            );
+        }
         if let Some(workspace_context) = prepared_knowledge.workspace {
             history.push(workspace_context);
         }

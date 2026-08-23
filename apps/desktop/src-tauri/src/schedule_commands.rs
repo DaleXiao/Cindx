@@ -790,6 +790,9 @@ pub(crate) fn trigger_schedule_run(
         queue_id: None,
         effort: schedule.effort.clone(),
         attachments: Vec::new(),
+        // Scheduled runs are dispatched unattended; the plan-then-confirm gate
+        // is an interactive Composer feature and never applies here.
+        plan_mode: false,
     };
     let run_id = unique_id("schedule-run");
     let queue_result = enqueue_agent_message_inner(state, queue_input);

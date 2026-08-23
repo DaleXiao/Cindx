@@ -201,7 +201,8 @@ test("queue then steer crosses the IPC boundary and reconciles exactly once", as
       currentTime: "<runtime>",
       effort: message.effort,
       attachments: [],
-      queueId: message.id
+      queueId: message.id,
+      planMode: false
     }
   );
   assert.equal(typeof queueInput.currentTime, "string");

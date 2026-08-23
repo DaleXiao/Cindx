@@ -148,6 +148,28 @@ transaction writes the typed "Agent run decision selected" event. A
 cancellation or steer that wins first prevents that stale decision from being
 committed.
 
+### 2a. Plan-then-confirm gate (High/Xhigh only)
+
+When the Composer's plan toggle is on for a High/Xhigh run, the task command
+runs a plan gate after the durable start commit and before preparation
+(`agent_plan_mode_runtime`). The gate drafts a plan with a bounded read-only
+tool loop that reuses the subagent whitelist (`file.read`, `file.list`,
+`file.search`, `web.search`) and the registry's permissionless-read guard, and
+charges every drafting call through `begin_stage_model_call(_,
+RunStageClass::Worker)`. The proposal (bounded markdown plus its
+content-bound digest) and the later user decision are persisted as ordinary
+run events; the gate then parks the run with the existing nonterminal pause
+plus recovery-envelope mechanism (`waiting_for_plan_confirmation`), so
+recovery re-presents the same pending confirmation. Resolving the gate reuses
+the paused-run continuation path; the execution itself is unchanged. A
+user-approved plan is injected during preparation from durable events via the
+project-instructions pipeline pattern — a protected internal system message
+with a provenance digest receipt and untrusted-guidance boundary text — and is
+re-derived identically on re-preparation and recovery. The deterministic
+`EffortRunPlan` remains the sole scheduling authority: plan mode writes only
+`confirmed_plan_*` provenance keys and never touches tool, effect, model, or
+budget scheduling keys.
+
 Model request generation follows the effort policy: chat requests and the
 credential probe disable provider-side thinking for model families whose
 builds enable it by default, and the executor loop pins deterministic sampling

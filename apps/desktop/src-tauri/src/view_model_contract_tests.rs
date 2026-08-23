@@ -32,6 +32,7 @@ fn queue_message(mode: &str, updated_at_ms: u64) -> QueuedAgentMessageView {
         }],
         effort: "default".to_string(),
         mode: mode.to_string(),
+        plan_mode: false,
         created_at_ms: 53,
         updated_at_ms,
     }
@@ -308,6 +309,7 @@ fn agent_state_values() -> Vec<Value> {
                 can_allow_session: true,
             }],
             queued_messages: vec![queue_message("queue", 53)],
+            pending_plan_confirmation: None,
             latest_answer: Some("Waiting".to_string()),
             last_error: None,
         }),
@@ -340,6 +342,7 @@ fn agent_state_values() -> Vec<Value> {
             messages: Vec::new(),
             pending_approvals: Vec::new(),
             queued_messages: Vec::new(),
+            pending_plan_confirmation: None,
             latest_answer: None,
             last_error: Some("contract failure".to_string()),
         }),

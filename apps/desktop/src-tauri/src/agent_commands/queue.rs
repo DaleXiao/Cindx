@@ -52,6 +52,7 @@ pub(crate) fn enqueue_agent_message_inner(
             .label()
             .to_string(),
         current_time: normalized_current_time_context(&input.current_time),
+        plan_mode: input.plan_mode,
     };
     let queue_id = queued_agent_message_id(input.queue_id.as_deref());
     let created_at_ms = current_time_millis();
@@ -74,10 +75,11 @@ pub(crate) fn enqueue_agent_message_inner(
     let message = QueuedAgentMessageView {
         id: queue_id.clone(),
         session_id: input.session_id,
-        prompt: payload.prompt,
-        attachments: payload.attachments,
-        effort: payload.effort,
+        prompt: payload.prompt.clone(),
+        attachments: payload.attachments.clone(),
+        effort: payload.effort.clone(),
         mode: "queue".to_string(),
+        plan_mode: payload.plan_mode,
         created_at_ms,
         updated_at_ms: revision.latest_timestamp_ms,
     };
@@ -211,6 +213,7 @@ pub(crate) fn edit_queued_agent_message_blocking(
         attachments: queued.attachments.clone(),
         effort: queued.effort.clone(),
         current_time: normalized_current_time_context(""),
+        plan_mode: queued.plan_mode,
     };
     append_agent_queue_event(
         &mut store,
@@ -460,6 +463,7 @@ pub(crate) fn run_next_queued_agent_message_blocking_inner(
         queue_id: Some(queued.view.id.clone()),
         effort: queued.payload.effort.clone(),
         attachments: queued.payload.attachments.clone(),
+        plan_mode: queued.payload.plan_mode,
     };
     match run_agent_task_blocking(app, state.clone(), task_input) {
         Ok(next) => {

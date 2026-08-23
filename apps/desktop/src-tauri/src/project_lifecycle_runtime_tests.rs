@@ -184,6 +184,7 @@ fn append_active_fork_source(store: &mut SqliteStore, final_status: Option<&str>
         attachments: Vec::new(),
         effort: "auto".to_string(),
         current_time: String::new(),
+        plan_mode: false,
     };
     append_test_event(
         store,
@@ -536,6 +537,7 @@ fn fork_rewrites_all_managed_attachment_references_and_survives_source_delete() 
         }],
         effort: "auto".to_string(),
         current_time: String::new(),
+        plan_mode: false,
     };
     let mut events = vec![Event {
         id: agent_core::EventId("event-a".to_string()),
@@ -614,6 +616,7 @@ fn queue_payload_only_attachment_is_cloned_and_rewritten() {
         }],
         effort: "auto".to_string(),
         current_time: String::new(),
+        plan_mode: false,
     };
     let mut events = vec![Event {
         id: agent_core::EventId("queue-event".to_string()),

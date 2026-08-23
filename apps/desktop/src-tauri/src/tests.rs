@@ -6480,6 +6480,7 @@ fn queued_agent_messages_are_durable_ordered_and_session_scoped() {
         attachments: Vec::new(),
         effort: "auto".to_string(),
         current_time: "now".to_string(),
+        plan_mode: false,
     };
     let first = payload("first");
     let second = payload("second");
@@ -6611,6 +6612,7 @@ fn queue_events_do_not_change_a_terminal_agent_status() {
         attachments: Vec::new(),
         effort: "auto".to_string(),
         current_time: "now".to_string(),
+        plan_mode: false,
     };
     append_agent_queue_event(
         &mut store,
@@ -6665,6 +6667,7 @@ fn queued_messages_preserve_a_permission_waiting_run() {
         attachments: Vec::new(),
         effort: "auto".to_string(),
         current_time: "now".to_string(),
+        plan_mode: false,
     };
     append_agent_queue_event(
         &mut store,
@@ -6695,6 +6698,7 @@ fn queued_agent_message_start_and_restore_are_replay_safe() {
         attachments: Vec::new(),
         effort: "pro".to_string(),
         current_time: "now".to_string(),
+        plan_mode: false,
     };
     append_agent_queue_event(
         &mut store,
@@ -6743,6 +6747,7 @@ fn queued_run_failure_restores_only_before_agent_start() {
         attachments: Vec::new(),
         effort: "pro".to_string(),
         current_time: "now".to_string(),
+        plan_mode: false,
     };
     let pending = PendingQueuedAgentMessage {
         view: QueuedAgentMessageView {
@@ -6752,6 +6757,7 @@ fn queued_run_failure_restores_only_before_agent_start() {
             attachments: Vec::new(),
             effort: payload.effort.clone(),
             mode: "queue".to_string(),
+            plan_mode: false,
             created_at_ms: 10,
             updated_at_ms: 10,
         },
@@ -6867,6 +6873,7 @@ fn queued_steer_commit_revalidates_the_current_queue_item() {
         attachments: Vec::new(),
         effort: "pro".to_string(),
         current_time: "now".to_string(),
+        plan_mode: false,
     };
     let mut store = SqliteStore::in_memory().expect("store should open");
     append_agent_queue_event(
@@ -6936,6 +6943,7 @@ fn queued_agent_messages_update_the_incremental_session_read_model() {
         attachments: Vec::new(),
         effort: "auto".to_string(),
         current_time: "now".to_string(),
+        plan_mode: false,
     };
     append_agent_queue_event(
         &mut store,

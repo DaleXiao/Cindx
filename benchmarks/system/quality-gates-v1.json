@@ -21,7 +21,8 @@
       "desktop-structure",
       "workspace-undo-contract",
       "project-instructions-contract",
-      "custom-commands-contract"
+      "custom-commands-contract",
+      "plan-mode-contract"
     ],
     "ci-contract": [
       "documentation-contract",
@@ -50,7 +51,8 @@
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
-      "frontend-test"
+      "frontend-test",
+      "plan-mode-contract"
     ],
     "control-plane": [
       "documentation-contract",
@@ -75,7 +77,8 @@
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
       "workspace-tests",
-      "desktop-tests"
+      "desktop-tests",
+      "plan-mode-contract"
     ],
     "performance": [
       "performance-comparator-contract",
@@ -143,7 +146,8 @@
       "prepared-image-request-scaling",
       "model-transport-prepare-scaling",
       "frontend-streaming-markdown-scaling",
-      "frontend-build"
+      "frontend-build",
+      "plan-mode-contract"
     ]
   },
   "gates": [
@@ -800,6 +804,24 @@
       "required_output": [
         "test result: ok. 1 passed; 0 failed",
         "cindx.rag-search-diagnostic.v1"
+      ]
+    },
+    {
+      "id": "plan-mode-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "plan_mode_contract_",
+        "--lib",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 16 passed; 0 failed"
       ]
     }
   ]

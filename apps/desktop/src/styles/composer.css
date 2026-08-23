@@ -1099,3 +1099,125 @@ textarea::placeholder {
   color: #6f6f6f;
   font-size: 11px;
 }
+
+.composer-plan-toggle {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  color: #555555;
+  background: transparent;
+  border: 1px solid #cfcfcf;
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.composer-plan-toggle:hover:not(:disabled) {
+  background: #eeeeee;
+}
+
+.composer-plan-toggle[data-active="true"] {
+  color: #ffffff;
+  background: #333333;
+  border-color: #333333;
+}
+
+.composer-plan-toggle svg {
+  width: 11px;
+  height: 11px;
+}
+
+.plan-confirmation {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 8px;
+  width: min(100%, 760px);
+  margin: 4px auto 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: var(--radius-lg);
+  background: rgba(247, 247, 247, 0.98);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.055);
+}
+
+.plan-confirmation-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.plan-confirmation-header svg {
+  width: 14px;
+  height: 14px;
+}
+
+.plan-confirmation-header strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.plan-confirmation p {
+  margin: 0;
+  color: #4b4b4b;
+  font-size: 12px;
+}
+
+.plan-confirmation-plan {
+  max-height: 240px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #333333;
+  background: #ffffff;
+  border: 1px solid #e2e2e2;
+  border-radius: var(--radius-md);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.plan-confirmation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plan-confirmation-actions button {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid #cfcfcf;
+  border-radius: var(--radius-md);
+  color: #333333;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.plan-confirmation-actions button:hover:not(:disabled) {
+  background: #eeeeee;
+}
+
+.plan-confirmation-actions button:disabled {
+  opacity: 0.6;
+}
+
+.plan-confirmation-actions button svg {
+  width: 11px;
+  height: 11px;
+}
+
+.plan-confirmation-actions .plan-confirmation-approve {
+  color: #ffffff;
+  background: #333333;
+  border-color: #333333;
+}
+
+.plan-confirmation-actions .plan-confirmation-approve:hover:not(:disabled) {
+  background: #1a1a1a;
+}

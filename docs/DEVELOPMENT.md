@@ -139,6 +139,15 @@ markdown command discovery, frontmatter parsing and effort normalization,
 project-over-global name precedence, and file-count and byte caps. It is
 included in `quick`, `ci-contract`, `control-plane`, and `full`.
 
+`plan-mode-contract` runs 16 provider-free desktop tests covering the
+High/Xhigh-only plan-mode gate (Fast/Default never activate it), the bounded
+read-only plan-drafting loop (whitelist enforcement, step bound, Worker-stage
+budget charging, cancellation), the user-confirmed plan context injection with
+its provenance receipt and untrusted-guidance boundary (which never writes a
+scheduling key), the paused pending-confirmation projection, and the
+plan-aware cancel guard. It is included in `quick`, `ci-contract`,
+`control-plane`, and `full`.
+
 The portable collaboration-learning contracts (`agent-collaboration-learning-contract`,
 `agent-collaboration-learning-offline-contract`, and the retired
 `agent-collaboration-learning-offline-adapter-contract`) have been removed along

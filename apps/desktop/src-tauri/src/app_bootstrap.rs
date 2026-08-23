@@ -257,6 +257,7 @@ pub fn run() -> Result<(), String> {
             cancel_agent_task,
             retry_agent_task,
             resolve_agent_permission,
+            resolve_agent_plan_confirmation,
             get_phase5_state,
             run_tool,
             resolve_tool_permission,

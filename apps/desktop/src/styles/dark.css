@@ -670,3 +670,42 @@
     transition: none;
   }
 }
+
+:root[data-theme="dark"] .plan-confirmation {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .plan-confirmation p {
+  color: var(--text-dim);
+}
+
+:root[data-theme="dark"] .plan-confirmation-plan {
+  color: var(--text);
+  background: var(--surface-active);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .plan-confirmation-actions button,
+:root[data-theme="dark"] .composer-plan-toggle {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border-strong);
+}
+
+:root[data-theme="dark"] .plan-confirmation-actions button:hover:not(:disabled),
+:root[data-theme="dark"] .composer-plan-toggle:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+:root[data-theme="dark"] .plan-confirmation-actions .plan-confirmation-approve,
+:root[data-theme="dark"] .composer-plan-toggle[data-active="true"] {
+  color: #ffffff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+:root[data-theme="dark"] .plan-confirmation-actions .plan-confirmation-approve:hover:not(:disabled) {
+  background: #1d4ed8;
+}

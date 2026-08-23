@@ -224,8 +224,9 @@ pub(crate) fn subagent_child_answer(
 /// Execute one whitelisted read-only subagent tool call and format its
 /// observation. The whitelist and the registry's read-only/permissionless guard
 /// are both enforced, so a disallowed or effectful call becomes an observation
-/// rather than an execution.
-fn execute_subagent_tool_call(
+/// rather than an execution. Also used by the plan-mode drafting loop, which
+/// shares the same read-only whitelist.
+pub(crate) fn execute_subagent_tool_call(
     registry: &ToolRegistry,
     task_id: &TaskId,
     call: &agent_core::ModelToolCall,

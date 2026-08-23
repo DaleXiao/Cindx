@@ -53,6 +53,7 @@ pub(crate) fn empty_agent_state_for_session(session_id: &str) -> AgentState {
         messages: Vec::new(),
         pending_approvals: Vec::new(),
         queued_messages: Vec::new(),
+        pending_plan_confirmation: None,
         latest_answer: None,
         last_error: None,
     }

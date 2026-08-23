@@ -99,6 +99,14 @@ pub(crate) fn agent_state_from_events(
         .filter_map(tool_approval_from_audit)
         .collect::<Vec<_>>();
     pending_approvals.reverse();
+    let pending_plan_confirmation =
+        crate::agent_plan_mode_runtime::pending_plan_confirmation(&active_events).map(|pending| {
+            crate::view_models::PendingPlanConfirmationView {
+                plan_markdown: pending.plan_markdown,
+                plan_digest: pending.plan_digest,
+                proposed_at_ms: pending.proposed_at_ms,
+            }
+        });
     let queued_messages = session_id
         .map(|session_id| {
             pending_queued_agent_messages(&thread_events, session_id)
@@ -244,6 +252,7 @@ pub(crate) fn agent_state_from_events(
         messages,
         pending_approvals,
         queued_messages,
+        pending_plan_confirmation,
         latest_answer,
         last_error,
     })

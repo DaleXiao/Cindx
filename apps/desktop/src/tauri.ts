@@ -11,8 +11,10 @@ export type * from "./tauriTypes";
 export type * from "./ragOperationModel";
 export type * from "./agentRunBudgetModel";
 export type * from "./memoryManagementModel";
+export type * from "./planModeModel";
 export { stageAgentAttachments } from "./attachmentIpc.ts";
 import type { AgentEffort } from "./agentRunBudgetModel";
+import type { PlanConfirmationDecision } from "./planModeModel";
 import type { NativeAgentHistoryPage, NativeAgentState, NativeAgentStateDelta } from "./tauriNativeTypes";
 import type {
   RuntimeStatus,
@@ -1483,11 +1485,12 @@ export async function runAgentTask(
   prompt: string,
   sessionId: string,
   attachments: AgentAttachment[] = [],
-  effort: AgentEffort = "default"
+  effort: AgentEffort = "default",
+  planMode = false
 ): Promise<AgentState> {
   try {
     return await invoke<NativeAgentState>("run_agent_task", {
-      input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments }
+      input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments, planMode }
     });
   } catch (error) {
     if (isTauriRuntime()) throw error;
@@ -1520,7 +1523,8 @@ export async function queueAgentMessage(
   sessionId: string,
   attachments: AgentAttachment[] = [],
   effort: AgentEffort = "default",
-  queueId?: string
+  queueId?: string,
+  planMode = false
 ): Promise<QueuedAgentMessageReceipt> {
   try {
     return await invoke<QueuedAgentMessageReceipt>("queue_agent_message", {
@@ -1530,7 +1534,8 @@ export async function queueAgentMessage(
         currentTime: currentAgentTimeContext(),
         effort,
         attachments,
-        queueId
+        queueId,
+        planMode
       }
     });
   } catch (error) {
@@ -1545,6 +1550,7 @@ export async function queueAgentMessage(
       attachments,
       effort,
       mode: "queue",
+      planMode,
       createdAtMs: now,
       updatedAtMs: now
     };
@@ -1776,6 +1782,29 @@ export async function resolveAgentPermission(
           timestampMs: now
         }
       ],
+      lastError: null
+    };
+    return browserAgentState;
+  }
+}
+
+export async function resolveAgentPlanConfirmation(
+  sessionId: string,
+  decision: PlanConfirmationDecision
+): Promise<AgentState> {
+  try {
+    return await invoke<NativeAgentState>("resolve_agent_plan_confirmation", {
+      sessionId,
+      decision
+    });
+  } catch (error) {
+    if (isTauriRuntime()) throw error;
+    browserAgentState = {
+      ...browserAgentState,
+      status: decision === "cancel" ? "cancelled" : "running",
+      canCancel: decision !== "cancel",
+      canContinue: false,
+      pendingPlanConfirmation: null,
       lastError: null
     };
     return browserAgentState;

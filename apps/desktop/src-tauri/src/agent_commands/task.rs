@@ -190,6 +190,14 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     );
     let requested_policy = effort.requested_policy();
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
+    // Plan mode is honored only for High/Xhigh runs that explicitly requested
+    // it; a stale flag on any other tier is dropped here at admission.
+    if crate::agent_plan_mode_runtime::plan_mode_gate_active(input.plan_mode, effort) {
+        run_context.insert(
+            crate::agent_plan_mode_runtime::PLAN_MODE_REQUESTED_KEY.to_string(),
+            "true".to_string(),
+        );
+    }
     add_image_generation_run_context(&mut run_context, &config, &prompt);
     add_agent_run_budget_metadata(&mut run_context, cancellation);
     run_context.insert(
@@ -267,6 +275,28 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
             .metadata
             .insert("display_content".to_string(), display_prompt.clone());
     }
+    // Plan-then-confirm gate (High/Xhigh with the Composer toggle only): draft
+    // a read-only plan, then pause for the user's explicit decision before any
+    // preparation or execution. Plan drafting is charged to the Worker stage
+    // budget; a drafting failure proceeds without a plan.
+    match crate::agent_plan_mode_runtime::run_plan_mode_gate(
+        &state,
+        &config,
+        &root,
+        &task_id,
+        &run_context,
+        &prompt,
+        effort,
+        cancellation,
+    )? {
+        crate::agent_plan_mode_runtime::PlanModeGateOutcome::AwaitingConfirmation(state) => {
+            return Ok(*state)
+        }
+        crate::agent_plan_mode_runtime::PlanModeGateOutcome::Stopped => {
+            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
+        }
+        crate::agent_plan_mode_runtime::PlanModeGateOutcome::Proceed => {}
+    }
     let prepared = match prepare_agent_execution(
         app,
         &state,
@@ -298,14 +328,25 @@ pub(crate) fn cancel_agent_task(
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
     let state = app.state::<AppState>();
+    cancel_agent_task_blocking(&app, state, &input.session_id)
+}
+
+/// Shared cancellation path. A run parked at the plan-confirmation gate is
+/// nonterminal and holds no active run control, so the ordinary can-cancel
+/// guard is extended to admit exactly that paused plan wait.
+pub(crate) fn cancel_agent_task_blocking(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    session_id: &str,
+) -> Result<AgentState, String> {
     let _lifecycle = state
         .session_lifecycle_gate
         .lock()
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
-    let telemetry_control = active_agent_run_control(&state, Some(&input.session_id))?;
-    let active_run_cancelled = request_agent_run_cancel(&state, &input.session_id)?;
-    clear_suspended_agent_run(&state, &input.session_id)?;
-    let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let telemetry_control = active_agent_run_control(&state, Some(session_id))?;
+    let active_run_cancelled = request_agent_run_cancel(&state, session_id)?;
+    clear_suspended_agent_run(&state, session_id)?;
+    let mut run_context = project_session_metadata_for_session(&state, Some(session_id))?;
     let session_id = run_context.get("session_id").cloned();
     let mut store = state
         .store
@@ -314,7 +355,12 @@ pub(crate) fn cancel_agent_task(
     let current = agent_state_for_session(&store, None, session_id.as_deref())
         .map_err(|error| error.to_string())?;
     if !current.can_cancel && !active_run_cancelled {
-        return Ok(current);
+        let events = agent_events_for_session(&store, &phase16_task_id(), session_id.as_deref())
+            .map_err(|error| error.to_string())?;
+        let active_events = active_agent_events_for_session(&events, session_id.as_deref());
+        if !crate::agent_plan_mode_runtime::plan_mode_pause_present(&active_events) {
+            return Ok(current);
+        }
     }
     let events = agent_events_for_session(&store, &phase16_task_id(), session_id.as_deref())
         .map_err(|error| error.to_string())?;
@@ -431,9 +477,9 @@ pub(crate) fn cancel_agent_task(
     }
 
     emit_agent_stream_delta(
-        &app,
+        app,
         "agent-cancelled",
-        Some(&input.session_id),
+        session_id.as_deref(),
         "",
         true,
         true,
@@ -726,11 +772,12 @@ pub(crate) fn retry_agent_task_blocking_inner(
         applied_steer_epoch,
         initial_objective,
         effective_objective,
-            prompt_contract_epoch,
-            inherited_identity,
-            history,
-            artifact_manifest,
-        ) = {
+        prompt_contract_epoch,
+        inherited_identity,
+        history,
+        artifact_manifest,
+        plan_mode_requested,
+    ) = {
         let store = state
             .store
             .lock()
@@ -795,6 +842,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .unwrap_or_default();
         let history = recovery_safe_transcript(&session_events);
         let artifact_manifest = artifact_manifest_message(&session_events);
+        let plan_mode_requested =
+            crate::agent_plan_mode_runtime::plan_mode_requested_in_events(&active_events);
         (
             prompt,
             display_prompt,
@@ -808,6 +857,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
             inherited_identity,
             history,
             artifact_manifest,
+            plan_mode_requested,
         )
     };
     run_context.insert("steer_epoch".to_string(), applied_steer_epoch.to_string());
@@ -845,6 +895,14 @@ pub(crate) fn retry_agent_task_blocking_inner(
     }
     let requested_policy = effort.requested_policy();
     run_context.insert("agent_effort".to_string(), effort.label().to_string());
+    // A resumed plan-mode run re-derives its request flag from the durable
+    // start event so preparation can inject the confirmed plan.
+    if plan_mode_requested {
+        run_context.insert(
+            crate::agent_plan_mode_runtime::PLAN_MODE_REQUESTED_KEY.to_string(),
+            "true".to_string(),
+        );
+    }
     add_image_generation_run_context(&mut run_context, &config, &prompt);
     add_agent_run_budget_metadata(&mut run_context, cancellation);
     run_context.insert(
@@ -1010,4 +1068,84 @@ pub(crate) fn retry_agent_task_blocking_inner(
         }
     };
     continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
+}
+
+/// Resolve a run parked at the plan-then-confirm gate. `approve` resumes the
+/// run with the confirmed plan injected as protected context; `discard`
+/// resumes ordinary execution without it; `cancel` cancels the whole run. The
+/// decision is persisted with the run events before any resume or cancel, and
+/// resuming reuses the ordinary paused-run continuation path so the plan
+/// phase's Worker-stage budget stays charged to the same logical run.
+#[tauri::command]
+pub(crate) async fn resolve_agent_plan_confirmation(
+    app: tauri::AppHandle,
+    session_id: String,
+    decision: String,
+) -> Result<AgentState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        resolve_agent_plan_confirmation_blocking(&app, state, session_id, decision)
+    })
+    .await
+    .map_err(|error| format!("agent plan confirmation failed to join: {error}"))?
+}
+
+pub(crate) fn resolve_agent_plan_confirmation_blocking(
+    app: &tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    session_id: String,
+    decision: String,
+) -> Result<AgentState, String> {
+    let decision = crate::agent_plan_mode_runtime::parse_plan_confirmation_decision(&decision)?;
+    let pending = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
+            .map_err(|error| error.to_string())?;
+        let active_events = active_agent_events_for_session(&events, Some(&session_id));
+        crate::agent_plan_mode_runtime::pending_plan_confirmation(&active_events)
+            .ok_or_else(|| "no plan is awaiting confirmation for this session".to_string())?
+    };
+    let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+    {
+        let mut store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
+            .map_err(|error| error.to_string())?;
+        let active_events = active_agent_events_for_session(&events, Some(&session_id));
+        if let Some(start) = active_events
+            .iter()
+            .find(|event| is_agent_run_start_event(event))
+        {
+            if let Some(identity) = AgentRunIdentity::from_metadata(&start.metadata)
+                .map_err(|error| format!("invalid active agent run identity: {error}"))?
+            {
+                identity
+                    .insert_into(&mut run_context)
+                    .map_err(|error| format!("invalid active agent run identity: {error}"))?;
+            }
+        }
+        append_event(
+            &mut store,
+            &phase16_task_id(),
+            crate::agent_plan_mode_runtime::plan_event_kind(),
+            crate::agent_plan_mode_runtime::PLAN_RESOLVED_SUMMARY,
+            metadata_with_context(
+                crate::agent_plan_mode_runtime::plan_resolved_event_metadata(
+                    decision,
+                    &pending.plan_digest,
+                ),
+                &run_context,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    if decision == crate::agent_plan_mode_runtime::PlanConfirmationDecision::Cancelled {
+        return cancel_agent_task_blocking(app, state, &session_id);
+    }
+    retry_agent_task_blocking(app, state, SessionActionInput { session_id })
 }
