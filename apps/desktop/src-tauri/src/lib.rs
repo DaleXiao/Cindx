@@ -153,16 +153,74 @@ use tool_execution::*;
 use view_models::*;
 use voice_commands::*;
 #[cfg(test)]
+mod agent_session_isolation_tests;
+#[cfg(test)]
+mod agent_state_view_tests;
+#[cfg(test)]
+mod agent_trace_runtime_tests;
+#[cfg(test)]
+mod app_store_persistence_tests;
+#[cfg(test)]
+mod attachment_projection_tests;
+#[cfg(test)]
+mod chat_projection_tests;
+#[cfg(test)]
+mod collaboration_stage_runtime_tests;
+#[cfg(test)]
+mod context_checkpoint_runtime_tests;
+#[cfg(test)]
 mod direct_judge_shadow_runtime_tests;
+#[cfg(test)]
+mod effort_runtime_tests;
+#[cfg(test)]
+mod event_persistence_tests;
+#[cfg(test)]
+mod event_security_tests;
 #[cfg(test)]
 mod manual_tool_execution_tests;
 #[cfg(test)]
 mod media_ipc_tests;
 #[cfg(test)]
+mod permission_runtime_tests;
+#[cfg(test)]
+mod project_memory_runtime_tests;
+#[cfg(test)]
+mod project_session_lifecycle_tests;
+#[cfg(test)]
+mod prompt_personalization_tests;
+#[cfg(test)]
+mod provider_config_tests;
+#[cfg(test)]
+mod queue_runtime_tests;
+#[cfg(test)]
+mod recovery_runtime_tests;
+#[cfg(test)]
 mod routing_learning_runtime_tests;
+#[cfg(test)]
+mod routing_telemetry_runtime_tests;
+#[cfg(test)]
+mod run_completion_runtime_tests;
 #[cfg(test)]
 mod run_telemetry_runtime_tests;
 #[cfg(test)]
+mod runtime_status_tests;
+#[cfg(test)]
+mod schedule_runtime_tests;
+#[cfg(test)]
+mod semantic_memory_lineage_tests;
+#[cfg(test)]
+mod session_read_model_tests;
+#[cfg(test)]
+mod session_title_tests;
+#[cfg(test)]
+mod steer_preparation_runtime_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tool_artifact_runtime_tests;
+#[cfg(test)]
 mod view_model_contract_tests;
+#[cfg(test)]
+mod workspace_knowledge_runtime_tests;
