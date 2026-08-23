@@ -498,7 +498,7 @@
   text-transform: uppercase;
 }
 
-.composer-effort-menu > button {
+.composer-effort-group > button {
   display: flex;
   width: 100%;
   align-items: center;
@@ -512,26 +512,20 @@
   border-radius: var(--radius-md);
 }
 
-.composer-effort-menu > button > span {
+.composer-effort-group > button > span {
   flex: 1;
   min-width: 0;
   text-align: left;
 }
 
-.composer-effort-menu > button > svg {
+.composer-effort-group > button > svg {
   flex: 0 0 auto;
 }
 
-.composer-effort-menu > button:hover,
-.composer-effort-menu > button:focus-visible,
-.composer-effort-menu > button[data-selected="true"] {
+.composer-effort-group > button:hover,
+.composer-effort-group > button:focus-visible,
+.composer-effort-group > button[data-selected="true"] {
   background: #f1f1f1;
-}
-
-.composer-effort-menu > button > span {
-  display: block;
-  min-width: 0;
-  text-align: left;
 }
 
 .composer-effort-menu strong {
