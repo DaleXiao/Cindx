@@ -287,6 +287,17 @@ Tool visibility does not grant authority.
   recalled: the terminal commit records a `memory_use` event against the
   delivered answer and increments each used record's `observed_use_count`.
   Failed, cancelled, and steered-away runs record nothing.
+- Each physical agent run also appends one shadow-only performance telemetry
+  receipt (`cindx.agent.run-telemetry.v1`) to a private 0600 capped journal
+  beside the app data root at its durable terminal commit. The receipt records
+  the run/session/effort labels, wall time, model and tool call counts with
+  cumulative provider wait and tool execution time, context compaction and
+  rolling-summary counts, workspace retrieval duration and channel hits,
+  provider-observed prompt/completion tokens with usage-source provenance,
+  the terminal path (direct, terminal finalizer, fallback, or none), and the
+  stop reason. The channel is measurement plumbing only: production code never
+  reads the journal, and no routing, prompt, memory, permission, or serving
+  path consumes it.
 
 ## Prompt Evolution
 

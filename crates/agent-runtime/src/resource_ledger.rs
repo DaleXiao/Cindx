@@ -81,6 +81,12 @@ pub struct RunResourceUsage {
     pub completion_tokens: u64,
     pub total_tokens: u64,
     pub reserved_tokens: u64,
+    /// Token sums settled strictly from provider-reported usage. Estimated
+    /// and unknown attempts never enter these counters.
+    #[serde(default)]
+    pub provider_prompt_tokens: u64,
+    #[serde(default)]
+    pub provider_completion_tokens: u64,
     pub usage_sources: ModelUsageSourceCounts,
     pub models: BTreeMap<String, ModelResourceUsage>,
 }
@@ -486,6 +492,14 @@ fn settle_usage(
         .completion_tokens
         .saturating_add(settled.completion_tokens);
     usage.total_tokens = usage.total_tokens.saturating_add(settled.total_tokens);
+    if settled.source == ModelUsageSource::Provider {
+        usage.provider_prompt_tokens = usage
+            .provider_prompt_tokens
+            .saturating_add(settled.prompt_tokens);
+        usage.provider_completion_tokens = usage
+            .provider_completion_tokens
+            .saturating_add(settled.completion_tokens);
+    }
     usage.usage_sources.record(settled.source);
 
     let model = bounded_model_key(&usage.models, model);
@@ -570,6 +584,12 @@ fn merge_run_usage(target: &mut RunResourceUsage, source: RunResourceUsage) {
     target.reserved_tokens = target
         .reserved_tokens
         .saturating_add(source.reserved_tokens);
+    target.provider_prompt_tokens = target
+        .provider_prompt_tokens
+        .saturating_add(source.provider_prompt_tokens);
+    target.provider_completion_tokens = target
+        .provider_completion_tokens
+        .saturating_add(source.provider_completion_tokens);
     target.usage_sources.provider = target
         .usage_sources
         .provider
@@ -635,6 +655,67 @@ mod tests {
         assert_eq!(snapshot.lineage.models.len(), MAX_RESOURCE_LEDGER_MODELS);
         assert!(snapshot.segment.models.contains_key(OTHER_MODELS_KEY));
         assert!(snapshot.lineage.models.contains_key(OTHER_MODELS_KEY));
+    }
+
+    #[test]
+    fn provider_observed_tokens_exclude_estimated_and_unknown_usage() {
+        let mut budget = RunBudget::for_effort("fast");
+        budget.terminal_token_reserve = 0;
+        budget.terminal_physical_model_attempt_reserve = 0;
+        let mut ledger = RunResourceLedger::new();
+
+        let provider = ledger
+            .reserve(budget, RunStageClass::Worker, "model-a", 10, 5)
+            .expect("provider attempt should reserve");
+        assert!(
+            ledger
+                .settle(
+                    budget,
+                    provider,
+                    Some(ModelAttemptUsage::new(
+                        10,
+                        5,
+                        15,
+                        ModelUsageSource::Provider
+                    )),
+                )
+                .settled
+        );
+        let estimated = ledger
+            .reserve(budget, RunStageClass::Worker, "model-a", 8, 4)
+            .expect("estimated attempt should reserve");
+        assert!(
+            ledger
+                .settle(
+                    budget,
+                    estimated,
+                    Some(ModelAttemptUsage::new(
+                        8,
+                        4,
+                        12,
+                        ModelUsageSource::Estimated
+                    )),
+                )
+                .settled
+        );
+        let unknown = ledger
+            .reserve(budget, RunStageClass::Worker, "model-a", 6, 3)
+            .expect("unknown attempt should reserve");
+        assert!(ledger.settle(budget, unknown, None).settled);
+
+        let snapshot = ledger.snapshot();
+        assert_eq!(snapshot.segment.prompt_tokens, 18);
+        assert_eq!(snapshot.segment.provider_prompt_tokens, 10);
+        assert_eq!(snapshot.segment.provider_completion_tokens, 5);
+        assert_eq!(snapshot.segment.usage_sources.provider, 1);
+        assert_eq!(snapshot.segment.usage_sources.estimated, 1);
+        assert_eq!(snapshot.segment.usage_sources.unknown, 1);
+
+        let encoded = serde_json::to_string(&snapshot).expect("snapshot should encode");
+        let decoded =
+            serde_json::from_str::<RunResourceSnapshot>(&encoded).expect("snapshot should decode");
+        assert_eq!(decoded.segment.provider_prompt_tokens, 10);
+        assert_eq!(decoded.segment.provider_completion_tokens, 5);
     }
 
     #[test]

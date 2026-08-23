@@ -1,3 +1,4 @@
+use crate::control::progress::RunTelemetryCountersSnapshot;
 use crate::control::RunStopReason;
 use crate::resource_ledger::RunResourceSnapshot;
 use crate::result_frontier::BestKnownResult;
@@ -138,6 +139,7 @@ pub struct RunControlSnapshot {
     pub(super) best_known_result: Option<BestKnownResult>,
     pub(super) result_frontier: Vec<BestKnownResult>,
     pub(super) resources: RunResourceSnapshot,
+    pub(super) telemetry: RunTelemetryCountersSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +161,8 @@ pub struct RunProgressSnapshot {
     pub stage_usage: BTreeMap<RunStageClass, RunStageUsageSnapshot>,
     pub best_known_result: Option<BestKnownResult>,
     pub resources: RunResourceSnapshot,
+    /// Cumulative measurement counters for this control segment.
+    pub telemetry: RunTelemetryCountersSnapshot,
 }
 
 #[derive(Debug, Clone)]

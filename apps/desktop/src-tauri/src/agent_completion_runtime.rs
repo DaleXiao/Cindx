@@ -608,6 +608,22 @@ pub(crate) fn finalize_agent_completion(
             )
         }
     };
+    if inserted_terminal {
+        crate::run_telemetry_runtime::record_run_telemetry_terminal(
+            crate::run_telemetry_runtime::RunTelemetryTerminalFacts {
+                run_context,
+                control: cancellation,
+                terminal_path: if delivery.used_fallback() {
+                    agent_application::RunTelemetryTerminalPathV1::Fallback
+                } else if delivery.is_finalizer() {
+                    agent_application::RunTelemetryTerminalPathV1::TerminalFinalizer
+                } else {
+                    agent_application::RunTelemetryTerminalPathV1::Direct
+                },
+                stop_reason: "completed",
+            },
+        );
+    }
     if let Err(error) = clear_suspended_agent_run_for_context(state, run_context) {
         eprintln!("completed agent suspended-run cleanup unavailable: {error}");
     }

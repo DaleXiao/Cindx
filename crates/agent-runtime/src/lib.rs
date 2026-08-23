@@ -78,8 +78,8 @@ pub use control::{
     AgentRunControl, RunContinuationDirective, RunControlSnapshot, RunEpochLease,
     RunEpochLeaseOutcome, RunExecutionStepCommit, RunPreparationCheckpoint, RunPreparationCommit,
     RunProgressSnapshot, RunStageUsageSnapshot, RunStartCheckpoint, RunSteer, RunSteerBatchCommit,
-    RunSteerRequestCommit, RunStopReason, RunTerminalCommit, RunToolCallBatchStart,
-    RunToolCallStart,
+    RunSteerRequestCommit, RunStopReason, RunTelemetryCountersSnapshot, RunTerminalCommit,
+    RunToolCallBatchStart, RunToolCallStart,
 };
 pub use delivery_verification::*;
 pub use evidence_target::{

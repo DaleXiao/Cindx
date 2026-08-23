@@ -265,6 +265,7 @@ pub(super) fn prepare_session_history_context(
     run_context: &Metadata,
     history: Vec<Message>,
     context_window_tokens: u64,
+    telemetry_control: Option<&AgentRunControl>,
 ) -> Result<Vec<Message>, String> {
     if history.is_empty() {
         return Ok(history);
@@ -478,5 +479,8 @@ pub(super) fn prepare_session_history_context(
     )
     .map_err(|error| error.to_string())?;
 
+    if let Some(control) = telemetry_control {
+        control.record_context_compaction();
+    }
     Ok(compacted)
 }

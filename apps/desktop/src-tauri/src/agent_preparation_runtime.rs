@@ -339,6 +339,7 @@ pub(crate) fn prepare_agent_execution_replay(
             &run_context,
             base_history,
             config.context_window_tokens,
+            Some(cancellation.as_ref()),
         )
         .map_err(|error| {
             runtime_preparation_error(&run_context, format!("context preparation failed: {error}"))

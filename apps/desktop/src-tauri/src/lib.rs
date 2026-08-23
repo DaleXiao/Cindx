@@ -81,6 +81,7 @@ mod provider_profiles;
 mod queue_service;
 mod rag_operation_runtime;
 mod routing_learning_runtime;
+mod run_telemetry_runtime;
 mod runtime_constants;
 mod runtime_values;
 mod schedule;
@@ -158,6 +159,8 @@ mod manual_tool_execution_tests;
 mod media_ipc_tests;
 #[cfg(test)]
 mod routing_learning_runtime_tests;
+#[cfg(test)]
+mod run_telemetry_runtime_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

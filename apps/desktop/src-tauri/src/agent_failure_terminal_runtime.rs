@@ -51,6 +51,14 @@ pub(crate) fn commit_agent_preparation_failure_terminal(
         || agent_state_with_error_in_context(state, run_context, display_message),
     ) {
         Ok(RunTerminalCommit::Committed(state)) => {
+            crate::run_telemetry_runtime::record_run_telemetry_terminal(
+                crate::run_telemetry_runtime::RunTelemetryTerminalFacts {
+                    run_context,
+                    control: cancellation,
+                    terminal_path: agent_application::RunTelemetryTerminalPathV1::None,
+                    stop_reason: "preparation_failed",
+                },
+            );
             AgentPreparationFailureTerminalOutcome::Finished(Ok(state))
         }
         Ok(RunTerminalCommit::RestartAfterSteer) => {
@@ -179,6 +187,16 @@ pub(crate) fn commit_agent_failure_terminal(
     })?;
     match terminal_commit {
         RunTerminalCommit::Committed(persisted) => {
+            if persisted.inserted {
+                crate::run_telemetry_runtime::record_run_telemetry_terminal(
+                    crate::run_telemetry_runtime::RunTelemetryTerminalFacts {
+                        run_context,
+                        control: cancellation,
+                        terminal_path: agent_application::RunTelemetryTerminalPathV1::None,
+                        stop_reason: failure.class.label(),
+                    },
+                );
+            }
             clear_suspended_agent_run_for_context(state, run_context)?;
             Ok(AgentFailureTerminalOutcome::Committed(persisted.state))
         }

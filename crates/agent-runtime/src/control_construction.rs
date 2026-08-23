@@ -191,6 +191,7 @@ impl AgentRunControl {
             self.repair_attempts
                 .fetch_add(snapshot.repair_attempts, Ordering::SeqCst);
             state.resources.absorb_completed_segment(snapshot.resources);
+            state.telemetry.absorb(snapshot.telemetry);
         }
         let model_calls = self.model_calls.load(Ordering::SeqCst);
         let tool_calls = self.tool_calls.load(Ordering::SeqCst);
@@ -273,6 +274,7 @@ impl AgentRunControl {
                 stop_reason: None,
                 active_model_calls: 0,
                 active_tool_calls: 0,
+                telemetry: progress::RunTelemetryCounters::default(),
                 pending_steers: VecDeque::new(),
                 applied_steer_epoch: applied_epoch,
                 phase: RunPhase::Executing,

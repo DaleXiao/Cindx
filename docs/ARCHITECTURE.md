@@ -425,6 +425,14 @@ Background services are bounded and must not block the healthy foreground path:
 Canonical events remain authoritative. Derived serving snapshots and caches can
 be rebuilt; a cache publication failure cannot rewrite the scientific outcome.
 
+One shadow measurement file also lives beside the app data root outside
+SQLite: `run-telemetry.journal.jsonl` (0600, capacity-capped, atomically
+rewritten). The desktop loop appends one `cindx.agent.run-telemetry.v1`
+receipt at each physical run's durable terminal commit (success, failure,
+preparation failure, or cancellation) behind the existing exactly-once
+terminal identity. It has no production reader or consumer; only tests load
+it back.
+
 ## Prompt Evolution Boundary
 
 Prompt evolution is retired. The campaign runtime, mutation, pairwise

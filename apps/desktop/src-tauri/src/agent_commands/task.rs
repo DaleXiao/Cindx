@@ -302,6 +302,7 @@ pub(crate) fn cancel_agent_task(
         .session_lifecycle_gate
         .lock()
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
+    let telemetry_control = active_agent_run_control(&state, Some(&input.session_id))?;
     let active_run_cancelled = request_agent_run_cancel(&state, &input.session_id)?;
     clear_suspended_agent_run(&state, &input.session_id)?;
     let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
@@ -350,8 +351,9 @@ pub(crate) fn cancel_agent_task(
         &mut receipt_context,
     )?;
     run_context.extend(receipt_context);
+    let mut telemetry_request: Option<(Metadata, Arc<AgentRunControl>)> = None;
     let cancelled = if run_context.contains_key(AGENT_RUN_ID_METADATA_KEY) {
-        persist_agent_terminal_once(
+        let persisted = persist_agent_terminal_once(
             &mut store,
             &phase16_task_id(),
             &run_context,
@@ -375,8 +377,22 @@ pub(crate) fn cancel_agent_task(
                 agent_state_for_session(store, None, session_id.as_deref())
             },
         )
-        .map_err(|error| error.to_string())?
-        .state
+        .map_err(|error| error.to_string())?;
+        if persisted.inserted {
+            if let Some(control) = telemetry_control {
+                let mut telemetry_context = run_context.clone();
+                if !telemetry_context.contains_key("agent_effort") {
+                    if let Some(effort) = persisted_agent_policy_from_active_events(&active_events)
+                        .ok()
+                        .map(|policy| policy.label().to_string())
+                    {
+                        telemetry_context.insert("agent_effort".to_string(), effort);
+                    }
+                }
+                telemetry_request = Some((telemetry_context, control));
+            }
+        }
+        persisted.state
     } else {
         store
             .with_immediate_transaction(|store| {
@@ -400,6 +416,18 @@ pub(crate) fn cancel_agent_task(
     };
     if let Err(error) = refresh_project_memory_after_run(&mut store, &run_context) {
         eprintln!("project memory checkpoint unavailable: {error}");
+    }
+    drop(store);
+
+    if let Some((telemetry_context, control)) = telemetry_request {
+        crate::run_telemetry_runtime::record_run_telemetry_terminal(
+            crate::run_telemetry_runtime::RunTelemetryTerminalFacts {
+                run_context: &telemetry_context,
+                control: &control,
+                terminal_path: agent_application::RunTelemetryTerminalPathV1::None,
+                stop_reason: "user_cancelled",
+            },
+        );
     }
 
     emit_agent_stream_delta(

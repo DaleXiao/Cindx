@@ -12,6 +12,7 @@ use crate::resource_ledger::{
 use crate::result_frontier::{BestKnownResult, ResultFrontier, ResultQuality};
 use crate::run_budget::{RunBudget, RunStageClass};
 use crate::{AgentLoopState, AgentRuntimeConfig};
+pub use progress::RunTelemetryCountersSnapshot;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -22,6 +23,8 @@ use std::time::{Duration, Instant};
 mod construction;
 #[path = "control_goal_delta.rs"]
 mod goal_delta;
+#[path = "control_progress.rs"]
+pub(crate) mod progress;
 #[path = "control_resources.rs"]
 mod resources;
 #[path = "control_steer_commit.rs"]
@@ -30,7 +33,6 @@ mod steer_commit;
 mod tool_batch;
 #[path = "control_tool_continuation.rs"]
 mod tool_continuation;
-const PARTIAL_OUTPUT_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStopReason {
@@ -114,6 +116,7 @@ struct RunMutableState {
     stop_reason: Option<RunStopReason>,
     active_model_calls: usize,
     active_tool_calls: usize,
+    telemetry: progress::RunTelemetryCounters,
     pending_steers: VecDeque<RunSteer>,
     applied_steer_epoch: u64,
     phase: RunPhase,
@@ -173,6 +176,7 @@ impl AgentRunControl {
                 stop_reason: snapshot.stop_reason,
                 active_model_calls: 0,
                 active_tool_calls: 0,
+                telemetry: progress::RunTelemetryCounters::restore(snapshot.telemetry),
                 pending_steers: snapshot.pending_steers,
                 applied_steer_epoch: snapshot.applied_steer_epoch,
                 phase: snapshot.phase,
@@ -240,6 +244,7 @@ impl AgentRunControl {
                         stop_reason: None,
                         active_model_calls: 0,
                         active_tool_calls: 0,
+                        telemetry: progress::RunTelemetryCounters::default(),
                         pending_steers: snapshot.pending_steers,
                         applied_steer_epoch: snapshot.applied_steer_epoch,
                         phase: RunPhase::Executing,
@@ -294,6 +299,7 @@ impl AgentRunControl {
             best_known_result: state.results.best_known(),
             result_frontier: state.results.candidates(),
             resources: state.resources.snapshot(),
+            telemetry: state.telemetry.snapshot(),
         }
     }
 
@@ -392,6 +398,7 @@ impl AgentRunControl {
             return Err(RunStopReason::ModelCallBudgetExceeded);
         }
         state.active_model_calls = state.active_model_calls.saturating_add(1);
+        state.telemetry.begin_model_call();
         state.stage = stage.to_string();
         state.detail = "model request started".to_string();
         state.last_progress_at = Instant::now();
@@ -583,12 +590,14 @@ impl AgentRunControl {
     pub fn finish_model_call(&self) {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.active_model_calls = state.active_model_calls.saturating_sub(1);
+        state.telemetry.finish_model_call();
         state.last_progress_at = Instant::now();
     }
 
     pub fn finish_model_call_at(&self, expected_epoch: u64) -> bool {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.active_model_calls = state.active_model_calls.saturating_sub(1);
+        state.telemetry.finish_model_call();
         if state.stop_reason.is_some()
             || self.cancellation_requested()
             || !self.objective_epoch_matches_locked(&state, expected_epoch)
@@ -710,6 +719,7 @@ impl AgentRunControl {
             }
         }
         state.active_tool_calls = state.active_tool_calls.saturating_add(1);
+        state.telemetry.begin_tool_call();
         state.stage = "tool".to_string();
         state.detail = tool_name.to_string();
         state.last_progress_at = Instant::now();
@@ -719,12 +729,14 @@ impl AgentRunControl {
     pub fn finish_tool_call(&self) {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.active_tool_calls = state.active_tool_calls.saturating_sub(1);
+        state.telemetry.finish_tool_call();
         state.last_progress_at = Instant::now();
     }
 
     pub fn finish_tool_call_at(&self, expected_epoch: u64) -> bool {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.active_tool_calls = state.active_tool_calls.saturating_sub(1);
+        state.telemetry.finish_tool_call();
         if state.stop_reason.is_some()
             || self.cancellation_requested()
             || !self.objective_epoch_matches_locked(&state, expected_epoch)
@@ -1025,59 +1037,6 @@ impl AgentRunControl {
         steers
     }
 
-    pub fn mark_progress(&self, stage: &str, detail: &str) {
-        let mut state = self.state.lock().expect("run control state poisoned");
-        if state.stop_reason.is_some() {
-            return;
-        }
-        state.stage = stage.to_string();
-        state.detail = detail.to_string();
-        state.last_progress_at = Instant::now();
-    }
-
-    pub fn mark_progress_at(&self, expected_epoch: u64, stage: &str, detail: &str) -> bool {
-        let mut state = self.state.lock().expect("run control state poisoned");
-        if state.stop_reason.is_some()
-            || self.cancellation_requested()
-            || !self.objective_epoch_matches_locked(&state, expected_epoch)
-        {
-            return false;
-        }
-        state.stage = stage.to_string();
-        state.detail = detail.to_string();
-        state.last_progress_at = Instant::now();
-        true
-    }
-
-    pub fn record_partial_output(&self, output: &str) {
-        let epoch = self.steer_epoch();
-        let _ = self.record_partial_output_at(epoch, output);
-    }
-
-    pub fn record_partial_output_at(&self, expected_epoch: u64, output: &str) -> bool {
-        let output = output.trim();
-        if output.is_empty() {
-            return false;
-        }
-        let partial_output = output
-            .char_indices()
-            .rev()
-            .nth(PARTIAL_OUTPUT_MAX_CHARS.saturating_sub(1))
-            .map(|(start, _)| output[start..].to_string())
-            .unwrap_or_else(|| output.to_string());
-        let mut state = self.state.lock().expect("run control state poisoned");
-        if state.phase == RunPhase::TerminalCommitted
-            || self.steer_epoch.load(Ordering::SeqCst) != expected_epoch
-            || state.applied_steer_epoch != expected_epoch
-            || !state.pending_steers.is_empty()
-        {
-            return false;
-        }
-        state.partial_output = partial_output;
-        state.last_progress_at = Instant::now();
-        true
-    }
-
     pub fn record_best_known_result(
         &self,
         stage: &str,
@@ -1287,30 +1246,6 @@ impl AgentRunControl {
             .unwrap_or(available)
             .min(available.saturating_sub(Duration::from_secs(1)));
         available.saturating_sub(reserved)
-    }
-
-    pub fn progress(&self) -> RunProgressSnapshot {
-        let state = self.state.lock().expect("run control state poisoned");
-        let elapsed = state.started_at.elapsed().min(self.budget.max_duration);
-        RunProgressSnapshot {
-            stage: state.stage.clone(),
-            detail: state.detail.clone(),
-            elapsed,
-            remaining: self.budget.max_duration.saturating_sub(elapsed),
-            model_calls: self.model_calls.load(Ordering::SeqCst),
-            tool_calls: self.tool_calls.load(Ordering::SeqCst),
-            agent_turns: self.agent_turns.load(Ordering::SeqCst),
-            repair_attempts: self.repair_attempts.load(Ordering::SeqCst),
-            model_call_limit: state.model_call_limit,
-            tool_call_limit: state.tool_call_limit,
-            agent_turn_limit: state.agent_turn_limit,
-            observations: state.observation_count,
-            checkpoints: state.checkpoint_count,
-            budget_extensions: state.budget_extensions,
-            stage_usage: snapshot_stage_usage(&state.stage_usage),
-            best_known_result: state.results.best_known(),
-            resources: state.resources.snapshot(),
-        }
     }
 
     pub fn budget(&self) -> RunBudget {

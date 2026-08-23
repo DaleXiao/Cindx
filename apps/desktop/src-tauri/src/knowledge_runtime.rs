@@ -92,6 +92,16 @@ pub(crate) fn prepare_agent_knowledge_context(
     )?;
     retrieval.trace.index_cache_hit = index_cache_hit;
     retrieval.trace.index_duration_ms = index_duration_ms;
+    cancellation.record_retrieval(
+        retrieval.trace.duration_ms,
+        retrieval.trace.channels.len() as u64,
+        retrieval
+            .trace
+            .channels
+            .iter()
+            .map(|channel| channel.result_count as u64)
+            .sum(),
+    );
 
     if knowledge_preparation_should_interrupt(cancellation, expected_epoch) {
         return Err(MODEL_REQUEST_CANCELLED.to_string());

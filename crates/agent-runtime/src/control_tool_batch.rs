@@ -82,6 +82,7 @@ impl AgentRunControl {
             .recent_actions
             .insert(scope.to_string(), recent_actions);
         state.active_tool_calls += calls.len();
+        state.telemetry.begin_tool_call_batch(calls.len());
         state.stage = "tool".to_string();
         state.detail = calls
             .last()

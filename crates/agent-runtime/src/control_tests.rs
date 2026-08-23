@@ -1,3 +1,4 @@
+use super::progress::PARTIAL_OUTPUT_MAX_CHARS;
 use super::*;
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
@@ -2793,4 +2794,106 @@ fn result_frontier_keeps_stronger_internal_guidance_without_replacing_deliverabl
     assert_eq!(guidance.content, "strong internal evidence");
     assert!(guidance.verified);
     assert!(!guidance.deliverable);
+}
+
+#[test]
+fn run_telemetry_counters_track_model_wait_and_tool_execution() {
+    let control = AgentRunControl::with_budget(test_budget());
+
+    control.begin_model_call("act").expect("model call begins");
+    std::thread::sleep(Duration::from_millis(2));
+    control.finish_model_call();
+
+    control
+        .begin_tool_call("scope", "file.read", "{}")
+        .expect("tool call begins");
+    std::thread::sleep(Duration::from_millis(2));
+    control.finish_tool_call();
+
+    let progress = control.progress();
+    assert_eq!(progress.model_calls, 1);
+    assert_eq!(progress.tool_calls, 1);
+    assert!(progress.telemetry.model_wait_ms >= 2);
+    assert!(progress.telemetry.tool_execution_ms >= 2);
+
+    let state = control.state.lock().expect("run control state poisoned");
+    assert_eq!(state.active_model_calls, 0);
+    assert_eq!(state.active_tool_calls, 0);
+}
+
+#[test]
+fn run_telemetry_counters_pair_batch_starts_with_per_call_finishes() {
+    let control = AgentRunControl::with_budget(test_budget());
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    let batch = control.begin_tool_call_batch_with_epoch(
+        lease,
+        "scope",
+        &[
+            ("file.read", "{\"path\":\"a\"}"),
+            ("file.read", "{\"path\":\"b\"}"),
+        ],
+    );
+    assert!(matches!(
+        batch,
+        RunToolCallBatchStart::Started {
+            first_call: 1,
+            call_count: 2
+        }
+    ));
+    control.finish_tool_call_at(lease.epoch());
+    control.finish_tool_call_at(lease.epoch());
+
+    let progress = control.progress();
+    assert_eq!(progress.tool_calls, 2);
+    let state = control.state.lock().expect("run control state poisoned");
+    assert_eq!(state.active_tool_calls, 0);
+}
+
+#[test]
+fn run_telemetry_counters_record_context_and_retrieval_events() {
+    let control = AgentRunControl::with_budget(test_budget());
+    control.record_context_compaction();
+    control.record_context_compaction();
+    control.record_rolling_summary();
+    control.record_retrieval(120, 3, 9);
+    control.record_retrieval(30, 1, 2);
+
+    let progress = control.progress();
+    assert_eq!(progress.telemetry.context_compactions, 2);
+    assert_eq!(progress.telemetry.rolling_summaries, 1);
+    assert_eq!(progress.telemetry.retrieval_ms, 150);
+    assert_eq!(progress.telemetry.retrieval_channels, 4);
+    assert_eq!(progress.telemetry.retrieval_channel_hits, 11);
+}
+
+#[test]
+fn run_telemetry_counters_survive_suspend_snapshot_and_reset_per_continuation() {
+    let control = AgentRunControl::with_budget(test_budget());
+    control.begin_model_call("act").expect("model call begins");
+    std::thread::sleep(Duration::from_millis(2));
+    control.finish_model_call();
+    control.record_context_compaction();
+    control.record_retrieval(120, 3, 9);
+
+    let resumed = AgentRunControl::from_snapshot(control.snapshot());
+    let resumed_progress = resumed.progress();
+    assert_eq!(resumed_progress.model_calls, 1);
+    assert_eq!(
+        resumed_progress.telemetry.model_wait_ms,
+        control.progress().telemetry.model_wait_ms
+    );
+    assert_eq!(resumed_progress.telemetry.context_compactions, 1);
+    assert_eq!(resumed_progress.telemetry.retrieval_channel_hits, 9);
+
+    control.request_stop(RunStopReason::TurnBudgetExhausted);
+    let continued =
+        AgentRunControl::from_snapshot_for_continuation(control.snapshot()).expect("continuation");
+    let continued_progress = continued.progress();
+    assert_eq!(continued_progress.model_calls, 0);
+    assert_eq!(continued_progress.telemetry.model_wait_ms, 0);
+    assert_eq!(continued_progress.telemetry.context_compactions, 0);
+    assert_eq!(continued_progress.telemetry.retrieval_channel_hits, 0);
 }

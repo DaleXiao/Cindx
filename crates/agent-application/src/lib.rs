@@ -9,6 +9,7 @@ mod recovery;
 mod run_execution;
 mod run_lifecycle;
 mod run_persistence;
+mod run_telemetry;
 mod sessions;
 mod strategy_decision;
 mod terminal_commit;
@@ -60,6 +61,10 @@ pub use run_lifecycle::{
 pub use run_persistence::{
     insert_run_objectives, insert_run_start_prompts, insert_runtime_message_display_prompt,
     insert_user_message_model_prompt, merge_persistable_run_context,
+};
+pub use run_telemetry::{
+    RunTelemetryError, RunTelemetryObservationV1, RunTelemetryReceiptV1,
+    RunTelemetryTerminalPathV1, RUN_TELEMETRY_SCHEMA,
 };
 pub use sessions::{
     project_session_lifecycle, SessionLifecycleInput, SessionLifecycleProjection, SessionTitleState,
