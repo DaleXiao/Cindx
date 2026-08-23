@@ -6,6 +6,8 @@ use agent_core::{
 };
 
 const WORKSPACE_RETRIEVAL_MAX_RESULTS: usize = 8;
+const WORKSPACE_RETRIEVAL_MAX_RESULTS_HIGH: usize = 12;
+const WORKSPACE_RETRIEVAL_MAX_RESULTS_XHIGH: usize = 16;
 
 /// The minimal, effort-tier run plan that replaces the orchestrator/conductor
 /// planning surface. It carries only what the loop and preparation actually need:
@@ -31,6 +33,7 @@ pub(crate) struct KnowledgeDecision {
     pub(crate) memory_policy: MemoryRecallPolicy,
     pub(crate) memory_query: String,
     pub(crate) retrieve_workspace: bool,
+    pub(crate) workspace_max_results: usize,
 }
 
 impl KnowledgeDecision {
@@ -39,6 +42,7 @@ impl KnowledgeDecision {
             memory_policy: MemoryRecallPolicy::None,
             memory_query: String::new(),
             retrieve_workspace: false,
+            workspace_max_results: WORKSPACE_RETRIEVAL_MAX_RESULTS,
         }
     }
 
@@ -63,7 +67,7 @@ impl KnowledgeDecision {
             ]
             .into_iter()
             .collect(),
-            max_results: WORKSPACE_RETRIEVAL_MAX_RESULTS,
+            max_results: self.workspace_max_results,
         })
     }
 }
@@ -88,21 +92,35 @@ pub(crate) fn plan_effort_run(
     }
 }
 
-/// Effort-tier knowledge defaults: Fast answers directly without durable memory or
-/// workspace retrieval, while Auto/Pro recall relevant durable memory keyed on the
-/// bounded run prompt and retrieve workspace context.
+/// Effort-tier knowledge defaults: fast answers directly without durable memory or
+/// workspace retrieval; default recalls relevant durable memory keyed on the
+/// bounded run prompt and retrieves workspace context; high and xhigh widen to
+/// comprehensive recall and a larger workspace retrieval cap.
 pub(crate) fn knowledge_decision_for_effort(
     effort_label: &str,
     prompt: &str,
 ) -> KnowledgeDecision {
-    if normalize_effort_label(effort_label) == "fast" {
-        KnowledgeDecision::none()
-    } else {
-        KnowledgeDecision {
-            memory_policy: MemoryRecallPolicy::Relevant,
-            memory_query: bounded_memory_query(prompt),
-            retrieve_workspace: true,
-        }
+    let (memory_policy, workspace_max_results) = match normalize_effort_label(effort_label).as_str()
+    {
+        "fast" => return KnowledgeDecision::none(),
+        "high" => (
+            MemoryRecallPolicy::Comprehensive,
+            WORKSPACE_RETRIEVAL_MAX_RESULTS_HIGH,
+        ),
+        "xhigh" => (
+            MemoryRecallPolicy::Comprehensive,
+            WORKSPACE_RETRIEVAL_MAX_RESULTS_XHIGH,
+        ),
+        _ => (
+            MemoryRecallPolicy::Relevant,
+            WORKSPACE_RETRIEVAL_MAX_RESULTS,
+        ),
+    };
+    KnowledgeDecision {
+        memory_policy,
+        memory_query: bounded_memory_query(prompt),
+        retrieve_workspace: true,
+        workspace_max_results,
     }
 }
 
@@ -151,8 +169,8 @@ impl EffortRunPlan {
         Ok(())
     }
 
-    /// The policy the run requested by effort tier: Fast runs single, Auto/Pro
-    /// historically requested the router and now resolve to the same single lane.
+    /// The policy the run requested by effort tier: fast runs single; every other
+    /// tier historically requested the router and now resolves to the same single lane.
     pub(crate) fn requested_policy_label(&self) -> &'static str {
         if self.effort_label == "fast" {
             "single"
@@ -164,8 +182,7 @@ impl EffortRunPlan {
 
 /// The minimal single-model execution contract for an effort tier. It keeps the
 /// loop's `conductor_contract` reader working without a conductor: one actor, no
-/// branches, and post-mutation verification required exactly on the verified-answer
-/// tiers (Auto/Pro).
+/// branches, and post-mutation verification required on every tier except fast.
 pub(crate) fn effort_execution_contract(effort_label: &str) -> ConductorExecutionContract {
     let effort = normalize_effort_label(effort_label);
     let terminal_model_call_reserve = match effort.as_str() {
@@ -306,13 +323,48 @@ mod tests {
     }
 
     #[test]
-    fn auto_and_pro_recall_relevant_memory_and_retrieve_workspace() {
-        for effort in ["default", "high"] {
-            let decision = knowledge_decision_for_effort(effort, "Why does login expire early?");
-            assert_eq!(decision.memory_policy, MemoryRecallPolicy::Relevant);
-            assert_eq!(decision.memory_query, "Why does login expire early?");
-            assert!(decision.retrieve_workspace);
-        }
+    fn default_recalls_relevant_memory_and_retrieves_workspace() {
+        let decision = knowledge_decision_for_effort("default", "Why does login expire early?");
+        assert_eq!(decision.memory_policy, MemoryRecallPolicy::Relevant);
+        assert_eq!(decision.memory_query, "Why does login expire early?");
+        assert!(decision.retrieve_workspace);
+        assert_eq!(
+            decision
+                .workspace_plan()
+                .expect("default retrieves workspace context")
+                .max_results,
+            WORKSPACE_RETRIEVAL_MAX_RESULTS
+        );
+    }
+
+    #[test]
+    fn high_recalls_comprehensive_memory_with_a_wider_retrieval_cap() {
+        let decision = knowledge_decision_for_effort("high", "Why does login expire early?");
+        assert_eq!(decision.memory_policy, MemoryRecallPolicy::Comprehensive);
+        assert_eq!(decision.memory_query, "Why does login expire early?");
+        assert!(decision.retrieve_workspace);
+        assert_eq!(
+            decision
+                .workspace_plan()
+                .expect("high retrieves workspace context")
+                .max_results,
+            WORKSPACE_RETRIEVAL_MAX_RESULTS_HIGH
+        );
+    }
+
+    #[test]
+    fn xhigh_recalls_comprehensive_memory_with_the_widest_retrieval_cap() {
+        let decision = knowledge_decision_for_effort("xhigh", "Why does login expire early?");
+        assert_eq!(decision.memory_policy, MemoryRecallPolicy::Comprehensive);
+        assert_eq!(decision.memory_query, "Why does login expire early?");
+        assert!(decision.retrieve_workspace);
+        assert_eq!(
+            decision
+                .workspace_plan()
+                .expect("xhigh retrieves workspace context")
+                .max_results,
+            WORKSPACE_RETRIEVAL_MAX_RESULTS_XHIGH
+        );
     }
 
     #[test]
@@ -357,6 +409,7 @@ mod tests {
             memory_policy: MemoryRecallPolicy::Relevant,
             memory_query: "   ".to_string(),
             retrieve_workspace: true,
+            workspace_max_results: WORKSPACE_RETRIEVAL_MAX_RESULTS,
         };
         assert_eq!(blank_query.workspace_plan(), None);
     }

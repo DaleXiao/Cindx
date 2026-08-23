@@ -732,7 +732,6 @@ pub(crate) fn refresh_project_memory_after_run(
     load_project_memory_ledger(store, project_id).map(Some)
 }
 
-#[cfg(test)]
 pub(crate) fn record_project_memory_observed_use(
     store: &mut SqliteStore,
     task_id: &TaskId,

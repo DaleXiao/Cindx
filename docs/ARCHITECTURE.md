@@ -130,8 +130,9 @@ desktop effort planner (`agent_effort_planner`) builds one `EffortRunPlan` per
 preparation: the effort label, the tier-selected primary model
 (`effort_tier_model` — the tier's pinned default or the executor-role
 fallback), fixed single-model scheduling facts, and the knowledge decision
-(Fast: no memory recall or workspace retrieval; Auto/Pro: relevant memory
-recall keyed on the bounded run prompt plus workspace retrieval). Preparation
+(fast: no memory recall or workspace retrieval; default: relevant memory
+recall keyed on the bounded run prompt plus workspace retrieval; high/xhigh:
+comprehensive memory recall plus a wider workspace retrieval cap). Preparation
 applies the prompt-derived route requirements onto the plan fail-closed (tool
 requirement lift, effect authority, image-input vision) and validates the
 tier-selected model's capabilities against the configured candidate pool. The
@@ -235,7 +236,8 @@ fallback candidates retain the original answer and record a
 never judged.
 
 The completion transaction persists terminal event, result, artifacts,
-lifecycle, learning evidence, and cleanup under one attempt/epoch identity.
+lifecycle, learning evidence, the observed-use measurement for recalled
+memories, and cleanup under one attempt/epoch identity.
 Its terminal identity keeps the existing exactly-once key and additionally
 validates the matching strategy receipt before a new terminal write. Post-start
 preparation failures arbitrate terminal persistence with cancellation and steer

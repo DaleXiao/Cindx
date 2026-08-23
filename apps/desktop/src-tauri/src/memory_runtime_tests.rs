@@ -1058,6 +1058,191 @@ fn rebuild_preserves_runtime_measurement_counts_and_exact_timestamps() {
 }
 
 #[test]
+fn completed_delivery_records_observed_use_exactly_once_for_recalled_memories() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let project_id = "project-memory-observed-use";
+    let session_id = "session-memory-observed-use";
+    let run_id = "run-memory-observed-use";
+    let content = "Always keep observed-use recording inside the terminal commit";
+    append_durable_requirement_run(
+        &mut store,
+        project_id,
+        "session-memory-observed-source",
+        "run-memory-observed-source",
+        content,
+    );
+    let memory_id = durable_requirement_id(
+        project_id,
+        "session-memory-observed-source",
+        "run-memory-observed-source",
+        content,
+    );
+    let run_context = [
+        ("project_id".to_string(), project_id.to_string()),
+        ("session_id".to_string(), session_id.to_string()),
+        ("agent_run_id".to_string(), run_id.to_string()),
+        ("steer_epoch".to_string(), "0".to_string()),
+        ("memory_ids".to_string(), memory_id.clone()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    let ledger =
+        load_project_memory_ledger(&mut store, project_id).expect("memory ledger should load");
+    let record = ledger
+        .records
+        .iter()
+        .find(|record| record.id == memory_id)
+        .expect("seeded requirement should exist")
+        .clone();
+    let prepared = PreparedMemoryRecall {
+        project_id: project_id.to_string(),
+        recall_projection_sha256: memory_recall_projection_sha256(&ledger),
+        recalled_at_ms: 225,
+        recalls: vec![agent_memory::MemoryRecall {
+            record,
+            score: 1.0,
+            reasons: vec!["test".to_string()],
+        }],
+        event_metadata: [("action".to_string(), "memory_recall".to_string())]
+            .into_iter()
+            .collect(),
+        message: Message {
+            role: MessageRole::System,
+            content: content.to_string(),
+            metadata: Metadata::new(),
+        },
+    };
+    commit_prepared_memory_recall(&mut store, &phase16_task_id(), &run_context, Some(&prepared))
+        .expect("prepared recall should commit");
+    let delivered = "Observed-use recording stays inside the terminal commit.";
+
+    let committed = crate::agent_terminal_commit_runtime::persist_agent_terminal_once(
+        &mut store,
+        &phase16_task_id(),
+        &run_context,
+        0,
+        |store, identity| {
+            append_event(
+                store,
+                &phase16_task_id(),
+                EventKind::TaskStatusChanged,
+                "Agent task completed",
+                metadata_with_context(identity.metadata(), &run_context),
+            )?;
+            let used = record_project_memory_observed_use(
+                store,
+                &phase16_task_id(),
+                &run_context,
+                delivered,
+            )?;
+            assert_eq!(used, 1);
+            crate::agent_read_model::agent_state_for_session(store, None, Some(session_id))
+        },
+    )
+    .expect("terminal commit should persist");
+    assert!(committed.inserted);
+
+    let ledger =
+        load_project_memory_ledger(&mut store, project_id).expect("memory ledger should load");
+    assert_eq!(
+        ledger
+            .records
+            .iter()
+            .find(|record| record.id == memory_id)
+            .map(|record| record.observed_use_count),
+        Some(1)
+    );
+    let memory_use_events = store
+        .list_by_task(&phase16_task_id())
+        .expect("events should load")
+        .into_iter()
+        .filter(|event| {
+            event.kind == EventKind::RetrievalPerformed
+                && event.metadata.get("action").map(String::as_str) == Some("memory_use")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(memory_use_events.len(), 1);
+    assert_eq!(
+        memory_use_events[0]
+            .metadata
+            .get("used_memory_ids")
+            .map(String::as_str),
+        Some(memory_id.as_str())
+    );
+
+    let replayed = crate::agent_terminal_commit_runtime::persist_agent_terminal_once(
+        &mut store,
+        &phase16_task_id(),
+        &run_context,
+        0,
+        |_, _| panic!("terminal replay must not re-record observed use"),
+    )
+    .expect("terminal replay should load the existing terminal state");
+    assert!(!replayed.inserted);
+    let ledger =
+        load_project_memory_ledger(&mut store, project_id).expect("memory ledger should reload");
+    assert_eq!(
+        ledger
+            .records
+            .iter()
+            .find(|record| record.id == memory_id)
+            .map(|record| record.observed_use_count),
+        Some(1)
+    );
+    assert_eq!(
+        store
+            .list_by_task(&phase16_task_id())
+            .expect("events should reload")
+            .iter()
+            .filter(|event| {
+                event.metadata.get("action").map(String::as_str) == Some("memory_use")
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn observed_use_recording_is_a_no_op_without_recalled_memories() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let run_context = [
+        (
+            "project_id".to_string(),
+            "project-memory-unused".to_string(),
+        ),
+        (
+            "session_id".to_string(),
+            "session-memory-unused".to_string(),
+        ),
+        (
+            "agent_run_id".to_string(),
+            "run-memory-unused".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    assert_eq!(
+        record_project_memory_observed_use(
+            &mut store,
+            &phase16_task_id(),
+            &run_context,
+            "Delivered answer without recalled memory.",
+        )
+        .expect("missing recall context should no-op"),
+        0
+    );
+    assert!(
+        store
+            .list_by_task(&phase16_task_id())
+            .expect("events should load")
+            .iter()
+            .all(|event| {
+                event.metadata.get("action").map(String::as_str) != Some("memory_use")
+            })
+    );
+}
+
+#[test]
 fn project_deletion_cancels_inflight_and_future_memory_vector_publication() {
     let root = std::env::temp_dir().join(unique_id("memory-vector-delete-race"));
     let project_id = "project-memory-vector-delete-race";

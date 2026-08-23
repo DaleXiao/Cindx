@@ -131,10 +131,12 @@ collaboration lane.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their budgets differ; their effect
-authority does not. There is no multi-model workflow lane. Auto and Pro
-recall durable project memory with the `relevant` policy (keyed on the
-bounded run prompt) and retrieve workspace context by effort default; Fast
-answers without memory recall or workspace retrieval.
+authority does not. There is no multi-model workflow lane. Memory recall and
+workspace retrieval scale by effort tier: Fast answers without either; Auto
+(`default`) recalls durable project memory with the `relevant` policy (keyed
+on the bounded run prompt) and retrieves up to 8 workspace results; `high`
+and `xhigh` recall with the `comprehensive` policy and retrieve up to 12 and
+16 workspace results.
 
 The Finalizer role is retired: single-model sessions deliver through the
 actor, and a forced stop runs at most one toolless wrap-up turn of the same
@@ -281,6 +283,10 @@ Tool visibility does not grant authority.
 - Recall-to-terminal attribution is applied from durable events. Ordinary
   answer overlap is not enough to label a memory helpful or harmful; matched
   evaluation evidence is required for that causal label.
+- A successfully completed run measures observed use of the memories it
+  recalled: the terminal commit records a `memory_use` event against the
+  delivered answer and increments each used record's `observed_use_count`.
+  Failed, cancelled, and steered-away runs record nothing.
 
 ## Prompt Evolution
 

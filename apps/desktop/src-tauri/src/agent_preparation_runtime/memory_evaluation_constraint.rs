@@ -100,6 +100,7 @@ mod tests {
             memory_policy: MemoryRecallPolicy::Relevant,
             memory_query: "durable release constraint".to_string(),
             retrieve_workspace: false,
+            workspace_max_results: 8,
         };
         let mut context = Metadata::new();
         AgentMemoryEvaluationConstraint::MemoryOff.write_to_context(&mut context);
@@ -120,6 +121,7 @@ mod tests {
             memory_policy: MemoryRecallPolicy::Relevant,
             memory_query: "workspace implementation evidence".to_string(),
             retrieve_workspace: true,
+            workspace_max_results: 8,
         };
         let mut context = Metadata::new();
 

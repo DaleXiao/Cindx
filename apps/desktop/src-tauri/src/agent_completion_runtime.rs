@@ -559,6 +559,14 @@ pub(crate) fn finalize_agent_completion(
                 {
                     eprintln!("project memory attribution unavailable: {error}");
                 }
+                if let Err(error) = crate::memory_runtime::record_project_memory_observed_use(
+                    store,
+                    &runtime.task_id,
+                    run_context,
+                    &final_answer,
+                ) {
+                    eprintln!("project memory observed-use recording unavailable: {error}");
+                }
                 delete_persisted_agent_runtime_snapshot(store, session_id)
                     .map_err(agent_storage::StorageError::new)?;
                 agent_state_for_session(store, None, session_id)

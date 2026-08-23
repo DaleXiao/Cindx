@@ -16,7 +16,6 @@ pub(crate) use agent_graph::{
     extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore,
 };
 pub(crate) use agent_mcp::{McpCatalogService, McpServerConfig};
-#[cfg(test)]
 pub(crate) use agent_memory::record_memory_observed_uses;
 pub(crate) use agent_memory::{
     build_restore_context_pack, build_session_checkpoint_at, conversation_memory_to_markdown,
