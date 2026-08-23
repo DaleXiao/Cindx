@@ -158,7 +158,6 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary>
-        {active ? <AgentActionOrb /> : null}
         <strong>Agent actions</strong>
         {progressLabel ? (
           <span className="thread-tool-chain-status" title={progressDetail}>{progressLabel}</span>
