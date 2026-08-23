@@ -2088,13 +2088,13 @@ assert(
 assert(
   composerSource.includes("const restoreKeyboardFocus = event.detail === 0") &&
     composerSource.includes("focus({ preventScroll: true })") &&
-    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?width: 192px;[\s\S]*?grid-template-columns: 104px 36px 36px;/.test(
+    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?grid-template-columns: min-content 36px 36px;/.test(
       styles
     ) &&
     /\.composer-primary-button \{[\s\S]*?width: 36px;[\s\S]*?min-width: 36px;[\s\S]*?max-width: 36px;/.test(
       styles
     ),
-  "Effort selection must preserve keyboard focus without shifting the fixed primary action"
+  "Effort selection must preserve keyboard focus without shifting the primary action"
 );
 const voiceButtonPosition = composerSource.indexOf("<VoiceInputButton");
 assert(

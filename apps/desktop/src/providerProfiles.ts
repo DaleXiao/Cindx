@@ -102,6 +102,17 @@ export function providerModelContextWindow(providerId: ProviderId, modelId: stri
   )?.contextWindowTokens;
 }
 
+/** Short display name for a catalog model id: strips date-style suffixes
+ * (e.g. "-0731", "-0813") and trailing -preview/-latest so the composer capsule
+ * reads the model name instead of the long id. */
+export function modelDisplayName(modelId: string): string {
+  const trimmed = modelId.trim();
+  if (!trimmed) return trimmed;
+  return trimmed
+    .replace(/-\d{4}$/, "")
+    .replace(/-(preview|latest|turbo|alpha|beta)$/i, "");
+}
+
 function endpointOrigin(value: string) {
   try {
     return new URL(value).origin.toLowerCase();

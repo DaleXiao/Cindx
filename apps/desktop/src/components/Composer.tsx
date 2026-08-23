@@ -25,7 +25,7 @@ import {
   type ToolApprovalView
 } from "../tauri";
 import type { VoiceInputStatus } from "../voice/voiceInputModel";
-import type { ProviderVoiceTransport } from "../providerProfiles";
+import { modelDisplayName, type ProviderVoiceTransport } from "../providerProfiles";
 import {
   providerSubmissionPreflight,
   type ProviderReadiness
@@ -181,7 +181,9 @@ export function Composer({
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
   const providerPreflight = providerSubmissionPreflight(providerReadiness);
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
-  const activeModelLabel = agentModel.trim() || "Default model";
+  const activeModelLabel = agentModel.trim()
+    ? modelDisplayName(agentModel)
+    : "Default model";
   const approvalInput = approvalInputSummary(pendingApproval);
   const [modelThinks, setModelThinks] = useState(false);
 
@@ -571,7 +573,7 @@ export function Composer({
                               }}
                             >
                               <span>
-                                <strong>{model}</strong>
+                                <strong>{modelDisplayName(model)}</strong>
                               </span>
                               {model === agentModel && <Check aria-hidden="true" />}
                             </button>
