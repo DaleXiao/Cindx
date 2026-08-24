@@ -154,7 +154,8 @@ When the Composer's plan toggle is on for a High/Xhigh run, the task command
 runs a plan gate after the durable start commit and before preparation
 (`agent_plan_mode_runtime`). The gate drafts a plan with a bounded read-only
 tool loop that reuses the subagent whitelist (`file.read`, `file.list`,
-`file.search`, `web.search`) and the registry's permissionless-read guard, and
+`file.search`, `file.glob`, `web.search`, `web.fetch`) and the registry's
+permissionless-read guard, and
 charges every drafting call through `begin_stage_model_call(_,
 RunStageClass::Worker)`. The proposal (bounded markdown plus its
 content-bound digest) and the later user decision are persisted as ordinary

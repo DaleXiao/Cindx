@@ -548,6 +548,8 @@ mod tests {
             .map(|spec| spec.name)
             .collect();
         assert!(names.iter().any(|name| name == "file.read"));
+        assert!(names.iter().any(|name| name == "file.glob"));
+        assert!(names.iter().any(|name| name == "web.fetch"));
         assert!(!names.iter().any(|name| name == "file.write"));
         assert!(!names.iter().any(|name| name == "shell.run"));
     }

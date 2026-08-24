@@ -49,8 +49,9 @@ The desktop app currently includes:
   parent transcript), and its answer returns to the parent as an internal
   instruction. The child runs a bounded read-only tool loop (not a single
   completion): each step it may call whitelisted read-only discovery tools
-  (`file.read`, `file.list`, `file.search`, `web.search`), whose observations are
-  appended to its own isolated message history, until it answers without a tool
+  (`file.read`, `file.list`, `file.search`, `file.glob`, `web.search`,
+  `web.fetch`), whose observations are appended to its own isolated message
+  history, until it answers without a tool
   call or exhausts `SUBAGENT_MAX_STEPS`. The whitelist is enforced both when the
   tool surface is built and again per call, and the registry additionally refuses
   any non-read-only or permission-requiring tool, so an effectful or out-of-policy
@@ -110,9 +111,9 @@ Plan mode (plan-then-confirm) is an opt-in interaction feature, not a planning
 system. The Composer shows a "Plan" toggle only for High and Extra High
 effort; Fast and Default never expose or honor it. When enabled, the run
 drafts a plan before any preparation or execution: a bounded read-only loop
-(the same `file.read`/`file.list`/`file.search`/`web.search` whitelist and
-per-call enforcement as subagent delegation) whose model calls are charged to
-the run's Worker stage budget. The drafted plan — an ordered step list plus
+(the same `file.read`/`file.list`/`file.search`/`file.glob`/`web.search`/
+`web.fetch` whitelist and per-call enforcement as subagent delegation) whose
+model calls are charged to the run's Worker stage budget. The drafted plan — an ordered step list plus
 the involved files, as bounded plain markdown — is persisted with the run
 events and the run pauses for an explicit user decision: approve and execute,
 discard and execute, or cancel the run. Approving injects the plan into the
@@ -279,6 +280,14 @@ Tool visibility does not grant authority.
   in terminal output.
 - Browser and computer control require healthy sidecars and the relevant macOS
   privacy permissions.
+- `file.glob` is a pure read-only tool that matches workspace files against a
+  relative glob pattern (for example `src/**/*.rs`) and returns a sorted list
+  bounded to 200 results with a truncated flag; hidden entries, symlinks, and
+  local credential files are skipped. `web.fetch` retrieves the body of one
+  HTTP/HTTPS URL through curl (at most five redirects, an 8 MiB byte bound, and
+  a clamped timeout) and wraps the body in an explicit untrusted-provenance
+  boundary; it shares the `web.search` Network permission and risk level. Both
+  tools are on the subagent and plan-mode read-only whitelist.
 - MCP servers already configured for other tools can be imported via
   "Import installed" in Settings → MCP. Cindx reads the standard config
   locations (Claude Desktop, Claude Code, Cursor, opencode `.jsonc`/`.json`,

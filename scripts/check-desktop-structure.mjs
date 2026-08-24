@@ -955,6 +955,7 @@ const toolsModuleBudgets = new Map([
   ["file_batch_projection.rs", 320],
   ["file_batch_request.rs", 130],
   ["file_batch_tests.rs", 220],
+  ["file_glob.rs", 440],
   ["file_list.rs", 130],
   ["file_list_collection.rs", 120],
   ["file_list_contract.rs", 90],
@@ -1000,6 +1001,7 @@ const toolsModuleBudgets = new Map([
   ["stream_capture.rs", 60],
   ["tool_contract_v2.rs", 650],
   ["tool_support.rs", 360],
+  ["web_fetch.rs", 180],
   ["web_search.rs", 420],
   ["workspace_file.rs", 380],
 ]);

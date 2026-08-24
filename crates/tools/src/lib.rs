@@ -15,6 +15,7 @@ use agent_core::{
 mod browser_session_retirement;
 mod desktop_control;
 mod file_batch;
+mod file_glob;
 mod file_list;
 mod file_patch;
 mod file_query_contract_v3;
@@ -42,6 +43,7 @@ mod subagent_tool;
 mod todo_tool;
 mod tool_contract_v2;
 mod tool_support;
+mod web_fetch;
 mod web_search;
 mod workspace_file;
 
@@ -53,6 +55,7 @@ use desktop_control::{
 };
 pub use desktop_control::{BrowserTool, ComputerTool};
 pub use file_batch::ReadFilesTool;
+pub use file_glob::GlobFilesTool;
 pub use file_list::ListDirectoryTool;
 pub use file_patch::PatchFileTool;
 pub use file_search::SearchFilesTool;
@@ -67,6 +70,7 @@ pub use shell::ShellRunTool;
 pub use subagent_tool::SubagentTaskTool;
 pub use todo_tool::TodoTool;
 pub use tool_support::{encode_input, parse_input};
+pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 
 use meta_invoke::ToolInvokeMeta;
@@ -279,6 +283,7 @@ impl ToolRegistry {
         registry.register(Box::new(ReadFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(ListDirectoryTool::new(workspace_root.clone())));
         registry.register(Box::new(SearchFilesTool::new(workspace_root.clone())));
+        registry.register(Box::new(GlobFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(PatchFileTool::new(workspace_root.clone())));
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(TodoTool::new(workspace_root.clone())));
@@ -294,6 +299,7 @@ impl ToolRegistry {
         ))));
         registry.register(Box::new(ProcessTerminateTool::new(process_manager)));
         registry.register(Box::new(WebSearchTool::new(web_search_config)));
+        registry.register(Box::new(WebFetchTool));
         if let Some(config) = image_generation_config.filter(ImageGenerationConfig::is_ready) {
             registry.register(Box::new(ImageGenerationTool::new(
                 workspace_root.clone(),
@@ -796,10 +802,12 @@ mod tests {
         let specs = registry.specs();
 
         assert!(specs.iter().any(|spec| spec.name == "file.read"));
+        assert!(specs.iter().any(|spec| spec.name == "file.glob"));
         assert!(specs.iter().any(|spec| spec.name == "file.patch"));
         assert!(specs.iter().any(|spec| spec.name == "file.write"));
         assert!(specs.iter().any(|spec| spec.name == "shell.run"));
         assert!(specs.iter().any(|spec| spec.name == "web.search"));
+        assert!(specs.iter().any(|spec| spec.name == "web.fetch"));
         assert!(specs.iter().any(|spec| spec.name == "browser.open"));
         assert!(specs.iter().any(|spec| spec.name == "browser.extract_text"));
         assert!(specs.iter().any(|spec| spec.name == "browser.capture"));
@@ -831,6 +839,7 @@ mod tests {
 
         for (name, integer_field) in [
             ("file.read", "offset_bytes"),
+            ("file.glob", "max_results"),
             ("file.search", "max_results"),
             ("shell.run", "timeout_seconds"),
             ("browser.extract_text", "timeout_ms"),
@@ -852,7 +861,7 @@ mod tests {
             assert!(spec.output_schema_json.is_some());
         }
 
-        for name in ["file.read", "file.read_many", "file.search"] {
+        for name in ["file.read", "file.read_many", "file.search", "file.glob"] {
             assert_eq!(
                 specs
                     .iter()
@@ -867,6 +876,7 @@ mod tests {
             "file.write",
             "shell.run",
             "web.search",
+            "web.fetch",
             "browser.open",
         ] {
             assert_eq!(
@@ -994,6 +1004,14 @@ mod tests {
             name: "catalog.read".to_string(),
         }));
         let invocation = invocation("catalog.read", "{}".to_string());
+
+        assert!(registry.permissionless_read_tool(&invocation).is_ok());
+    }
+
+    #[test]
+    fn permissionless_read_gate_accepts_file_glob_as_a_pure_read() {
+        let registry = ToolRegistry::with_workspace_tools(temp_workspace());
+        let invocation = invocation("file.glob", encode_input(&[("pattern", "src/**/*.rs")]));
 
         assert!(registry.permissionless_read_tool(&invocation).is_ok());
     }

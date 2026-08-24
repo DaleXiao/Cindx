@@ -13,8 +13,8 @@ use super::{
 };
 use crate::stream_capture::capture_stream_limited;
 
-const WEB_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const WEB_STDERR_MAX_BYTES: usize = 256 * 1024;
+pub(crate) const WEB_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const WEB_STDERR_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct WebSearchTool {
@@ -223,13 +223,14 @@ fn search_api_request(
     Ok((command, secret_stdin))
 }
 
-struct LimitedCommandOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+#[derive(Debug)]
+pub(crate) struct LimitedCommandOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
-fn run_command_with_limited_output(
+pub(crate) fn run_command_with_limited_output(
     command: &mut Command,
     stdout_max_bytes: usize,
     stderr_max_bytes: usize,

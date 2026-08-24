@@ -231,6 +231,8 @@ fn plan_mode_contract_tool_surface_is_the_read_only_whitelist() {
     assert!(names.iter().any(|name| name == "file.read"));
     assert!(names.iter().any(|name| name == "file.list"));
     assert!(names.iter().any(|name| name == "file.search"));
+    assert!(names.iter().any(|name| name == "file.glob"));
+    assert!(names.iter().any(|name| name == "web.fetch"));
     assert!(!names.iter().any(|name| name == "file.write"));
     assert!(!names.iter().any(|name| name == "shell.run"));
 }

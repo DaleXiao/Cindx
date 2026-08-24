@@ -13,7 +13,9 @@ pub const SUBAGENT_ALLOWED_TOOLS: &[&str] = &[
     "file.reads",
     "file.list",
     "file.search",
+    "file.glob",
     "web.search",
+    "web.fetch",
 ];
 
 pub fn subagent_system_prompt() -> &'static str {
@@ -53,7 +55,9 @@ mod tests {
     #[test]
     fn subagent_tool_policy_is_read_only() {
         assert!(subagent_tool_allowed("file.read"));
+        assert!(subagent_tool_allowed("file.glob"));
         assert!(subagent_tool_allowed("web.search"));
+        assert!(subagent_tool_allowed("web.fetch"));
         assert!(!subagent_tool_allowed("file.write"));
         assert!(!subagent_tool_allowed("shell.run"));
         assert!(!subagent_tool_allowed("task"));
