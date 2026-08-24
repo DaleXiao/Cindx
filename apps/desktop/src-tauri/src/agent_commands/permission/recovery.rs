@@ -3,7 +3,13 @@ use super::observations::{
     persisted_permission_observations, restore_permission_snapshot_from_boundary,
 };
 use crate::agent_preparation_runtime::effective_prompt_objective_for_messages;
-use crate::*;
+use crate::agent_read_model::{
+    agent_recovery_prompt_from_active_events, agent_runtime_transcript_from_active_events,
+};
+use crate::agent_recovery_service::initial_agent_objective_from_events;
+use crate::app_state::AgentRecoveryEnvelope;
+use agent_core::{Event, Metadata, ToolOutcomeStatus, ToolSpec};
+use agent_runtime::{AgentKernel, AgentTaskStateSnapshot};
 
 pub(crate) fn recovery_task_state_with_persisted_permission_denials(
     active_events: &[Event],

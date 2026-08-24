@@ -1,5 +1,6 @@
-use crate::*;
-use agent_core::{AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY};
+use agent_core::{
+    Metadata, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
+};
 
 mod commands;
 mod observations;

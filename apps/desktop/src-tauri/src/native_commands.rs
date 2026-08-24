@@ -1,6 +1,16 @@
-use super::*;
 use crate::app_bootstrap::QuitConfirmation;
-use std::io::Read;
+use crate::app_state::AppState;
+use crate::persistence_runtime::active_workspace_root;
+use crate::runtime_values::normalized_config_value;
+use crate::view_models::{ArtifactPreviewView, ConfirmDeleteInput};
+use std::ffi::OsStr;
+use std::fs;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use tauri::Manager;
 
 pub(crate) const MAX_ARTIFACT_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 

@@ -70,9 +70,11 @@ pub(crate) use model_provider::{
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
 pub(crate) use agent_core::{ConductorExecutionContract, MemoryRecallPolicy};
 pub(crate) use agent_core::{
-    parse_policy, role_label, sha256_hex, AgentPolicy, OrchestrationPolicy, RoutingOutcome,
-    RoutingTelemetry, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+    parse_policy, role_label, sha256_hex, AgentPolicy, OrchestrationPolicy,
+    WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
 };
+#[cfg(test)]
+pub(crate) use agent_core::RoutingOutcome;
 #[cfg(test)]
 pub(crate) use agent_core::TaskClass;
 pub(crate) use serde::{Deserialize, Serialize};

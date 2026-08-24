@@ -1,6 +1,7 @@
-use super::*;
+use agent_application::{AgentRunEvent, AgentRunStatus};
 use agent_core::{
-    LearningAttribution, LearningEvidenceV1, LearningTermination, LearningUsageCompleteness,
+    sha256_hex, Event, EventKind, LearningAttribution, LearningEvidenceV1, LearningTermination,
+    LearningUsageCompleteness, Metadata,
 };
 
 pub(crate) const LEARNING_BUDGET_KEYS: [&str; 12] = [

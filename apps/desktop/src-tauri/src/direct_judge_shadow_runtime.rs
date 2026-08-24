@@ -1,4 +1,7 @@
-use super::*;
+use crate::event_projection::write_private_file_atomically;
+use crate::persistence_runtime::app_data_root;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub(crate) const DIRECT_JUDGE_SHADOW_JOURNAL_CAPACITY: usize = 256;
 const DIRECT_JUDGE_SHADOW_JOURNAL_FILE: &str = "direct-judge-shadow.journal.jsonl";

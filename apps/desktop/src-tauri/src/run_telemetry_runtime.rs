@@ -1,4 +1,9 @@
-use super::*;
+use crate::event_projection::write_private_file_atomically;
+use crate::persistence_runtime::app_data_root;
+use agent_core::Metadata;
+use agent_runtime::AgentRunControl;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub(crate) const RUN_TELEMETRY_JOURNAL_CAPACITY: usize = 256;
 const RUN_TELEMETRY_JOURNAL_FILE: &str = "run-telemetry.journal.jsonl";

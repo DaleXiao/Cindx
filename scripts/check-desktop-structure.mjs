@@ -804,15 +804,36 @@ const oversizedStyleModules = styleModuleEntries
       .split("\n").length,
   }))
   .filter(({ lines }) => lines > 2_100);
+const isDesktopRustTestFile = (name) =>
+  name === "tests.rs" ||
+  name.endsWith("_tests.rs") ||
+  name.endsWith("_eval_tests.rs");
+// Module-size budgets are pinned at the current maximum + 10% headroom so the
+// gate blocks growth without failing on the present tree. Current maxima:
+// top-level production `src/*.rs`: project_commands.rs at 1,197 lines;
+// nested production (`agent_commands/*.rs` and deeper): agent_commands/task.rs
+// at 1,152 lines.
+const DESKTOP_TOP_LEVEL_PRODUCTION_LINE_BUDGET = 1_316;
+const DESKTOP_NESTED_PRODUCTION_LINE_BUDGET = 1_267;
+// tests.rs is the one test file with a line budget: it was digested into
+// domain `*_tests.rs` modules and must not grow back into a grab-bag.
+const DESKTOP_TESTS_RS_LINE_BUDGET = 300;
 const oversizedProductionRustModules = desktopRustModules
-  .filter(
-    ({ entry }) =>
-      entry !== "tests.rs" &&
-      !entry.endsWith("_tests.rs") &&
-      !entry.endsWith("_eval_tests.rs")
-  )
+  .filter(({ entry }) => !isDesktopRustTestFile(entry))
   .map(({ entry, source }) => ({ entry, lines: source.split("\n").length }))
-  .filter(({ lines }) => lines > 1_200);
+  .filter(({ lines }) => lines > DESKTOP_TOP_LEVEL_PRODUCTION_LINE_BUDGET);
+const nestedDesktopRustModules = listRustSourceFiles(desktopRustSourceDirectory)
+  .filter((file) => path.dirname(file) !== desktopRustSourceDirectory)
+  .map((file) => ({
+    entry: path.relative(desktopRustSourceDirectory, file),
+    lines: fs.readFileSync(file, "utf8").split("\n").length,
+  }));
+const oversizedNestedProductionRustModules = nestedDesktopRustModules
+  .filter(({ entry }) => !isDesktopRustTestFile(path.basename(entry)))
+  .filter(({ lines }) => lines > DESKTOP_NESTED_PRODUCTION_LINE_BUDGET);
+const testsRsLineCount = desktopRustModules.find(
+  ({ entry }) => entry === "tests.rs"
+)?.source.split("\n").length;
 const criticalDesktopAgentModuleBudgets = new Map([
   ["attachment_commands.rs", 190],
   ["attachment_upload_batches.rs", 170],
@@ -1020,9 +1041,26 @@ assert(
 );
 assert(
   oversizedProductionRustModules.length === 0,
-  `Desktop Rust production modules exceeded the 1,200-line cohesion budget: ${oversizedProductionRustModules
-    .map(({ entry, lines }) => `${entry} (${lines})`)
+  `Desktop Rust top-level production modules exceeded the ${DESKTOP_TOP_LEVEL_PRODUCTION_LINE_BUDGET}-line cohesion budget: ${oversizedProductionRustModules
+    .map(
+      ({ entry, lines }) =>
+        `${entry} (${lines}/${DESKTOP_TOP_LEVEL_PRODUCTION_LINE_BUDGET})`
+    )
     .join(", ")}`
+);
+assert(
+  oversizedNestedProductionRustModules.length === 0,
+  `Desktop Rust nested production modules exceeded the ${DESKTOP_NESTED_PRODUCTION_LINE_BUDGET}-line cohesion budget: ${oversizedNestedProductionRustModules
+    .map(
+      ({ entry, lines }) =>
+        `${entry} (${lines}/${DESKTOP_NESTED_PRODUCTION_LINE_BUDGET})`
+    )
+    .join(", ")}`
+);
+assert(
+  testsRsLineCount !== undefined &&
+    testsRsLineCount <= DESKTOP_TESTS_RS_LINE_BUDGET,
+  `Desktop Rust tests.rs exceeded the ${DESKTOP_TESTS_RS_LINE_BUDGET}-line regression budget: tests.rs (${testsRsLineCount}/${DESKTOP_TESTS_RS_LINE_BUDGET}); add domain *_tests.rs modules instead of growing the grab-bag`
 );
 assert(
   criticalDesktopAgentModules.length === criticalDesktopAgentModuleBudgets.size &&

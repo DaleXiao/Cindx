@@ -117,6 +117,7 @@ use app_state::*;
 use attachment_commands::*;
 use attachment_upload_batches::*;
 use collaboration_execution::*;
+#[cfg(test)]
 use collaboration_stage_runtime::*;
 use configuration_models::*;
 use configuration_persistence::*;

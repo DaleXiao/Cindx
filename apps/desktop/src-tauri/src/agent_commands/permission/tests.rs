@@ -6,11 +6,29 @@ use super::observations::{
 };
 use super::resolution::persist_denied_permission_resolution_rows;
 use super::*;
+use crate::agent_loop_runtime::{
+    apply_run_task_contract, workspace_verification_policy_for_run_context,
+};
+use crate::agent_read_model::agent_runtime_transcript_from_active_events;
+use crate::app_state::AgentRecoveryEnvelope;
+use crate::project_session_persistence::metadata_with_context;
+use crate::runtime_constants::AGENT_RECOVERY_SCHEMA;
+use crate::runtime_values::phase16_task_id;
+use agent_application::{AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState};
 use agent_core::{
-    AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
+    Event, EventId, EventKind, Message, MessageRole, PermissionDecision, PermissionRequest,
+    PermissionRequestId, PermissionResolution, PermissionRisk, TaskId, ToolOutcomeStatus, ToolRisk,
+    ToolSpec, AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
     LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
-use agent_runtime::PromptEvidenceScope;
+use agent_runtime::{
+    start_agent_loop, AgentKernel, AgentRunControl, AgentRuntimeConfig, AgentTaskStateSnapshot,
+    AgentToolRequest, PromptEvidenceScope, WorkspaceVerificationPolicy,
+    MAX_IDENTICAL_TOOL_FAILURES,
+};
+use agent_storage::{EventStore, PermissionStore, SqliteStore, StorageError};
+use std::collections::BTreeSet;
+use tools::ToolRegistry;
 
 #[test]
 fn permission_cold_recovery_preserves_verification_contract() {
