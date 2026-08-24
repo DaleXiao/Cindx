@@ -192,6 +192,18 @@ const permissionReviewControllerSource = read(
 const sidebarResizeSource = read(
   "apps/desktop/src/controllers/useSidebarResize.ts"
 );
+const sessionRuntimeControllerSource = read(
+  "apps/desktop/src/controllers/useSessionRuntimeController.ts"
+);
+const projectSessionControllerSource = read(
+  "apps/desktop/src/controllers/useProjectSessionController.ts"
+);
+const agentRunControllerSource = read(
+  "apps/desktop/src/controllers/useAgentRunController.ts"
+);
+const sessionRuntimeSyncSource = read(
+  "apps/desktop/src/controllers/useSessionRuntimeSync.ts"
+);
 const sessionThreadFileSource = read("apps/desktop/src/components/SessionThread.tsx");
 const sessionThreadViewCacheSource = read(
   "apps/desktop/src/components/sessionThreadViewCache.ts"
@@ -356,6 +368,17 @@ const desktopControllerSource = desktopControllers
   .map(({ source }) => source)
   .join("\n");
 const desktopUiSource = `${appSource}\n${settingsPageSource}\n${desktopControllerSource}`;
+// The App composition includes the extracted controllers the App component
+// wires together; logic assertions pin behavior across that whole surface
+// while layout assertions stay pinned to App.tsx itself.
+const appCompositionSource = [
+  appSource,
+  desktopControllerSource,
+  sessionRuntimeControllerSource,
+  projectSessionControllerSource,
+  agentRunControllerSource,
+  sessionRuntimeSyncSource
+].join("\n");
 const localBuildScript = read("scripts/build-local-app.mjs");
 const browserSidecarSource = read("scripts/sidecars/browser-sidecar.js");
 const browserIntegrationTest = read("scripts/test-browser-sidecar.mjs");
@@ -613,14 +636,17 @@ const browserControlDoc = read("docs/DEVELOPMENT.md");
 const mainSource = read("apps/desktop/src/main.tsx");
 const html = read("apps/desktop/index.html");
 const viteConfig = read("apps/desktop/vite.config.ts");
-const sessionRefreshStart = appSource.indexOf(
+const sessionRefreshStart = appCompositionSource.indexOf(
   "async function refreshWorkspaceAfterProjectSession"
 );
-const sessionRefreshEnd = appSource.indexOf(
+const sessionRefreshEnd = appCompositionSource.indexOf(
   "function forgetDeletedSessions",
   sessionRefreshStart
 );
-const sessionRefreshBlock = appSource.slice(sessionRefreshStart, sessionRefreshEnd);
+const sessionRefreshBlock = appCompositionSource.slice(
+  sessionRefreshStart,
+  sessionRefreshEnd
+);
 
 const frontendInvokeCommandNames = uniqueSortedNames(
   capturedNames(
@@ -735,6 +761,10 @@ const extractedDesktopBoundaryBudgets = [
   ["SessionMinimap.tsx", sessionMinimapSource, 130],
   ["useSessionMinimapInteraction.ts", sessionMinimapInteractionSource, 150],
   ["WorkspaceChrome.tsx", workspaceChromeSource, 150],
+  ["useSessionRuntimeController.ts", sessionRuntimeControllerSource, 600],
+  ["useProjectSessionController.ts", projectSessionControllerSource, 600],
+  ["useAgentRunController.ts", agentRunControllerSource, 580],
+  ["useSessionRuntimeSync.ts", sessionRuntimeSyncSource, 300],
 ];
 const oversizedExtractedDesktopBoundaries = extractedDesktopBoundaryBudgets.filter(
   ([, source, budget]) => source.split("\n").length > budget
@@ -1083,8 +1113,8 @@ assert(
 );
 
 assert(
-  appLineCount <= 2_420 &&
-    appUseStateCount <= 25 &&
+  appLineCount <= 900 &&
+    appUseStateCount <= 8 &&
     appUseStateCounterProbe === 3 &&
     settingsPageLineCount <= 1_400 &&
     sessionThreadLineCount <= 1_150 &&
@@ -1097,7 +1127,11 @@ assert(
     desktopControllerEntries.every((entry) =>
       appSource.includes(`./controllers/${entry.replace(/\.ts$/, "")}`)
     ) &&
-    appSource.includes('./appShellModel') &&
+    appCompositionSource.includes('./appShellModel') &&
+    appSource.includes('./controllers/useSessionRuntimeController') &&
+    appSource.includes('./controllers/useProjectSessionController') &&
+    appSource.includes('./controllers/useAgentRunController') &&
+    appSource.includes('./controllers/useSessionRuntimeSync') &&
     appSource.includes('./controllers/useAppWorkspaceProjection') &&
     appSource.includes('./controllers/useAppShellController') &&
     appSource.includes('./controllers/useComposerAttachments') &&
@@ -1376,8 +1410,12 @@ assert(
     appSource.includes("document.fonts.ready") &&
     appSource.includes("window.setTimeout(resolve, 120)") &&
     appSource.includes("await revealMainWindow()") &&
-    appSource.includes("!sessionRuntimeCache.hasAgent(state.activeSessionId)") &&
-    !appSource.includes("agentState?.sessionId !== projectSessionState.activeSessionId") &&
+    appCompositionSource.includes(
+      "!sessionRuntimeCache.hasAgent(state.activeSessionId)"
+    ) &&
+    !appCompositionSource.includes(
+      "agentState?.sessionId !== projectSessionState.activeSessionId"
+    ) &&
     !appSource.includes("revealAfterStableFrame"),
   "The native window must keep framework and custom traffic-light geometry aligned across size, scale, focus, and background redraws"
 );
@@ -1437,7 +1475,10 @@ assert(
 assert(html.includes("/src/main.tsx"), "index.html must load the React entrypoint");
 assert(viteConfig.includes('base: "./"'), "Vite should emit relative asset paths for Tauri");
 assert(mainSource.includes("<App />"), "React entrypoint must render App");
-assert(appSource.includes("<SessionThread"), "App must render the session thread");
+assert(
+  appSource.includes("<LiveSessionThread"),
+  "App must render the session thread"
+);
 assert(
   rustLib.includes("run_started_at_ms") &&
     appSource.includes("runStartedAtMs={activeAgentState?.runStartedAtMs ?? 0}") &&
@@ -1588,7 +1629,7 @@ assert(
     styles.includes(".thread-markdown-deferred-tail") &&
     !sessionThreadFileSource.includes("streamBufferRef") &&
     !agentMarkdownSource.includes("splitStreamingMarkdown") &&
-    appSource.includes("markSessionBusy(sessionId, false)") &&
+    appCompositionSource.includes("markSessionBusy(sessionId, false)") &&
     tauriBridge.includes("sessionId: string | null") &&
     tauriBridge.includes("reset: boolean"),
   "Agent output must stream by session and Stop must cancel the active provider request"
@@ -1662,18 +1703,18 @@ assert(
   "Run preparation must plan purely by effort tier, record one typed decision, and keep knowledge retrieval cancellable"
 );
 assert(
-  appSource.includes("sessionSelectionRequestRef") &&
+  appCompositionSource.includes("sessionSelectionRequestRef") &&
     latestAsyncSelectionSource.includes("const runningRef = useRef(false)") &&
     latestAsyncSelectionSource.includes(
       "const pendingRef = useRef<PendingSelection<Value> | null>(null)"
     ) &&
     latestAsyncSelectionSource.includes("while (pendingRef.current)") &&
     latestAsyncSelectionSource.includes("pending.operation = operation") &&
-    appSource.includes("sessionRefreshRequestRef") &&
-    appSource.includes("enqueueProjectSessionSelection") &&
-    appSource.includes("if (sessionId === activeSessionIdRef.current) {") &&
-    appSource.includes("getContextState(sessionId)") &&
-    appSource.includes("if (workspaceChanged) refreshWorkspaceScopedState()") &&
+    appCompositionSource.includes("sessionRefreshRequestRef") &&
+    appCompositionSource.includes("enqueueProjectSessionSelection") &&
+    appCompositionSource.includes("if (sessionId === activeSessionIdRef.current) {") &&
+    appCompositionSource.includes("getContextState(sessionId)") &&
+    appCompositionSource.includes("if (workspaceChanged) refreshWorkspaceScopedState()") &&
     !sessionRefreshBlock.includes("setPhase7(await getPhase7State())") &&
     tauriBridge.includes('invoke<ContextState>("get_context_state", {') &&
     rustLib.includes("session_id: Option<String>") &&
@@ -1684,17 +1725,17 @@ assert(
   sessionRuntimeModelSource.includes("SESSION_STATE_CACHE_LIMIT = 24") &&
     sessionRuntimeModelSource.includes("class SessionRuntimeCache") &&
     appWorkspaceProjectionSource.includes("SESSION_STATE_CACHE_LIMIT") &&
-    appSource.includes("sessionRuntimeCache") &&
-    !appSource.includes("agentStateCacheRef") &&
-    !appSource.includes("agentTraceCacheRef") &&
-    !appSource.includes("contextStateCacheRef") &&
-    appSource.includes("requestSessionAgentState(sessionId)") &&
-    appSource.includes("applySelectedSessionAgentState") &&
-    appSource.includes("prefetchedAgentState") &&
-    appSource.includes("void Promise.all(") &&
-    appSource.includes("restoreCachedSessionState(sessionId)") &&
-    appSource.includes("startTransition(() =>") &&
-    !appSource.includes("onSessionPrefetch") &&
+    appCompositionSource.includes("sessionRuntimeCache") &&
+    !appCompositionSource.includes("agentStateCacheRef") &&
+    !appCompositionSource.includes("agentTraceCacheRef") &&
+    !appCompositionSource.includes("contextStateCacheRef") &&
+    appCompositionSource.includes("requestSessionAgentState(sessionId)") &&
+    appCompositionSource.includes("applySelectedSessionAgentState") &&
+    appCompositionSource.includes("prefetchedAgentState") &&
+    appCompositionSource.includes("void Promise.all(") &&
+    appCompositionSource.includes("restoreCachedSessionState(sessionId)") &&
+    appCompositionSource.includes("startTransition(() =>") &&
+    !appCompositionSource.includes("onSessionPrefetch") &&
     !sidebarSource.includes("onSessionPrefetch"),
   "Session switching must restore a bounded cache without speculative full-session reads"
 );
@@ -1735,8 +1776,8 @@ assert(
     rustLib.includes("struct AgentStateDelta") &&
     tauriBridge.includes("export async function getAgentStateDelta") &&
     sessionRuntimeModelSource.includes("function mergeAgentStateDelta") &&
-    appSource.includes("mergeAgentStateDelta") &&
-    appSource.includes("getAgentStateDelta(sessionId"),
+    appCompositionSource.includes("mergeAgentStateDelta") &&
+    appCompositionSource.includes("getAgentStateDelta(sessionId"),
   "Active session polling must use indexed event deltas and a persistent read model"
 );
 assert(
@@ -1762,9 +1803,9 @@ assert(
 assert(
   tauriBridge.match(/if \(isTauriRuntime\(\)\) throw error;/g)?.length >= 10 &&
     sessionRuntimeModelSource.includes("function mergeAgentStateSnapshot") &&
-    appSource.includes("mergeAgentStateSnapshot") &&
-    appSource.includes("mergeAgentStateSnapshot(current, failedState)") &&
-    appSource.includes("mergeAgentStateSnapshot(current, nextAgentState)"),
+    appCompositionSource.includes("mergeAgentStateSnapshot") &&
+    appCompositionSource.includes("mergeAgentStateSnapshot(current, failedState)") &&
+    appCompositionSource.includes("mergeAgentStateSnapshot(current, nextAgentState)"),
   "Real Tauri agent failures must propagate without replacing loaded session history"
 );
 assert(
@@ -1899,7 +1940,7 @@ assert(
 assert(
   appShellStateModelSource.includes('inspectorOpen: false') &&
     appShellStateModelSource.includes('inspectorOpenBeforeSettings: false') &&
-    appSource.includes("onArtifactInspect={(path) =>") &&
+    appSource.includes("onArtifactInspect={handleArtifactInspect}") &&
     appSource.includes("showInspectorOutput({ sessionId, path, nonce: Date.now() })") &&
     appShellStateModelSource.includes('type: "show_output"') &&
     appShellStateModelSource.includes("inspectorOpen: true, inspectorOutputRequest"),
@@ -1941,8 +1982,11 @@ assert(
 );
 assert(
   /function handleSelectSession\(sessionId: string\) \{\s*const leavingTimeline = activeView === "timeline";\s*showTimelineView\(\);\s*if \(sessionId === activeSessionIdRef\.current\) \{/.test(
-    appSource
-  ) && appSource.includes("if (!leavingTimeline) void acknowledgeSessionResult(sessionId);"),
+    appCompositionSource
+  ) &&
+    appCompositionSource.includes(
+      "if (!leavingTimeline) void acknowledgeSessionResult(sessionId);"
+    ),
   "Selecting any sidebar session must leave Settings, including the active session"
 );
 assert(
@@ -2168,7 +2212,7 @@ assert(
 );
 assert(
   tauriBridge.includes("attachments?: AgentAttachment[]") &&
-    appSource.includes("attachments\n    };") &&
+    appCompositionSource.includes("attachments\n    };") &&
     rustLib.includes('"attachment_mime_types".to_string()') &&
     rustLib.includes("attachments: attachment_views_from_event(event)") &&
     sessionThreadSource.includes("function UserMessageAttachments") &&
@@ -2183,9 +2227,9 @@ assert(
     sessionThreadProjectionSource.includes(
       'message.sequence ?? `${message.role}-${index}`'
     ) &&
-    appSource.includes("optimisticUserMessagesRef") &&
-    appSource.includes("optimisticUserMessageRevision") &&
-    appSource.includes("setOptimisticUserMessageRevision") &&
+    appCompositionSource.includes("optimisticUserMessagesRef") &&
+    appCompositionSource.includes("optimisticUserMessageRevision") &&
+    appCompositionSource.includes("setOptimisticUserMessageRevision") &&
     appWorkspaceProjectionSource.includes("messagesWithOptimisticUserMessage") &&
     appSource.includes("messages={visibleAgentMessages}"),
   "Session thread must show submitted user messages before paint and preserve them during polling"
@@ -2270,10 +2314,10 @@ assert(
     sessionThreadSource.includes('className="session-thread-empty-state"') &&
     sessionThreadSource.includes("rowVirtualizer.measureElement(element)") &&
     appWorkspaceProjectionSource.includes("const sessionPrefetchKey = useMemo") &&
-    appSource.includes("requestSessionAgentState(sessionId).catch(() => null)") &&
-    appSource.includes("await Promise.all([worker(), worker()])") &&
-    appSource.includes("const cached = sessionRuntimeCache.read(sessionId)") &&
-    appSource.includes("setAgentState(cached.agent)") &&
+    appCompositionSource.includes("requestSessionAgentState(sessionId).catch(() => null)") &&
+    appCompositionSource.includes("await Promise.all([worker(), worker()])") &&
+    appCompositionSource.includes("const cached = sessionRuntimeCache.read(sessionId)") &&
+    appCompositionSource.includes("setAgentState(cached.agent)") &&
     sessionRuntimeModelSource.includes("private readonly agentRequests") &&
     sessionRuntimeModelSource.includes("const existing = this.agentRequests.get(sessionId)") &&
     !styles.includes('.session-thread[data-content-ready="false"]'),
@@ -2467,11 +2511,11 @@ assert(
     rustLib.includes("queued_agent_messages_update_the_incremental_session_read_model") &&
     rustLib.includes("queue_events_do_not_change_a_terminal_agent_status") &&
     rustLib.includes("queued_messages_preserve_a_permission_waiting_run") &&
-    appSource.includes("steeredQueuedMessageIdsRef") &&
+    appCompositionSource.includes("steeredQueuedMessageIdsRef") &&
     sessionRuntimeModelSource.includes("function committedSteerReconciliation(") &&
-    appSource.includes("const resolution = committedSteerReconciliation(state, queueId)") &&
-    appSource.includes('if (resolution === "pending") return;') &&
-    appSource.includes("receipt.steerCommitted") &&
+    appCompositionSource.includes("const resolution = committedSteerReconciliation(state, queueId)") &&
+    appCompositionSource.includes('if (resolution === "pending") return;') &&
+    appCompositionSource.includes("receipt.steerCommitted") &&
     queueServiceSource.includes("steer_committed: bool") &&
     tauriBridge.includes("steerCommitted: boolean") &&
     rustLib.includes("fn commit_queued_agent_steer(") &&
@@ -2497,8 +2541,8 @@ assert(
     tauriBridge.includes("export async function queueAgentMessage(") &&
     tauriBridge.includes("queueId?: string") &&
     tauriBridge.includes("export async function runNextQueuedAgentMessage(") &&
-    appSource.includes("async function drainQueuedMessages(sessionId: string)") &&
-    appSource.includes("suppressQueueDrainSessionIdsRef") &&
+    appCompositionSource.includes("async function drainQueuedMessages(sessionId: string)") &&
+    appCompositionSource.includes("suppressQueueDrainSessionIdsRef") &&
     appSource.includes("<QueuedMessages") &&
     queuedMessagesSource.includes('role="menuitem"') &&
     queuedMessagesSource.includes("onSteer") &&
@@ -2508,10 +2552,10 @@ assert(
     styles.includes("bottom: calc(100% - 2px)") &&
     styles.includes("border-radius: var(--radius-lg) var(--radius-lg) 0 0") &&
     styles.includes(".queued-message + .queued-message") &&
-    appSource.includes("applyQueuedMessageReceiptForSession") &&
-    appSource.includes("applyQueuedMessageActionReceiptForSession") &&
-    appSource.includes("optimisticQueuedMessagesRef") &&
-    appSource.includes("optimisticallyDeletedQueuedMessagesRef") &&
+    appCompositionSource.includes("applyQueuedMessageReceiptForSession") &&
+    appCompositionSource.includes("applyQueuedMessageActionReceiptForSession") &&
+    appCompositionSource.includes("optimisticQueuedMessagesRef") &&
+    appCompositionSource.includes("optimisticallyDeletedQueuedMessagesRef") &&
     styles.includes(".composer-stack > .composer") &&
     appSource.includes("data-has-queued={Boolean(activeAgentState?.queuedMessages.length)}") &&
     styles.includes('.composer-stack[data-has-queued="true"] > .composer'),
@@ -2653,14 +2697,14 @@ assert(
     sidebarSource.includes('aria-label="Cancel session rename"') &&
     !sidebarSource.includes("window.prompt") &&
     styles.includes(".session-rename-input") &&
-    appSource.includes("handleRenameSession") &&
+    appCompositionSource.includes("handleRenameSession") &&
     tauriBridge.includes('invoke<ProjectSessionState>("rename_session"'),
   "Session menu must provide inline editing through the persisted Tauri command"
 );
 assert(
   sidebarSource.includes("onProjectRename") &&
     sidebarSource.includes('className="project-rename-form"') &&
-    appSource.includes("handleRenameProject") &&
+    appCompositionSource.includes("handleRenameProject") &&
     tauriBridge.includes('invoke<ProjectSessionState>("rename_project"') &&
     rustLib.includes("fn rename_project("),
   "Project menu must provide inline editing through the persisted Tauri command"
@@ -2678,7 +2722,7 @@ assert(
     tauriBridge.includes('invoke<boolean>("confirm_delete_action"') &&
     rustLib.includes("async fn confirm_delete_action(") &&
     rustLib.includes("fn show_native_delete_confirmation(") &&
-    appSource.includes("handleDeleteProject") &&
+    appCompositionSource.includes("handleDeleteProject") &&
     tauriBridge.includes('invoke<ProjectSessionState>("delete_project"') &&
     rustLib.includes("fn delete_project(") &&
     rustLib.includes("remove_project_from_config"),
@@ -2812,7 +2856,7 @@ assert(
 );
 assert(
   appSource.includes('className="settings-saved-toast"') &&
-    appSource.includes("showSettingsSaved();") &&
+    appCompositionSource.includes("showSettingsSaved();") &&
     desktopControllerSource.includes('showSettingsSaved("Personalization saved")') &&
     desktopControllerSource.includes('showSaved("Provider verified and configured")') &&
     (desktopControllerSource.match(/showSaved\(/g)?.length ?? 0) === 4 &&
@@ -2953,10 +2997,10 @@ assert(
   "Outputs must use a compact path-free file list with a validated Finder reveal action"
 );
 assert(
-  appSource.includes("async function handleExportAgentTrace()") &&
-    appSource.includes("const next = await exportAgentTraceJsonl(activeSession?.id)") &&
-    appSource.includes("if (next.exportPath)") &&
-    appSource.includes("await revealArtifact(next.exportPath)"),
+  appCompositionSource.includes("async function handleExportAgentTrace()") &&
+    appCompositionSource.includes("const next = await exportAgentTraceJsonl(activeSession?.id)") &&
+    appCompositionSource.includes("if (next.exportPath)") &&
+    appCompositionSource.includes("await revealArtifact(next.exportPath)"),
   "Exporting agent trace JSONL must reveal the exported file in the system file browser"
 );
 assert(
@@ -3165,7 +3209,7 @@ assert(
     tauriBridge.includes("getPermissionReviewState") &&
     rustLib.includes("async fn get_permission_review_state(") &&
     rustLib.includes("let store = open_app_read_store()?") &&
-    appSource.includes("let inFlight = false;") &&
+    appCompositionSource.includes("let inFlight = false;") &&
     rustLib.includes("struct PermissionReviewItem"),
   "Permission settings must present actionable reviews with source session context"
 );
@@ -3200,7 +3244,7 @@ assert(
     !sessionTitleServiceSource.includes("automatic_conversation_title") &&
     sessionTitleServiceSource.includes("app.emit_session_title_updated(") &&
     (rustLib.match(/persist_completed_conversation_title/g) || []).length >= 2 &&
-    appSource.includes("subscribeToSessionTitleUpdates") &&
+    appCompositionSource.includes("subscribeToSessionTitleUpdates") &&
     tauriBridge.includes('listen<string>("session-title-updated"'),
   "Session titles must refine semantically, retry safely, and never overwrite manual names"
 );
@@ -3245,7 +3289,7 @@ assert(
   "Running one session must not disable navigation to other sessions"
 );
 const projectSelectionBlock =
-  appSource.match(
+  appCompositionSource.match(
     /async function handleSelectProject[\s\S]*?(?=\n  async function handleSelectSession)/
   )?.[0] ?? "";
 assert(
@@ -3284,9 +3328,9 @@ assert(
     appWorkspaceProjectionSource.includes(
       "normalizedSessionEffort(activeSession?.effort)"
     ) &&
-    appSource.includes("handleSessionEffortChange") &&
-    appSource.includes("setSessionEffort(sessionId, effort)") &&
-    !appSource.includes('useState<AgentEffort>("auto")') &&
+    appCompositionSource.includes("handleSessionEffortChange") &&
+    appCompositionSource.includes("setSessionEffort(sessionId, effort)") &&
+    !appCompositionSource.includes('useState<AgentEffort>("auto")') &&
     tauriBridge.includes(
       'export type AgentEffort = "fast" | "default" | "high" | "xhigh"'
     ) &&
@@ -3308,7 +3352,7 @@ assert(
     tauriTypesSource.includes("export type RuntimeStatus = {") &&
     tauriTypesSource.includes("agentRunBudgets: AgentRunBudgets | null") &&
     agentRunBudgetModelSource.includes("budgets?.[effort]") &&
-    appSource.includes(
+    appCompositionSource.includes(
       "optimisticRunBudgetPatch(runtime?.agentRunBudgets, agentEffort)"
     ) &&
     !appShellModelSource.includes("runBudgetForEffort") &&
@@ -3395,7 +3439,7 @@ assert(
 assert(
   rustLib.includes("execute_agent_tool_invocation") &&
     rustLib.includes("drop(store);") &&
-    appSource.includes("markSessionBusy"),
+    appCompositionSource.includes("markSessionBusy"),
   "Agent tool execution must release the shared event-store lock"
 );
 assert(
@@ -3435,18 +3479,18 @@ assert(
   "Legacy event redaction must be a versioned one-time startup migration"
 );
 assert(
-  appSource.includes("agentStateUnchanged") &&
-    appSource.includes("agentTraceUnchanged") &&
-    appSource.includes("sessionLifecycleRefreshRef") &&
-    appSource.includes("sessionLifecycleRefreshRef.current === refreshRequest"),
+  appCompositionSource.includes("agentStateUnchanged") &&
+    appCompositionSource.includes("agentTraceUnchanged") &&
+    appCompositionSource.includes("sessionLifecycleRefreshRef") &&
+    appCompositionSource.includes("sessionLifecycleRefreshRef.current === refreshRequest"),
   "Agent polling must preserve unchanged React state references"
 );
 assert(
   rustLib.includes("get_agent_state_revision") &&
     rustLib.includes("AGENT_HISTORY_INITIAL_PAGE_SIZE: usize = 120") &&
     tauriBridge.includes("getAgentStateRevision") &&
-    appSource.includes("agentStateRevisionsRef") &&
-    appSource.includes("agentStateRevisionsRef.current.set(state.sessionId") &&
+    appCompositionSource.includes("agentStateRevisionsRef") &&
+    appCompositionSource.includes("agentStateRevisionsRef.current.set(state.sessionId") &&
     sessionThreadSource.includes("const RunProgressStatus = memo") &&
     styles.includes("content-visibility: auto"),
   "Long sessions must avoid full-state polling and repeated offscreen rendering"
@@ -3634,7 +3678,7 @@ assert(settingsPageSource.includes("Save workspace"), "App must render workspace
 assert(
   appSource.includes("handlePickWorkspace") &&
     settingsPageSource.includes("workspace-folder-selector") &&
-    appSource.includes("pickWorkspaceFolder"),
+    appCompositionSource.includes("pickWorkspaceFolder"),
   "Workspace settings must use the native folder selector"
 );
 assert(
@@ -3889,8 +3933,8 @@ assert(
   settingsPageSource.includes("const KnowledgeGraph = lazy(() =>") &&
     settingsPageSource.includes("knowledgeGraphOpen ? (") &&
     appShellModelSource.includes("BACKGROUND_AGENT_POLL_INTERVAL_MS = 5_000") &&
-    appSource.includes('document.visibilityState === "hidden"') &&
-    appSource.includes('document.addEventListener("visibilitychange"'),
+    appCompositionSource.includes('document.visibilityState === "hidden"') &&
+    appCompositionSource.includes('document.addEventListener("visibilitychange"'),
   "Heavy graph code and active-session polling must pause or defer while their surfaces are not visible"
 );
 assert(

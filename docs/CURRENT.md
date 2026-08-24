@@ -527,8 +527,13 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   preview fallback state now lives in its own module beside `tauri.ts`, and
   Composer textarea sizing plus attachment batch limits are extracted into
   pure, node-tested models (`composerSizingModel`, `attachmentLimitsModel`).
-  `App.tsx`, `tauri.ts`, settings, inspector, and thread styling remain large
-  change surfaces.
+  `App.tsx` is now a composition and layout layer: the session runtime store
+  (agent state, trace, optimistic overlays, queue drain), project/session
+  lifecycle commands, run and queued-message commands, and the runtime sync
+  effects (polling, prefetch, subscriptions) live in `src/controllers/` as
+  `useSessionRuntimeController`, `useProjectSessionController`,
+  `useAgentRunController`, and `useSessionRuntimeSync`. `tauri.ts`, settings,
+  inspector, and thread styling remain large change surfaces.
 - The `realworld-eval` feature and the `orchestrator`/`orchestrator-eval`
   crates are physically removed; there is no provider evaluation surface in the
   product build.

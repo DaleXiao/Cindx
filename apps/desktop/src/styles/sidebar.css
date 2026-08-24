@@ -586,6 +586,9 @@
 .session-row {
   position: relative;
   min-width: 0;
+  /* Long session lists skip offscreen row rendering; the DOM is unchanged. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 30px;
 }
 
 .session-rename-form {

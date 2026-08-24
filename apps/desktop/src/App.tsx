@@ -1,6 +1,5 @@
 import {
   lazy,
-  startTransition,
   Suspense,
   useCallback,
   useEffect,
@@ -16,13 +15,8 @@ import { PlanConfirmationCard } from "./components/PlanConfirmationCard";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceChrome } from "./components/WorkspaceChrome";
-import {
-  BACKGROUND_AGENT_POLL_INTERVAL_MS,
-  FOREGROUND_AGENT_POLL_INTERVAL_MS,
-  queuedMessageClientId
-} from "./appShellModel";
-import { optimisticRunBudgetPatch } from "./agentRunBudgetModel";
 import { providerReadinessMessage, providerStatusText } from "./providerReadinessModel";
+import { useAgentRunController } from "./controllers/useAgentRunController";
 import { useAppWorkspaceProjection } from "./controllers/useAppWorkspaceProjection";
 import { useAppShellController } from "./controllers/useAppShellController";
 import { useComposerAttachments } from "./controllers/useComposerAttachments";
@@ -33,79 +27,26 @@ import { useIntegrationSettingsController } from "./controllers/useIntegrationSe
 import { useKnowledgeToolingController } from "./controllers/useKnowledgeToolingController";
 import { useLatestAsyncSelection } from "./controllers/useLatestAsyncSelection";
 import { usePermissionReviewController } from "./controllers/usePermissionReviewController";
+import { useProjectSessionController } from "./controllers/useProjectSessionController";
+import { useSessionRuntimeController } from "./controllers/useSessionRuntimeController";
+import { useSessionRuntimeSync } from "./controllers/useSessionRuntimeSync";
 import { useSidebarResize } from "./controllers/useSidebarResize";
+import { LiveSessionThread } from "./components/SessionThread";
 import {
-  LiveSessionThread,
-  type SessionThreadSelection
-} from "./components/SessionThread";
-import {
-  AgentState,
-  AgentEffort,
-  AgentTraceState,
-  ChatMessageView,
-  acknowledgeSessionActivity,
-  archiveSession,
-  cancelAgentTask,
-  createProject,
-  createSession,
-  deleteQueuedAgentMessage,
-  deleteProject,
-  deleteSession,
-  exportAgentTraceJsonl,
   getAgentState,
-  getAgentStateDelta,
-  getAgentHistoryPage,
-  getAgentStateRevision,
-  getAgentTraceState,
-  getContextState,
   getProjectSessionState,
   getRuntimeStatus,
-  editQueuedAgentMessage,
-  forkSession,
-  PermissionReviewItem,
-  ProjectSessionState,
-  QueuedAgentMessage,
-  QueuedAgentMessageActionReceipt,
-  QueuedAgentMessageReceipt,
-  revealArtifact,
   revealMainWindow,
-  setSidebarMaterialWidth,
-  resolveAgentPermission,
   resolvePermission,
-  RuntimeStatus,
-  retryAgentTask,
-  renameProject,
-  renameSession,
-  restoreSession,
-  runAgentTask,
-  runNextQueuedAgentMessage,
-  pickWorkspaceFolder,
-  saveWorkspaceRoot,
-  selectProject,
-  selectSession,
-  setSessionEffort,
-  setSessionModel,
-  steerQueuedAgentMessage,
-  subscribeToSessionTitleUpdates,
-  queueAgentMessage
+  setSidebarMaterialWidth
 } from "./tauri";
-import {
-  SessionRuntimeCache,
-  agentStateUnchanged,
-  agentTraceUnchanged,
-  committedSteerReconciliation,
-  committedSteerUserMessage,
-  containsOptimisticUserMessage,
-  latestTraceStep,
-  mergeAcknowledgedSessionActivity,
-  mergeAgentStateDelta,
-  mergeAgentStateSnapshot,
-  mergeQueuedAgentMessage,
-  mergeSequencedItems,
-  projectReadSessionResult
-} from "./sessionRuntimeModel";
+import type { PermissionReviewItem, ProjectSessionState, TimelineEntry } from "./tauri";
 
 const SIDEBAR_MATERIAL_HIDE_DELAY_MS = 220;
+
+// Stable empty list so the memoized thread does not re-render on unrelated
+// state changes when no session is active.
+const EMPTY_THREAD_TIMELINE: TimelineEntry[] = [];
 
 const ScheduleView = lazy(() =>
   import("./components/ScheduleView").then((module) => ({
@@ -120,7 +61,17 @@ const SettingsPage = lazy(() =>
 );
 
 export function App() {
-  const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const reportComposerError = useCallback(
+    (message: string | null) => setComposerError(message),
+    []
+  );
+  const [permissionBusy, setPermissionBusy] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [projectCreateOpen, setProjectCreateOpen] = useState(false);
+  const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
+  const [sidebarQuery, setSidebarQuery] = useState("");
+  const startupWindowRevealRequestedRef = useRef(false);
   const {
     activeView,
     debugAlwaysVisible,
@@ -174,53 +125,171 @@ export function App() {
   } = usePermissionReviewController(
     activeView === "settings" && settingsCategory === "permissions"
   );
-  const [agentState, setAgentState] = useState<AgentState | null>(null);
-  const [sessionLoadingId, setSessionLoadingId] = useState<string | null>(null);
-  const [agentTraceState, setAgentTraceState] = useState<AgentTraceState | null>(null);
-  const [selectedThreadItem, setSelectedThreadItem] =
-    useState<SessionThreadSelection | null>(null);
-  const [selectedTraceStepId, setSelectedTraceStepId] = useState<string | null>(null);
-  const [projectSessionState, setProjectSessionState] = useState<ProjectSessionState | null>(null);
-  const [workspaceDraft, setWorkspaceDraft] = useState("");
-  const [newProjectName, setNewProjectName] = useState("");
-  const [projectCreateOpen, setProjectCreateOpen] = useState(false);
-  const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
-  const [sidebarQuery, setSidebarQuery] = useState("");
-  const [streamResetVersion, setStreamResetVersion] = useState(0);
-  const [permissionBusy, setPermissionBusy] = useState(false);
-  const [workspaceBusy, setWorkspaceBusy] = useState(false);
-  const [workspacePickerBusy, setWorkspacePickerBusy] = useState(false);
-  const [traceBusy, setTraceBusy] = useState(false);
-  const [projectSessionBusy, setProjectSessionBusy] = useState(false);
-  const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
-  const [queuedMessageBusyId, setQueuedMessageBusyId] = useState<string | null>(null);
-  const [persistingQueuedMessageIds, setPersistingQueuedMessageIds] = useState<Set<string>>(
-    () => new Set()
-  );
-  const activeSessionIdRef = useRef<string | null>(null);
-  const agentStateRevisionsRef = useRef<
-    Map<string, { eventCount: number; latestSequence: number; latestTimestampMs: number }>
-  >(new Map());
-  const [sessionRuntimeCache] = useState(() => new SessionRuntimeCache());
-  const agentHistoryRequestsRef = useRef<Set<string>>(new Set());
-  const [loadingOlderSessionId, setLoadingOlderSessionId] = useState<string | null>(null);
-  const sessionSelectionRequestRef = useRef(0);
+  const {
+    activeRagOperation, browserApprovals,
+    browserBusy,
+    browserObservations,
+    browserTarget,
+    browserText,
+    browserUrl,
+    contextBusy,
+    contextCheckpoint,
+    contextState,
+    handleAnswerWithRag, handleCancelRag,
+    handleCompactContext,
+    handleIndexRag,
+    handleResolveBrowserPermission,
+    handleResolveToolPermission,
+    handleRunBrowserTool,
+    handleRunTool,
+    handleSearchRag,
+    knowledgeError,
+    knowledgeGraphOpen,
+    loadKnowledgeState,
+    phase5,
+    phase7,
+    ragBusy, ragCancelling, ragProgress,
+    ragQuery,
+    ragSources,
+    ragStats,
+    refreshWorkspaceKnowledge,
+    selectedTool,
+    selectedToolSpec,
+    setBrowserTarget,
+    setBrowserText,
+    setBrowserUrl,
+    setContextState,
+    setKnowledgeGraphOpen,
+    setRagQuery,
+    setSelectedTool,
+    setToolInput,
+    toolApprovals,
+    toolBusy,
+    toolInput,
+    toolResults
+  } = useKnowledgeToolingController({
+    reportError: reportComposerError,
+    showInspector
+  });
+  const sessionRuntime = useSessionRuntimeController({
+    setComposerError,
+    setContextState,
+    refreshPermissionReviews,
+    setInspectorTab,
+    setInspectorOpen
+  });
+  const {
+    activeSessionIdRef,
+    agentState,
+    agentTraceState,
+    applyAgentStateForSession,
+    applyBootstrapAgentState,
+    applyBootstrapProjectSessionState,
+    busySessionIds,
+    handleAgentStreamDone,
+    handleExportAgentTrace,
+    handleSessionEffortChange,
+    handleSessionModelChange,
+    handleThreadSelection,
+    loadOlderAgentHistory,
+    loadingOlderSessionId,
+    optimisticUserMessageRevision,
+    optimisticUserMessagesRef,
+    projectSessionState,
+    selectedThreadItem,
+    selectedTraceStepId,
+    sessionLoadingId,
+    setSelectedThreadItem,
+    setSelectedTraceStepId,
+    streamResetVersion,
+    traceBusy
+  } = sessionRuntime;
+  const {
+    activeAgentState,
+    activeProject,
+    activeSession,
+    activeSessionBusy,
+    activeSessionTraceSteps,
+    agentEffort,
+    archivedSessions,
+    projects,
+    selectedTraceStep,
+    sessionPrefetchKey,
+    sessions,
+    visibleAgentMessages
+  } = useAppWorkspaceProjection({
+    activeView,
+    agentState,
+    agentTraceState,
+    busySessionIds,
+    optimisticUserMessages: optimisticUserMessagesRef.current,
+    optimisticUserMessageRevision,
+    projectSessionState,
+    selectedTraceStepId,
+    sidebarQuery
+  });
+  const {
+    value: composerDraft,
+    focusRequest: composerFocusRequest,
+    setActiveDraft: setActiveComposerDraft,
+    appendDraftForSession: appendComposerDraftForSession,
+    editActiveDraft: handleThreadMessageEdit,
+    restoreDraftIfEmpty,
+    forgetDrafts
+  } = useComposerDrafts(activeSession?.id ?? null, activeSessionIdRef);
+  const {
+    attachments: composerAttachments,
+    busy: attachmentBusy,
+    clear: clearAttachments,
+    forget: forgetAttachments,
+    pick: handlePickAttachments,
+    remove: handleRemoveAttachment,
+    restoreIfEmpty: restoreAttachmentsIfEmpty
+  } = useComposerAttachments({
+    reportError: reportComposerError,
+    sessionId: activeSession?.id ?? null
+  });
   const enqueueProjectSessionSelection = useLatestAsyncSelection<ProjectSessionState>();
-  const sessionRefreshRequestRef = useRef(0);
-  const sessionLifecycleRefreshRef = useRef(0);
-  const optimisticUserMessagesRef = useRef<Map<string, ChatMessageView[]>>(new Map());
-  const [optimisticUserMessageRevision, setOptimisticUserMessageRevision] = useState(0);
-  const optimisticQueuedMessagesRef = useRef<Map<string, QueuedAgentMessage>>(new Map());
-  const optimisticallyDeletedQueuedMessagesRef = useRef<Map<string, string>>(new Map());
-  const steeredQueuedMessageIdsRef = useRef<Set<string>>(new Set());
-  const queueDrainingSessionIdsRef = useRef<Set<string>>(new Set());
-  const suppressQueueDrainSessionIdsRef = useRef<Set<string>>(new Set());
-  const startupWindowRevealRequestedRef = useRef(false);
-  const [composerError, setComposerError] = useState<string | null>(null);
-  const reportComposerError = useCallback(
-    (message: string | null) => setComposerError(message),
-    []
-  );
+  const {
+    completeBulkDelete,
+    handleArchiveSession,
+    handleCreateProject,
+    handleCreateSession,
+    handleDeleteProject,
+    handleDeleteSession,
+    handleForkSession,
+    handleOpenScheduledSession,
+    handlePickWorkspace,
+    handleRenameProject,
+    handleRenameSession,
+    handleRestoreSession,
+    handleSaveWorkspace,
+    handleSelectProject,
+    handleSelectSession,
+    projectSessionBusy,
+    runtime,
+    setRuntime,
+    setWorkspaceDraft,
+    workspaceBusy,
+    workspaceDraft,
+    workspacePickerBusy
+  } = useProjectSessionController({
+    sessionRuntime,
+    activeAgentState,
+    activeProject,
+    activeView,
+    enqueueProjectSessionSelection,
+    forgetAttachments,
+    forgetDrafts,
+    newProjectName,
+    refreshWorkspaceKnowledge,
+    setComposerError,
+    setContextState,
+    setNewProjectName,
+    setProjectCreateOpen,
+    showSettingsSaved,
+    showTimelineView
+  });
   const {
     canUseConfiguredKey,
     modelProfileCount,
@@ -282,150 +351,86 @@ export function App() {
     showSaved: showSettingsSaved
   });
   const {
-    activeRagOperation, browserApprovals,
-    browserBusy,
-    browserObservations,
-    browserTarget,
-    browserText,
-    browserUrl,
-    contextBusy,
-    contextCheckpoint,
-    contextState,
-    handleAnswerWithRag, handleCancelRag,
-    handleCompactContext,
-    handleIndexRag,
-    handleResolveBrowserPermission,
-    handleResolveToolPermission,
-    handleRunBrowserTool,
-    handleRunTool,
-    handleSearchRag,
-    knowledgeError,
-    knowledgeGraphOpen,
-    loadKnowledgeState,
-    phase5,
-    phase7,
-    ragBusy, ragCancelling, ragProgress,
-    ragQuery,
-    ragSources,
-    ragStats,
-    refreshWorkspaceKnowledge,
-    selectedTool,
-    selectedToolSpec,
-    setBrowserTarget,
-    setBrowserText,
-    setBrowserUrl,
-    setContextState,
-    setKnowledgeGraphOpen,
-    setRagQuery,
-    setSelectedTool,
-    setToolInput,
-    toolApprovals,
-    toolBusy,
-    toolInput,
-    toolResults
-  } = useKnowledgeToolingController({
-    reportError: reportComposerError,
-    showInspector
+    handleCancelAgentTask,
+    handleDeleteQueuedMessage,
+    handleEditQueuedMessage,
+    handleResolveAgentPermission,
+    handleRetryAgentTask,
+    handleSendPrompt,
+    handleSteerQueuedMessage,
+    persistingQueuedMessageIds,
+    queuedMessageBusyId
+  } = useAgentRunController({
+    sessionRuntime,
+    activeAgentState,
+    activeSession,
+    agentEffort,
+    attachmentBusy,
+    clearAttachments,
+    composerAttachments,
+    refreshPermissionReviews,
+    restoreAttachmentsIfEmpty,
+    restoreDraftIfEmpty,
+    runtime,
+    setComposerError
+  });
+  useSessionRuntimeSync({
+    sessionRuntime,
+    activeAgentState,
+    activeSession,
+    activeSessionBusy,
+    activeView,
+    inspectorOpen,
+    sessionPrefetchKey,
+    setComposerError,
+    setContextState
   });
 
-  function requestSessionAgentState(sessionId: string) {
-    return sessionRuntimeCache.requestAgent(sessionId, () =>
-      getAgentState(sessionId).then((next) => {
-        agentStateRevisionsRef.current.set(sessionId, {
-          eventCount: next.eventCount,
-          latestSequence: next.latestSequence,
-          latestTimestampMs: 0
-        });
-        return next;
-      })
-    );
-  }
+  const handleArtifactInspect = useCallback(
+    (path: string) => {
+      const sessionId = activeSession?.id;
+      if (!sessionId) return;
+      showInspectorOutput({ sessionId, path, nonce: Date.now() });
+    },
+    [activeSession?.id, showInspectorOutput]
+  );
 
-  function applySelectedSessionAgentState(
-    sessionId: string,
-    selectionRequest: number,
-    request: Promise<AgentState>
+  const statusText = useMemo(() => {
+    if (!runtime) return "Connecting";
+    if (runtime.kernelStatus === "kernel bridge online") return providerStatusText(providerReadiness);
+    return runtime.kernelStatus;
+  }, [providerReadiness, runtime]);
+
+  const agentApprovals = activeAgentState?.pendingApprovals ?? [];
+  const agentCanCancel = Boolean(activeAgentState?.canCancel || activeSessionBusy);
+  const agentCanRetry = Boolean(activeAgentState?.canRetry);
+  const pendingPlanConfirmation = activeAgentState?.pendingPlanConfirmation ?? null;
+  const agentCanContinue = Boolean(activeAgentState?.canContinue) && !pendingPlanConfirmation;
+  const agentWorking = Boolean(activeSessionBusy || activeAgentState?.status === "running");
+
+  async function handleResolvePermissionReview(
+    review: PermissionReviewItem,
+    decision: "allow_once" | "allow_for_session" | "deny"
   ) {
-    void request
-      .then((nextAgentState) => {
-        if (
-          selectionRequest !== sessionSelectionRequestRef.current ||
-          activeSessionIdRef.current !== sessionId
-        ) {
-          return;
-        }
-        setSessionLoadingId(null);
-        acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
-        setAgentState((current) => {
-          const merged = preserveOptimisticQueuedMessages(
-            sessionId,
-            mergeAgentStateSnapshot(current, nextAgentState)
-          );
-          return agentStateUnchanged(current, merged) ? current : merged;
-        });
-        updateSessionStatus(sessionId, nextAgentState.status, nextAgentState.canContinue);
-      })
-      .catch((error) => {
-        if (
-          selectionRequest === sessionSelectionRequestRef.current &&
-          activeSessionIdRef.current === sessionId
-        ) {
-          setSessionLoadingId(null);
-          setComposerError(error instanceof Error ? error.message : String(error));
-        }
-      });
+    setPermissionBusy(true);
+    try {
+      if (review.source === "agent") {
+        const sessionId = review.sessionId ?? activeSession?.id;
+        if (!sessionId) throw new Error("The related session is no longer available.");
+        await handleResolveAgentPermission(review.requestId, decision, sessionId);
+      } else if (review.source === "tool") {
+        await handleResolveToolPermission(review.requestId, decision);
+      } else if (review.source === "browser") {
+        await handleResolveBrowserPermission(review.requestId, decision);
+      } else {
+        await resolvePermission(review.requestId, decision);
+      }
+      handleRestorePermissionReview(review.requestId);
+    } finally {
+      await refreshPermissionReviews().catch(() => {});
+      setPermissionBusy(false);
+    }
   }
-
-  function restoreCachedSessionState(sessionId: string) {
-    const cached = sessionRuntimeCache.read(sessionId);
-    setSessionLoadingId(cached.agent ? null : sessionId);
-    setAgentState(cached.agent);
-    setAgentTraceState(cached.trace);
-    setContextState(cached.context);
-  }
-
-  const handleThreadSelection = useCallback((selection: SessionThreadSelection) => {
-    setSelectedThreadItem(selection);
-    setSelectedTraceStepId(null);
-    setInspectorTab("details");
-    setInspectorOpen(true);
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    let unsubscribe: (() => void) | null = null;
-    void subscribeToSessionTitleUpdates((sessionId) => {
-      void getProjectSessionState()
-        .then((nextState) => {
-          if (disposed) return;
-          const renamedSession = nextState.sessions.find((session) => session.id === sessionId);
-          if (!renamedSession) return;
-          setProjectSessionState((current) =>
-            current
-              ? {
-                  ...current,
-                  sessions: current.sessions.map((session) =>
-                    session.id === sessionId ? renamedSession : session
-                  )
-                }
-              : nextState
-          );
-          setAgentState((current) =>
-            current?.sessionId === sessionId
-              ? { ...current, sessionName: renamedSession.name }
-              : current
-          );
-        })
-        .catch(() => {});
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else unsubscribe = unlisten;
-    });
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-    };
-  }, []);
 
   useEffect(() => {
     let frame: number | null = null;
@@ -460,29 +465,10 @@ export function App() {
         setWorkspaceDraft(state.workspaceRoot);
       }),
       getProjectSessionState().then((state) => {
-        setProjectSessionState(state);
-        setSessionLoadingId(
-          state.activeSessionId && !sessionRuntimeCache.hasAgent(state.activeSessionId)
-            ? state.activeSessionId
-            : null
-        );
-        setComposerError((current) => current ?? state.lastError);
+        applyBootstrapProjectSessionState(state);
       }),
       getAgentState().then((state) => {
-        if (state.sessionId) {
-          agentStateRevisionsRef.current.set(state.sessionId, {
-            eventCount: state.eventCount,
-            latestSequence: state.latestSequence,
-            latestTimestampMs: 0
-          });
-          sessionRuntimeCache.rememberAgent(state.sessionId, state);
-        }
-        setAgentState(state);
-        setSessionLoadingId(null);
-        if (state.sessionId) {
-          updateSessionStatus(state.sessionId, state.status, state.canContinue);
-        }
-        setComposerError((current) => current ?? state.lastError);
+        applyBootstrapAgentState(state);
       }),
       loadPersonalization()
     ];
@@ -537,1515 +523,6 @@ export function App() {
       if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
     };
   }, [projectSessionState, runtime]);
-  const statusText = useMemo(() => {
-    if (!runtime) return "Connecting";
-    if (runtime.kernelStatus === "kernel bridge online") return providerStatusText(providerReadiness);
-    return runtime.kernelStatus;
-  }, [providerReadiness, runtime]);
-
-  const {
-    activeAgentState,
-    activeProject,
-    activeSession,
-    activeSessionBusy,
-    activeSessionTraceSteps,
-    agentEffort,
-    archivedSessions,
-    projects,
-    selectedTraceStep,
-    sessionPrefetchKey,
-    sessions,
-    visibleAgentMessages
-  } = useAppWorkspaceProjection({
-    activeView,
-    agentState,
-    agentTraceState,
-    busySessionIds,
-    optimisticUserMessages: optimisticUserMessagesRef.current,
-    optimisticUserMessageRevision,
-    projectSessionState,
-    selectedTraceStepId,
-    sidebarQuery
-  });
-  const {
-    attachments: composerAttachments,
-    busy: attachmentBusy,
-    clear: clearAttachments,
-    forget: forgetAttachments,
-    pick: handlePickAttachments,
-    remove: handleRemoveAttachment,
-    restoreIfEmpty: restoreAttachmentsIfEmpty
-  } = useComposerAttachments({
-    reportError: reportComposerError,
-    sessionId: activeSession?.id ?? null
-  });
-
-  function preserveOptimisticQueuedMessages(sessionId: string, state: AgentState) {
-    steeredQueuedMessageIdsRef.current.forEach((queueId) => {
-      if (optimisticallyDeletedQueuedMessagesRef.current.get(queueId) !== sessionId) return;
-      const resolution = committedSteerReconciliation(state, queueId);
-      if (resolution === "pending") return;
-      steeredQueuedMessageIdsRef.current.delete(queueId);
-      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
-      const optimistic = optimisticUserMessagesRef.current.get(sessionId);
-      if (!optimistic) return;
-      const next = optimistic.filter((message) => message.queueId !== queueId);
-      if (next.length > 0) {
-        optimisticUserMessagesRef.current.set(sessionId, next);
-      } else {
-        optimisticUserMessagesRef.current.delete(sessionId);
-      }
-    });
-    let queuedMessages = state.queuedMessages;
-    optimisticallyDeletedQueuedMessagesRef.current.forEach((targetSessionId, queueId) => {
-      if (targetSessionId === sessionId) {
-        queuedMessages = queuedMessages.filter((message) => message.id !== queueId);
-      }
-    });
-    optimisticQueuedMessagesRef.current.forEach((message) => {
-      if (message.sessionId === sessionId) {
-        queuedMessages = mergeQueuedAgentMessage(queuedMessages, message);
-      }
-    });
-    return queuedMessages === state.queuedMessages ? state : { ...state, queuedMessages };
-  }
-
-  const loadOlderAgentHistory = useCallback(async () => {
-    const sessionId = activeAgentState?.sessionId;
-    if (
-      !activeAgentState ||
-      !sessionId ||
-      !activeAgentState.hasOlderHistory ||
-      activeAgentState.oldestSequence <= 0 ||
-      agentHistoryRequestsRef.current.has(sessionId)
-    ) {
-      return;
-    }
-    agentHistoryRequestsRef.current.add(sessionId);
-    setLoadingOlderSessionId(sessionId);
-    try {
-      const page = await getAgentHistoryPage(
-        sessionId,
-        activeAgentState.oldestSequence
-      );
-      setAgentState((current) => {
-        if (!current || current.sessionId !== page.sessionId) return current;
-        return {
-          ...current,
-          oldestSequence: page.oldestSequence,
-          hasOlderHistory: page.hasOlderHistory,
-          timeline: mergeSequencedItems(page.timeline, current.timeline),
-          messages: mergeSequencedItems(page.messages, current.messages)
-        };
-      });
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      agentHistoryRequestsRef.current.delete(sessionId);
-      setLoadingOlderSessionId((current) => (current === sessionId ? null : current));
-    }
-  }, [activeAgentState?.hasOlderHistory, activeAgentState?.oldestSequence, activeAgentState?.sessionId]);
-
-  useEffect(() => {
-    activeSessionIdRef.current = activeSession?.id ?? null;
-  }, [activeSession?.id]);
-
-  const handleAgentStreamDone = useCallback(async (sessionId: string) => {
-    if (activeSessionIdRef.current !== sessionId) return false;
-    try {
-      const next = await requestSessionAgentState(sessionId);
-      if (activeSessionIdRef.current !== sessionId) return false;
-      acknowledgeOptimisticUserMessage(sessionId, next.messages);
-      setAgentState((current) => {
-        const merged = preserveOptimisticQueuedMessages(
-          sessionId,
-          mergeAgentStateSnapshot(current, next)
-        );
-        return agentStateUnchanged(current, merged) ? current : merged;
-      });
-      updateSessionStatus(sessionId, next.status, next.canContinue);
-      return next.status === "completed" && Boolean(next.latestAnswer?.trim());
-    } catch (error) {
-      if (activeSessionIdRef.current === sessionId) {
-        setComposerError(error instanceof Error ? error.message : String(error));
-      }
-      return false;
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!agentState?.sessionId) return;
-    sessionRuntimeCache.rememberAgent(agentState.sessionId, agentState);
-  }, [agentState, sessionRuntimeCache]);
-
-  useEffect(() => {
-    if (!agentTraceState?.sessionId) return;
-    sessionRuntimeCache.rememberTrace(agentTraceState.sessionId, agentTraceState);
-  }, [agentTraceState, sessionRuntimeCache]);
-
-  useEffect(() => {
-    if (!sessionPrefetchKey || activeSessionBusy) return;
-    let disposed = false;
-    let idleCallback: number | null = null;
-    let fallbackTimer: number | null = null;
-    const sessionIds = sessionPrefetchKey.split("|");
-    const prefetch = async () => {
-      if (disposed) return;
-      const pending = sessionIds.filter(
-        (sessionId) => !sessionRuntimeCache.hasAgent(sessionId)
-      );
-      let nextIndex = 0;
-      const worker = async () => {
-        while (!disposed && nextIndex < pending.length) {
-          const sessionId = pending[nextIndex];
-          nextIndex += 1;
-          await requestSessionAgentState(sessionId).catch(() => null);
-        }
-      };
-      await Promise.all([worker(), worker()]);
-    };
-    if (typeof window.requestIdleCallback === "function") {
-      idleCallback = window.requestIdleCallback(() => void prefetch(), { timeout: 2_000 });
-    } else {
-      fallbackTimer = window.setTimeout(() => void prefetch(), 1_200);
-    }
-    return () => {
-      disposed = true;
-      if (idleCallback !== null) window.cancelIdleCallback(idleCallback);
-      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
-    };
-  }, [activeSessionBusy, sessionPrefetchKey, sessionRuntimeCache]);
-
-  useEffect(() => {
-    const sessionId = activeSession?.id;
-    if (!sessionId || !activeSessionBusy) return;
-    let disposed = false;
-    let inFlight = false;
-    let lastTraceRefreshAt = 0;
-    let lastBackgroundRefreshAt = 0;
-    const refresh = async () => {
-      if (inFlight) return;
-      const now = Date.now();
-      if (
-        document.visibilityState === "hidden" &&
-        now - lastBackgroundRefreshAt < BACKGROUND_AGENT_POLL_INTERVAL_MS
-      ) {
-        return;
-      }
-      if (document.visibilityState === "hidden") lastBackgroundRefreshAt = now;
-      inFlight = true;
-      try {
-        const refreshTrace =
-          activeView === "timeline" && inspectorOpen && now - lastTraceRefreshAt >= 3_000;
-        if (refreshTrace) lastTraceRefreshAt = now;
-        const revision = await getAgentStateRevision(sessionId);
-        const previousRevision = agentStateRevisionsRef.current.get(sessionId);
-        const stateChanged =
-          !previousRevision ||
-          previousRevision.eventCount !== revision.eventCount ||
-          previousRevision.latestSequence !== revision.latestSequence;
-        const [nextDelta, nextTrace] = await Promise.all([
-          stateChanged
-            ? getAgentStateDelta(sessionId, previousRevision?.latestSequence ?? 0)
-            : Promise.resolve(null),
-          refreshTrace
-            ? getAgentTraceState(sessionId).catch(() => null)
-            : Promise.resolve(null)
-        ]);
-        if (!disposed && activeSessionIdRef.current === sessionId) {
-          agentStateRevisionsRef.current.set(sessionId, revision);
-          if (nextDelta) {
-            acknowledgeOptimisticUserMessage(sessionId, nextDelta.state.messages);
-            setAgentState((current) => {
-              const next = preserveOptimisticQueuedMessages(
-                sessionId,
-                mergeAgentStateDelta(current, nextDelta)
-              );
-              return agentStateUnchanged(current, next) ? current : next;
-            });
-            updateSessionStatus(
-              sessionId,
-              nextDelta.state.status,
-              nextDelta.state.canContinue
-            );
-          }
-          if (nextTrace) {
-            setAgentTraceState((current) =>
-              agentTraceUnchanged(current, nextTrace) ? current : nextTrace
-            );
-          }
-        }
-      } catch (error) {
-        if (!disposed) {
-          setComposerError(error instanceof Error ? error.message : String(error));
-        }
-      } finally {
-        inFlight = false;
-      }
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    void refresh();
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    const interval = window.setInterval(
-      () => void refresh(),
-      activeView === "timeline"
-        ? FOREGROUND_AGENT_POLL_INTERVAL_MS
-        : BACKGROUND_AGENT_POLL_INTERVAL_MS
-    );
-    return () => {
-      disposed = true;
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.clearInterval(interval);
-    };
-  }, [activeSession?.id, activeSessionBusy, activeView, inspectorOpen]);
-
-  useEffect(() => {
-    const sessionId = activeSession?.id;
-    if (!inspectorOpen || !sessionId || activeSessionBusy) return;
-    let disposed = false;
-    void Promise.all([getAgentTraceState(sessionId), getContextState(sessionId)])
-      .then(([nextTrace, nextContext]) => {
-        if (disposed || activeSessionIdRef.current !== sessionId) return;
-        sessionRuntimeCache.rememberTrace(sessionId, nextTrace);
-        sessionRuntimeCache.rememberContext(sessionId, nextContext);
-        startTransition(() => {
-          setAgentTraceState((current) =>
-            agentTraceUnchanged(current, nextTrace) ? current : nextTrace
-          );
-          setContextState(nextContext);
-        });
-        setSelectedTraceStepId(latestTraceStep(nextTrace.turns)?.id ?? null);
-      })
-      .catch((error) => {
-        if (!disposed) setComposerError(error instanceof Error ? error.message : String(error));
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [activeSession?.id, activeSessionBusy, inspectorOpen, sessionRuntimeCache]);
-
-  const {
-    value: composerDraft,
-    focusRequest: composerFocusRequest,
-    setActiveDraft: setActiveComposerDraft,
-    appendDraftForSession: appendComposerDraftForSession,
-    editActiveDraft: handleThreadMessageEdit,
-    restoreDraftIfEmpty,
-    forgetDrafts
-  } = useComposerDrafts(activeSession?.id ?? null, activeSessionIdRef);
-
-  const agentApprovals = activeAgentState?.pendingApprovals ?? [];
-  const agentCanCancel = Boolean(activeAgentState?.canCancel || activeSessionBusy);
-  const agentCanRetry = Boolean(activeAgentState?.canRetry);
-  const pendingPlanConfirmation = activeAgentState?.pendingPlanConfirmation ?? null;
-  const agentCanContinue = Boolean(activeAgentState?.canContinue) && !pendingPlanConfirmation;
-  const agentWorking = Boolean(activeSessionBusy || activeAgentState?.status === "running");
-  function markSessionBusy(sessionId: string, busy: boolean) {
-    setBusySessionIds((current) => {
-      const next = new Set(current);
-      if (busy) next.add(sessionId);
-      else next.delete(sessionId);
-      return next;
-    });
-  }
-
-  function acknowledgeSessionResult(sessionId: string, throughSequence?: number) {
-    return acknowledgeSessionActivity(sessionId, throughSequence)
-      .then((nextState) => {
-        const acknowledged = nextState.sessions.find((session) => session.id === sessionId);
-        if (!acknowledged) return;
-        setProjectSessionState((current) =>
-          current
-            ? {
-                ...current,
-                sessions: current.sessions.map((session) =>
-                  session.id === sessionId
-                    ? mergeAcknowledgedSessionActivity(session, acknowledged)
-                    : session
-                )
-              }
-            : current
-        );
-      })
-      .catch(() => {});
-  }
-
-  function updateSessionStatus(
-    _sessionId: string,
-    status: AgentState["status"],
-    _canContinue = false
-  ) {
-    if (status === "running") return;
-    const refreshRequest = ++sessionLifecycleRefreshRef.current;
-    void getProjectSessionState()
-      .then((nextState) => {
-        if (sessionLifecycleRefreshRef.current === refreshRequest) {
-          setProjectSessionState(nextState);
-        }
-      })
-      .catch(() => {});
-  }
-
-  function acknowledgeOptimisticUserMessage(
-    sessionId: string,
-    messages: ChatMessageView[]
-  ) {
-    const optimistic = optimisticUserMessagesRef.current.get(sessionId);
-    if (!optimistic) return;
-    const pending = optimistic.filter(
-      (message) => !containsOptimisticUserMessage(messages, message)
-    );
-    if (pending.length === optimistic.length) return;
-    if (pending.length > 0) {
-      optimisticUserMessagesRef.current.set(sessionId, pending);
-    } else {
-      optimisticUserMessagesRef.current.delete(sessionId);
-    }
-    setOptimisticUserMessageRevision((revision) => revision + 1);
-  }
-
-  function addOptimisticUserMessage(sessionId: string, message: ChatMessageView) {
-    const current = optimisticUserMessagesRef.current.get(sessionId) ?? [];
-    optimisticUserMessagesRef.current.set(sessionId, [...current, message]);
-    setOptimisticUserMessageRevision((revision) => revision + 1);
-  }
-
-  async function refreshAgentTrace(
-    selectLatest = false,
-    sessionId = activeSessionIdRef.current
-  ) {
-    const next = await getAgentTraceState(sessionId);
-    if (sessionId === activeSessionIdRef.current) {
-      setAgentTraceState(next);
-      if (selectLatest) {
-        const latestStep = latestTraceStep(next.turns);
-        setSelectedTraceStepId(latestStep?.id ?? null);
-      }
-      setComposerError((current) => current ?? next.lastError);
-    }
-    return next;
-  }
-
-  async function handleResolvePermissionReview(
-    review: PermissionReviewItem,
-    decision: "allow_once" | "allow_for_session" | "deny"
-  ) {
-    setPermissionBusy(true);
-    try {
-      if (review.source === "agent") {
-        const sessionId = review.sessionId ?? activeSession?.id;
-        if (!sessionId) throw new Error("The related session is no longer available.");
-        await handleResolveAgentPermission(review.requestId, decision, sessionId);
-      } else if (review.source === "tool") {
-        await handleResolveToolPermission(review.requestId, decision);
-      } else if (review.source === "browser") {
-        await handleResolveBrowserPermission(review.requestId, decision);
-      } else {
-        await resolvePermission(review.requestId, decision);
-      }
-      handleRestorePermissionReview(review.requestId);
-    } finally {
-      await refreshPermissionReviews().catch(() => {});
-      setPermissionBusy(false);
-    }
-  }
-
-  async function handleSaveWorkspace() {
-    const nextPath = workspaceDraft.trim();
-    if (!nextPath) return;
-    setWorkspaceBusy(true);
-    setComposerError(null);
-    try {
-      const next = await saveWorkspaceRoot(nextPath);
-      setRuntime(next);
-      setWorkspaceDraft(next.workspaceRoot);
-      setProjectSessionState(await getProjectSessionState());
-      await refreshWorkspaceKnowledge();
-      showSettingsSaved();
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWorkspaceBusy(false);
-    }
-  }
-
-  async function handlePickWorkspace() {
-    if (workspacePickerBusy) return;
-    setWorkspacePickerBusy(true);
-    setComposerError(null);
-    try {
-      const nextPath = await pickWorkspaceFolder(workspaceDraft.trim() || undefined);
-      if (nextPath) setWorkspaceDraft(nextPath);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWorkspacePickerBusy(false);
-    }
-  }
-
-  async function refreshWorkspaceAfterProjectSession(
-    nextState: ProjectSessionState,
-    prefetchedAgentState?: { sessionId: string; request: Promise<AgentState> }
-  ) {
-    const refreshRequest = ++sessionRefreshRequestRef.current;
-    const previousSessionId = activeSessionIdRef.current;
-    const sessionId = nextState.activeSessionId || null;
-    const nextProject = nextState.projects.find((project) => project.id === nextState.activeProjectId);
-    const nextWorkspaceRoot = nextProject?.root ?? "";
-    const currentWorkspaceRoot = runtime?.workspaceRoot ?? activeProject?.root ?? "";
-    const workspaceChanged = Boolean(
-      nextWorkspaceRoot && nextWorkspaceRoot !== currentWorkspaceRoot
-    );
-    const isCurrentRequest = () =>
-      sessionRefreshRequestRef.current === refreshRequest &&
-      activeSessionIdRef.current === sessionId;
-    const reportBackgroundError = (error: unknown) => {
-      if (!isCurrentRequest()) return;
-      setSessionLoadingId(null);
-      setComposerError(error instanceof Error ? error.message : String(error));
-    };
-    const refreshWorkspaceScopedState = () => {
-      void getRuntimeStatus()
-        .then((nextRuntime) => {
-          if (!isCurrentRequest()) return;
-          setRuntime(nextRuntime);
-          setWorkspaceDraft(nextRuntime.workspaceRoot);
-        })
-        .catch(reportBackgroundError);
-      void refreshWorkspaceKnowledge(isCurrentRequest).catch(reportBackgroundError);
-    };
-
-    activeSessionIdRef.current = sessionId;
-    if (sessionId) acknowledgeSessionResult(sessionId);
-    setProjectSessionState(nextState);
-    setComposerError(nextState.lastError);
-    setSelectedThreadItem(null);
-    setStreamResetVersion((version) => version + 1);
-    if (nextWorkspaceRoot) {
-      setWorkspaceDraft(nextWorkspaceRoot);
-      setRuntime((current) =>
-        current ? { ...current, workspaceRoot: nextWorkspaceRoot } : current
-      );
-    }
-    if (previousSessionId !== sessionId) {
-      if (sessionId) restoreCachedSessionState(sessionId);
-      else {
-        setAgentState(null);
-        setAgentTraceState(null);
-        setContextState(null);
-      }
-      setSelectedTraceStepId(null);
-    }
-    if (!sessionId) {
-      setSessionLoadingId(null);
-      if (workspaceChanged) refreshWorkspaceScopedState();
-      return;
-    }
-
-    let nextAgentState: AgentState;
-    try {
-      nextAgentState = await (
-        prefetchedAgentState?.sessionId === sessionId
-          ? prefetchedAgentState.request
-          : requestSessionAgentState(sessionId)
-      );
-    } catch (error) {
-      reportBackgroundError(error);
-      return;
-    }
-    if (!isCurrentRequest()) return;
-    setSessionLoadingId(null);
-    acknowledgeOptimisticUserMessage(sessionId, nextAgentState.messages);
-    setAgentState((current) => {
-      const merged = preserveOptimisticQueuedMessages(
-        sessionId,
-        mergeAgentStateSnapshot(current, nextAgentState)
-      );
-      return agentStateUnchanged(current, merged) ? current : merged;
-    });
-    updateSessionStatus(sessionId, nextAgentState.status, nextAgentState.canContinue);
-
-    if (workspaceChanged) refreshWorkspaceScopedState();
-  }
-
-  function forgetDeletedSessions(sessionIds: string[]) {
-    if (sessionIds.length === 0) return;
-    const deleted = new Set(sessionIds);
-    forgetDrafts(sessionIds);
-    forgetAttachments(sessionIds);
-    setBusySessionIds((current) => new Set([...current].filter((id) => !deleted.has(id))));
-    deleted.forEach((sessionId) => {
-      agentStateRevisionsRef.current.delete(sessionId);
-      sessionRuntimeCache.forget(sessionId);
-    });
-  }
-
-  async function handleCreateProject() {
-    const name = newProjectName.trim();
-    const root = workspaceDraft.trim() || runtime?.workspaceRoot || "";
-    if (!name || !root) return;
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      const next = await createProject(name, root);
-      setNewProjectName("");
-      setProjectCreateOpen(false);
-      await refreshWorkspaceAfterProjectSession(next);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleCreateSession() {
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      const next = await createSession("New Session", activeProject?.id ?? undefined);
-      await refreshWorkspaceAfterProjectSession(next);
-      showTimelineView();
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleSelectProject(projectId: string) {
-    showTimelineView();
-    if (projectId === projectSessionState?.activeProjectId) return;
-    const selectionRequest = ++sessionSelectionRequestRef.current;
-    const targetSession = projectSessionState?.sessions.find(
-      (session) => session.projectId === projectId && !session.archived
-    );
-    activeSessionIdRef.current = targetSession?.id ?? null;
-    if (targetSession) acknowledgeSessionResult(targetSession.id);
-    setComposerError(null);
-    setProjectSessionState((current) => {
-      if (!current || !current.projects.some((project) => project.id === projectId)) {
-        return current;
-      }
-      const nextSession =
-        current.sessions.find(
-          (session) =>
-            session.id === current.activeSessionId &&
-            session.projectId === projectId &&
-            !session.archived
-        ) ??
-        current.sessions.find(
-          (session) => session.projectId === projectId && !session.archived
-        );
-      return {
-        ...current,
-        activeProjectId: projectId,
-        activeSessionId: nextSession?.id ?? "",
-        projects: current.projects.map((project) => ({
-          ...project,
-          active: project.id === projectId
-        })),
-        sessions: current.sessions.map((session) => ({
-          ...session,
-          active: session.id === nextSession?.id
-        }))
-      };
-    });
-    if (targetSession) restoreCachedSessionState(targetSession.id);
-    else {
-      setSessionLoadingId(null);
-      setAgentState(null);
-      setAgentTraceState(null);
-      setContextState(null);
-    }
-    setSelectedTraceStepId(null);
-    setSelectedThreadItem(null);
-    setStreamResetVersion((version) => version + 1);
-    const agentStateRequest = targetSession
-      ? requestSessionAgentState(targetSession.id)
-      : null;
-    if (targetSession && agentStateRequest) {
-      applySelectedSessionAgentState(targetSession.id, selectionRequest, agentStateRequest);
-    }
-    try {
-      const next = await enqueueProjectSessionSelection(() => selectProject(projectId));
-      if (selectionRequest !== sessionSelectionRequestRef.current) return;
-      await refreshWorkspaceAfterProjectSession(
-        next,
-        targetSession && agentStateRequest
-          ? { sessionId: targetSession.id, request: agentStateRequest }
-          : undefined
-      );
-    } catch (error) {
-      if (selectionRequest === sessionSelectionRequestRef.current) {
-        setComposerError(error instanceof Error ? error.message : String(error));
-      }
-    }
-  }
-
-  async function handleSelectSession(sessionId: string) {
-    const leavingTimeline = activeView === "timeline";
-    showTimelineView();
-    if (sessionId === activeSessionIdRef.current) {
-      if (!leavingTimeline) void acknowledgeSessionResult(sessionId);
-      return;
-    }
-    const selectionRequest = ++sessionSelectionRequestRef.current;
-    const previousSessionId = activeSessionIdRef.current;
-    const previousReadSequence =
-      activeAgentState?.sessionId === previousSessionId
-        ? activeAgentState.latestSequence
-        : projectSessionState?.sessions.find((session) => session.id === previousSessionId)
-            ?.latestSequence;
-    if (leavingTimeline && previousSessionId) {
-      sessionLifecycleRefreshRef.current += 1;
-      setProjectSessionState((current) =>
-        current
-          ? projectReadSessionResult(current, previousSessionId, previousReadSequence)
-          : current
-      );
-      void acknowledgeSessionResult(previousSessionId, previousReadSequence);
-    }
-    activeSessionIdRef.current = sessionId;
-    void acknowledgeSessionResult(sessionId);
-    setComposerError(null);
-    setProjectSessionState((current) => {
-      if (!current) return current;
-      const target = current.sessions.find((session) => session.id === sessionId);
-      if (!target) return current;
-      return {
-        ...current,
-        activeProjectId: target.projectId,
-        activeSessionId: sessionId,
-        projects: current.projects.map((project) => ({
-          ...project,
-          active: project.id === target.projectId
-        })),
-        sessions: current.sessions.map((session) => ({
-          ...session,
-          active: session.id === sessionId
-        }))
-      };
-    });
-    restoreCachedSessionState(sessionId);
-    setSelectedTraceStepId(null);
-    setSelectedThreadItem(null);
-    setStreamResetVersion((version) => version + 1);
-    const agentStateRequest = requestSessionAgentState(sessionId);
-    applySelectedSessionAgentState(sessionId, selectionRequest, agentStateRequest);
-    try {
-      const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
-      if (selectionRequest !== sessionSelectionRequestRef.current) return;
-      const nextWithReadSession =
-        leavingTimeline && previousSessionId
-          ? projectReadSessionResult(next, previousSessionId, previousReadSequence)
-          : next;
-      await refreshWorkspaceAfterProjectSession(nextWithReadSession, {
-        sessionId,
-        request: agentStateRequest
-      });
-    } catch (error) {
-      if (selectionRequest === sessionSelectionRequestRef.current) {
-        setComposerError(error instanceof Error ? error.message : String(error));
-      }
-    }
-  }
-
-  async function handleOpenScheduledSession(sessionId: string) {
-    if (sessionId !== activeSessionIdRef.current) {
-      await handleSelectSession(sessionId);
-      return;
-    }
-    const selectionRequest = ++sessionSelectionRequestRef.current;
-    showTimelineView();
-    setSessionLoadingId(sessionId);
-    setComposerError(null);
-    try {
-      const next = await enqueueProjectSessionSelection(() => selectSession(sessionId));
-      if (selectionRequest !== sessionSelectionRequestRef.current) return;
-      await refreshWorkspaceAfterProjectSession(next);
-    } catch (error) {
-      if (selectionRequest === sessionSelectionRequestRef.current) {
-        setSessionLoadingId(null);
-        setComposerError(error instanceof Error ? error.message : String(error));
-      }
-    }
-  }
-
-  async function handleForkSession(sessionId: string) {
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      await refreshWorkspaceAfterProjectSession(await forkSession(sessionId));
-      showTimelineView();
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleRenameSession(sessionId: string, name: string) {
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      await refreshWorkspaceAfterProjectSession(await renameSession(sessionId, name));
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleSessionEffortChange(effort: AgentEffort) {
-    const sessionId = activeSession?.id;
-    if (!sessionId || effort === agentEffort) return;
-    const previousEffort = agentEffort;
-    setProjectSessionState((current) =>
-      current
-        ? {
-            ...current,
-            sessions: current.sessions.map((session) =>
-              session.id === sessionId ? { ...session, effort } : session
-            )
-          }
-        : current
-    );
-    try {
-      const next = await setSessionEffort(sessionId, effort);
-      const persisted = next.sessions.find((session) => session.id === sessionId)?.effort ?? effort;
-      setProjectSessionState((current) =>
-        current
-          ? {
-              ...current,
-              sessions: current.sessions.map((session) =>
-                session.id === sessionId ? { ...session, effort: persisted } : session
-              )
-            }
-          : next
-      );
-    } catch (error) {
-      setProjectSessionState((current) =>
-        current
-          ? {
-              ...current,
-              sessions: current.sessions.map((session) =>
-                session.id === sessionId ? { ...session, effort: previousEffort } : session
-              )
-            }
-          : current
-      );
-      setComposerError(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function handleSessionModelChange(agentModel: string) {
-    const sessionId = activeSession?.id;
-    if (!sessionId) return;
-    const previousModel = activeSession?.agentModel ?? "";
-    setProjectSessionState((current) =>
-      current
-        ? {
-            ...current,
-            sessions: current.sessions.map((session) =>
-              session.id === sessionId ? { ...session, agentModel } : session
-            )
-          }
-        : current
-    );
-    try {
-      const next = await setSessionModel(sessionId, agentModel);
-      const persisted =
-        next.sessions.find((session) => session.id === sessionId)?.agentModel ?? agentModel;
-      setProjectSessionState((current) =>
-        current
-          ? {
-              ...current,
-              sessions: current.sessions.map((session) =>
-                session.id === sessionId ? { ...session, agentModel: persisted } : session
-              )
-            }
-          : next
-      );
-    } catch (error) {
-      setProjectSessionState((current) =>
-        current
-          ? {
-              ...current,
-              sessions: current.sessions.map((session) =>
-                session.id === sessionId ? { ...session, agentModel: previousModel } : session
-              )
-            }
-          : current
-      );
-      setComposerError(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function handleRenameProject(projectId: string, name: string) {
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      await refreshWorkspaceAfterProjectSession(await renameProject(projectId, name));
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleDeleteProject(projectId: string) {
-    const sessionIds = (projectSessionState?.sessions ?? [])
-      .filter((session) => session.projectId === projectId)
-      .map((session) => session.id);
-    if (
-      sessionIds.some(
-        (sessionId) =>
-          busySessionIds.has(sessionId) ||
-          projectSessionState?.sessions.find((session) => session.id === sessionId)
-            ?.attentionReason === "permission"
-      )
-    ) {
-      setComposerError("Stop the running sessions before deleting this project.");
-      return;
-    }
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      const next = await deleteProject(projectId);
-      forgetDeletedSessions(sessionIds);
-      await refreshWorkspaceAfterProjectSession(next);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleArchiveSession(sessionId: string) {
-    if (
-      busySessionIds.has(sessionId) ||
-      projectSessionState?.sessions.find((session) => session.id === sessionId)
-        ?.attentionReason === "permission"
-    ) {
-      setComposerError("Stop the running session before archiving it.");
-      return;
-    }
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      const next = await archiveSession(sessionId);
-      await refreshWorkspaceAfterProjectSession(next);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleRestoreSession(sessionId: string) {
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      const next = await restoreSession(sessionId);
-      setProjectSessionState(next);
-      setComposerError(next.lastError);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  async function handleDeleteSession(sessionId: string) {
-    if (
-      busySessionIds.has(sessionId) ||
-      projectSessionState?.sessions.find((session) => session.id === sessionId)
-        ?.attentionReason === "permission"
-    ) {
-      setComposerError("Stop the running session before deleting it.");
-      return;
-    }
-    setProjectSessionBusy(true);
-    setComposerError(null);
-    try {
-      const next = await deleteSession(sessionId);
-      forgetDeletedSessions([sessionId]);
-      await refreshWorkspaceAfterProjectSession(next);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectSessionBusy(false);
-    }
-  }
-
-  function completeBulkDelete(ids: string[], next: ProjectSessionState | null, error: string | null) {
-    forgetDeletedSessions(ids);
-    if (error) setComposerError(error);
-    if (next) void refreshWorkspaceAfterProjectSession(next);
-  }
-
-  function applyAgentStateForSession(sessionId: string, next: AgentState) {
-    const effectiveNext = preserveOptimisticQueuedMessages(sessionId, next);
-    agentStateRevisionsRef.current.set(sessionId, {
-      eventCount: effectiveNext.eventCount,
-      latestSequence: effectiveNext.latestSequence,
-      latestTimestampMs: 0
-    });
-    sessionRuntimeCache.rememberAgent(sessionId, effectiveNext);
-    acknowledgeOptimisticUserMessage(sessionId, effectiveNext.messages);
-    updateSessionStatus(sessionId, effectiveNext.status, effectiveNext.canContinue);
-    if (activeSessionIdRef.current === sessionId) {
-      setAgentState((current) => mergeAgentStateSnapshot(current, effectiveNext));
-    }
-  }
-
-  function updateQueuedMessagesForSession(
-    sessionId: string,
-    update: (messages: QueuedAgentMessage[]) => QueuedAgentMessage[]
-  ) {
-    const updateState = (current: AgentState) => {
-      const queuedMessages = update(current.queuedMessages);
-      return queuedMessages === current.queuedMessages
-        ? current
-        : { ...current, queuedMessages };
-    };
-    const cached = sessionRuntimeCache.peekAgent(sessionId);
-    if (cached) {
-      sessionRuntimeCache.rememberAgent(sessionId, updateState(cached));
-    }
-    if (activeSessionIdRef.current === sessionId) {
-      setAgentState((current) => {
-        if (!current || current.sessionId !== sessionId) return current;
-        const next = updateState(current);
-        sessionRuntimeCache.rememberAgent(sessionId, next);
-        return next;
-      });
-    }
-  }
-
-  function queuedMessageForSession(sessionId: string, queueId: string) {
-    const cached = sessionRuntimeCache.peekAgent(sessionId);
-    const state = agentState?.sessionId === sessionId ? agentState : cached;
-    return state?.queuedMessages.find((message) => message.id === queueId) ?? null;
-  }
-
-  function applyQueuedMessageReceiptForSession(
-    sessionId: string,
-    receipt: QueuedAgentMessageReceipt
-  ) {
-    const revision = agentStateRevisionsRef.current.get(sessionId);
-    agentStateRevisionsRef.current.set(sessionId, {
-      eventCount: Math.max(revision?.eventCount ?? 0, receipt.eventCount),
-      latestSequence: Math.max(revision?.latestSequence ?? 0, receipt.latestSequence),
-      latestTimestampMs: Math.max(
-        revision?.latestTimestampMs ?? 0,
-        receipt.latestTimestampMs
-      )
-    });
-    const mergeReceipt = (current: AgentState) => ({
-      ...current,
-      eventCount: Math.max(current.eventCount, receipt.eventCount),
-      latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
-      queuedMessages: mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
-    });
-    const cached = sessionRuntimeCache.peekAgent(sessionId);
-    if (cached) sessionRuntimeCache.rememberAgent(sessionId, mergeReceipt(cached));
-    if (activeSessionIdRef.current === sessionId) {
-      setAgentState((current) => {
-        if (!current || current.sessionId !== sessionId) return current;
-        const next = mergeReceipt(current);
-        sessionRuntimeCache.rememberAgent(sessionId, next);
-        return next;
-      });
-    }
-  }
-
-  function applyQueuedMessageActionReceiptForSession(
-    sessionId: string,
-    receipt: QueuedAgentMessageActionReceipt
-  ) {
-    const revision = agentStateRevisionsRef.current.get(sessionId);
-    agentStateRevisionsRef.current.set(sessionId, {
-      eventCount: Math.max(revision?.eventCount ?? 0, receipt.eventCount),
-      latestSequence: Math.max(revision?.latestSequence ?? 0, receipt.latestSequence),
-      latestTimestampMs: Math.max(
-        revision?.latestTimestampMs ?? 0,
-        receipt.latestTimestampMs
-      )
-    });
-    const applyReceipt = (current: AgentState) => {
-      const queuedMessages = receipt.message
-        ? mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
-        : current.queuedMessages.filter((message) => message.id !== receipt.queueId);
-      return {
-        ...current,
-        status: receipt.cancelledActiveRun ? "cancelled" : current.status,
-        canCancel: receipt.cancelledActiveRun ? false : current.canCancel,
-        canRetry: receipt.cancelledActiveRun ? true : current.canRetry,
-        eventCount: Math.max(current.eventCount, receipt.eventCount),
-        latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
-        queuedMessages
-      };
-    };
-    const cached = sessionRuntimeCache.peekAgent(sessionId);
-    if (cached) sessionRuntimeCache.rememberAgent(sessionId, applyReceipt(cached));
-    if (activeSessionIdRef.current === sessionId) {
-      setAgentState((current) => {
-        if (!current || current.sessionId !== sessionId) return current;
-        const next = applyReceipt(current);
-        sessionRuntimeCache.rememberAgent(sessionId, next);
-        return next;
-      });
-    }
-  }
-
-  async function drainQueuedMessages(sessionId: string) {
-    if (
-      queueDrainingSessionIdsRef.current.has(sessionId) ||
-      suppressQueueDrainSessionIdsRef.current.has(sessionId)
-    ) {
-      return;
-    }
-    queueDrainingSessionIdsRef.current.add(sessionId);
-    markSessionBusy(sessionId, true);
-    try {
-      while (!suppressQueueDrainSessionIdsRef.current.has(sessionId)) {
-        const next = await runNextQueuedAgentMessage(sessionId);
-        if (!next) {
-          break;
-        }
-        applyAgentStateForSession(sessionId, next);
-        if (activeSessionIdRef.current === sessionId) {
-          setComposerError(next.lastError);
-          setStreamResetVersion((version) => version + 1);
-        }
-        if (
-          next.queuedMessages.length === 0 ||
-          next.status !== "completed" ||
-          next.canContinue ||
-          next.pendingApprovals.length > 0 ||
-          Boolean(next.lastError)
-        ) {
-          break;
-        }
-      }
-      setProjectSessionState(await getProjectSessionState());
-      await refreshAgentTrace(true, sessionId);
-    } catch (error) {
-      updateSessionStatus(sessionId, "failed");
-      const message = error instanceof Error ? error.message : String(error);
-      try {
-        const failedState = await getAgentState(sessionId);
-        applyAgentStateForSession(sessionId, failedState);
-      } catch {
-        // Preserve the original queue error when a follow-up state read also fails.
-      }
-      if (activeSessionIdRef.current === sessionId) setComposerError(message);
-    } finally {
-      queueDrainingSessionIdsRef.current.delete(sessionId);
-      markSessionBusy(sessionId, false);
-      void refreshPermissionReviews().catch(() => {});
-    }
-  }
-
-  async function handleEditQueuedMessage(queueId: string, prompt: string) {
-    const sessionId = activeSessionIdRef.current;
-    if (!sessionId) return;
-    const previous = queuedMessageForSession(sessionId, queueId);
-    if (!previous) {
-      const error = new Error("queued message not found");
-      setComposerError(error.message);
-      throw error;
-    }
-    const optimistic = { ...previous, prompt: prompt.trim(), updatedAtMs: Date.now() };
-    optimisticQueuedMessagesRef.current.set(queueId, optimistic);
-    updateQueuedMessagesForSession(sessionId, (messages) =>
-      mergeQueuedAgentMessage(messages, optimistic)
-    );
-    setQueuedMessageBusyId(queueId);
-    setComposerError(null);
-    try {
-      const receipt = await editQueuedAgentMessage(sessionId, queueId, prompt);
-      optimisticQueuedMessagesRef.current.delete(queueId);
-      applyQueuedMessageActionReceiptForSession(sessionId, receipt);
-    } catch (error) {
-      optimisticQueuedMessagesRef.current.delete(queueId);
-      updateQueuedMessagesForSession(sessionId, (messages) =>
-        mergeQueuedAgentMessage(messages, previous)
-      );
-      setComposerError(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      setQueuedMessageBusyId(null);
-    }
-  }
-
-  async function handleDeleteQueuedMessage(queueId: string) {
-    const sessionId = activeSessionIdRef.current;
-    if (!sessionId) return;
-    const previous = queuedMessageForSession(sessionId, queueId);
-    if (!previous) return;
-    optimisticallyDeletedQueuedMessagesRef.current.set(queueId, sessionId);
-    updateQueuedMessagesForSession(sessionId, (messages) =>
-      messages.filter((message) => message.id !== queueId)
-    );
-    setQueuedMessageBusyId(queueId);
-    setComposerError(null);
-    try {
-      const receipt = await deleteQueuedAgentMessage(sessionId, queueId);
-      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
-      applyQueuedMessageActionReceiptForSession(sessionId, receipt);
-    } catch (error) {
-      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
-      updateQueuedMessagesForSession(sessionId, (messages) =>
-        mergeQueuedAgentMessage(messages, previous)
-      );
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setQueuedMessageBusyId(null);
-    }
-  }
-
-  async function handleSteerQueuedMessage(queueId: string) {
-    const sessionId = activeSessionIdRef.current;
-    if (!sessionId) return;
-    const previous = queuedMessageForSession(sessionId, queueId);
-    if (!previous) return;
-    const runCommandActive = busySessionIds.has(sessionId);
-    suppressQueueDrainSessionIdsRef.current.delete(sessionId);
-    setQueuedMessageBusyId(queueId);
-    setComposerError(null);
-    try {
-      const receipt = await steerQueuedAgentMessage(sessionId, queueId);
-      const optimisticSteerMessage = committedSteerUserMessage(previous, receipt);
-      if (optimisticSteerMessage) {
-        addOptimisticUserMessage(sessionId, optimisticSteerMessage);
-        optimisticallyDeletedQueuedMessagesRef.current.set(queueId, sessionId);
-        steeredQueuedMessageIdsRef.current.add(queueId);
-        applyQueuedMessageActionReceiptForSession(sessionId, { ...receipt, message: null });
-      } else {
-        applyQueuedMessageActionReceiptForSession(sessionId, receipt);
-      }
-      if (!runCommandActive && !receipt.steerCommitted) void drainQueuedMessages(sessionId);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setQueuedMessageBusyId(null);
-    }
-  }
-
-  async function handleSendPrompt(value: string, planMode = false) {
-    const nextPrompt = value.trim();
-    const sessionId = activeSession?.id;
-    const attachments = composerAttachments;
-    if (
-      (!nextPrompt && attachments.length === 0) ||
-      !sessionId ||
-      attachmentBusy
-    ) {
-      return;
-    }
-    const visiblePrompt =
-      nextPrompt || `Review attached ${attachments.map((attachment) => attachment.name).join(", ")}`;
-    const sessionAgentState =
-      activeAgentState?.sessionId === sessionId
-        ? activeAgentState
-        : sessionRuntimeCache.peekAgent(sessionId);
-    if (
-      busySessionIds.has(sessionId) ||
-      sessionAgentState?.status === "running" ||
-      sessionAgentState?.status === "waiting_for_permission" ||
-      sessionAgentState?.canCancel
-    ) {
-      setComposerError(null);
-      const queueId = queuedMessageClientId();
-      const queuedAt = Date.now();
-      const optimisticMessage: QueuedAgentMessage = {
-        id: queueId,
-        sessionId,
-        prompt: visiblePrompt,
-        attachments,
-        effort: agentEffort,
-        mode: "queue",
-        planMode,
-        createdAtMs: queuedAt,
-        updatedAtMs: queuedAt
-      };
-      optimisticQueuedMessagesRef.current.set(queueId, optimisticMessage);
-      setPersistingQueuedMessageIds((current) => {
-        const next = new Set(current);
-        next.add(queueId);
-        return next;
-      });
-      updateQueuedMessagesForSession(sessionId, (messages) =>
-        mergeQueuedAgentMessage(messages, optimisticMessage)
-      );
-      clearAttachments(sessionId);
-      try {
-        const receipt = await queueAgentMessage(nextPrompt, sessionId, attachments, agentEffort, queueId, planMode);
-        optimisticQueuedMessagesRef.current.delete(queueId);
-        applyQueuedMessageReceiptForSession(sessionId, receipt);
-      } catch (error) {
-        optimisticQueuedMessagesRef.current.delete(queueId);
-        updateQueuedMessagesForSession(sessionId, (messages) =>
-          messages.filter((message) => message.id !== queueId)
-        );
-        restoreAttachmentsIfEmpty(sessionId, attachments);
-        restoreDraftIfEmpty(sessionId, value);
-        setComposerError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setPersistingQueuedMessageIds((current) => {
-          if (!current.has(queueId)) return current;
-          const next = new Set(current);
-          next.delete(queueId);
-          return next;
-        });
-      }
-      return;
-    }
-    setStreamResetVersion((version) => version + 1);
-    setComposerError(null);
-    clearAttachments(sessionId);
-    markSessionBusy(sessionId, true);
-    const submittedAt = Date.now();
-    const optimisticUserMessage: ChatMessageView = {
-      role: "user",
-      content: visiblePrompt,
-      timestampMs: submittedAt,
-      attachments
-    };
-    addOptimisticUserMessage(sessionId, optimisticUserMessage);
-    const runBudgetPatch = optimisticRunBudgetPatch(runtime?.agentRunBudgets, agentEffort);
-    setAgentState((current) => {
-      if (!current) return current;
-      const contextTokensUsed =
-        current.contextTokensUsed + Math.ceil(visiblePrompt.length / 4) + attachments.length * 64 + 6;
-      return {
-        ...current,
-        sessionName: current.sessionName,
-        status: "running",
-        canCancel: true,
-        canRetry: false,
-        canContinue: false,
-        ...runBudgetPatch,
-        transcriptMessages: current.transcriptMessages + 1,
-        contextTokensUsed,
-        contextRemainingPercent: Math.max(
-          0,
-          ((current.contextWindowTokens - contextTokensUsed) / current.contextWindowTokens) * 100
-        ),
-        contextUsageEstimated: true,
-        runStartedAtMs: submittedAt,
-        messages: current.messages
-      };
-    });
-    let completedState: AgentState | null = null;
-    try {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort, planMode);
-      completedState = next;
-      acknowledgeOptimisticUserMessage(sessionId, next.messages);
-      updateSessionStatus(sessionId, next.status, next.canContinue);
-      if (activeSessionIdRef.current === sessionId) {
-        setAgentState((current) =>
-          preserveOptimisticQueuedMessages(
-            sessionId,
-            mergeAgentStateSnapshot(current, next)
-          )
-        );
-        setComposerError(next.lastError);
-        setStreamResetVersion((version) => version + 1);
-      }
-      setProjectSessionState(await getProjectSessionState());
-      await refreshAgentTrace(true, sessionId);
-    } catch (error) {
-      restoreAttachmentsIfEmpty(sessionId, attachments);
-      updateSessionStatus(sessionId, "failed");
-      if (activeSessionIdRef.current === sessionId) {
-        setComposerError(error instanceof Error ? error.message : String(error));
-        const failedState = await getAgentState(sessionId);
-        acknowledgeOptimisticUserMessage(sessionId, failedState.messages);
-        setAgentState((current) =>
-          preserveOptimisticQueuedMessages(
-            sessionId,
-            mergeAgentStateSnapshot(current, failedState)
-          )
-        );
-      }
-    } finally {
-      markSessionBusy(sessionId, false);
-      void refreshPermissionReviews().catch(() => {});
-      const suppressDrain = suppressQueueDrainSessionIdsRef.current.delete(sessionId);
-      if (
-        !suppressDrain &&
-        completedState &&
-        completedState.queuedMessages.length > 0 &&
-        !completedState.canContinue &&
-        !completedState.lastError &&
-        (completedState.status === "completed" || completedState.status === "cancelled")
-      ) {
-        void drainQueuedMessages(sessionId);
-      }
-    }
-  }
-
-  async function handleCancelAgentTask() {
-    const sessionId = activeSession?.id;
-    if (!sessionId) return;
-    suppressQueueDrainSessionIdsRef.current.add(sessionId);
-    setStreamResetVersion((version) => version + 1);
-    setComposerError(null);
-    try {
-      const next = await cancelAgentTask(sessionId);
-      acknowledgeOptimisticUserMessage(sessionId, next.messages);
-      updateSessionStatus(sessionId, next.status, next.canContinue);
-      markSessionBusy(sessionId, false);
-      if (activeSessionIdRef.current === sessionId) {
-        setAgentState((current) =>
-          preserveOptimisticQueuedMessages(
-            sessionId,
-            mergeAgentStateSnapshot(current, next)
-          )
-        );
-        setComposerError(next.lastError);
-      }
-      await refreshAgentTrace(true, sessionId);
-    } catch (error) {
-      setComposerError(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function handleRetryAgentTask() {
-    const sessionId = activeSession?.id;
-    if (!sessionId || busySessionIds.has(sessionId)) return;
-    setStreamResetVersion((version) => version + 1);
-    setComposerError(null);
-    markSessionBusy(sessionId, true);
-    let completedState: AgentState | null = null;
-    try {
-      const next = await retryAgentTask(sessionId);
-      completedState = next;
-      applyAgentStateForSession(sessionId, next);
-      if (activeSessionIdRef.current === sessionId) setComposerError(next.lastError);
-      await refreshAgentTrace(true, sessionId);
-    } catch (error) {
-      updateSessionStatus(sessionId, "failed");
-      if (activeSessionIdRef.current === sessionId) {
-        setComposerError(error instanceof Error ? error.message : String(error));
-      }
-    } finally {
-      markSessionBusy(sessionId, false);
-      if (
-        completedState?.status === "completed" &&
-        !completedState.canContinue &&
-        !completedState.lastError &&
-        completedState.queuedMessages.length > 0
-      ) {
-        void drainQueuedMessages(sessionId);
-      }
-    }
-  }
-
-  async function handleResolveAgentPermission(
-    requestId: string,
-    decision: "allow_once" | "allow_for_session" | "deny",
-    targetSessionId = activeSession?.id
-  ) {
-    const sessionId = targetSessionId;
-    if (!sessionId || busySessionIds.has(sessionId)) return;
-    markSessionBusy(sessionId, true);
-    setComposerError(null);
-    if (activeSessionIdRef.current === sessionId) {
-      setAgentState((current) =>
-        current
-          ? {
-              ...current,
-              status: "running",
-              canCancel: true,
-              canRetry: false,
-              canContinue: false,
-              pendingApprovals: current.pendingApprovals.filter(
-                (approval) => approval.requestId !== requestId
-              )
-            }
-          : current
-      );
-    }
-    let completedState: AgentState | null = null;
-    try {
-      const next = await resolveAgentPermission(requestId, decision, sessionId);
-      completedState = next;
-      applyAgentStateForSession(sessionId, next);
-      if (activeSessionIdRef.current === sessionId) setComposerError(next.lastError);
-      await refreshAgentTrace(true, sessionId);
-    } catch (error) {
-      updateSessionStatus(sessionId, "failed");
-      if (activeSessionIdRef.current === sessionId) {
-        setComposerError(error instanceof Error ? error.message : String(error));
-        const failedState = await getAgentState(sessionId);
-        setAgentState((current) =>
-          preserveOptimisticQueuedMessages(
-            sessionId,
-            mergeAgentStateSnapshot(current, failedState)
-          )
-        );
-      }
-    } finally {
-      markSessionBusy(sessionId, false);
-      void refreshPermissionReviews().catch(() => {});
-      if (
-        completedState?.status === "completed" &&
-        !completedState.canContinue &&
-        !completedState.lastError &&
-        completedState.queuedMessages.length > 0
-      ) {
-        void drainQueuedMessages(sessionId);
-      }
-    }
-  }
-
-  async function handleExportAgentTrace() {
-    setTraceBusy(true);
-    setComposerError(null);
-    try {
-      const next = await exportAgentTraceJsonl(activeSession?.id);
-      setAgentTraceState(next);
-      setInspectorTab("trace");
-      setInspectorOpen(true);
-      const latestStep = latestTraceStep(next.turns);
-      setSelectedTraceStepId((current) => current ?? latestStep?.id ?? null);
-      setComposerError(next.lastError);
-      if (next.exportPath) {
-        await revealArtifact(next.exportPath);
-      }
-    } finally {
-      setTraceBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    const sessionId = activeAgentState?.sessionId;
-    if (
-      !sessionId ||
-      activeSessionBusy ||
-      activeAgentState.queuedMessages.length === 0 ||
-      activeAgentState.canContinue ||
-      activeAgentState.pendingApprovals.length > 0 ||
-      !["idle", "completed"].includes(activeAgentState.status)
-    ) {
-      return;
-    }
-    void drainQueuedMessages(sessionId);
-  }, [
-    activeAgentState?.canContinue,
-    activeAgentState?.pendingApprovals.length,
-    activeAgentState?.queuedMessages.length,
-    activeAgentState?.sessionId,
-    activeAgentState?.status,
-    activeSessionBusy
-  ]);
 
   return (
     <main
@@ -2143,7 +620,7 @@ export function App() {
               sessionId={activeSession?.id ?? null}
               loading={sessionLoadingId === activeSession?.id && !activeAgentState}
               messages={visibleAgentMessages}
-              timeline={activeAgentState?.timeline ?? []}
+              timeline={activeAgentState?.timeline ?? EMPTY_THREAD_TIMELINE}
               streamResetVersion={streamResetVersion}
               status={activeAgentState?.status ?? "idle"}
               runStartedAtMs={activeAgentState?.runStartedAtMs ?? 0}
@@ -2153,11 +630,7 @@ export function App() {
               onLoadOlderHistory={loadOlderAgentHistory}
               onSelect={handleThreadSelection}
               onEditMessage={handleThreadMessageEdit}
-              onArtifactInspect={(path) => {
-                const sessionId = activeSession?.id;
-                if (!sessionId) return;
-                showInspectorOutput({ sessionId, path, nonce: Date.now() });
-              }}
+              onArtifactInspect={handleArtifactInspect}
               onLinkOpenError={setComposerError}
               onStreamDone={handleAgentStreamDone}
             />

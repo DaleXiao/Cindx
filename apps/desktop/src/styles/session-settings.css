@@ -9,6 +9,9 @@
   align-items: center;
   gap: 12px;
   padding: 9px 0;
+  /* Archived history can be long; skip offscreen row rendering. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
 }
 
 .archived-session-row + .archived-session-row {
