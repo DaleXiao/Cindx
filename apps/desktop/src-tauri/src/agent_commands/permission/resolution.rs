@@ -1,4 +1,5 @@
 use super::observations::permission_tool_observation_metadata;
+use super::restore_permission_run_context;
 use crate::*;
 
 fn persist_permission_resolution_rows(
@@ -31,6 +32,106 @@ fn persist_permission_resolution_rows(
             run_context,
         ),
     )
+}
+
+/// Resolve a write subagent's patch approval in place. The parent run is still
+/// executing — parked inside the delegating tool batch — so there is no
+/// suspended run to resume and no run control to register: the waiting
+/// subagent thread observes the durable decision and executes an approved
+/// patch itself. Only the resolution rows and the audit event are persisted;
+/// no tool executes here and no message enters the parent transcript.
+/// Returns `None` when the request is not subagent-originated so the caller
+/// falls through to the ordinary suspended-run resolution path.
+pub(super) fn resolve_subagent_permission_if_pending(
+    state: &tauri::State<'_, AppState>,
+    request_id: &str,
+    decision: &str,
+    session_id: &str,
+) -> Result<Option<AgentState>, String> {
+    let request = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        store
+            .get_permission_request(&PermissionRequestId(request_id.to_string()))
+            .map_err(|error| error.to_string())?
+    };
+    let Some(request) = request else { return Ok(None) };
+    if request
+        .metadata
+        .get(crate::agent_subagent_runtime::SUBAGENT_PERMISSION_ORIGIN_KEY)
+        .map(String::as_str)
+        != Some(crate::agent_subagent_runtime::SUBAGENT_PERMISSION_ORIGIN_VALUE)
+    {
+        return Ok(None);
+    }
+    let decision = parse_permission_decision(decision).map_err(|error| error.to_string())?;
+    let mut run_context = project_session_metadata_for_session(state, Some(session_id))?;
+    restore_permission_run_context(&mut run_context, &request.metadata);
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    resolve_subagent_permission_in_store(&mut store, &request, &decision, &run_context, session_id)
+        .map(Some)
+}
+
+/// Store-level core of the subagent approval branch: validate the request the
+/// same way the suspended-run path does (session-eligibility, agent-loop
+/// ownership, pending membership), persist the resolution rows, and return the
+/// refreshed state. Nothing executes and nothing resumes here.
+pub(super) fn resolve_subagent_permission_in_store(
+    store: &mut SqliteStore,
+    request: &PermissionRequest,
+    decision: &PermissionDecision,
+    run_context: &Metadata,
+    session_id: &str,
+) -> Result<AgentState, String> {
+    if matches!(decision, PermissionDecision::AllowForSession)
+        && !permission_can_allow_session(request)
+    {
+        return agent_state_for_session(
+            store,
+            Some("this permission can only be allowed once".to_string()),
+            Some(session_id),
+        )
+        .map_err(|error| error.to_string());
+    }
+    if request.task_id != phase16_task_id() {
+        return agent_state_for_session(
+            store,
+            Some("permission does not belong to the agent loop".to_string()),
+            Some(session_id),
+        )
+        .map_err(|error| error.to_string());
+    }
+    let current =
+        agent_state_for_session(store, None, Some(session_id)).map_err(|error| error.to_string())?;
+    if !current
+        .pending_approvals
+        .iter()
+        .any(|approval| approval.request_id == request.id.0)
+    {
+        return agent_state_for_session(
+            store,
+            Some("permission does not belong to the active session".to_string()),
+            Some(session_id),
+        )
+        .map_err(|error| error.to_string());
+    }
+    let resolution = PermissionResolution {
+        request_id: request.id.clone(),
+        decision: decision.clone(),
+        resolved_at_ms: current_time_millis(),
+        resolved_by: "local-user".to_string(),
+    };
+    store
+        .with_immediate_transaction(|store| {
+            persist_permission_resolution_rows(store, request, &resolution, run_context)
+        })
+        .map_err(|error| error.to_string())?;
+    agent_state_for_session(store, None, Some(session_id)).map_err(|error| error.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]

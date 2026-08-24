@@ -39,6 +39,17 @@ pub(crate) fn resolve_agent_permission_blocking(
     decision: String,
     session_id: String,
 ) -> Result<AgentState, String> {
+    // A write subagent's patch approval belongs to a run that is still
+    // executing (parked inside the delegating tool batch): resolve it in
+    // place without run-control registration or a loop resume.
+    if let Some(agent_state) = super::resolution::resolve_subagent_permission_if_pending(
+        &state,
+        &request_id,
+        &decision,
+        &session_id,
+    )? {
+        return Ok(agent_state);
+    }
     let snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
     let recovery_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     let (request_effort, durable_recovery, applied_steer_epoch) = {

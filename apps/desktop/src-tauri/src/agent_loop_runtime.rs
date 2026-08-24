@@ -520,6 +520,7 @@ let normal_calls = crate::agent_subagent_runtime::execute_subagent_delegations(
                     &run_context,
                     cancellation,
                     &registry,
+                    workspace_root,
                     calls,
                 );
                 if normal_calls.is_empty() {

@@ -16,8 +16,8 @@ test("tracks multiple subagents and counts finished ones", () => {
   const progress = activeRunProgress(timeline, 1000);
 
   assert.equal(progress.subagents.length, 2);
-  assert.deepEqual(progress.subagents[0], { description: "repo A", done: true });
-  assert.deepEqual(progress.subagents[1], { description: "repo B", done: false });
+  assert.deepEqual(progress.subagents[0], { description: "repo A", done: true, write: false });
+  assert.deepEqual(progress.subagents[1], { description: "repo B", done: false, write: false });
   assert.equal(progress.label, "Running subagents 1/2");
 });
 
@@ -44,5 +44,45 @@ test("subagent finished reports done and a finished label", () => {
   const progress = activeRunProgress(timeline, 1000);
 
   assert.equal(progress.subagents[0].done, true);
+  assert.equal(progress.label, "Subagent done");
+});
+
+test("write subagents are distinguished from read-only ones", () => {
+  const timeline = [
+    status("Agent task started", 1000),
+    status("Write subagent started: patch readme", 1100),
+    status("Subagent started: survey repo", 1150)
+  ];
+
+  const progress = activeRunProgress(timeline, 1000);
+
+  assert.equal(progress.subagents.length, 2);
+  assert.deepEqual(progress.subagents[0], {
+    description: "patch readme",
+    done: false,
+    write: true
+  });
+  assert.deepEqual(progress.subagents[1], {
+    description: "survey repo",
+    done: false,
+    write: false
+  });
+  assert.equal(progress.label, "Running subagents 0/2");
+});
+
+test("a write subagent finish marks only its own row done", () => {
+  const timeline = [
+    status("Agent task started", 1000),
+    status("Write subagent started: patch readme", 1100),
+    status("Write subagent finished: patch readme", 1200)
+  ];
+
+  const progress = activeRunProgress(timeline, 1000);
+
+  assert.deepEqual(progress.subagents[0], {
+    description: "patch readme",
+    done: true,
+    write: true
+  });
   assert.equal(progress.label, "Subagent done");
 });

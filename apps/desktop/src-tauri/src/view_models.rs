@@ -501,6 +501,10 @@ pub(crate) struct ToolApprovalView {
     pub(crate) input: String,
     pub(crate) requested_at_ms: u64,
     pub(crate) can_allow_session: bool,
+    /// True when a write subagent raised the request from inside its parent
+    /// run. The frontend lets only these resolve while the run is still
+    /// executing (the subagent thread is parked waiting on the decision).
+    pub(crate) subagent: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -65,6 +65,22 @@ The desktop app currently includes:
   header shows a per-subagent panel (one row each, orb while running, check when
   done) plus a "Running subagents done/total" status; the panel collapses when
   every delegation completes.
+  A delegation may also set `allow_patches: true`: when the parent run's own
+  prompt effect authority permits workspace effects, the child becomes a write
+  subagent whose surface adds exactly `file.patch` and `file.patch_batch` (never
+  shell, process, computer, browser, or `file.write`). A write subagent holds no
+  permission capability of its own: each patch call is persisted as a pending
+  permission request in the parent run's name (marked `session_reusable=false`,
+  so session grants never apply and the UI offers only allow-once or deny), the
+  parent run keeps executing while the subagent thread parks on the decision,
+  and the ordinary approval command resolves the request in place. An approved
+  patch executes through the same tool path as a parent-run call (durable
+  started/finished events, shared tool budget, undo projection, workspace cache
+  invalidation); a denial returns as the child's denied observation; a
+  cancellation before approval executes nothing. When the run's objective
+  forbids effects, a requested write delegation is refused without a model call.
+  The subagent panel marks write subagents with a `write` badge, and the
+  approval card names the delegating subagent.
 - The main window stays hidden until fonts and initial state are ready plus a short
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and
@@ -302,7 +318,8 @@ Tool visibility does not grant authority.
   content, shares `file.patch`'s Write risk, and its permission scope is the
   sorted set of target paths, so a session grant is reused only for the
   identical path set. It is not on the read-only subagent or plan-mode
-  whitelist.
+  whitelist; a write subagent (`task` with `allow_patches`) may call it under
+  the per-call approval contract described above.
 - `file.glob` is a pure read-only tool that matches workspace files against a
   relative glob pattern (for example `src/**/*.rs`) and returns a sorted list
   bounded to 200 results with a truncated flag; hidden entries, symlinks, and

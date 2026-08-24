@@ -345,7 +345,8 @@
               "scope": "/contract/workspace",
               "input": "echo contract",
               "requestedAtMs": 52,
-              "canAllowSession": true
+              "canAllowSession": true,
+              "subagent": false
             }
           ],
           "queuedMessages": [

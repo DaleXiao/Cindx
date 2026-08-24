@@ -1504,13 +1504,24 @@ details[open] > summary .disclosure-triangle {
 
 .thread-tool-chain-subagent {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   min-width: 0;
   font-size: 11px;
   line-height: 16px;
   color: var(--muted);
+}
+
+.thread-tool-chain-subagent-badge {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--subtle);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .thread-tool-chain-subagent-icon {

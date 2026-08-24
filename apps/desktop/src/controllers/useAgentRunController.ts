@@ -492,8 +492,19 @@ export function useAgentRunController({
     targetSessionId = activeSession?.id
   ) {
     const sessionId = targetSessionId;
-    if (!sessionId || busySessionIds.has(sessionId)) return;
-    markSessionBusy(sessionId, true);
+    if (!sessionId) return;
+    // A write subagent's patch approval arrives while its parent run is still
+    // in flight: only those approvals may resolve without waiting for the run
+    // command to return, and resolving one must not disturb the run's busy
+    // bookkeeping.
+    const runCommandInFlight = busySessionIds.has(sessionId);
+    const pendingApproval = (
+      activeAgentState?.sessionId === sessionId
+        ? activeAgentState
+        : sessionRuntimeCache.peekAgent(sessionId)
+    )?.pendingApprovals.find((approval) => approval.requestId === requestId);
+    if (runCommandInFlight && !pendingApproval?.subagent) return;
+    if (!runCommandInFlight) markSessionBusy(sessionId, true);
     setComposerError(null);
     if (activeSessionIdRef.current === sessionId) {
       setAgentState((current) =>
@@ -531,7 +542,7 @@ export function useAgentRunController({
         );
       }
     } finally {
-      markSessionBusy(sessionId, false);
+      if (!runCommandInFlight) markSessionBusy(sessionId, false);
       void refreshPermissionReviews().catch(() => {});
       if (
         completedState?.status === "completed" &&

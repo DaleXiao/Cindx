@@ -1841,7 +1841,8 @@ export async function runTool(toolName: string, input: string): Promise<Phase5St
             scope: ".",
             input,
             requestedAtMs: now,
-            canAllowSession: false
+            canAllowSession: false,
+            subagent: false
           },
           ...browserPhase5State.pendingApprovals
         ],
@@ -2108,7 +2109,8 @@ export async function runBrowserTool(toolName: string, input: string): Promise<P
           scope: input,
           input,
           requestedAtMs: now,
-          canAllowSession: false
+          canAllowSession: false,
+          subagent: false
         },
         ...browserPhase8State.pendingApprovals
       ],

@@ -140,7 +140,7 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
   onSelect: (selection: SessionThreadSelection) => void;
   active?: boolean;
   progressLabel?: string; progressDetail?: string;
-  subagents?: { description: string; done: boolean }[];
+  subagents?: { description: string; done: boolean; write?: boolean }[];
 }) {
   const [open, setOpen] = useState(false);
   const selected = row.items.some((item) => item.id === selectedId);
@@ -176,6 +176,9 @@ export const ToolChainDisclosure = memo(function ToolChainDisclosure({
                 )}
               </span>
               <span className="thread-tool-chain-subagent-label">{subagent.description}</span>
+              {subagent.write ? (
+                <span className="thread-tool-chain-subagent-badge" title="May patch files; every patch needs your approval">write</span>
+              ) : null}
             </div>
           ))}
         </div>

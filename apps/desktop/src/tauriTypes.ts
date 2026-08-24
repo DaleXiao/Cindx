@@ -432,6 +432,8 @@ export type ToolApprovalView = {
   input: string;
   requestedAtMs: number;
   canAllowSession: boolean;
+  /** True when a write subagent raised the request inside its live parent run. */
+  subagent: boolean;
 };
 
 export type Phase5State = {

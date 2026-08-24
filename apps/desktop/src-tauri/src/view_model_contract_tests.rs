@@ -308,6 +308,7 @@ fn agent_state_values() -> Vec<Value> {
                 input: "echo contract".to_string(),
                 requested_at_ms: 52,
                 can_allow_session: true,
+                subagent: false,
             }],
             queued_messages: vec![queue_message("queue", 53)],
             pending_plan_confirmation: None,

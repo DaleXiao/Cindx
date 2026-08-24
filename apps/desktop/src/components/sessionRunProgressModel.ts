@@ -1,6 +1,6 @@
 import type { TimelineEntry } from "../tauriTypes";
 
-export type RunSubagentState = { description: string; done: boolean };
+export type RunSubagentState = { description: string; done: boolean; write: boolean };
 export type RunProgress = { label: string; detail: string; subagents: RunSubagentState[] };
 
 export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: number): RunProgress {
@@ -18,16 +18,17 @@ export function activeRunProgress(timeline: TimelineEntry[], runStartedAtMs: num
   const subagentByDescription = new Map<string, RunSubagentState>();
   for (const event of timeline) {
     if (event.timestampMs < startedAtMs || event.label !== "Status") continue;
-    const match = event.detail.match(/^Subagent (started|finished): (.+)$/i);
+    const match = event.detail.match(/^(Write )?Subagent (started|finished): (.+)$/i);
     if (!match) continue;
-    const description = match[2].trim();
-    let entry = subagentByDescription.get(description);
+    const write = Boolean(match[1]);
+    const key = `${write ? "write" : "read"}:${match[3].trim()}`;
+    let entry = subagentByDescription.get(key);
     if (!entry) {
-      entry = { description, done: false };
-      subagentByDescription.set(description, entry);
+      entry = { description: match[3].trim(), done: false, write };
+      subagentByDescription.set(key, entry);
       subagents.push(entry);
     }
-    entry.done = match[1].toLowerCase() === "finished";
+    entry.done = match[2].toLowerCase() === "finished";
   }
   let latest: TimelineEntry | undefined;
   let candidateStarts = 0;

@@ -218,6 +218,41 @@ the exact permission request, checks a matching session capability or asks the
 user, executes the effect, and commits the canonical outcome. Effects use the
 physical attempt identity for replay and idempotency.
 
+Write subagents (`task` with `allow_patches`) plug into the same permission
+path without holding any authority of their own. A write subagent's patch call
+is persisted as a pending permission request under the parent run's identity
+(task, session, physical run, objectives), but with two deliberate marks:
+`session_reusable=false` and a subagent-origin marker. The first makes the
+request fail the session-capability policy in both directions — a session
+grant the parent already holds for the same path never satisfies a
+subagent-originated request, and an `allow_for_session` decision is rejected —
+so every patch a write subagent attempts is approved per call by the user.
+Rationale: a session grant encodes trust in the parent's current trajectory;
+the child is a separately prompted model context whose patch targets the
+parent did not necessarily foresee, so widening must be re-authorized at each
+call. The subagent gate never consults the session-capability store at all,
+so grant non-propagation is structural rather than emergent.
+
+The approval handshake also differs deliberately from the run-level
+suspend/resume mechanism. A subagent loop runs on a scoped thread inside the
+parent's tool batch, and its internal message history is not part of the
+durable runtime snapshot, so suspending the run would abandon the child and
+replay the delegation on resume — re-asking the same approval and
+double-executing an already-applied patch. Instead the subagent thread parks
+on the durable permission row (polling with cancellation), the run stays
+active, and the projected pending approval flips the run status to
+waiting_for_permission as usual. The `resolve_agent_permission` command routes
+subagent-marked requests to an in-place branch that validates and persists
+only the resolution rows: it registers no run control (the live run already
+owns the session slot) and resumes no loop. The parked subagent thread then
+executes an approved patch through the ordinary
+`execute_agent_tool_invocation_for_objective_epoch` path, so durable
+started/finished events, tool-budget accounting, undo projection, and
+workspace-cache invalidation are identical to a parent-run effect. A denial
+records the same denied tool-finished event shape and returns to the child as
+an ordinary denied observation; a cancellation before approval executes
+nothing.
+
 Grounding obligations accept negative evidence: when a tool attempt fails
 against an input that matches the obligation's bound target anchors, the
 failure is recorded as an absent-target receipt and satisfies the obligation,

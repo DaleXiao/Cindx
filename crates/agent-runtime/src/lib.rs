@@ -129,8 +129,9 @@ pub use run_budget::{
 pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use subagent::{
-    build_subagent_task_prompt, subagent_system_prompt, subagent_tool_allowed,
-    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_MAX_STEPS,
+    build_subagent_task_prompt, subagent_patch_tool_allowed, subagent_system_prompt,
+    subagent_tool_allowed, subagent_write_system_prompt, SUBAGENT_ALLOWED_TOOLS,
+    SUBAGENT_MAX_STEPS, SUBAGENT_PATCH_TOOLS,
 };
 pub use task_contract::{
     AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,

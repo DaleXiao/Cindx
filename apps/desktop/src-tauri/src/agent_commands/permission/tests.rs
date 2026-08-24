@@ -11,9 +11,10 @@ use crate::agent_loop_runtime::{
 };
 use crate::agent_read_model::agent_runtime_transcript_from_active_events;
 use crate::app_state::AgentRecoveryEnvelope;
+use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
 use crate::runtime_constants::AGENT_RECOVERY_SCHEMA;
-use crate::runtime_values::phase16_task_id;
+use crate::runtime_values::{current_time_millis, phase16_task_id};
 use agent_application::{AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState};
 use agent_core::{
     Event, EventId, EventKind, Message, MessageRole, PermissionDecision, PermissionRequest,
@@ -1290,4 +1291,176 @@ fn cold_permission_recovery_persists_before_the_caller_credits_goal_delta() {
     })
     .expect("a denial-only recovery should persist its rebuilt contract");
     assert!(denial_only_commit_called.get());
+}
+
+fn subagent_patch_request(request_id: &str, run_context: &Metadata) -> PermissionRequest {
+    let mut request = PermissionRequest {
+        id: PermissionRequestId(request_id.to_string()),
+        task_id: phase16_task_id(),
+        risk: PermissionRisk::Write,
+        action: "file.patch".to_string(),
+        reason: "Write subagent \"fix the readme\" requests approval: Atomically patch an existing file in the selected workspace.".to_string(),
+        scope: "README.md".to_string(),
+        metadata: Metadata::new(),
+    };
+    request
+        .metadata
+        .insert("session_reusable".to_string(), "false".to_string());
+    request.metadata.insert(
+        crate::agent_subagent_runtime::SUBAGENT_PERMISSION_ORIGIN_KEY.to_string(),
+        "true".to_string(),
+    );
+    request.metadata.insert(
+        "tool_call_id".to_string(),
+        format!("subagent:parent-call:{request_id}"),
+    );
+    request
+        .metadata
+        .insert("tool_name".to_string(), "file.patch".to_string());
+    request.metadata = agent_application::merge_persistable_run_context(
+        std::mem::take(&mut request.metadata),
+        run_context,
+    );
+    request
+}
+
+fn seed_subagent_permission_run(
+    store: &mut SqliteStore,
+    run_context: &Metadata,
+    request: &PermissionRequest,
+) {
+    append_event(
+        store,
+        &phase16_task_id(),
+        EventKind::TaskStatusChanged,
+        "Agent task started",
+        metadata_with_context(
+            [("prompt".to_string(), "fix the readme".to_string())]
+                .into_iter()
+                .collect(),
+            run_context,
+        ),
+    )
+    .expect("run should start");
+    store
+        .save_permission_request(request.clone(), current_time_millis())
+        .expect("request should save");
+}
+
+#[test]
+fn subagent_permission_resolves_in_place_without_executing_or_resuming() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let run_context = permission_run_context(0, 0);
+    let request = subagent_patch_request("agent-perm-subagent", &run_context);
+    seed_subagent_permission_run(&mut store, &run_context, &request);
+
+    let state = super::resolution::resolve_subagent_permission_in_store(
+        &mut store,
+        &request,
+        &PermissionDecision::AllowOnce,
+        &run_context,
+        "session-a",
+    )
+    .expect("resolution should succeed");
+
+    assert!(state.pending_approvals.is_empty());
+    let audit = store
+        .list_permission_audits()
+        .expect("audits should load")
+        .into_iter()
+        .find(|audit| audit.request.id == request.id)
+        .expect("audit should exist");
+    assert_eq!(
+        audit.resolution.map(|resolution| resolution.decision),
+        Some(PermissionDecision::AllowOnce)
+    );
+    let events = store
+        .list_by_task(&phase16_task_id())
+        .expect("events should load");
+    assert!(events.iter().any(|event| {
+        event.kind == EventKind::PermissionResolved
+            && event.metadata.get("permission_id").map(String::as_str) == Some("agent-perm-subagent")
+    }));
+    // The in-place resolution executes nothing and writes no transcript
+    // message: the waiting subagent thread performs the approved patch.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolCallFinished | EventKind::ToolCallStarted))
+    );
+    assert!(
+        !events.iter().any(|event| {
+            event.kind == EventKind::MessageAdded
+                && event.metadata.get("role").map(String::as_str) == Some("tool")
+        })
+    );
+}
+
+#[test]
+fn subagent_permission_rejects_allow_for_session() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let run_context = permission_run_context(0, 0);
+    let request = subagent_patch_request("agent-perm-subagent", &run_context);
+    seed_subagent_permission_run(&mut store, &run_context, &request);
+
+    let state = super::resolution::resolve_subagent_permission_in_store(
+        &mut store,
+        &request,
+        &PermissionDecision::AllowForSession,
+        &run_context,
+        "session-a",
+    )
+    .expect("state should load");
+
+    assert_eq!(
+        state.last_error.as_deref(),
+        Some("this permission can only be allowed once")
+    );
+    // The request stays durably unresolved: a subagent patch approval can
+    // never create a session capability.
+    let audit = store
+        .list_permission_audits()
+        .expect("audits should load")
+        .into_iter()
+        .find(|audit| audit.request.id == request.id)
+        .expect("audit should exist");
+    assert!(audit.resolution.is_none());
+}
+
+#[test]
+fn subagent_permission_rejects_a_request_outside_the_active_pending_set() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let run_context = permission_run_context(0, 0);
+    let request = subagent_patch_request("agent-perm-subagent", &run_context);
+    seed_subagent_permission_run(&mut store, &run_context, &request);
+    // The pending approval belongs to a different run, so the active run's
+    // pending set does not contain it.
+    let mut other_run_request = subagent_patch_request("agent-perm-other", &run_context);
+    other_run_request
+        .metadata
+        .insert("agent_run_id".to_string(), "run-b".to_string());
+    store
+        .save_permission_request(other_run_request.clone(), current_time_millis())
+        .expect("request should save");
+
+    let state = super::resolution::resolve_subagent_permission_in_store(
+        &mut store,
+        &other_run_request,
+        &PermissionDecision::AllowOnce,
+        &run_context,
+        "session-a",
+    )
+    .expect("state should load");
+
+    assert_eq!(
+        state.last_error.as_deref(),
+        Some("permission does not belong to the active session")
+    );
+    let audit = store
+        .list_permission_audits()
+        .expect("audits should load")
+        .into_iter()
+        .find(|audit| audit.request.id == other_run_request.id)
+        .expect("audit should exist");
+    assert!(audit.resolution.is_none());
 }
