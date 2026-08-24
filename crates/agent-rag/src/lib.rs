@@ -138,6 +138,25 @@ pub struct RagIndex {
     pub stats: RagIndexStats,
 }
 
+/// Per-run accounting for an incremental workspace indexing pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RagIndexReuse {
+    /// Files whose content hash was unchanged, so their previous chunks were
+    /// reused without re-chunking or re-embedding.
+    pub files_reused: usize,
+    /// Files that were new or whose content hash changed, so they were
+    /// re-chunked from source.
+    pub files_reindexed: usize,
+    /// Chunks carried over from the previous index.
+    pub chunks_reused: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncrementalRagIndex {
+    pub index: RagIndex,
+    pub reuse: RagIndexReuse,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingBatch {
     pub provider: String,
@@ -984,6 +1003,8 @@ pub fn index_workspace_cancellable(
 ) -> Result<RagIndex, RagError> {
     let workspace_root = workspace_root.as_ref();
     let indexed_at_ms = current_time_millis();
+    let reuse = BTreeMap::new();
+    let mut report = RagIndexReuse::default();
     let mut chunks = Vec::new();
     let mut files_indexed = 0;
 
@@ -992,6 +1013,8 @@ pub fn index_workspace_cancellable(
         workspace_root,
         &options,
         indexed_at_ms,
+        &reuse,
+        &mut report,
         &mut chunks,
         &mut files_indexed,
         &mut should_cancel,
@@ -1004,6 +1027,56 @@ pub fn index_workspace_cancellable(
     };
 
     Ok(RagIndex { chunks, stats })
+}
+
+/// Indexes the workspace incrementally: files whose content hash is unchanged
+/// since `previous` keep their existing chunks (including any externally
+/// applied embeddings), and only new or content-changed files are re-chunked.
+/// Chunks of files that disappeared from the workspace are dropped. The merged
+/// result is content-equivalent to a full re-index of the same workspace.
+pub fn index_workspace_reusing(
+    workspace_root: impl AsRef<Path>,
+    options: IndexOptions,
+    previous: &RagIndex,
+) -> Result<IncrementalRagIndex, RagError> {
+    index_workspace_reusing_cancellable(workspace_root, options, previous, || false)
+}
+
+pub fn index_workspace_reusing_cancellable(
+    workspace_root: impl AsRef<Path>,
+    options: IndexOptions,
+    previous: &RagIndex,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<IncrementalRagIndex, RagError> {
+    let workspace_root = workspace_root.as_ref();
+    let indexed_at_ms = current_time_millis();
+    let reuse = reusable_chunks_by_path(previous);
+    let mut report = RagIndexReuse::default();
+    let mut chunks = Vec::new();
+    let mut files_indexed = 0;
+
+    collect_chunks(
+        workspace_root,
+        workspace_root,
+        &options,
+        indexed_at_ms,
+        &reuse,
+        &mut report,
+        &mut chunks,
+        &mut files_indexed,
+        &mut should_cancel,
+    )?;
+
+    let stats = RagIndexStats {
+        files_indexed,
+        chunks_indexed: chunks.len(),
+        indexed_at_ms,
+    };
+
+    Ok(IncrementalRagIndex {
+        index: RagIndex { chunks, stats },
+        reuse: report,
+    })
 }
 
 pub fn workspace_index_is_fresh(
@@ -1107,6 +1180,97 @@ pub fn apply_embeddings_to_index_cancellable(
         chunk.embedding_model = model.clone();
     }
     Ok(())
+}
+
+/// Re-embeds only the chunks that still carry the deterministic local
+/// placeholder profile (`local` / `local-hash-*`), leaving chunks that already
+/// carry an external embedding profile untouched, and returns the number of
+/// chunks embedded. Incremental indexing reuses previous embeddings for
+/// unchanged files, so only freshly chunked files pay the embedder. Callers
+/// must ensure reused profiles match the embedder's identity (the desktop
+/// knowledge runtime gates chunk reuse on the configured embedding model).
+pub fn apply_embeddings_to_placeholder_chunks_cancellable(
+    index: &mut RagIndex,
+    embedder: &mut dyn RagEmbedder,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<usize, RagError> {
+    let local_model = format!("local-hash-{EMBEDDING_DIMS}");
+    let targets = index
+        .chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, chunk)| {
+            chunk.embedding_provider == "local" && chunk.embedding_model == local_model
+        })
+        .map(|(position, _)| position)
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+
+    let mut provider = None;
+    let mut model = None;
+    let mut vectors = Vec::with_capacity(targets.len());
+    for batch_positions in targets.chunks(DEFAULT_EMBEDDING_BATCH_SIZE) {
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        let texts = batch_positions
+            .iter()
+            .map(|position| index.chunks[*position].text.clone())
+            .collect::<Vec<_>>();
+        let batch = embedder.embed_texts(&texts)?;
+        if should_cancel() {
+            return Err(RagError::new(RAG_INDEX_CANCELLED));
+        }
+        if batch.vectors.len() != texts.len() {
+            return Err(RagError::new(format!(
+                "embedding count mismatch: got {}, expected {}",
+                batch.vectors.len(),
+                texts.len()
+            )));
+        }
+        if provider
+            .as_ref()
+            .is_some_and(|value| value != &batch.provider)
+            || model.as_ref().is_some_and(|value| value != &batch.model)
+        {
+            return Err(RagError::new(
+                "embedding provider or model changed between batches",
+            ));
+        }
+        provider.get_or_insert(batch.provider);
+        model.get_or_insert(batch.model);
+        vectors.extend(batch.vectors);
+    }
+
+    let provider = provider.unwrap_or_default();
+    let model = model.unwrap_or_default();
+    for (position, vector) in targets.iter().zip(vectors) {
+        if vector.is_empty() {
+            return Err(RagError::new("embedding vector was empty"));
+        }
+        let chunk = &mut index.chunks[*position];
+        chunk.embedding_dimensions = vector.len();
+        chunk.embedding = vector;
+        chunk.embedding_provider = provider.clone();
+        chunk.embedding_model = model.clone();
+    }
+    Ok(targets.len())
+}
+
+/// Recomputes every chunk's embedding with the deterministic local hash
+/// profile, discarding any externally applied vectors. An incrementally
+/// assembled index can mix the previous external profile with fresh
+/// placeholder chunks; restoring the local profile keeps an
+/// embedding-failure fallback index homogeneous.
+pub fn restore_local_embeddings(index: &mut RagIndex) {
+    for chunk in &mut index.chunks {
+        chunk.embedding = embed_text(&chunk.text);
+        chunk.embedding_provider = "local".to_string();
+        chunk.embedding_model = format!("local-hash-{EMBEDDING_DIMS}");
+        chunk.embedding_dimensions = EMBEDDING_DIMS;
+    }
 }
 
 pub fn search_chunks(chunks: &[RagChunk], query: &str, limit: usize) -> Vec<RagSearchResult> {
@@ -1618,11 +1782,42 @@ fn truncate_search_line(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+/// Previous chunks of one workspace file that an incremental indexing pass
+/// may carry over unchanged.
+struct ReusedFileChunks {
+    file_hash: String,
+    chunks: Vec<RagChunk>,
+    /// A previous index whose per-path hashes disagree cannot drive safe
+    /// reuse; such entries are ignored and the file is re-chunked.
+    consistent: bool,
+}
+
+fn reusable_chunks_by_path(index: &RagIndex) -> BTreeMap<String, ReusedFileChunks> {
+    let mut by_path: BTreeMap<String, ReusedFileChunks> = BTreeMap::new();
+    for chunk in &index.chunks {
+        let entry = by_path
+            .entry(chunk.path.clone())
+            .or_insert_with(|| ReusedFileChunks {
+                file_hash: chunk.file_hash.clone(),
+                chunks: Vec::new(),
+                consistent: true,
+            });
+        if entry.file_hash != chunk.file_hash {
+            entry.consistent = false;
+        }
+        entry.chunks.push(chunk.clone());
+    }
+    by_path
+}
+
+#[allow(clippy::too_many_arguments)]
 fn collect_chunks(
     workspace_root: &Path,
     current: &Path,
     options: &IndexOptions,
     indexed_at_ms: u64,
+    reuse: &BTreeMap<String, ReusedFileChunks>,
+    report: &mut RagIndexReuse,
     chunks: &mut Vec<RagChunk>,
     files_indexed: &mut usize,
     should_cancel: &mut dyn FnMut() -> bool,
@@ -1645,6 +1840,8 @@ fn collect_chunks(
             &metadata,
             options,
             indexed_at_ms,
+            reuse,
+            report,
             chunks,
             files_indexed,
             should_cancel,
@@ -1687,6 +1884,8 @@ fn collect_chunks(
                 &path,
                 options,
                 indexed_at_ms,
+                reuse,
+                report,
                 chunks,
                 files_indexed,
                 should_cancel,
@@ -1698,6 +1897,8 @@ fn collect_chunks(
                 &metadata,
                 options,
                 indexed_at_ms,
+                reuse,
+                report,
                 chunks,
                 files_indexed,
                 should_cancel,
@@ -1842,6 +2043,8 @@ fn index_file(
     metadata: &fs::Metadata,
     options: &IndexOptions,
     indexed_at_ms: u64,
+    reuse: &BTreeMap<String, ReusedFileChunks>,
+    report: &mut RagIndexReuse,
     chunks: &mut Vec<RagChunk>,
     files_indexed: &mut usize,
     should_cancel: &mut dyn FnMut() -> bool,
@@ -1873,6 +2076,25 @@ fn index_file(
         .ok()
         .and_then(system_time_millis)
         .unwrap_or(0);
+    // A file whose content hash is unchanged keeps its previous chunks
+    // verbatim (including any externally applied embeddings); only the file
+    // modification time is refreshed so the mtime-based freshness check keeps
+    // passing. The reused embedding identity remains the caller's contract
+    // (the desktop knowledge runtime only reuses a matching profile).
+    if let Some(reused) = reuse.get(&relative) {
+        if reused.consistent && reused.file_hash == file_hash {
+            report.files_reused += 1;
+            report.chunks_reused += reused.chunks.len();
+            *files_indexed += 1;
+            chunks.extend(reused.chunks.iter().map(|chunk| {
+                let mut chunk = chunk.clone();
+                chunk.modified_time_ms = modified_time_ms;
+                chunk
+            }));
+            return Ok(());
+        }
+    }
+    report.files_reindexed += 1;
     let lines = content.lines().collect::<Vec<_>>();
     let chunk_lines = options.chunk_lines.max(8);
     let overlap = options.chunk_overlap.min(chunk_lines.saturating_sub(1));
@@ -2361,6 +2583,37 @@ mod tests {
         }
     }
 
+    /// Records every text it was asked to embed and derives deterministic
+    /// vectors from the text, so incremental tests can observe exactly which
+    /// chunks were re-embedded.
+    struct TrackingEmbedder {
+        provider: String,
+        embedded_texts: Vec<String>,
+    }
+
+    impl TrackingEmbedder {
+        fn new(provider: &str) -> Self {
+            Self {
+                provider: provider.to_string(),
+                embedded_texts: Vec::new(),
+            }
+        }
+    }
+
+    impl RagEmbedder for TrackingEmbedder {
+        fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+            self.embedded_texts.extend(texts.iter().cloned());
+            Ok(EmbeddingBatch {
+                provider: self.provider.clone(),
+                model: "test-embedding".to_string(),
+                vectors: texts
+                    .iter()
+                    .map(|text| vec![stable_hash(text.as_bytes()) as f32, 1.0])
+                    .collect(),
+            })
+        }
+    }
+
     fn temp_workspace() -> PathBuf {
         let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -2525,6 +2778,435 @@ mod tests {
             !workspace_index_is_fresh(&root, &index.chunks, IndexOptions::default(), || false)
                 .expect("new file should invalidate the empty index")
         );
+    }
+
+    #[test]
+    fn incremental_index_reindexes_only_the_modified_file() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+        fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+        let mut first_embedder = TrackingEmbedder::new("first-provider");
+        let base =
+            index_workspace_with_embedder(&root, IndexOptions::default(), &mut first_embedder)
+                .expect("base index should build");
+        assert_eq!(first_embedder.embedded_texts.len(), 2);
+        let base_b = base
+            .chunks
+            .iter()
+            .find(|chunk| chunk.path == "b.md")
+            .cloned()
+            .expect("b chunk should exist");
+
+        fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
+        let mut incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+
+        assert_eq!(
+            incremental.reuse,
+            RagIndexReuse {
+                files_reused: 1,
+                files_reindexed: 1,
+                chunks_reused: 1,
+            }
+        );
+        let reused_b = incremental
+            .index
+            .chunks
+            .iter()
+            .find(|chunk| chunk.path == "b.md")
+            .expect("b chunk should remain");
+        assert_eq!(reused_b, &base_b);
+
+        let mut second_embedder = TrackingEmbedder::new("second-provider");
+        let embedded = apply_embeddings_to_placeholder_chunks_cancellable(
+            &mut incremental.index,
+            &mut second_embedder,
+            || false,
+        )
+        .expect("placeholder embedding should succeed");
+
+        assert_eq!(embedded, 1);
+        assert_eq!(
+            second_embedder.embedded_texts,
+            vec!["alpha evidence lines extended".to_string()]
+        );
+        let updated_a = incremental
+            .index
+            .chunks
+            .iter()
+            .find(|chunk| chunk.path == "a.md")
+            .expect("a chunk should remain");
+        assert_eq!(updated_a.embedding_provider, "second-provider");
+        let reused_b = incremental
+            .index
+            .chunks
+            .iter()
+            .find(|chunk| chunk.path == "b.md")
+            .expect("b chunk should remain");
+        assert_eq!(reused_b.embedding_provider, "first-provider");
+        assert_eq!(reused_b, &base_b);
+    }
+
+    #[test]
+    fn incremental_index_drops_deleted_file_chunks() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+        fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+        let base = index_workspace(&root, IndexOptions::default()).expect("base should build");
+        fs::remove_file(root.join("b.md")).expect("b should delete");
+
+        let incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+
+        assert_eq!(
+            incremental.reuse,
+            RagIndexReuse {
+                files_reused: 1,
+                files_reindexed: 0,
+                chunks_reused: 1,
+            }
+        );
+        assert!(incremental
+            .index
+            .chunks
+            .iter()
+            .all(|chunk| chunk.path == "a.md"));
+        assert_eq!(incremental.index.stats.files_indexed, 1);
+        assert_eq!(incremental.index.stats.chunks_indexed, 1);
+    }
+
+    #[test]
+    fn incremental_index_matches_full_rebuild() {
+        let root = temp_workspace();
+        fs::create_dir_all(root.join("docs")).expect("docs directory should exist");
+        let long_file = (0..190)
+            .map(|line| format!("knowledge line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+        fs::write(root.join("b.md"), &long_file).expect("b should write");
+        fs::write(root.join("docs").join("c.md"), "charlie docs evidence").expect("c should write");
+        let base = index_workspace(&root, IndexOptions::default()).expect("base should build");
+        assert_eq!(base.stats.files_indexed, 3);
+        assert!(base.chunks.len() > 3);
+
+        fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
+        fs::remove_file(root.join("docs").join("c.md")).expect("c should delete");
+        fs::write(root.join("d.md"), "delta fresh evidence").expect("d should write");
+
+        let incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+        let full = index_workspace(&root, IndexOptions::default()).expect("full should build");
+
+        assert_eq!(
+            incremental.reuse,
+            RagIndexReuse {
+                files_reused: 1,
+                files_reindexed: 2,
+                chunks_reused: base
+                    .chunks
+                    .iter()
+                    .filter(|chunk| chunk.path == "b.md")
+                    .count(),
+            }
+        );
+        assert_eq!(
+            incremental.index.stats.files_indexed,
+            full.stats.files_indexed
+        );
+        assert_eq!(
+            incremental.index.stats.chunks_indexed,
+            full.stats.chunks_indexed
+        );
+        let semantic = |chunk: &RagChunk| {
+            (
+                chunk.id.clone(),
+                chunk.path.clone(),
+                chunk.file_hash.clone(),
+                chunk.modified_time_ms,
+                chunk.start_line,
+                chunk.end_line,
+                chunk.text.clone(),
+                chunk.embedding.clone(),
+                chunk.embedding_provider.clone(),
+                chunk.embedding_model.clone(),
+                chunk.embedding_dimensions,
+            )
+        };
+        assert_eq!(
+            incremental
+                .index
+                .chunks
+                .iter()
+                .map(semantic)
+                .collect::<Vec<_>>(),
+            full.chunks.iter().map(semantic).collect::<Vec<_>>(),
+        );
+        let from_incremental = search_chunks(&incremental.index.chunks, "knowledge line", 5);
+        let from_full = search_chunks(&full.chunks, "knowledge line", 5);
+        assert_eq!(
+            from_incremental
+                .iter()
+                .map(|result| (result.chunk.id.clone(), result.score))
+                .collect::<Vec<_>>(),
+            from_full
+                .iter()
+                .map(|result| (result.chunk.id.clone(), result.score))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn incremental_index_rebuilds_nothing_when_hashes_match() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+        fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+        let mut first_embedder = TrackingEmbedder::new("first-provider");
+        let base =
+            index_workspace_with_embedder(&root, IndexOptions::default(), &mut first_embedder)
+                .expect("base index should build");
+
+        let mut incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+
+        assert_eq!(
+            incremental.reuse,
+            RagIndexReuse {
+                files_reused: 2,
+                files_reindexed: 0,
+                chunks_reused: 2,
+            }
+        );
+        let mut second_embedder = TrackingEmbedder::new("second-provider");
+        let embedded = apply_embeddings_to_placeholder_chunks_cancellable(
+            &mut incremental.index,
+            &mut second_embedder,
+            || false,
+        )
+        .expect("placeholder embedding should succeed");
+        assert_eq!(embedded, 0);
+        assert!(second_embedder.embedded_texts.is_empty());
+        assert_eq!(incremental.index.chunks, base.chunks);
+    }
+
+    #[test]
+    fn incremental_index_refreshes_reused_chunk_file_times() {
+        let root = temp_workspace();
+        let notes = root.join("notes.md");
+        fs::write(&notes, "stable evidence lines").expect("notes should write");
+        let base = index_workspace(&root, IndexOptions::default()).expect("base should build");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&notes, "stable evidence lines").expect("notes should rewrite");
+        let current_mtime = fs::metadata(&notes)
+            .expect("notes metadata should load")
+            .modified()
+            .ok()
+            .and_then(system_time_millis)
+            .unwrap_or(0);
+        assert!(current_mtime > base.chunks[0].modified_time_ms);
+
+        let incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+
+        assert_eq!(incremental.reuse.files_reused, 1);
+        assert_eq!(incremental.reuse.files_reindexed, 0);
+        assert_eq!(incremental.index.chunks[0].id, base.chunks[0].id);
+        assert_eq!(incremental.index.chunks[0].modified_time_ms, current_mtime);
+        assert!(workspace_index_is_fresh(
+            &root,
+            &incremental.index.chunks,
+            IndexOptions::default(),
+            || false
+        )
+        .expect("freshness should check"));
+    }
+
+    #[test]
+    fn incremental_index_survives_snapshot_round_trip() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+        fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+        let mut first_embedder = TrackingEmbedder::new("test-provider");
+        let base =
+            index_workspace_with_embedder(&root, IndexOptions::default(), &mut first_embedder)
+                .expect("base index should build");
+        let index_path = root.join(".cindx").join("rag-index.tsv");
+        let mut adapter = FileRagAdapter::open(&index_path).expect("adapter should open");
+        adapter.replace_all(base).expect("base should persist");
+
+        fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
+        let persisted = FileRagAdapter::open(&index_path).expect("adapter should reload");
+        let mut incremental =
+            index_workspace_reusing(&root, IndexOptions::default(), persisted.index())
+                .expect("incremental index should build");
+        assert_eq!(incremental.reuse.files_reused, 1);
+        assert_eq!(incremental.reuse.files_reindexed, 1);
+        let mut second_embedder = TrackingEmbedder::new("test-provider");
+        apply_embeddings_to_placeholder_chunks_cancellable(
+            &mut incremental.index,
+            &mut second_embedder,
+            || false,
+        )
+        .expect("placeholder embedding should succeed");
+        let mut adapter = FileRagAdapter::open(&index_path).expect("adapter should reopen");
+        adapter
+            .replace_all(incremental.index.clone())
+            .expect("incremental index should persist");
+
+        let reloaded = FileRagAdapter::open(&index_path).expect("incremental index should load");
+        let mut reference_embedder = TrackingEmbedder::new("test-provider");
+        let reference =
+            index_workspace_with_embedder(&root, IndexOptions::default(), &mut reference_embedder)
+                .expect("reference index should build");
+        let semantic = |chunk: &RagChunk| {
+            (
+                chunk.id.clone(),
+                chunk.path.clone(),
+                chunk.file_hash.clone(),
+                chunk.modified_time_ms,
+                chunk.start_line,
+                chunk.end_line,
+                chunk.text.clone(),
+                chunk.embedding.clone(),
+                chunk.embedding_provider.clone(),
+                chunk.embedding_model.clone(),
+                chunk.embedding_dimensions,
+            )
+        };
+        assert_eq!(
+            reloaded.chunks().iter().map(semantic).collect::<Vec<_>>(),
+            reference.chunks.iter().map(semantic).collect::<Vec<_>>(),
+        );
+        let persisted_results = reloaded.search("evidence", 5).expect("search should run");
+        let reference_results = search_chunks(&reference.chunks, "evidence", 5);
+        assert_eq!(
+            persisted_results
+                .iter()
+                .map(|result| (result.chunk.id.clone(), result.score))
+                .collect::<Vec<_>>(),
+            reference_results
+                .iter()
+                .map(|result| (result.chunk.id.clone(), result.score))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[cfg(feature = "lancedb-store")]
+    #[test]
+    fn incremental_index_publishes_to_lancedb_and_exports_jsonl() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+        fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+        let mut first_embedder = TrackingEmbedder::new("test-provider");
+        let base =
+            index_workspace_with_embedder(&root, IndexOptions::default(), &mut first_embedder)
+                .expect("base index should build");
+        fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
+
+        let mut incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+        let mut second_embedder = TrackingEmbedder::new("test-provider");
+        apply_embeddings_to_placeholder_chunks_cancellable(
+            &mut incremental.index,
+            &mut second_embedder,
+            || false,
+        )
+        .expect("placeholder embedding should succeed");
+
+        let database_path = root.join(".cindx").join("lancedb");
+        let rows = replace_lancedb_index(&database_path, &incremental.index)
+            .expect("LanceDB index should persist");
+        assert_eq!(rows, incremental.index.chunks.len());
+        let results = search_lancedb_index(&database_path, &[1.0, 0.0], 5)
+            .expect("LanceDB search should succeed");
+        let mut result_paths = results
+            .iter()
+            .map(|result| result.chunk.path.clone())
+            .collect::<Vec<_>>();
+        result_paths.sort();
+        assert_eq!(result_paths, vec!["a.md".to_string(), "b.md".to_string()]);
+
+        let export_path = root.join(".cindx").join("lancedb-records.jsonl");
+        let exported = export_lancedb_records_jsonl(&incremental.index, &export_path)
+            .expect("export should write");
+        assert_eq!(exported, incremental.index.chunks.len());
+        let export = fs::read_to_string(&export_path).expect("export should read");
+        assert!(export.contains("\"path\":\"a.md\""));
+        assert!(export.contains("\"path\":\"b.md\""));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restore_local_embeddings_homogenizes_a_mixed_incremental_index() {
+        let root = temp_workspace();
+        fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+        fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+        let mut first_embedder = TrackingEmbedder::new("first-provider");
+        let base =
+            index_workspace_with_embedder(&root, IndexOptions::default(), &mut first_embedder)
+                .expect("base index should build");
+        fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
+        let mut incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+        let mut second_embedder = TrackingEmbedder::new("second-provider");
+        apply_embeddings_to_placeholder_chunks_cancellable(
+            &mut incremental.index,
+            &mut second_embedder,
+            || false,
+        )
+        .expect("placeholder embedding should succeed");
+        assert!(incremental
+            .index
+            .chunks
+            .iter()
+            .any(|chunk| chunk.embedding_provider == "first-provider"));
+        assert!(incremental
+            .index
+            .chunks
+            .iter()
+            .any(|chunk| chunk.embedding_provider == "second-provider"));
+
+        restore_local_embeddings(&mut incremental.index);
+
+        let full_local =
+            index_workspace(&root, IndexOptions::default()).expect("full local index should build");
+        let semantic = |chunks: &[RagChunk]| {
+            chunks
+                .iter()
+                .map(|chunk| {
+                    (
+                        chunk.id.clone(),
+                        chunk.embedding.clone(),
+                        chunk.embedding_provider.clone(),
+                        chunk.embedding_model.clone(),
+                        chunk.embedding_dimensions,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            semantic(&incremental.index.chunks),
+            semantic(&full_local.chunks)
+        );
+    }
+
+    #[test]
+    fn cancellable_incremental_index_stops_during_workspace_scan() {
+        let root = temp_workspace();
+        fs::write(root.join("one.md"), "one").expect("first file should write");
+        fs::write(root.join("two.md"), "two").expect("second file should write");
+        let base = index_workspace(&root, IndexOptions::default()).expect("base should build");
+        let mut checks = 0;
+
+        let error =
+            index_workspace_reusing_cancellable(&root, IndexOptions::default(), &base, || {
+                checks += 1;
+                checks >= 3
+            })
+            .expect_err("incremental index should be cancelled");
+
+        assert_eq!(error.message, RAG_INDEX_CANCELLED);
     }
 
     #[test]

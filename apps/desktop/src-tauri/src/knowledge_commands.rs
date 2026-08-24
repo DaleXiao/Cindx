@@ -1,8 +1,9 @@
 use super::*;
 use crate::knowledge_generation_runtime::{
-    build_and_publish_knowledge_generation_with_commit,
+    build_and_publish_knowledge_generation_with_commit, open_active_knowledge_adapter,
     with_workspace_knowledge_index_lock_cancellable, PublishedKnowledgeGeneration,
 };
+use crate::knowledge_runtime::rag_index_profile_matches_config;
 
 #[tauri::command]
 pub(crate) fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
@@ -102,30 +103,19 @@ pub(crate) fn index_workspace_with_cloud_fallback(
     embedder: &mut impl RagEmbedder,
     configured_model: &str,
 ) -> Result<(RagIndex, String, String, Option<String>), RagError> {
-    let mut index = index_workspace(root, options)?;
-    match apply_embeddings_to_index_cancellable(&mut index, embedder, || false) {
-        Ok(()) => {
-            let model = index
-                .chunks
-                .first()
-                .map(|chunk| chunk.embedding_model.clone())
-                .unwrap_or_else(|| configured_model.to_string());
-            Ok((index, "cloud".to_string(), model, None))
-        }
-        Err(cloud_error) => {
-            let model = index
-                .chunks
-                .first()
-                .map(|chunk| chunk.embedding_model.clone())
-                .unwrap_or_else(|| "local-hash".to_string());
-            Ok((
-                index,
-                "local-fallback".to_string(),
-                model,
-                Some(cloud_error.to_string()),
-            ))
-        }
-    }
+    let empty_base = RagIndex {
+        chunks: Vec::new(),
+        stats: RagIndexStats::default(),
+    };
+    index_workspace_with_cloud_fallback_cancellable(
+        root,
+        options,
+        &empty_base,
+        embedder,
+        configured_model,
+        || false,
+    )
+    .map_err(RagError::new)
 }
 
 #[tauri::command]
@@ -170,6 +160,19 @@ fn index_workspace_rag_operation(
             || {
                 rag_operation_checkpoint(cancellation)?;
                 progress.advance("indexing", 0, "Indexing workspace knowledge");
+                // Incremental rebuild: reuse the active generation's chunks
+                // and embeddings for unchanged files when the embedding
+                // profile still matches; a profile change re-embeds the whole
+                // workspace.
+                let reuse_base = match open_active_knowledge_adapter(&root) {
+                    Ok(adapter) if rag_index_profile_matches_config(&adapter, &config) => {
+                        adapter.index().clone()
+                    }
+                    _ => RagIndex {
+                        chunks: Vec::new(),
+                        stats: RagIndexStats::default(),
+                    },
+                };
                 let (index, backend, model, fallback_error) = if config.is_ready() {
                     let configured_model = config.model_for_role(&ModelRole::Embedder);
                     let mut embedder = CloudRagEmbedder {
@@ -181,15 +184,20 @@ fn index_workspace_rag_operation(
                     index_workspace_with_cloud_fallback_cancellable(
                         &root,
                         IndexOptions::default(),
+                        &reuse_base,
                         &mut embedder,
                         &configured_model,
                         || cancellation.should_cancel(),
                     )?
                 } else {
-                    let index = index_workspace_cancellable(&root, IndexOptions::default(), || {
-                        cancellation.should_cancel()
-                    })
-                    .map_err(rag_index_error_for_agent)?;
+                    let index = index_workspace_reusing_cancellable(
+                        &root,
+                        IndexOptions::default(),
+                        &reuse_base,
+                        || cancellation.should_cancel(),
+                    )
+                    .map_err(rag_index_error_for_agent)?
+                    .index;
                     let model = index
                         .chunks
                         .first()

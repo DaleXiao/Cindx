@@ -171,6 +171,19 @@ fn prepare_parallel_tool_batch(
     Ok(Some(prepared))
 }
 
+/// Certifies that every prepared call is a permissionless read-only tool
+/// invocation, which is the exact admission contract the run-control batch
+/// reservation relaxes for. The stricter parallel batch contract already
+/// implies it; this re-check keeps the flag honest if the contract widens.
+fn parallel_batch_is_permissionless_read_only(
+    registry: &ToolRegistry,
+    prepared: &[PreparedParallelToolCall],
+) -> bool {
+    prepared
+        .iter()
+        .all(|item| registry.permissionless_read_tool(&item.invocation).is_ok())
+}
+
 fn run_parallel_tool_bodies(
     registry: &ToolRegistry,
     cancellation: &Arc<AgentRunControl>,
@@ -275,7 +288,13 @@ fn execute_prepared_parallel_tool_batch(
             )
         })
         .collect::<Vec<_>>();
-    match cancellation.begin_tool_call_batch_with_epoch(epoch_lease, scope, &admission) {
+    let permissionless_read_only = parallel_batch_is_permissionless_read_only(registry, &prepared);
+    match cancellation.begin_tool_call_batch_with_epoch(
+        epoch_lease,
+        scope,
+        &admission,
+        permissionless_read_only,
+    ) {
         agent_runtime::RunToolCallBatchStart::Started { .. } => {}
         agent_runtime::RunToolCallBatchStart::SerialRequired => return Ok(None),
         agent_runtime::RunToolCallBatchStart::RestartAfterSteer

@@ -41,6 +41,170 @@ fn workspace_index_falls_back_to_local_embeddings_when_cloud_fails() {
 }
 
 #[test]
+fn incremental_workspace_index_reuses_embeddings_for_unchanged_files() {
+    struct RecordingEmbedder {
+        provider: String,
+        embedded_texts: Vec<String>,
+    }
+
+    impl RagEmbedder for RecordingEmbedder {
+        fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+            self.embedded_texts.extend(texts.iter().cloned());
+            Ok(EmbeddingBatch {
+                provider: self.provider.clone(),
+                model: "test-embedding".to_string(),
+                vectors: texts
+                    .iter()
+                    .map(|text| vec![text.len() as f32, 1.0])
+                    .collect(),
+            })
+        }
+    }
+
+    let root = temp_test_root("phase7-incremental-reuse");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+    fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+    let empty_base = RagIndex {
+        chunks: Vec::new(),
+        stats: RagIndexStats::default(),
+    };
+    let mut first_embedder = RecordingEmbedder {
+        provider: "first-cloud".to_string(),
+        embedded_texts: Vec::new(),
+    };
+    let (base, backend, _, _) = index_workspace_with_cloud_fallback_cancellable(
+        &root,
+        IndexOptions::default(),
+        &empty_base,
+        &mut first_embedder,
+        "test-embedding",
+        || false,
+    )
+    .expect("base index should build");
+    assert_eq!(backend, "cloud");
+    assert_eq!(first_embedder.embedded_texts.len(), 2);
+    let base_b = base
+        .chunks
+        .iter()
+        .find(|chunk| chunk.path == "b.md")
+        .cloned()
+        .expect("b chunk should exist");
+
+    fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
+    let mut second_embedder = RecordingEmbedder {
+        provider: "second-cloud".to_string(),
+        embedded_texts: Vec::new(),
+    };
+    let (incremental, backend, _, _) = index_workspace_with_cloud_fallback_cancellable(
+        &root,
+        IndexOptions::default(),
+        &base,
+        &mut second_embedder,
+        "test-embedding",
+        || false,
+    )
+    .expect("incremental index should build");
+
+    assert_eq!(backend, "cloud");
+    assert_eq!(
+        second_embedder.embedded_texts,
+        vec!["alpha evidence lines extended".to_string()]
+    );
+    let reused_b = incremental
+        .chunks
+        .iter()
+        .find(|chunk| chunk.path == "b.md")
+        .expect("b chunk should remain");
+    assert_eq!(reused_b, &base_b);
+    let updated_a = incremental
+        .chunks
+        .iter()
+        .find(|chunk| chunk.path == "a.md")
+        .expect("a chunk should remain");
+    assert_eq!(updated_a.embedding_provider, "second-cloud");
+}
+
+#[test]
+fn incremental_workspace_index_fallback_restores_the_local_profile() {
+    struct RecordingEmbedder;
+
+    impl RagEmbedder for RecordingEmbedder {
+        fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+            Ok(EmbeddingBatch {
+                provider: "first-cloud".to_string(),
+                model: "test-embedding".to_string(),
+                vectors: texts.iter().map(|text| vec![text.len() as f32, 1.0]).collect(),
+            })
+        }
+    }
+
+    struct FailingEmbedder;
+
+    impl RagEmbedder for FailingEmbedder {
+        fn embed_texts(&mut self, _texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+            Err(RagError::new("configured embedding model is unavailable"))
+        }
+    }
+
+    let root = temp_test_root("phase7-incremental-fallback");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    fs::write(root.join("a.md"), "alpha evidence lines").expect("a should write");
+    fs::write(root.join("b.md"), "bravo evidence lines").expect("b should write");
+    let empty_base = RagIndex {
+        chunks: Vec::new(),
+        stats: RagIndexStats::default(),
+    };
+    let (base, backend, _, _) = index_workspace_with_cloud_fallback_cancellable(
+        &root,
+        IndexOptions::default(),
+        &empty_base,
+        &mut RecordingEmbedder,
+        "test-embedding",
+        || false,
+    )
+    .expect("base index should build");
+    assert_eq!(backend, "cloud");
+
+    fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
+    let (fallback, backend, model, fallback_error) = index_workspace_with_cloud_fallback_cancellable(
+        &root,
+        IndexOptions::default(),
+        &base,
+        &mut FailingEmbedder,
+        "test-embedding",
+        || false,
+    )
+    .expect("local fallback should build the index");
+
+    assert_eq!(backend, "local-fallback");
+    assert_eq!(
+        fallback_error.as_deref(),
+        Some("configured embedding model is unavailable")
+    );
+    assert!(model.starts_with("local-hash-"));
+    assert_eq!(fallback.chunks.len(), 2);
+    assert!(fallback
+        .chunks
+        .iter()
+        .all(|chunk| chunk.embedding_provider == "local"));
+    let full_local = index_workspace(&root, IndexOptions::default()).expect("local index");
+    let semantic = |chunk: &RagChunk| {
+        (
+            chunk.id.clone(),
+            chunk.embedding.clone(),
+            chunk.embedding_provider.clone(),
+            chunk.embedding_model.clone(),
+            chunk.embedding_dimensions,
+        )
+    };
+    assert_eq!(
+        fallback.chunks.iter().map(semantic).collect::<Vec<_>>(),
+        full_local.chunks.iter().map(semantic).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn phase7_state_reports_rag_stats() {
     let root = temp_test_root("phase7-stats");
     fs::create_dir_all(&root).expect("temp root should exist");

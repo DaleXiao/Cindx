@@ -232,6 +232,55 @@ fn batch_eligibility_rejects_serial_permissioned_and_unknown_members() {
 }
 
 #[test]
+fn batch_read_only_certification_rejects_permissioned_serial_and_unknown_members() {
+    let mut registry = ToolRegistry::new();
+    registry.register(fake_tool(
+        "test.read",
+        true,
+        false,
+        None,
+        Duration::ZERO,
+        "read",
+    ));
+    registry.register(fake_tool(
+        "test.read-two",
+        true,
+        false,
+        None,
+        Duration::ZERO,
+        "read two",
+    ));
+    registry.register(fake_tool(
+        "test.permissioned",
+        true,
+        true,
+        None,
+        Duration::ZERO,
+        "permissioned",
+    ));
+
+    let read_only = vec![
+        prepared_call("call-read", "test.read"),
+        prepared_call("call-read-two", "test.read-two"),
+    ];
+    assert!(parallel_batch_is_permissionless_read_only(
+        &registry,
+        &read_only
+    ));
+
+    for rejected_tool in ["test.permissioned", "test.unknown"] {
+        let mixed = vec![
+            prepared_call("call-read", "test.read"),
+            prepared_call("call-rejected", rejected_tool),
+        ];
+        assert!(
+            !parallel_batch_is_permissionless_read_only(&registry, &mixed),
+            "{rejected_tool} must keep the conservative serial fallback"
+        );
+    }
+}
+
+#[test]
 fn proposed_and_started_events_preserve_model_call_order() {
     let mut store = SqliteStore::in_memory().expect("test store should open");
     let prepared = vec![

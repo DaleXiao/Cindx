@@ -655,6 +655,7 @@ fn continuation_lease_is_exact_immediate_and_serial() {
             lease,
             "main",
             &[("process.poll", poll), ("file.read", "README.md")],
+            false,
         ),
         RunToolCallBatchStart::SerialRequired
     );
@@ -718,7 +719,7 @@ fn batch_tool_admission_reserves_ordered_calls_atomically() {
     let calls = [("file.read", "a"), ("file.list", "b"), ("file.search", "c")];
 
     assert_eq!(
-        control.begin_tool_call_batch_with_epoch(lease, "main", &calls),
+        control.begin_tool_call_batch_with_epoch(lease, "main", &calls, false),
         RunToolCallBatchStart::Started {
             first_call: 1,
             call_count: 3,
@@ -781,7 +782,8 @@ fn batch_tool_admission_without_budget_headroom_has_no_side_effects() {
         control.begin_tool_call_batch_with_epoch(
             lease,
             "main",
-            &[("file.read", "a"), ("file.read", "b"), ("file.read", "c"),],
+            &[("file.read", "a"), ("file.read", "b"), ("file.read", "c")],
+            false,
         ),
         RunToolCallBatchStart::SerialRequired
     );
@@ -804,6 +806,7 @@ fn batch_tool_admission_without_budget_headroom_has_no_side_effects() {
             lease,
             "main",
             &[("file.read", "a"), ("file.read", "b")],
+            false,
         ),
         RunToolCallBatchStart::Started {
             first_call: 1,
@@ -842,6 +845,7 @@ fn batch_tool_admission_repeated_action_fallback_has_no_side_effects() {
             lease,
             "main",
             &[("file.read", "a"), ("file.read", "b")],
+            false,
         ),
         RunToolCallBatchStart::SerialRequired
     );
@@ -886,6 +890,7 @@ fn batch_tool_admission_cycle_fallback_has_no_side_effects() {
             lease,
             "main",
             &[("file.read", "b"), ("file.read", "c")],
+            false,
         ),
         RunToolCallBatchStart::SerialRequired
     );
@@ -921,6 +926,7 @@ fn batch_tool_admission_preserves_stale_stop_and_terminal_semantics() {
             stale_lease,
             "main",
             &[("file.read", "a"), ("file.read", "b")],
+            false,
         ),
         RunToolCallBatchStart::RestartAfterSteer
     );
@@ -937,6 +943,7 @@ fn batch_tool_admission_preserves_stale_stop_and_terminal_semantics() {
             stopped_lease,
             "main",
             &[("file.read", "a"), ("file.read", "b")],
+            false,
         ),
         RunToolCallBatchStart::Stopped(RunStopReason::ProviderUnavailable)
     );
@@ -956,10 +963,281 @@ fn batch_tool_admission_preserves_stale_stop_and_terminal_semantics() {
             terminal_lease,
             "main",
             &[("file.read", "a"), ("file.read", "b")],
+            false,
         ),
         RunToolCallBatchStart::TerminalCommitted
     );
     assert_eq!(terminal_control.progress().tool_calls, 0);
+}
+
+#[test]
+fn read_only_batch_admission_honors_continuation_lease_without_serial_fallback() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 12;
+    budget.max_tool_calls = 12;
+    let control = AgentRunControl::with_budget(budget);
+    let poll = r#"{"process_id":"proc-a"}"#;
+    // Drive the repeat guard to its limit without an active lease, then grant
+    // the continuation lease for the exact same action.
+    assert!(control
+        .begin_tool_call("main", "process.poll", poll)
+        .is_ok());
+    control.finish_tool_call();
+    assert!(control
+        .begin_tool_call("main", "process.poll", poll)
+        .is_ok());
+    control.finish_tool_call();
+    assert!(control.record_tool_continuation_at(
+        0,
+        "main",
+        "process.poll",
+        poll,
+        &agent_core::ToolEffectSemantics::Idempotent,
+        Some(false),
+    ));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+
+    // Without the lease the first call would trip the repeat guard; the
+    // certified read-only batch honors the lease and admits the batch.
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("process.poll", poll), ("file.read", "README.md")],
+            true,
+        ),
+        RunToolCallBatchStart::Started {
+            first_call: 3,
+            call_count: 2,
+        }
+    );
+    assert_eq!(control.progress().tool_calls, 4);
+    let state = control.state.lock().expect("run control state should lock");
+    // The second call mismatched the lease and cleared it; only that call
+    // entered the repeated-action history.
+    assert!(!state.continuation_actions.contains_key("main"));
+    assert_eq!(
+        state.action_history.get("main"),
+        Some(&(fingerprint(&("file.read", "README.md")), 1))
+    );
+    assert_eq!(state.active_tool_calls, 2);
+    drop(state);
+    control.finish_tool_call();
+    control.finish_tool_call();
+}
+
+#[test]
+fn read_only_batch_admission_clears_continuation_lease_on_first_mismatch() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 12;
+    budget.max_tool_calls = 12;
+    let control = AgentRunControl::with_budget(budget);
+    let poll = r#"{"process_id":"proc-a"}"#;
+    assert!(control
+        .begin_tool_call("main", "process.poll", poll)
+        .is_ok());
+    control.finish_tool_call();
+    assert!(control.record_tool_continuation_at(
+        0,
+        "main",
+        "process.poll",
+        poll,
+        &agent_core::ToolEffectSemantics::Idempotent,
+        Some(false),
+    ));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "README.md"), ("file.list", ".")],
+            true,
+        ),
+        RunToolCallBatchStart::Started {
+            first_call: 2,
+            call_count: 2,
+        }
+    );
+    let state = control.state.lock().expect("run control state should lock");
+    assert!(!state.continuation_actions.contains_key("main"));
+}
+
+#[test]
+fn read_only_batch_admission_extends_budget_like_the_serial_path() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 2;
+    budget.max_tool_calls = 4;
+    budget.tool_calls_per_extension = 1;
+    let control = AgentRunControl::with_budget(budget);
+    assert!(record_test_goal_delta(
+        &control,
+        "read-only-batch-extension"
+    ));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "a"), ("file.list", "b"), ("file.search", "c")],
+            true,
+        ),
+        RunToolCallBatchStart::Started {
+            first_call: 1,
+            call_count: 3,
+        }
+    );
+    let progress = control.progress();
+    assert_eq!(progress.tool_calls, 3);
+    assert_eq!(progress.tool_call_limit, 3);
+    assert_eq!(progress.budget_extensions, 1);
+
+    let conservative = AgentRunControl::with_budget(budget);
+    assert!(record_test_goal_delta(
+        &conservative,
+        "read-only-batch-extension"
+    ));
+    let conservative_lease = match conservative.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(
+        conservative.begin_tool_call_batch_with_epoch(
+            conservative_lease,
+            "main",
+            &[("file.read", "a"), ("file.list", "b"), ("file.search", "c")],
+            false,
+        ),
+        RunToolCallBatchStart::SerialRequired
+    );
+    let conservative_progress = conservative.progress();
+    assert_eq!(conservative_progress.tool_calls, 0);
+    assert_eq!(conservative_progress.tool_call_limit, 2);
+    assert_eq!(conservative_progress.budget_extensions, 0);
+}
+
+#[test]
+fn read_only_batch_admission_stops_on_exhausted_tool_budget() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 2;
+    budget.max_tool_calls = 2;
+    let control = AgentRunControl::with_budget(budget);
+    assert!(record_test_goal_delta(
+        &control,
+        "read-only-batch-exhausted"
+    ));
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "a"), ("file.list", "b"), ("file.search", "c")],
+            true,
+        ),
+        RunToolCallBatchStart::Stopped(RunStopReason::ToolCallBudgetExceeded)
+    );
+    assert_eq!(
+        control.stop_reason(),
+        Some(RunStopReason::ToolCallBudgetExceeded)
+    );
+    assert_eq!(control.progress().tool_calls, 0);
+    assert_eq!(control.progress().budget_extensions, 0);
+}
+
+#[test]
+fn read_only_batch_admission_stops_on_repeated_action_like_the_serial_path() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 10;
+    budget.max_tool_calls = 10;
+    let control = AgentRunControl::with_budget(budget);
+    assert_eq!(control.begin_tool_call("main", "file.read", "a"), Ok(1));
+    control.finish_tool_call();
+    assert_eq!(control.begin_tool_call("main", "file.read", "a"), Ok(2));
+    control.finish_tool_call();
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b")],
+            true,
+        ),
+        RunToolCallBatchStart::Stopped(RunStopReason::RepeatedAction)
+    );
+    assert_eq!(control.stop_reason(), Some(RunStopReason::RepeatedAction));
+    assert_eq!(control.progress().tool_calls, 2);
+}
+
+#[test]
+fn read_only_batch_admission_stops_on_repeated_action_cycle() {
+    let mut budget = test_budget();
+    budget.initial_tool_calls = 12;
+    budget.max_tool_calls = 12;
+    let control = AgentRunControl::with_budget(budget);
+    for input in ["a", "b", "a", "b", "a"] {
+        assert!(control.begin_tool_call("main", "file.read", input).is_ok());
+        control.finish_tool_call();
+    }
+    let lease = match control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+
+    assert_eq!(
+        control.begin_tool_call_batch_with_epoch(
+            lease,
+            "main",
+            &[("file.read", "b"), ("file.read", "c")],
+            true,
+        ),
+        RunToolCallBatchStart::Stopped(RunStopReason::RepeatedAction)
+    );
+    assert_eq!(control.stop_reason(), Some(RunStopReason::RepeatedAction));
+    assert_eq!(control.progress().tool_calls, 5);
+}
+
+#[test]
+fn read_only_batch_admission_still_requires_the_current_epoch() {
+    let stale_control = AgentRunControl::new("pro");
+    let stale_lease = match stale_control.execution_epoch_lease() {
+        RunEpochLeaseOutcome::Acquired(lease) => lease,
+        outcome => panic!("execution lease unavailable: {outcome:?}"),
+    };
+    assert_eq!(stale_control.request_steer("new-objective"), Ok(true));
+    assert!(matches!(
+        stale_control
+            .commit_pending_steers_with(|_| Ok::<_, ()>(()))
+            .expect("steer application should succeed"),
+        RunSteerBatchCommit::Committed { .. }
+    ));
+    assert_eq!(
+        stale_control.begin_tool_call_batch_with_epoch(
+            stale_lease,
+            "main",
+            &[("file.read", "a"), ("file.read", "b")],
+            true,
+        ),
+        RunToolCallBatchStart::RestartAfterSteer
+    );
+    assert_eq!(stale_control.progress().tool_calls, 0);
 }
 
 #[test]
@@ -2835,6 +3113,7 @@ fn run_telemetry_counters_pair_batch_starts_with_per_call_finishes() {
             ("file.read", "{\"path\":\"a\"}"),
             ("file.read", "{\"path\":\"b\"}"),
         ],
+        false,
     );
     assert!(matches!(
         batch,

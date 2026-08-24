@@ -34,6 +34,15 @@ The desktop app currently includes:
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed
   from opencode/deepseek-harness), and the loop never executes a tool-call batch that
   the provider truncated at its output limit (borrowed from pi), re-asking instead.
+- A tool-call batch whose calls are all permissionless read-only tools (the
+  registry `permissionless_read_tool` predicate shared with the subagent and
+  plan-mode whitelists) is admitted for parallel execution without the
+  conservative serial fallback: a pending continuation lease is honored inline,
+  the serial path's checkpoint-driven budget extension may cover the batch, and
+  an exhausted budget or a tripped repeated-action guard stops the run with the
+  same reason the serial path would record. A batch mixing in any
+  permission-requiring or non-read-only tool keeps the serial fallback; budget
+  accounting, steer-epoch validation, and tool telemetry pairing are unchanged.
 - Long runs keep a rolling summary injected into the trusted runtime context so the
   model retains the objective across compaction. Only transcripts already pressing on
   the context window (≥40% used) pay a model-generated summary
@@ -347,6 +356,14 @@ Tool visibility does not grant authority.
 - Workspace knowledge and project memory are separate systems. Knowledge comes
   from indexed files and graph/vector adapters. Memory comes from eligible run
   evidence and user requirements.
+- Workspace knowledge re-indexing is incremental: files whose content hash is
+  unchanged keep their previous chunks and embeddings (only their
+  modification-time freshness markers are refreshed), only new or
+  content-changed files are re-chunked and embedded, and deleted files' chunks
+  are dropped. The merged index is content-equivalent to a full rebuild of the
+  same workspace, and the atomic generation publish (file snapshot, LanceDB
+  export and database, graph store) is unchanged; a changed embedding profile
+  discards the reuse base so the whole workspace is re-embedded.
 - Memory recall combines lexical and semantic evidence with trust, utility,
   deduplication, supersession, conflict suppression, and session diversity.
 - Memory is not append-only. Capacity retention protects pins and verified user

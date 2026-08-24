@@ -262,16 +262,7 @@ pub(crate) fn ensure_workspace_knowledge_index(
             let snapshot_paths = knowledge_paths_for_rag_index(adapter.path());
             let embedding_profile_matches = (adapter.chunks().is_empty()
                 && snapshot_paths.generation_id.is_some())
-                || adapter
-                    .embedding_profile()
-                    .is_some_and(|(provider, model, _)| {
-                        if config.is_ready() {
-                            provider != "local"
-                                && model == config.model_for_role(&ModelRole::Embedder)
-                        } else {
-                            provider == "local"
-                        }
-                    });
+                || rag_index_profile_matches_config(adapter, config);
             let index_is_fresh = embedding_profile_matches
                 && workspace_index_is_fresh(
                     workspace_root,
@@ -284,6 +275,19 @@ pub(crate) fn ensure_workspace_knowledge_index(
                 return Ok(None);
             }
 
+            // Incremental rebuild: unchanged files keep their existing chunks
+            // and embeddings; only files whose content hash changed are
+            // re-chunked and re-embedded. A mismatched embedding profile
+            // discards the reuse base so the whole workspace is re-embedded.
+            let empty_reuse_base = RagIndex {
+                chunks: Vec::new(),
+                stats: RagIndexStats::default(),
+            };
+            let reuse_base = if embedding_profile_matches {
+                adapter.index()
+            } else {
+                &empty_reuse_base
+            };
             let (index, embedding_backend, embedding_model, fallback_error) = if index_is_fresh {
                 let (backend, model) = adapter
                     .embedding_profile()
@@ -306,15 +310,20 @@ pub(crate) fn ensure_workspace_knowledge_index(
                 index_workspace_with_cloud_fallback_cancellable(
                     workspace_root,
                     options,
+                    reuse_base,
                     &mut embedder,
                     &configured_model,
                     || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
                 )?
             } else {
-                let index = index_workspace_cancellable(workspace_root, options, || {
-                    knowledge_preparation_should_interrupt(cancellation, expected_epoch)
-                })
-                .map_err(rag_index_error_for_agent)?;
+                let index = index_workspace_reusing_cancellable(
+                    workspace_root,
+                    options,
+                    reuse_base,
+                    || knowledge_preparation_should_interrupt(cancellation, expected_epoch),
+                )
+                .map_err(rag_index_error_for_agent)?
+                .index;
                 let model = index
                     .chunks
                     .first()
@@ -355,6 +364,25 @@ fn knowledge_snapshot_is_complete(adapter: &FileRagAdapter) -> bool {
         && (!adapter.chunks().is_empty() || paths.generation_id.is_some())
 }
 
+/// A previous workspace index can seed an incremental rebuild only when its
+/// embedding profile matches what the current configuration would produce:
+/// the configured cloud model when a provider is ready, or the deterministic
+/// local profile otherwise.
+pub(crate) fn rag_index_profile_matches_config(
+    adapter: &FileRagAdapter,
+    config: &ProviderConfig,
+) -> bool {
+    adapter
+        .embedding_profile()
+        .is_some_and(|(provider, model, _)| {
+            if config.is_ready() {
+                provider != "local" && model == config.model_for_role(&ModelRole::Embedder)
+            } else {
+                provider == "local"
+            }
+        })
+}
+
 pub(crate) fn rag_index_error_for_agent(error: RagError) -> String {
     if error.message == RAG_INDEX_CANCELLED {
         MODEL_REQUEST_CANCELLED.to_string()
@@ -363,17 +391,26 @@ pub(crate) fn rag_index_error_for_agent(error: RagError) -> String {
     }
 }
 
+/// Incrementally re-indexes the workspace against `previous` and applies
+/// cloud embeddings only to freshly chunked files, reusing the previous
+/// embeddings for files whose content hash is unchanged. Callers must gate
+/// `previous` on `rag_index_profile_matches_config`. A cloud failure falls
+/// back to the deterministic local profile for every chunk so the fallback
+/// index stays homogeneous.
 pub(crate) fn index_workspace_with_cloud_fallback_cancellable(
     root: &Path,
     options: IndexOptions,
+    previous: &RagIndex,
     embedder: &mut impl RagEmbedder,
     configured_model: &str,
     mut should_cancel: impl FnMut() -> bool,
 ) -> Result<(RagIndex, String, String, Option<String>), String> {
-    let mut index = index_workspace_cancellable(root, options, &mut should_cancel)
-        .map_err(rag_index_error_for_agent)?;
-    match apply_embeddings_to_index_cancellable(&mut index, embedder, &mut should_cancel) {
-        Ok(()) => {
+    let mut index = index_workspace_reusing_cancellable(root, options, previous, &mut should_cancel)
+        .map_err(rag_index_error_for_agent)?
+        .index;
+    match apply_embeddings_to_placeholder_chunks_cancellable(&mut index, embedder, &mut should_cancel)
+    {
+        Ok(_) => {
             let model = index
                 .chunks
                 .first()
@@ -385,6 +422,7 @@ pub(crate) fn index_workspace_with_cloud_fallback_cancellable(
             Err(MODEL_REQUEST_CANCELLED.to_string())
         }
         Err(cloud_error) => {
+            restore_local_embeddings(&mut index);
             let model = index
                 .chunks
                 .first()
