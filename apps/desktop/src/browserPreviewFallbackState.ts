@@ -160,6 +160,7 @@ return {
     imageEndpoint: "",
     voiceModel: "gpt-realtime-2.1",
     collaborationPolicy: "auto_router",
+    directJudgeFailClosed: false,
     contextWindowTokens: 1047576,
     agentSystemPrompt:
       "You are Cindx, a desktop-first assistant. Work carefully, be direct, and ask for clarification when the task is ambiguous.",

@@ -112,6 +112,24 @@ fn shadow_fitness_fails_closed_on_unknown_disposition() {
 }
 
 #[test]
+fn shadow_fitness_projects_fail_closed_block_as_judged_failure() {
+    let state = shadow_runtime_with_verified_mutation();
+    let signal = project_direct_judge_shadow_signal(
+        &state,
+        "direct_judge_fail_closed_blocked",
+        "postcondition_verified",
+    )
+    .expect("fail-closed block must stay on the shadow journal");
+    assert_eq!(signal.reward_bps, Some(0));
+    assert_eq!(
+        signal.family,
+        agent_application::DirectJudgeDispositionFamilyV1::ReviseExhausted
+    );
+    assert!(signal.repair_round_used);
+    assert!(!signal.censored());
+}
+
+#[test]
 fn shadow_fitness_journal_bounds_growth_and_reloads_for_summary() {
     let path = shadow_journal_path();
     for index in 0..(DIRECT_JUDGE_SHADOW_JOURNAL_CAPACITY + 5) {

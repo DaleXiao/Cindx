@@ -335,6 +335,8 @@ export type ProviderConfigState = {
   imageEndpoint: string;
   voiceModel: string;
   collaborationPolicy: string;
+  /** Fail-closed delivery judge: a judged-but-unresolved mutation-bearing run fails instead of delivering the unverified candidate. */
+  directJudgeFailClosed: boolean;
   contextWindowTokens: number;
   agentSystemPrompt: string;
   ready: boolean;
@@ -364,6 +366,8 @@ export type ProviderConfigInput = {
   imageEndpoint: string;
   voiceModel: string;
   collaborationPolicy: string;
+  /** Fail-closed delivery judge toggle; omitted by older clients means fail-open. */
+  directJudgeFailClosed: boolean;
   contextWindowTokens: number;
   agentSystemPrompt: string;
   /** The models the user enabled in Settings; the composer offers exactly these. Empty = all catalog models. */

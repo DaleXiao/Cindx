@@ -255,7 +255,13 @@ repair round over the recorded findings and one recheck; a repaired answer is
 re-grounded against the task contract before replacing the candidate. Judge
 unavailability, inconclusive receipts, empty or ungrounded repairs, and
 fallback candidates retain the original answer and record a
-`direct_judge_disposition` instead of blocking delivery. Fast execution is
+`direct_judge_disposition` instead of blocking delivery. The persisted
+`direct_judge_fail_closed` provider setting (default off) diverts the two
+judged quality failures — an ungrounded repair or a recheck still requiring
+revision — to the existing failure terminal for runs with at least one
+successful workspace mutation, recording a
+`direct_judge_fail_closed_blocked` disposition; infrastructure failures stay
+fail-open. Fast execution is
 never judged.
 
 The completion transaction persists terminal event, result, artifacts,

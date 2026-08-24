@@ -93,6 +93,11 @@ pub(crate) struct ProviderConfig {
     pub(crate) voice_model: String,
     pub(crate) auth_verified_at_ms: Option<u64>,
     pub(crate) collaboration_policy: String,
+    /// When true, a mutation-bearing Auto/Pro run whose delivery judge never
+    /// reached a pass (recheck still revising, or the repair could not be
+    /// grounded) fails closed instead of delivering the unverified candidate.
+    /// Defaults false: the judge gate stays fail-open.
+    pub(crate) direct_judge_fail_closed: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     /// The models the user enabled in Settings; the composer offers exactly
@@ -155,6 +160,7 @@ impl Default for ProviderConfig {
             voice_model: defaults.voice.clone(),
             auth_verified_at_ms: None,
             collaboration_policy: "auto_router".to_string(),
+            direct_judge_fail_closed: false,
             context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),
             enabled_models: Vec::new(),

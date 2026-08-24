@@ -126,6 +126,7 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
         }
         _ => "auto_router".to_string(),
     };
+    config.direct_judge_fail_closed = input.direct_judge_fail_closed;
     config.context_window_tokens = if input.context_window_tokens < 4_096 {
         defaults
             .map(|value| value.context_window_tokens)
@@ -232,6 +233,7 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
                 config.auth_verified_at_ms = value.parse::<u64>().ok().filter(|value| *value > 0)
             }
             "collaboration_policy" => config.collaboration_policy = value.to_string(),
+            "direct_judge_fail_closed" => config.direct_judge_fail_closed = value.trim() == "true",
             "context_window_tokens" => {
                 config.context_window_tokens = value.parse().unwrap_or(128_000)
             }
@@ -370,7 +372,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
 
 pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
     format!(
-        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
+        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ndirect_judge_fail_closed={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
         sanitize_config_value(&config.provider_id),
         sanitize_config_value(&config.provider_resource),
         sanitize_config_value(&config.base_url),
@@ -390,6 +392,7 @@ pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
         sanitize_config_value(&config.voice_model),
         config.auth_verified_at_ms.unwrap_or_default(),
         sanitize_config_value(&config.collaboration_policy),
+        config.direct_judge_fail_closed,
         config.context_window_tokens,
         config_hex_encode(&config.agent_system_prompt),
         config.enabled_models.join(",")

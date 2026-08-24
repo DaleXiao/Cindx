@@ -842,7 +842,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["agent_recovery_service.rs", 550],
   ["agent_runtime_snapshot.rs", 220],
   ["background_work_runtime.rs", 80],
-  ["configuration_persistence.rs", 400],
+  ["configuration_persistence.rs", 402],
   ["event_persistence.rs", 180],
   ["event_security.rs", 500],
   ["permission_service.rs", 220],

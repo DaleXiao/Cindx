@@ -436,6 +436,8 @@ pub(crate) struct ProviderConfigState {
     pub(crate) image_endpoint: String,
     pub(crate) voice_model: String,
     pub(crate) collaboration_policy: String,
+    /// Mirrors `ProviderConfig::direct_judge_fail_closed` for the Settings toggle.
+    pub(crate) direct_judge_fail_closed: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     pub(crate) ready: bool,
@@ -915,6 +917,9 @@ pub(crate) struct ProviderConfigInput {
     #[serde(default)]
     pub(crate) voice_model: String,
     pub(crate) collaboration_policy: String,
+    /// Optional fail-closed delivery-judge toggle; absent means fail-open.
+    #[serde(default)]
+    pub(crate) direct_judge_fail_closed: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     /// The models the user enabled in Settings; the composer offers exactly

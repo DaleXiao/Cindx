@@ -18,6 +18,9 @@ pub const DIRECT_JUDGE_DISPOSITION_INCONCLUSIVE: &str = "direct_judge_inconclusi
 pub const DIRECT_JUDGE_DISPOSITION_REPAIR_UNAVAILABLE: &str = "direct_judge_repair_unavailable";
 pub const DIRECT_JUDGE_DISPOSITION_REPAIR_EMPTY: &str = "direct_judge_repair_empty";
 pub const DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED: &str = "direct_judge_repair_ungrounded";
+/// The judge required revision, the repair loop closed without a pass, and the
+/// run was configured fail-closed, so the candidate was not delivered.
+pub const DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED: &str = "direct_judge_fail_closed_blocked";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectJudgeOutcomeError(String);
@@ -281,7 +284,8 @@ pub fn disposition_family(
         DIRECT_JUDGE_DISPOSITION_PASSED | DIRECT_JUDGE_DISPOSITION_RECHECK_PASSED => {
             Ok(DirectJudgeDispositionFamilyV1::Passed)
         }
-        DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED => {
+        DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED
+        | DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED => {
             Ok(DirectJudgeDispositionFamilyV1::ReviseExhausted)
         }
         DIRECT_JUDGE_DISPOSITION_RECHECK_INCONCLUSIVE
@@ -310,6 +314,7 @@ pub fn disposition_used_repair_round(disposition: &str) -> bool {
             | DIRECT_JUDGE_DISPOSITION_REPAIR_UNAVAILABLE
             | DIRECT_JUDGE_DISPOSITION_REPAIR_EMPTY
             | DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED
+            | DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED
     )
 }
 
@@ -358,7 +363,7 @@ mod tests {
         }
     }
 
-    const ALL_DISPOSITIONS: [&str; 11] = [
+    const ALL_DISPOSITIONS: [&str; 12] = [
         DIRECT_JUDGE_DISPOSITION_PASSED,
         DIRECT_JUDGE_DISPOSITION_RECHECK_PASSED,
         DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
@@ -370,6 +375,7 @@ mod tests {
         DIRECT_JUDGE_DISPOSITION_REPAIR_UNAVAILABLE,
         DIRECT_JUDGE_DISPOSITION_REPAIR_EMPTY,
         DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED,
+        DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED,
     ];
 
     #[test]
@@ -416,6 +422,18 @@ mod tests {
         ))
         .expect("projects");
         assert_eq!(exhausted.reward_bps, Some(0));
+
+        let blocked = DirectJudgeOutcomeV1::from_completion_facts(&facts(
+            DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED,
+        ))
+        .expect("projects");
+        assert_eq!(blocked.reward_bps, Some(0));
+        assert_eq!(
+            blocked.family,
+            DirectJudgeDispositionFamilyV1::ReviseExhausted
+        );
+        assert!(blocked.reviewer_independent);
+        assert!(blocked.repair_round_used);
 
         for disposition in [
             DIRECT_JUDGE_DISPOSITION_UNAVAILABLE,

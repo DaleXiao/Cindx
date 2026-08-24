@@ -180,6 +180,7 @@
           "imageEndpoint": "",
           "voiceModel": "voice-contract",
           "collaborationPolicy": "auto_router",
+          "directJudgeFailClosed": false,
           "contextWindowTokens": 128000,
           "agentSystemPrompt": "Contract prompt",
           "ready": true,
@@ -206,6 +207,7 @@
           "imageEndpoint": "",
           "voiceModel": "",
           "collaborationPolicy": "single",
+          "directJudgeFailClosed": false,
           "contextWindowTokens": 4096,
           "agentSystemPrompt": "",
           "ready": false,
@@ -240,6 +242,7 @@
           "imageEndpoint": "",
           "voiceModel": "voice-contract",
           "collaborationPolicy": "auto_router",
+          "directJudgeFailClosed": true,
           "contextWindowTokens": 64000,
           "agentSystemPrompt": "Contract prompt",
           "enabledModels": []

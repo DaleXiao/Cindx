@@ -139,6 +139,7 @@ pub(crate) fn finalize_agent_completion(
             &receipt_sequences,
         )
         .map_err(|issue| format!("{} receipt validation failed: {issue:?}", delivery.label()))?;
+    let judged_basis_label = grounded_completion_basis_label(grounded_completion_receipt.basis);
     let (answer, mut grounded_completion_receipt, judge_disposition) =
         if delivery.used_fallback() || collaboration.is_some() {
             (
@@ -152,7 +153,7 @@ pub(crate) fn finalize_agent_completion(
                 receipt: grounded_completion_receipt,
                 already_persisted: false,
             };
-            let (judged, disposition) = crate::direct_judge_runtime::apply_direct_judge_gate(
+            match crate::direct_judge_runtime::apply_direct_judge_gate(
                 state,
                 config,
                 &runtime.task_id,
@@ -164,8 +165,65 @@ pub(crate) fn finalize_agent_completion(
                     .unwrap_or_default(),
                 prompt,
                 judge_candidate,
-            );
-            (judged.content, judged.receipt, disposition)
+            ) {
+                crate::direct_judge_runtime::DirectJudgeGateOutcome::Delivered(
+                    judged,
+                    disposition,
+                ) => (judged.content, judged.receipt, disposition),
+                crate::direct_judge_runtime::DirectJudgeGateOutcome::Blocked {
+                    disposition,
+                    message,
+                } => {
+                    // Fail-closed delivery: the judged candidate is withheld and
+                    // the run commits the ordinary failure terminal carrying the
+                    // verification failure and the judge findings.
+                    let mut blocked_context = run_context.clone();
+                    blocked_context
+                        .insert("direct_judge_disposition".to_string(), disposition.clone());
+                    crate::direct_judge_shadow_runtime::record_direct_judge_shadow_fitness(
+                        runtime,
+                        &disposition,
+                        judged_basis_label,
+                    );
+                    if streamed_output {
+                        emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
+                    }
+                    let failure = agent_runtime::AgentFailure::contract(
+                        "direct_judge_fail_closed",
+                        message.clone(),
+                    );
+                    return match crate::agent_failure_terminal_runtime::commit_agent_failure_terminal(
+                        state,
+                        runtime,
+                        &blocked_context,
+                        cancellation,
+                        epoch_lease,
+                        &failure,
+                        message,
+                    )? {
+                        crate::agent_failure_terminal_runtime::AgentFailureTerminalOutcome::Committed(
+                            agent_state,
+                        ) => Ok(AgentCompletionOutcome::Completed(agent_state)),
+                        crate::agent_failure_terminal_runtime::AgentFailureTerminalOutcome::RestartAfterSteer => {
+                            Ok(AgentCompletionOutcome::RestartAfterSteer)
+                        }
+                        crate::agent_failure_terminal_runtime::AgentFailureTerminalOutcome::Stopped => {
+                            Ok(AgentCompletionOutcome::Paused(
+                                pause_agent_loop_for_control_stop(
+                                    app,
+                                    state,
+                                    workspace_root,
+                                    runtime,
+                                    prompt,
+                                    &blocked_context,
+                                    collaboration,
+                                    cancellation,
+                                )?,
+                            ))
+                        }
+                    };
+                }
+            }
         };
     let mut direct_judge_run_context = run_context.clone();
     direct_judge_run_context.insert(

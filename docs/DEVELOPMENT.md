@@ -104,7 +104,7 @@ censoring; and isolation from production learning consumers.
 
 `direct-judge-outcome-contract` runs ten provider-free agent-application
 tests over the shadow outcome projection wired at terminal finalization and
-its review-admission contract. It pins all eleven recorded
+its review-admission contract. It pins all twelve recorded
 `direct_judge_disposition` values to their typed families with unknown values
 failing closed, checks the monotone integer reward rule (verified pass, pass
 with unverified mutations under a required verification policy, judged

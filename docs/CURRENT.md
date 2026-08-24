@@ -183,7 +183,17 @@ single-line receipt (`pass` or `revise` with findings). A `revise` verdict permi
 and one recheck; Fast runs and collaboration workflow products are never
 judged. Judge unavailability, inconclusive receipts, empty or ungrounded
 repairs, and fallback candidates keep the original answer and record a
-`direct_judge_disposition` instead of blocking delivery. At finalization the
+`direct_judge_disposition` instead of blocking delivery. An opt-in
+`direct_judge_fail_closed` provider setting (default off, exposed as a
+Settings toggle) narrows two of those outcomes for runs that recorded at
+least one successful workspace mutation: when the judge required revision and
+the repair could not be grounded, or the recheck still requires revision, the
+run commits the ordinary failure terminal with the judge findings instead of
+delivering the unverified candidate, and records a
+`direct_judge_fail_closed_blocked` disposition. Judge unavailability and
+inconclusive receipts stay fail-open on every configuration — they are
+infrastructure failures, not quality evidence — and mutation-free runs are
+unaffected. At finalization the
 disposition plus the task contract's mutation and post-mutation verification
 facts are projected into a typed shadow outcome receipt
 (`cindx.agent.direct-judge-outcome.v1`) and appended to a private

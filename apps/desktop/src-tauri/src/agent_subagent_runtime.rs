@@ -157,7 +157,9 @@ pub(crate) fn subagent_child_answer(
             role: ModelRole::Executor,
             messages: messages.clone(),
             tools: subagent_tools.to_vec(),
-            mode: ModelCallMode::NonStreaming,
+            // The child dispatches through `complete_streaming_cancellable`, so
+            // declare the streaming mode the transport actually runs.
+            mode: ModelCallMode::Streaming,
             metadata: Metadata::new(),
         };
         let mut should_cancel = || agent_run_should_stop(cancellation);
@@ -329,6 +331,7 @@ mod tests {
     struct ScriptedProvider {
         responses: Mutex<VecDeque<ModelResponse>>,
         calls: AtomicUsize,
+        modes: Mutex<Vec<ModelCallMode>>,
     }
 
     impl ScriptedProvider {
@@ -336,18 +339,23 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 calls: AtomicUsize::new(0),
+                modes: Mutex::new(Vec::new()),
             }
         }
 
         fn served(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
+
+        fn requested_modes(&self) -> Vec<ModelCallMode> {
+            self.modes.lock().expect("modes poisoned").clone()
+        }
     }
 
     impl StreamingModelProvider for ScriptedProvider {
         fn complete_streaming_cancellable(
             &self,
-            _request: ModelRequest,
+            request: ModelRequest,
             _on_delta: &mut dyn FnMut(&str),
             should_cancel: &mut dyn FnMut() -> bool,
         ) -> Result<ModelResponse, model_provider::ModelError> {
@@ -355,6 +363,10 @@ mod tests {
                 return Err(model_provider::ModelError::new("cancelled"));
             }
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.modes
+                .lock()
+                .expect("modes poisoned")
+                .push(request.mode.clone());
             self.responses
                 .lock()
                 .expect("scripted provider poisoned")
@@ -433,6 +445,33 @@ mod tests {
 
         assert_eq!(answer, "README.md:1 says line one");
         assert_eq!(provider.served(), 2);
+    }
+
+    #[test]
+    fn subagent_child_requests_streaming_mode() {
+        let (_workspace, registry, task_id) = fixture();
+        let provider = ScriptedProvider::new(vec![
+            tool_call_step(read_call("c1", "README.md")),
+            final_answer("README.md:1 says line one"),
+        ]);
+        let control = Arc::new(AgentRunControl::new("fast"));
+        let tools = subagent_tool_specs(&registry);
+
+        let (_description, answer) = subagent_child_answer(
+            &provider,
+            &delegation_input(),
+            &control,
+            &registry,
+            &tools,
+            &task_id,
+        );
+
+        assert_eq!(answer, "README.md:1 says line one");
+        assert_eq!(
+            provider.requested_modes(),
+            vec![ModelCallMode::Streaming, ModelCallMode::Streaming],
+            "every child model call must declare the streaming mode it dispatches through"
+        );
     }
 
     #[test]

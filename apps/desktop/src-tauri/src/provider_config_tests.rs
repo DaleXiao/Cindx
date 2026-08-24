@@ -32,6 +32,7 @@ fn provider_config_input_preserves_existing_key_when_blank() {
             image_endpoint: "https://images.example.test/v1".to_string(),
             voice_model: "gpt-realtime".to_string(),
             collaboration_policy: "auto_router".to_string(),
+            direct_judge_fail_closed: false,
             context_window_tokens: 128_000,
             agent_system_prompt: "Be concise.\nUse Chinese when asked.".to_string(),
             enabled_models: Vec::new(),
@@ -50,6 +51,28 @@ fn provider_config_input_preserves_existing_key_when_blank() {
     assert_eq!(config.image_model, "image-model-a");
     assert_eq!(config.image_endpoint, "https://images.example.test/v1");
     assert_eq!(config.voice_model, "gpt-realtime");
+}
+
+#[test]
+fn direct_judge_fail_closed_config_round_trip_defaults_off() {
+    // Legacy configs predate the key and must load fail-open.
+    let legacy = provider_config_from_text("base_url=https://example.test/v1\nmodel=base\n");
+    assert!(!legacy.direct_judge_fail_closed);
+    assert!(provider_config_text(&legacy).contains("direct_judge_fail_closed=false"));
+
+    let enabled = provider_config_from_text(
+        "base_url=https://example.test/v1\ndirect_judge_fail_closed=true\n",
+    );
+    assert!(enabled.direct_judge_fail_closed);
+    let reloaded = provider_config_from_text(&provider_config_text(&enabled));
+    assert!(reloaded.direct_judge_fail_closed);
+
+    let mut config = ProviderConfig::default();
+    assert!(!config.direct_judge_fail_closed);
+    let mut input = provider_input_from_config(&config);
+    input.direct_judge_fail_closed = true;
+    apply_provider_config_input(&mut config, input);
+    assert!(config.direct_judge_fail_closed);
 }
 
 #[test]

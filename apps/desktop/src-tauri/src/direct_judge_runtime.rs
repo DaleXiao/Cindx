@@ -13,6 +13,50 @@ pub(crate) struct DirectJudgePlan {
     pub(crate) prompt: String,
 }
 
+/// Result of the delivery-judge gate. `Delivered` carries the (possibly
+/// repaired) candidate and its recorded disposition; `Blocked` is the
+/// fail-closed exit: the run commits the ordinary failure terminal with the
+/// "verification failed + findings" message instead of delivering.
+pub(crate) enum DirectJudgeGateOutcome {
+    Delivered(GroundedFinalizerCandidate, String),
+    Blocked { disposition: String, message: String },
+}
+
+/// Fail-closed delivery decision for the judge gate. Only a judged quality
+/// failure on a mutation-bearing run blocks delivery: the recheck still
+/// required revision, or the judge required revision and the repair could not
+/// be grounded against the task contract. Judge unavailability, inconclusive
+/// receipts, and repair transport failures stay fail-open — they are
+/// infrastructure failures, not quality evidence.
+pub(crate) fn direct_judge_fail_closed_block(
+    fail_closed_enabled: bool,
+    successful_mutations: usize,
+    disposition: &str,
+    findings: &[String],
+) -> Option<String> {
+    if !fail_closed_enabled || successful_mutations == 0 {
+        return None;
+    }
+    let detail = match disposition {
+        agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED => {
+            "the judge still requires revision after the single repair round"
+        }
+        agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED => {
+            "the repair could not be grounded against the task contract"
+        }
+        _ => return None,
+    };
+    let findings_text = if findings.is_empty() {
+        "(no findings recorded)".to_string()
+    } else {
+        findings.join("; ")
+    };
+    Some(format!(
+        "Delivery verification failed: {detail}. The candidate answer was not delivered. \
+         Judge findings: {findings_text}"
+    ))
+}
+
 pub(crate) fn plan_direct_judge(
     effort: &str,
     verification_required: bool,
@@ -168,7 +212,7 @@ pub(crate) fn apply_direct_judge_gate(
     executor_model: &str,
     objective: &str,
     candidate: GroundedFinalizerCandidate,
-) -> (GroundedFinalizerCandidate, String) {
+) -> DirectJudgeGateOutcome {
     let plan = plan_direct_judge(
         &effort_from_run_context(run_context),
         verification_required_from_run_context(run_context),
@@ -178,7 +222,10 @@ pub(crate) fn apply_direct_judge_gate(
         &candidate.content,
     );
     let Some(plan) = plan else {
-        return (candidate, "direct_judge_not_eligible".to_string());
+        return DirectJudgeGateOutcome::Delivered(
+            candidate,
+            "direct_judge_not_eligible".to_string(),
+        );
     };
 
     let judge_output = match dispatch_direct_judge_call(
@@ -196,14 +243,24 @@ pub(crate) fn apply_direct_judge_gate(
         ),
     ) {
         Ok(output) => output,
-        Err(_) => return (candidate, "direct_judge_unavailable".to_string()),
+        Err(_) => {
+            return DirectJudgeGateOutcome::Delivered(
+                candidate,
+                "direct_judge_unavailable".to_string(),
+            )
+        }
     };
     let receipt = match resolve_direct_judge_output(&judge_output) {
         Ok(receipt) => receipt,
-        Err(_) => return (candidate, "direct_judge_inconclusive".to_string()),
+        Err(_) => {
+            return DirectJudgeGateOutcome::Delivered(
+                candidate,
+                "direct_judge_inconclusive".to_string(),
+            )
+        }
     };
     if receipt.verdict == agent_core::DirectJudgeVerdict::Pass {
-        return (candidate, "direct_judge_passed".to_string());
+        return DirectJudgeGateOutcome::Delivered(candidate, "direct_judge_passed".to_string());
     }
 
     let repair_prompt = format!(
@@ -223,10 +280,15 @@ pub(crate) fn apply_direct_judge_gate(
         repair_prompt,
     ) {
         Ok(output) => sanitize_assistant_content(&output),
-        Err(_) => return (candidate, "direct_judge_repair_unavailable".to_string()),
+        Err(_) => {
+            return DirectJudgeGateOutcome::Delivered(
+                candidate,
+                "direct_judge_repair_unavailable".to_string(),
+            )
+        }
     };
     if repaired_output.trim().is_empty() {
-        return (candidate, "direct_judge_repair_empty".to_string());
+        return DirectJudgeGateOutcome::Delivered(candidate, "direct_judge_repair_empty".to_string());
     }
     let Some(repaired_receipt) = ground_repaired_answer(
         runtime,
@@ -234,11 +296,26 @@ pub(crate) fn apply_direct_judge_gate(
         &repaired_output,
         &candidate.receipt.visible_evidence_sequences.clone(),
     ) else {
-        return (candidate, "direct_judge_repair_ungrounded".to_string());
+        if let Some(message) = direct_judge_fail_closed_block(
+            config.direct_judge_fail_closed,
+            runtime.task_contract.successful_mutations(),
+            agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED,
+            &receipt.findings,
+        ) {
+            return DirectJudgeGateOutcome::Blocked {
+                disposition: agent_application::DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED
+                    .to_string(),
+                message,
+            };
+        }
+        return DirectJudgeGateOutcome::Delivered(
+            candidate,
+            "direct_judge_repair_ungrounded".to_string(),
+        );
     };
 
     let recheck_prompt = direct_judge_prompt_with_facts(objective, &repaired_output, runtime);
-    let disposition = match dispatch_direct_judge_call(
+    let recheck = dispatch_direct_judge_call(
         state,
         config,
         task_id,
@@ -249,22 +326,47 @@ pub(crate) fn apply_direct_judge_gate(
         recheck_prompt,
     )
     .ok()
-    .and_then(|output| resolve_direct_judge_output(&output).ok())
-    .map(|recheck| match recheck.verdict {
-        agent_core::DirectJudgeVerdict::Pass => "direct_judge_recheck_passed".to_string(),
-        agent_core::DirectJudgeVerdict::Revise => "direct_judge_recheck_exhausted".to_string(),
-    }) {
-        Some(disposition) => disposition,
-        None => "direct_judge_recheck_inconclusive".to_string(),
+    .and_then(|output| resolve_direct_judge_output(&output).ok());
+    let repaired_candidate = GroundedFinalizerCandidate {
+        content: repaired_output,
+        receipt: repaired_receipt,
+        already_persisted: false,
     };
-    (
-        GroundedFinalizerCandidate {
-            content: repaired_output,
-            receipt: repaired_receipt,
-            already_persisted: false,
-        },
-        disposition,
-    )
+    match recheck {
+        Some(recheck) if recheck.verdict == agent_core::DirectJudgeVerdict::Pass => {
+            DirectJudgeGateOutcome::Delivered(
+                repaired_candidate,
+                "direct_judge_recheck_passed".to_string(),
+            )
+        }
+        Some(recheck) => {
+            let findings = if recheck.findings.is_empty() {
+                &receipt.findings
+            } else {
+                &recheck.findings
+            };
+            if let Some(message) = direct_judge_fail_closed_block(
+                config.direct_judge_fail_closed,
+                runtime.task_contract.successful_mutations(),
+                agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+                findings,
+            ) {
+                return DirectJudgeGateOutcome::Blocked {
+                    disposition: agent_application::DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED
+                        .to_string(),
+                    message,
+                };
+            }
+            DirectJudgeGateOutcome::Delivered(
+                repaired_candidate,
+                "direct_judge_recheck_exhausted".to_string(),
+            )
+        }
+        None => DirectJudgeGateOutcome::Delivered(
+            repaired_candidate,
+            "direct_judge_recheck_inconclusive".to_string(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +437,83 @@ mod tests {
             "{\"verification_required\":false}".to_string(),
         );
         assert!(!verification_required_from_run_context(&no_flag));
+    }
+
+    #[test]
+    fn direct_judge_fail_closed_defaults_off_and_stays_fail_open() {
+        // Default off: even a judged failure on a mutation-bearing run keeps
+        // the historical fail-open behavior.
+        for disposition in [
+            agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+            agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED,
+        ] {
+            assert!(
+                direct_judge_fail_closed_block(false, 2, disposition, &["gap".to_string()])
+                    .is_none(),
+                "{disposition} must stay fail-open when the toggle is off"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_judge_fail_closed_blocks_failed_recheck_on_mutation_runs() {
+        let message = direct_judge_fail_closed_block(
+            true,
+            1,
+            agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+            &["missing edge case".to_string()],
+        )
+        .expect("a failed recheck on a mutation run must block");
+        assert!(message.contains("not delivered"));
+        assert!(message.contains("missing edge case"));
+    }
+
+    #[test]
+    fn direct_judge_fail_closed_blocks_ungrounded_repair_on_mutation_runs() {
+        let message = direct_judge_fail_closed_block(
+            true,
+            3,
+            agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED,
+            &[],
+        )
+        .expect("an ungrounded repair on a mutation run must block");
+        assert!(message.contains("not delivered"));
+        assert!(message.contains("no findings recorded"));
+    }
+
+    #[test]
+    fn direct_judge_fail_closed_ignores_mutation_free_runs() {
+        for disposition in [
+            agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+            agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED,
+        ] {
+            assert!(
+                direct_judge_fail_closed_block(true, 0, disposition, &["gap".to_string()])
+                    .is_none(),
+                "{disposition} must stay fail-open without workspace mutations"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_judge_fail_closed_keeps_infrastructure_failures_fail_open() {
+        for disposition in [
+            agent_application::DIRECT_JUDGE_DISPOSITION_UNAVAILABLE,
+            agent_application::DIRECT_JUDGE_DISPOSITION_INCONCLUSIVE,
+            agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_INCONCLUSIVE,
+            agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_UNAVAILABLE,
+            agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_EMPTY,
+            agent_application::DIRECT_JUDGE_DISPOSITION_PASSED,
+            agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_PASSED,
+            agent_application::DIRECT_JUDGE_DISPOSITION_NOT_ELIGIBLE,
+            agent_application::DIRECT_JUDGE_DISPOSITION_NOT_APPLICABLE,
+        ] {
+            assert!(
+                direct_judge_fail_closed_block(true, 5, disposition, &["gap".to_string()])
+                    .is_none(),
+                "{disposition} is not a judged quality failure and must stay fail-open"
+            );
+        }
     }
 
     #[test]

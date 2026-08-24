@@ -129,6 +129,20 @@ export function SettingsModelsPanel({
               providerModels={providerModels}
               setProviderDraft={setProviderDraft}
             />
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                disabled={providerBusy}
+                checked={providerDraft.directJudgeFailClosed}
+                onChange={(event) =>
+                  setProviderDraft({
+                    ...providerDraft,
+                    directJudgeFailClosed: event.target.checked
+                  })
+                }
+              />
+              <span>Fail closed when the delivery judge rejects a file-changing answer</span>
+            </label>
             <ProviderModalityFields
               imageEndpointValidation={imageEndpointValidation}
               providerBusy={providerBusy}
