@@ -1,12 +1,17 @@
+mod batch;
 mod contract;
 mod receipt;
 mod undo;
 
 #[cfg(test)]
+mod batch_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod undo_tests;
+
+pub use self::batch::PatchBatchFileTool;
 
 use self::contract::{input_path, patch_spec, PatchIssue, PatchPlan, PatchRequest};
 use self::receipt::{failed_patch_result, successful_patch_result};

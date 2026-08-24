@@ -120,12 +120,13 @@ admission read path (`prompt_evolution_admission_runtime`) has been physically
 removed with the prompt-genome mechanism. It is included in `ci-contract`,
 `control-plane`, and `full`.
 
-`workspace-undo-contract` runs 10 provider-free desktop tests covering undo
+`workspace-undo-contract` runs 14 provider-free desktop tests covering undo
 entry projection from tool events, undo/redo of created, overwritten, and
-patched files, disclosure of a capture failure as a not-undoable entry,
-external-edit conflict blocking, LIFO ordering, and undo registry
-persistence. It is included in `quick`, `ci-contract`, `control-plane`, and
-`full`.
+patched files, `file.patch_batch` group projection plus whole-group undo/redo
+(with any externally edited member blocking the entire group restore),
+disclosure of a capture failure as a not-undoable entry, external-edit
+conflict blocking, LIFO ordering, and undo registry persistence. It is
+included in `quick`, `ci-contract`, `control-plane`, and `full`.
 
 `project-instructions-contract` runs 17 provider-free desktop tests covering
 bounded discovery of workspace instruction files (`AGENTS.md` from the

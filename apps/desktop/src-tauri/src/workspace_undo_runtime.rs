@@ -13,6 +13,13 @@ pub(crate) const WORKSPACE_UNDO_READ_MODEL_NAMESPACE: &str = "workspace-undo-v1"
 const WORKSPACE_UNDO_SCHEMA: &str = "cindx.workspace-undo-registry.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkspaceUndoFile {
+    pub(crate) path: String,
+    pub(crate) undo_before_path: Option<String>,
+    pub(crate) after_artifact_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkspaceUndoEntry {
     pub(crate) tool_call_id: String,
@@ -22,7 +29,14 @@ pub(crate) struct WorkspaceUndoEntry {
     pub(crate) action: String,
     pub(crate) undo_before_path: Option<String>,
     pub(crate) after_artifact_path: Option<String>,
+    /// A `file.patch_batch` call is one atomic group: every file shares the
+    /// single entry so one undo restores the whole batch. Empty for
+    /// single-file tools, which use the flat fields above.
+    #[serde(default)]
+    pub(crate) files: Vec<WorkspaceUndoFile>,
 }
+
+const MAX_UNDO_GROUP_FILES: usize = 16;
 
 #[derive(Debug)]
 pub(crate) enum WorkspaceUndoError {
@@ -56,7 +70,7 @@ pub(crate) fn project_workspace_undo_entries(events: &[Event]) -> Vec<WorkspaceU
         .filter_map(|event| {
             let metadata = &event.metadata;
             let tool = metadata.get("tool").map(String::as_str)?;
-            if tool != "file.write" && tool != "file.patch" {
+            if tool != "file.write" && tool != "file.patch" && tool != "file.patch_batch" {
                 return None;
             }
             if metadata.get("status").map(String::as_str) != Some("succeeded") {
@@ -64,6 +78,9 @@ pub(crate) fn project_workspace_undo_entries(events: &[Event]) -> Vec<WorkspaceU
             }
             let action = metadata.get("result_undo_action")?.clone();
             let tool_call_id = metadata.get("tool_call_id")?.clone();
+            if tool == "file.patch_batch" {
+                return project_batch_entry(metadata, tool_call_id, event.sequence, action);
+            }
             let path = metadata.get("result_path")?.clone();
             Some(WorkspaceUndoEntry {
                 tool_call_id,
@@ -73,11 +90,46 @@ pub(crate) fn project_workspace_undo_entries(events: &[Event]) -> Vec<WorkspaceU
                 action,
                 undo_before_path: metadata.get("result_undo_before_path").cloned(),
                 after_artifact_path: metadata.get("result_artifact_path").cloned(),
+                files: Vec::new(),
             })
         })
         .collect();
     entries.sort_by_key(|entry| entry.sequence);
     entries
+}
+
+/// A `file.patch_batch` call carries its per-file undo snapshots in the
+/// bounded `result_undo_group` JSON array. The whole batch projects as one
+/// entry so undo/redo rolls the group back together.
+fn project_batch_entry(
+    metadata: &agent_core::Metadata,
+    tool_call_id: String,
+    sequence: u64,
+    action: String,
+) -> Option<WorkspaceUndoEntry> {
+    let files: Vec<WorkspaceUndoFile> =
+        serde_json::from_str(metadata.get("result_undo_group")?).ok()?;
+    if files.is_empty()
+        || files.len() > MAX_UNDO_GROUP_FILES
+        || files.iter().any(|file| file.path.is_empty())
+    {
+        return None;
+    }
+    let path = metadata
+        .get("result_path")
+        .filter(|path| !path.is_empty())
+        .cloned()
+        .unwrap_or_else(|| files[0].path.clone());
+    Some(WorkspaceUndoEntry {
+        tool_call_id,
+        sequence,
+        tool: "file.patch_batch".to_string(),
+        path,
+        action,
+        undo_before_path: None,
+        after_artifact_path: None,
+        files,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,26 +193,37 @@ fn sha256_file(path: &Path) -> Result<String, WorkspaceUndoError> {
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }
 
-fn entry_target(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> std::path::PathBuf {
-    workspace_root.join(&entry.path)
+/// Project an entry to its per-file changes: one file for single-file tools,
+/// the recorded group for `file.patch_batch`.
+fn entry_files(entry: &WorkspaceUndoEntry) -> Vec<WorkspaceUndoFile> {
+    if entry.files.is_empty() {
+        return vec![WorkspaceUndoFile {
+            path: entry.path.clone(),
+            undo_before_path: entry.undo_before_path.clone(),
+            after_artifact_path: entry.after_artifact_path.clone(),
+        }];
+    }
+    entry.files.clone()
 }
 
-fn entry_undo_snapshot(
+fn file_target(workspace_root: &Path, file: &WorkspaceUndoFile) -> std::path::PathBuf {
+    workspace_root.join(&file.path)
+}
+
+fn file_undo_snapshot(
     workspace_root: &Path,
-    entry: &WorkspaceUndoEntry,
+    file: &WorkspaceUndoFile,
 ) -> Option<std::path::PathBuf> {
-    entry
-        .undo_before_path
+    file.undo_before_path
         .as_ref()
         .map(|relative| workspace_root.join(relative))
 }
 
-fn entry_after_artifact(
+fn file_after_artifact(
     workspace_root: &Path,
-    entry: &WorkspaceUndoEntry,
+    file: &WorkspaceUndoFile,
 ) -> Result<std::path::PathBuf, WorkspaceUndoError> {
-    entry
-        .after_artifact_path
+    file.after_artifact_path
         .as_ref()
         .map(|relative| workspace_root.join(relative))
         .ok_or_else(|| {
@@ -172,31 +235,33 @@ fn entry_after_artifact(
 }
 
 pub(crate) fn entry_is_undoable(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> bool {
-    if entry.action == "created" {
-        return entry.after_artifact_path.is_some();
-    }
-    entry_undo_snapshot(workspace_root, entry)
-        .map(|snapshot| snapshot.is_file())
-        .unwrap_or(false)
-        && entry.after_artifact_path.is_some()
+    entry_files(entry).iter().all(|file| {
+        if entry.action == "created" {
+            return file.after_artifact_path.is_some();
+        }
+        file_undo_snapshot(workspace_root, file)
+            .map(|snapshot| snapshot.is_file())
+            .unwrap_or(false)
+            && file.after_artifact_path.is_some()
+    })
 }
 
-fn require_applied_state(
+fn require_applied_file_state(
     workspace_root: &Path,
-    entry: &WorkspaceUndoEntry,
+    file: &WorkspaceUndoFile,
 ) -> Result<(), WorkspaceUndoError> {
-    let target = entry_target(workspace_root, entry);
-    let artifact = entry_after_artifact(workspace_root, entry)?;
+    let target = file_target(workspace_root, file);
+    let artifact = file_after_artifact(workspace_root, file)?;
     if !target.is_file() {
         return Err(WorkspaceUndoError::Conflict(format!(
             "{} is missing, so the recorded change no longer applies.",
-            entry.path
+            file.path
         )));
     }
     if !artifact.is_file() {
         return Err(WorkspaceUndoError::MissingArtifact(format!(
             "The after-state snapshot for {} is missing.",
-            entry.path
+            file.path
         )));
     }
     let current = sha256_file(&target)?;
@@ -204,7 +269,7 @@ fn require_applied_state(
     if current != expected {
         return Err(WorkspaceUndoError::Conflict(format!(
             "{} changed outside this run, so undoing the recorded change is blocked.",
-            entry.path
+            file.path
         )));
     }
     Ok(())
@@ -217,81 +282,98 @@ fn apply_undo(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> Result<(), W
             entry.path
         )));
     }
-    require_applied_state(workspace_root, entry)?;
-    let target = entry_target(workspace_root, entry);
-    if entry.action == "created" {
-        fs::remove_file(&target).map_err(|error| {
-            WorkspaceUndoError::Io(format!("failed to remove {target:?}: {error}"))
+    let files = entry_files(entry);
+    // Validate the whole group before restoring any file.
+    for file in &files {
+        require_applied_file_state(workspace_root, file)?;
+    }
+    for file in &files {
+        let target = file_target(workspace_root, file);
+        if entry.action == "created" {
+            fs::remove_file(&target).map_err(|error| {
+                WorkspaceUndoError::Io(format!("failed to remove {target:?}: {error}"))
+            })?;
+            continue;
+        }
+        let snapshot = file_undo_snapshot(workspace_root, file).ok_or_else(|| {
+            WorkspaceUndoError::Unsupported(format!(
+                "The change to {} has no undo snapshot and cannot be undone.",
+                file.path
+            ))
         })?;
-        return Ok(());
+        if !snapshot.is_file() {
+            return Err(WorkspaceUndoError::MissingArtifact(format!(
+                "The undo snapshot for {} is missing.",
+                file.path
+            )));
+        }
+        let before = fs::read(&snapshot).map_err(|error| {
+            WorkspaceUndoError::Io(format!("failed to read {snapshot:?}: {error}"))
+        })?;
+        fs::write(&target, &before).map_err(|error| {
+            WorkspaceUndoError::Io(format!("failed to restore {target:?}: {error}"))
+        })?;
     }
-    let snapshot = entry_undo_snapshot(workspace_root, entry).ok_or_else(|| {
-        WorkspaceUndoError::Unsupported(format!(
-            "The change to {} has no undo snapshot and cannot be undone.",
-            entry.path
-        ))
-    })?;
-    if !snapshot.is_file() {
-        return Err(WorkspaceUndoError::MissingArtifact(format!(
-            "The undo snapshot for {} is missing.",
-            entry.path
-        )));
-    }
-    let before = fs::read(&snapshot)
-        .map_err(|error| WorkspaceUndoError::Io(format!("failed to read {snapshot:?}: {error}")))?;
-    fs::write(&target, &before).map_err(|error| {
-        WorkspaceUndoError::Io(format!("failed to restore {target:?}: {error}"))
-    })?;
     Ok(())
 }
 
 fn apply_redo(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> Result<(), WorkspaceUndoError> {
-    let artifact = entry_after_artifact(workspace_root, entry)?;
-    if !artifact.is_file() {
-        return Err(WorkspaceUndoError::MissingArtifact(format!(
-            "The after-state snapshot for {} is missing.",
-            entry.path
-        )));
-    }
-    let target = entry_target(workspace_root, entry);
-    if entry.action == "created" {
-        if target.exists() {
-            return Err(WorkspaceUndoError::Conflict(format!(
-                "{} exists again, so redoing the recorded creation is blocked.",
-                entry.path
+    let files = entry_files(entry);
+    // Validate the whole group before replaying any file.
+    for file in &files {
+        let artifact = file_after_artifact(workspace_root, file)?;
+        if !artifact.is_file() {
+            return Err(WorkspaceUndoError::MissingArtifact(format!(
+                "The after-state snapshot for {} is missing.",
+                file.path
             )));
         }
-    } else {
-        let snapshot = entry_undo_snapshot(workspace_root, entry).ok_or_else(|| {
-            WorkspaceUndoError::Unsupported(format!(
-                "The change to {} has no undo snapshot and cannot be redone.",
-                entry.path
-            ))
+        let target = file_target(workspace_root, file);
+        if entry.action == "created" {
+            if target.exists() {
+                return Err(WorkspaceUndoError::Conflict(format!(
+                    "{} exists again, so redoing the recorded creation is blocked.",
+                    file.path
+                )));
+            }
+        } else {
+            let snapshot = file_undo_snapshot(workspace_root, file).ok_or_else(|| {
+                WorkspaceUndoError::Unsupported(format!(
+                    "The change to {} has no undo snapshot and cannot be redone.",
+                    file.path
+                ))
+            })?;
+            if !target.is_file() || !snapshot.is_file() {
+                return Err(WorkspaceUndoError::Conflict(format!(
+                    "{} no longer matches the undone state, so redo is blocked.",
+                    file.path
+                )));
+            }
+            let current = sha256_file(&target)?;
+            let expected = sha256_file(&snapshot)?;
+            if current != expected {
+                return Err(WorkspaceUndoError::Conflict(format!(
+                    "{} changed outside this run, so redo is blocked.",
+                    file.path
+                )));
+            }
+        }
+    }
+    for file in &files {
+        let artifact = file_after_artifact(workspace_root, file)?;
+        let after = fs::read(&artifact).map_err(|error| {
+            WorkspaceUndoError::Io(format!("failed to read {artifact:?}: {error}"))
         })?;
-        if !target.is_file() || !snapshot.is_file() {
-            return Err(WorkspaceUndoError::Conflict(format!(
-                "{} no longer matches the undone state, so redo is blocked.",
-                entry.path
-            )));
+        let target = file_target(workspace_root, file);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                WorkspaceUndoError::Io(format!("failed to create {parent:?}: {error}"))
+            })?;
         }
-        let current = sha256_file(&target)?;
-        let expected = sha256_file(&snapshot)?;
-        if current != expected {
-            return Err(WorkspaceUndoError::Conflict(format!(
-                "{} changed outside this run, so redo is blocked.",
-                entry.path
-            )));
-        }
-    }
-    let after = fs::read(&artifact)
-        .map_err(|error| WorkspaceUndoError::Io(format!("failed to read {artifact:?}: {error}")))?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            WorkspaceUndoError::Io(format!("failed to create {parent:?}: {error}"))
+        fs::write(&target, &after).map_err(|error| {
+            WorkspaceUndoError::Io(format!("failed to write {target:?}: {error}"))
         })?;
     }
-    fs::write(&target, &after)
-        .map_err(|error| WorkspaceUndoError::Io(format!("failed to write {target:?}: {error}")))?;
     Ok(())
 }
 
@@ -345,7 +427,11 @@ fn build_state(
         entries
             .iter()
             .find(|entry| &entry.tool_call_id == tool_call_id)
-            .map(|entry| entry.after_artifact_path.is_some())
+            .map(|entry| {
+                entry_files(entry)
+                    .iter()
+                    .all(|file| file.after_artifact_path.is_some())
+            })
             .unwrap_or(false)
     });
     WorkspaceUndoState {

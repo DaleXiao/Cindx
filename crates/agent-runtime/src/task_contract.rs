@@ -1432,7 +1432,7 @@ fn inferred_builtin_tool_risk(tool_name: &str) -> Option<&'static ToolRisk> {
     static EXECUTES_PROCESS: ToolRisk = ToolRisk::ExecutesProcess;
     match tool_name {
         "file.read" | "file.read_many" | "file.list" | "file.search" => Some(&READ_ONLY),
-        "file.write" | "file.patch" => Some(&WRITES_WORKSPACE),
+        "file.write" | "file.patch" | "file.patch_batch" => Some(&WRITES_WORKSPACE),
         "shell.run" => Some(&EXECUTES_PROCESS),
         _ => None,
     }

@@ -57,7 +57,7 @@ pub use desktop_control::{BrowserTool, ComputerTool};
 pub use file_batch::ReadFilesTool;
 pub use file_glob::GlobFilesTool;
 pub use file_list::ListDirectoryTool;
-pub use file_patch::PatchFileTool;
+pub use file_patch::{PatchBatchFileTool, PatchFileTool};
 pub use file_search::SearchFilesTool;
 pub use file_tools::{ReadFileTool, WriteFileTool};
 pub use image_generation::ImageGenerationTool;
@@ -285,6 +285,7 @@ impl ToolRegistry {
         registry.register(Box::new(SearchFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(GlobFilesTool::new(workspace_root.clone())));
         registry.register(Box::new(PatchFileTool::new(workspace_root.clone())));
+        registry.register(Box::new(PatchBatchFileTool::new(workspace_root.clone())));
         registry.register(Box::new(WriteFileTool::new(workspace_root.clone())));
         registry.register(Box::new(TodoTool::new(workspace_root.clone())));
         registry.register(Box::new(SubagentTaskTool::new()));
@@ -804,6 +805,7 @@ mod tests {
         assert!(specs.iter().any(|spec| spec.name == "file.read"));
         assert!(specs.iter().any(|spec| spec.name == "file.glob"));
         assert!(specs.iter().any(|spec| spec.name == "file.patch"));
+        assert!(specs.iter().any(|spec| spec.name == "file.patch_batch"));
         assert!(specs.iter().any(|spec| spec.name == "file.write"));
         assert!(specs.iter().any(|spec| spec.name == "shell.run"));
         assert!(specs.iter().any(|spec| spec.name == "web.search"));
@@ -873,6 +875,7 @@ mod tests {
         for name in [
             "file.list",
             "file.patch",
+            "file.patch_batch",
             "file.write",
             "shell.run",
             "web.search",

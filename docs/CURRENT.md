@@ -69,11 +69,13 @@ The desktop app currently includes:
   timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
   not fire while the window is hidden), so launch can never stall with no UI, and
   the WebView gets a beat to paint before the window shows.
-- Workspace file changes made by `file.write` and `file.patch` preserve their
-  prior content best-effort for recovery. A session can undo and redo its most
-  recent file change through Composer controls, guarded by content-hash
-  conflict checks. Shell, browser, computer, and process effects remain
-  irreversible.
+- Workspace file changes made by `file.write`, `file.patch`, and
+  `file.patch_batch` preserve their prior content best-effort for recovery. A
+  session can undo and redo its most recent file change through Composer
+  controls, guarded by content-hash conflict checks; a `file.patch_batch` call
+  is one undo entry, so undoing it restores every file in the batch together
+  and any externally edited member blocks the whole group restore. Shell,
+  browser, computer, and process effects remain irreversible.
 - Project instruction files: `AGENTS.md` discovered from the workspace root up
   to the Git root, plus `.cindx/instructions/*.md` files, are loaded under
   bounded byte caps and injected into every run as untrusted project guidance
@@ -290,6 +292,17 @@ Tool visibility does not grant authority.
   in terminal output.
 - Browser and computer control require healthy sidecars and the relevant macOS
   privacy permissions.
+- `file.patch_batch` applies up to 16 `file.patch` operations (same anchor or
+  byte-range selector plus base SHA-256 per file) to distinct workspace files
+  as one atomic batch: every target is validated in memory before any write,
+  a validation failure writes nothing and reports each item's failure reason,
+  and publication follows the input order through the same locked atomic
+  replace (a mid-batch publish race rolls the applied prefix back
+  best-effort). The batch is bounded to 32 MiB of combined base and patched
+  content, shares `file.patch`'s Write risk, and its permission scope is the
+  sorted set of target paths, so a session grant is reused only for the
+  identical path set. It is not on the read-only subagent or plan-mode
+  whitelist.
 - `file.glob` is a pure read-only tool that matches workspace files against a
   relative glob pattern (for example `src/**/*.rs`) and returns a sorted list
   bounded to 200 results with a truncated flag; hidden entries, symlinks, and
@@ -532,10 +545,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 
 ## Known Structural Limits
 
-- Undo and redo cover only `file.write` and `file.patch` changes whose undo
-  snapshot was captured. A change whose snapshot capture failed is disclosed
-  as not undoable, and undo is blocked when the target file changed outside
-  the recorded run.
+- Undo and redo cover only `file.write`, `file.patch`, and `file.patch_batch`
+  changes whose undo snapshot was captured. A change whose snapshot capture
+  failed is disclosed as not undoable, and undo is blocked when the target
+  file changed outside the recorded run.
 - Project instruction files are enabled by default and can currently only be
   toggled or extended through `project_instructions.json` in the app support
   directory; a Settings UI is not wired yet.

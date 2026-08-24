@@ -28,7 +28,7 @@ pub fn permission_can_allow_session(request: &PermissionRequest) -> bool {
 pub fn permission_requires_exact_scope(request: &PermissionRequest) -> bool {
     matches!(
         request.action.as_str(),
-        "file.patch" | "shell.run" | "process.start"
+        "file.patch" | "file.patch_batch" | "shell.run" | "process.start"
     )
 }
 
@@ -97,6 +97,30 @@ mod tests {
 
         assert!(permission_capability_matches(&granted, &same_path));
         assert!(!permission_capability_matches(&granted, &another_path));
+    }
+
+    #[test]
+    fn file_patch_batch_session_capability_is_bound_to_the_exact_path_set() {
+        let granted = request(
+            "file.patch_batch",
+            PermissionRisk::Write,
+            "[\"a.txt\",\"b.txt\"]",
+        );
+        let same_set = request(
+            "file.patch_batch",
+            PermissionRisk::Write,
+            "[\"a.txt\",\"b.txt\"]",
+        );
+        let wider_set = request(
+            "file.patch_batch",
+            PermissionRisk::Write,
+            "[\"a.txt\",\"b.txt\",\"c.txt\"]",
+        );
+        let single_patch = request("file.patch", PermissionRisk::Write, "a.txt");
+
+        assert!(permission_capability_matches(&granted, &same_set));
+        assert!(!permission_capability_matches(&granted, &wider_set));
+        assert!(!permission_capability_matches(&granted, &single_patch));
     }
 
     #[test]

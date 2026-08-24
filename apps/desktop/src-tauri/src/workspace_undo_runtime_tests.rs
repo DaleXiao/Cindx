@@ -415,6 +415,220 @@ fn undo_stack_follows_last_in_first_out_across_mutations() {
     );
 }
 
+struct BatchFileSpec<'a> {
+    path: &'a str,
+    prior: &'a [u8],
+    after: &'a [u8],
+}
+
+fn seed_batch_mutation(
+    store: &mut SqliteStore,
+    fixture: &MutationFixture,
+    sequence: u64,
+    tool_call_id: &str,
+    files: &[BatchFileSpec<'_>],
+) {
+    let group: Vec<serde_json::Value> = files
+        .iter()
+        .map(|file| {
+            let target = fixture.workspace.join(file.path);
+            write_file(&target, file.after);
+            let artifact_relative = format!(".cindx/output-history/{tool_call_id}/{}", file.path);
+            write_file(&fixture.workspace.join(&artifact_relative), file.after);
+            let undo_relative = format!(".cindx/undo-history/{tool_call_id}/{}", file.path);
+            write_file(&fixture.workspace.join(&undo_relative), file.prior);
+            serde_json::json!({
+                "path": file.path,
+                "undo_before_path": undo_relative,
+                "after_artifact_path": artifact_relative,
+            })
+        })
+        .collect();
+    let display = files
+        .iter()
+        .map(|file| file.path)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let metadata: agent_core::Metadata = [
+        ("tool_call_id".to_string(), tool_call_id.to_string()),
+        ("tool".to_string(), "file.patch_batch".to_string()),
+        ("status".to_string(), "succeeded".to_string()),
+        ("result_path".to_string(), display),
+        ("result_undo_action".to_string(), "patched".to_string()),
+        (
+            "result_undo_group".to_string(),
+            serde_json::to_string(&group).expect("group should encode"),
+        ),
+        ("session_id".to_string(), SESSION.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let event = Event {
+        id: EventId(format!("event-{sequence}")),
+        task_id: phase16_task_id(),
+        sequence,
+        timestamp_ms: sequence * 10,
+        kind: EventKind::ToolCallFinished,
+        summary: "Tool call finished: file.patch_batch".to_string(),
+        metadata,
+    };
+    store
+        .append_next_event(
+            event.id.clone(),
+            event.task_id.clone(),
+            event.timestamp_ms,
+            event.kind,
+            event.summary.clone(),
+            event.metadata.clone(),
+        )
+        .expect("event should append");
+}
+
+#[test]
+fn batch_patch_projects_as_one_group_undo_entry() {
+    let fixture = MutationFixture::new("batch-project");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_batch_mutation(
+        &mut store,
+        &fixture,
+        1,
+        "call-batch",
+        &[
+            BatchFileSpec {
+                path: "a.txt",
+                prior: b"a-original",
+                after: b"a-patched",
+            },
+            BatchFileSpec {
+                path: "dir/b.txt",
+                prior: b"b-original",
+                after: b"b-patched",
+            },
+        ],
+    );
+    let events = agent_events_for_session(&store, &phase16_task_id(), Some(SESSION))
+        .expect("events should load");
+
+    let entries = project_workspace_undo_entries(&events);
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].tool, "file.patch_batch");
+    assert_eq!(entries[0].action, "patched");
+    assert_eq!(entries[0].files.len(), 2);
+    assert_eq!(entries[0].files[1].path, "dir/b.txt");
+    let state = get_workspace_undo_state_for_session(&store, &fixture.workspace, SESSION)
+        .expect("state should load");
+    assert!(state.can_undo);
+    assert!(state.entries[0].undoable);
+}
+
+#[test]
+fn undo_batch_restores_the_whole_group() {
+    let fixture = MutationFixture::new("batch-undo");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_batch_mutation(
+        &mut store,
+        &fixture,
+        1,
+        "call-batch",
+        &[
+            BatchFileSpec {
+                path: "a.txt",
+                prior: b"a-original",
+                after: b"a-patched",
+            },
+            BatchFileSpec {
+                path: "dir/b.txt",
+                prior: b"b-original",
+                after: b"b-patched",
+            },
+        ],
+    );
+
+    let state = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect("group undo should succeed");
+
+    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"a-original");
+    assert_eq!(
+        fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
+        b"b-original"
+    );
+    assert!(!state.can_undo);
+    assert!(state.can_redo);
+}
+
+#[test]
+fn batch_undo_is_blocked_when_any_group_file_changed_externally() {
+    let fixture = MutationFixture::new("batch-conflict");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_batch_mutation(
+        &mut store,
+        &fixture,
+        1,
+        "call-batch",
+        &[
+            BatchFileSpec {
+                path: "a.txt",
+                prior: b"a-original",
+                after: b"a-patched",
+            },
+            BatchFileSpec {
+                path: "dir/b.txt",
+                prior: b"b-original",
+                after: b"b-patched",
+            },
+        ],
+    );
+    write_file(&fixture.workspace.join("dir/b.txt"), b"edited outside cindx");
+
+    let error = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect_err("group undo should be blocked");
+
+    assert!(error.contains("changed outside this run"));
+    // The failed group undo restores nothing, not even the untouched file.
+    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"a-patched");
+    assert_eq!(
+        fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
+        b"edited outside cindx"
+    );
+}
+
+#[test]
+fn redo_reapplies_the_whole_batch_group() {
+    let fixture = MutationFixture::new("batch-redo");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_batch_mutation(
+        &mut store,
+        &fixture,
+        1,
+        "call-batch",
+        &[
+            BatchFileSpec {
+                path: "a.txt",
+                prior: b"a-original",
+                after: b"a-patched",
+            },
+            BatchFileSpec {
+                path: "dir/b.txt",
+                prior: b"b-original",
+                after: b"b-patched",
+            },
+        ],
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false).expect("undo should succeed");
+    let state = change_undo_stack(&mut store, &fixture.workspace, SESSION, true)
+        .expect("group redo should succeed");
+
+    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"a-patched");
+    assert_eq!(
+        fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
+        b"b-patched"
+    );
+    assert!(state.can_undo);
+    assert!(!state.can_redo);
+}
+
 #[test]
 fn undo_registry_survives_store_reopen() {
     println!("{WORKSPACE_UNDO_SCHEMA}");
