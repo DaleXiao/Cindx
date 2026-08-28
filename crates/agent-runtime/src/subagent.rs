@@ -1,10 +1,16 @@
 //! Borrowed from opencode `tool/task.ts`, pi `subagent`, and deepseek-harness
 //! `subagent`/`goal-round-driver`: a subagent is an isolated child run that sees
-//! only the delegated task, uses a restricted read-only tool set, and returns its
-//! final text to the parent. This module holds the deterministic policy; the child
-//! execution is wired by the desktop loop.
+//! the delegated task plus a bounded seed of the parent's completed rounds, uses
+//! a restricted read-only tool set, and returns its final text to the parent.
+//! This module holds the deterministic policy; the child execution is wired by
+//! the desktop loop.
+
+use agent_core::{Message, MessageRole};
 
 pub const SUBAGENT_MAX_STEPS: usize = 8;
+
+/// Maximum parent messages a subagent context fork may seed into the child.
+pub const SUBAGENT_CONTEXT_FORK_MAX_MESSAGES: usize = 32;
 
 /// Tools a subagent may use: read-only discovery. Effectful, delegation, and
 /// working-memory tools are denied (mirrors opencode deriveSubagentSessionPermission).
@@ -48,6 +54,47 @@ pub fn build_subagent_task_prompt(description: &str, prompt: &str) -> String {
     out
 }
 
+/// The balanced completed-round prefix of the parent transcript that seeds a
+/// delegated child run. The prefix ends at the last complete assistant round
+/// (an assistant answer without pending tool calls, or a fully answered
+/// tool-call round); an in-flight round with unpaired tool calls is excluded.
+/// When the prefix exceeds `max_messages` the most recent messages are kept
+/// and the window start advances until the retained slice is balanced again.
+/// An empty parent history yields an empty prefix (the child sees only the
+/// delegated prompt, as before).
+pub fn subagent_context_fork_prefix(messages: &[Message], max_messages: usize) -> Vec<Message> {
+    let mut end = messages.len();
+    loop {
+        if end == 0 {
+            return Vec::new();
+        }
+        if crate::context_engine::is_balanced_cut(&messages[..end])
+            && round_completed_at(messages, end)
+        {
+            break;
+        }
+        end -= 1;
+    }
+    let mut start = end.saturating_sub(max_messages);
+    while start < end && !crate::context_engine::is_balanced_cut(&messages[start..end]) {
+        start += 1;
+    }
+    messages[start..end].to_vec()
+}
+
+/// True when the prefix `messages[..end]` ends on a completed assistant round:
+/// a tool observation whose round is balanced, or an assistant message with no
+/// proposed tool calls.
+fn round_completed_at(messages: &[Message], end: usize) -> bool {
+    match &messages[end - 1] {
+        message if matches!(message.role, MessageRole::Tool) => true,
+        message if matches!(message.role, MessageRole::Assistant) => {
+            crate::context_engine::proposed_tool_call_ids(message).is_empty()
+        }
+        _ => false,
+    }
+}
+
 /// True when a tool name is permitted for a subagent.
 pub fn subagent_tool_allowed(tool_name: &str) -> bool {
     SUBAGENT_ALLOWED_TOOLS.contains(&tool_name)
@@ -63,6 +110,100 @@ pub fn subagent_patch_tool_allowed(tool_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::Metadata;
+
+    fn message(role: MessageRole, content: &str) -> Message {
+        Message {
+            role,
+            content: content.to_string(),
+            metadata: Metadata::new(),
+        }
+    }
+
+    fn assistant_tool_call(call_id: &str) -> Message {
+        let mut assistant = message(MessageRole::Assistant, "");
+        assistant.metadata.insert(
+            "raw_tool_calls_json".to_string(),
+            format!("[{{\"id\":\"{call_id}\"}}]"),
+        );
+        assistant
+    }
+
+    fn tool_result(call_id: &str) -> Message {
+        let mut result = message(MessageRole::Tool, "observation");
+        result
+            .metadata
+            .insert("tool_call_id".to_string(), call_id.to_string());
+        result
+    }
+
+    #[test]
+    fn fork_prefix_contains_the_completed_parent_rounds() {
+        let history = vec![
+            message(MessageRole::User, "parent request"),
+            assistant_tool_call("c1"),
+            tool_result("c1"),
+            message(MessageRole::Assistant, "parent finding"),
+        ];
+
+        let prefix = subagent_context_fork_prefix(&history, SUBAGENT_CONTEXT_FORK_MAX_MESSAGES);
+
+        assert_eq!(prefix, history, "a fully completed transcript seeds whole");
+    }
+
+    #[test]
+    fn fork_prefix_excludes_an_in_flight_round() {
+        let mut history = vec![
+            message(MessageRole::User, "parent request"),
+            assistant_tool_call("c1"),
+            tool_result("c1"),
+            message(MessageRole::Assistant, "parent finding"),
+        ];
+        // The parent is mid-batch: the new turn's tool call has no result yet.
+        history.push(message(MessageRole::User, "follow-up"));
+        history.push(assistant_tool_call("c2"));
+
+        let prefix = subagent_context_fork_prefix(&history, SUBAGENT_CONTEXT_FORK_MAX_MESSAGES);
+
+        assert_eq!(prefix, &history[..4], "the in-flight round is excluded");
+        assert!(crate::context_engine::is_balanced_cut(&prefix));
+    }
+
+    #[test]
+    fn fork_prefix_caps_message_count_and_stays_balanced() {
+        // Ten completed rounds of four messages each.
+        let mut history = Vec::new();
+        for round in 0..10 {
+            history.push(message(MessageRole::User, &format!("request {round}")));
+            history.push(assistant_tool_call(&format!("c{round}")));
+            history.push(tool_result(&format!("c{round}")));
+            history.push(message(MessageRole::Assistant, &format!("answer {round}")));
+        }
+        assert_eq!(history.len(), 40);
+
+        let prefix = subagent_context_fork_prefix(&history, SUBAGENT_CONTEXT_FORK_MAX_MESSAGES);
+
+        assert_eq!(prefix.len(), SUBAGENT_CONTEXT_FORK_MAX_MESSAGES);
+        assert!(crate::context_engine::is_balanced_cut(&prefix));
+        assert_eq!(
+            prefix.last(),
+            history.last(),
+            "the cap keeps the most recent messages"
+        );
+    }
+
+    #[test]
+    fn fork_prefix_degenerates_to_empty_without_parent_history() {
+        assert!(subagent_context_fork_prefix(&[], SUBAGENT_CONTEXT_FORK_MAX_MESSAGES).is_empty());
+        // Only an in-flight round: nothing completed, nothing to seed.
+        let in_flight = vec![
+            message(MessageRole::User, "request"),
+            assistant_tool_call("c1"),
+        ];
+        assert!(
+            subagent_context_fork_prefix(&in_flight, SUBAGENT_CONTEXT_FORK_MAX_MESSAGES).is_empty()
+        );
+    }
 
     #[test]
     fn subagent_prompt_is_isolated_and_bounded() {

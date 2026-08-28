@@ -222,9 +222,19 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             .collect::<Vec<_>>();
         let runtime_context = merged_runtime_context(runtime_context, has_grounding_evidence);
         let has_cognitive_context = cognitive_context.is_some();
-        let mut overlays = Vec::with_capacity(evidence_contexts.len() + 1);
+        // Advisory repetition reminder: injected as a transient overlay on the
+        // actor decision path when the identical-call streak reaches a
+        // threshold. It never vetoes or rewrites the repeated call; the
+        // invariant-repair fallback below drops it like the cognitive overlay.
+        let repetition_advisory = if enforce_actor_turn_budget {
+            self.state.repetition_advisory.advisory_message()
+        } else {
+            None
+        };
+        let mut overlays = Vec::with_capacity(evidence_contexts.len() + 2);
         overlays.extend(cognitive_context);
         overlays.extend(evidence_contexts.iter().cloned());
+        overlays.extend(repetition_advisory);
         let (mut request, mut context) = if overlays.is_empty() {
             model_request_for_turn_with_context_budget(
                 self.state,
@@ -765,6 +775,11 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 );
         }
         append_tool_observation(self.state, request.call_id.clone(), observation);
+        // Advisory repetition tracking: a different tool or canonical argument
+        // resets the streak; the notice itself is injected at turn preparation.
+        self.state
+            .repetition_advisory
+            .observe(&request.tool_name, &request.input);
         let new_evidence = self
             .state
             .task_contract

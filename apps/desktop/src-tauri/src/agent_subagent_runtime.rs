@@ -71,6 +71,13 @@ pub(crate) fn execute_subagent_delegations(
     let read_only_tools = subagent_tool_specs_for_mode(registry, false);
     let write_tools = subagent_tool_specs_for_mode(registry, true);
     let task_id = runtime.task_id.clone();
+    // Context fork: seed each child with the parent's balanced completed-round
+    // prefix (bounded, in-flight rounds excluded) ahead of the subagent system
+    // and delegation prompts.
+    let context_prefix = agent_runtime::subagent_context_fork_prefix(
+        &runtime.messages,
+        agent_runtime::SUBAGENT_CONTEXT_FORK_MAX_MESSAGES,
+    );
     let answers: Vec<(String, String)> = std::thread::scope(|scope| {
         let handles: Vec<_> = task_calls
             .iter()
@@ -104,6 +111,7 @@ pub(crate) fn execute_subagent_delegations(
                         tools,
                         &task_id,
                         write_context,
+                        &context_prefix,
                     )
                 }))
             })
@@ -223,14 +231,16 @@ pub(crate) struct SubagentWriteContext<'a> {
 }
 
 /// Run a bounded, isolated child run for a `task` delegation and return
-/// (description, answer). The child sees only the delegated prompt (context
-/// isolation) plus the subagent contract; it never sees the parent transcript.
-/// Unlike a plain completion, the child runs a bounded read-only tool loop: each
-/// step it may call whitelisted read-only tools, whose observations are appended
-/// to its own message history, until it answers without a tool call or exhausts
-/// `SUBAGENT_MAX_STEPS`. Every model call is charged to the parent run's Worker
-/// stage budget, and the child honours the parent run's cancellation so a
-/// stopped run aborts it. With a `SubagentWriteContext` the child may
+/// (description, answer). The child is seeded with `parent_context` — the
+/// parent run's balanced completed-round prefix (bounded, in-flight rounds
+/// excluded) — placed ahead of the subagent system prompt and the delegated
+/// task prompt; an empty prefix keeps the former fully isolated shape. Unlike
+/// a plain completion, the child runs a bounded read-only tool loop: each step
+/// it may call whitelisted read-only tools, whose observations are appended to
+/// its own message history, until it answers without a tool call or exhausts
+/// `SUBAGENT_MAX_STEPS`. Every model call is charged to the parent run's
+/// Worker stage budget, and the child honours the parent run's cancellation so
+/// a stopped run aborts it. With a `SubagentWriteContext` the child may
 /// additionally attempt `file.patch`/`file.patch_batch`; each such call parks
 /// on an explicit user approval routed through the parent run's permission
 /// path (session grants never apply).
@@ -243,6 +253,7 @@ pub(crate) fn subagent_child_answer(
     subagent_tools: &[ToolSpec],
     task_id: &TaskId,
     write: Option<SubagentWriteContext<'_>>,
+    parent_context: &[Message],
 ) -> (String, String) {
     let description = subagent_description(input_json);
     let input = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
@@ -253,18 +264,17 @@ pub(crate) fn subagent_child_answer(
     } else {
         agent_runtime::subagent_system_prompt()
     };
-    let mut messages = vec![
-        Message {
-            role: MessageRole::System,
-            content: system_prompt.to_string(),
-            metadata: Metadata::new(),
-        },
-        Message {
-            role: MessageRole::User,
-            content: child_prompt,
-            metadata: Metadata::new(),
-        },
-    ];
+    let mut messages = parent_context.to_vec();
+    messages.push(Message {
+        role: MessageRole::System,
+        content: system_prompt.to_string(),
+        metadata: Metadata::new(),
+    });
+    messages.push(Message {
+        role: MessageRole::User,
+        content: child_prompt,
+        metadata: Metadata::new(),
+    });
     let mut last_content = String::new();
     for _step in 0..SUBAGENT_MAX_STEPS {
         if agent_run_should_stop(cancellation) {

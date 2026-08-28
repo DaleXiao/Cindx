@@ -36,6 +36,7 @@ mod kernel;
 mod model_transport;
 mod parallel;
 mod prepared_task_state;
+mod repetition_advisory;
 mod resource_ledger;
 mod result_frontier;
 mod run_budget;
@@ -68,9 +69,9 @@ pub use context_compiler::{
 pub use context_engine::{
     compaction_summary_instruction, context_prompt_reserve, estimate_context_tokens,
     estimate_message_tokens, estimate_request_tokens, estimate_text_tokens,
-    extractive_rolling_summary, is_user_turn_start, serialize_transcript_for_compaction,
-    ContextCompactionPlan, ContextCompactionPolicy, ContextEngine, ContextSourceKind,
-    CONTEXT_SOURCE_SCHEMA,
+    extractive_rolling_summary, is_balanced_cut, is_user_turn_start, nearest_balanced_cut,
+    serialize_transcript_for_compaction, ContextCompactionPlan, ContextCompactionPolicy,
+    ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
 };
 pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
@@ -115,6 +116,10 @@ pub use parallel::{
     ParallelTaskError, QuorumExecution,
 };
 pub use prepared_task_state::PreparedTaskState;
+pub use repetition_advisory::{
+    RepetitionAdvisoryTracker, REPETITION_ADVISORY_KIND, REPETITION_ADVISORY_PREVIEW_MAX_CHARS,
+    REPETITION_ADVISORY_THRESHOLDS,
+};
 pub use resource_ledger::{
     ModelAttemptUsage, ModelResourceUsage, ModelUsageSource, ModelUsageSourceCounts,
     PhysicalModelAttempt, RunResourceSnapshot, RunResourceUsage, MAX_PENDING_RESOURCE_ATTEMPTS,
@@ -129,9 +134,10 @@ pub use run_budget::{
 pub use run_context::{effective_agent_objective, run_context_steer_epoch};
 pub use state_transaction::AgentLoopAppendTransaction;
 pub use subagent::{
-    build_subagent_task_prompt, subagent_patch_tool_allowed, subagent_system_prompt,
-    subagent_tool_allowed, subagent_write_system_prompt, SUBAGENT_ALLOWED_TOOLS,
-    SUBAGENT_MAX_STEPS, SUBAGENT_PATCH_TOOLS,
+    build_subagent_task_prompt, subagent_context_fork_prefix, subagent_patch_tool_allowed,
+    subagent_system_prompt, subagent_tool_allowed, subagent_write_system_prompt,
+    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_CONTEXT_FORK_MAX_MESSAGES, SUBAGENT_MAX_STEPS,
+    SUBAGENT_PATCH_TOOLS,
 };
 pub use task_contract::{
     AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,
@@ -220,6 +226,9 @@ pub struct AgentLoopState {
     prepared_task_state: PreparedTaskState,
     adaptive_loop_cursor: AdaptiveLoopCursor,
     context_token_ledger: context_token_ledger::ContextTokenLedger,
+    /// Consecutive identical tool-call streak used for the advisory repetition
+    /// reminder. Runtime-only; restored runs start with a fresh streak.
+    pub repetition_advisory: RepetitionAdvisoryTracker,
     pub generation_temperature: Option<String>,
     /// The run's reasoning level (fast/default/high/xhigh); maps to the
     /// provider's thinking/reasoning effort parameter.
@@ -449,6 +458,7 @@ pub fn start_agent_loop(
         prepared_task_state,
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
+        repetition_advisory: RepetitionAdvisoryTracker::default(),
         generation_temperature: None,
         reasoning_effort: None,
     }
@@ -478,6 +488,7 @@ pub fn start_agent_loop_with_history(
         prepared_task_state,
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
+        repetition_advisory: RepetitionAdvisoryTracker::default(),
         generation_temperature: None,
         reasoning_effort: None,
     }
@@ -523,6 +534,7 @@ pub fn resume_agent_loop_from_messages(
         prepared_task_state,
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
+        repetition_advisory: RepetitionAdvisoryTracker::default(),
         generation_temperature: None,
         reasoning_effort: None,
     };

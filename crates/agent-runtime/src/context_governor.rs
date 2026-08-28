@@ -1238,27 +1238,9 @@ fn protected_sources_satisfied(original: &[Message], projected: &[Message]) -> b
 }
 
 fn tool_round_integrity_satisfied(messages: &[Message]) -> bool {
-    let mut proposed = BTreeSet::new();
-    let mut observed = BTreeSet::new();
-    for message in messages {
-        if let Some(raw_calls) = message.metadata.get("raw_tool_calls_json") {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_calls) {
-                if let Some(calls) = value.as_array() {
-                    proposed.extend(calls.iter().filter_map(|call| {
-                        call.get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                    }));
-                }
-            }
-        }
-        if matches!(message.role, MessageRole::Tool) {
-            if let Some(call_id) = message.metadata.get("tool_call_id") {
-                observed.insert(call_id.clone());
-            }
-        }
-    }
-    proposed == observed
+    // The whole-projection integrity invariant is exactly the balanced-cut
+    // predicate applied to the full message list, so the two can never drift.
+    crate::context_engine::is_balanced_cut(messages)
 }
 
 fn select_system_contexts(
@@ -1465,6 +1447,36 @@ mod tests {
         assert!(!report.applied);
         assert_eq!(projected.len(), 2);
         assert_eq!(projected[1], history[0]);
+    }
+
+    #[test]
+    fn balanced_cut_predicate_matches_tool_round_integrity() {
+        let mut assistant = message(MessageRole::Assistant, "calling");
+        assistant.metadata.insert(
+            "raw_tool_calls_json".to_string(),
+            r#"[{"id":"call-1"}]"#.to_string(),
+        );
+        let mut result = message(MessageRole::Tool, "observation");
+        result
+            .metadata
+            .insert("tool_call_id".to_string(), "call-1".to_string());
+        let complete = vec![
+            message(MessageRole::User, "request"),
+            assistant.clone(),
+            result.clone(),
+        ];
+        let split = vec![message(MessageRole::User, "request"), assistant];
+        let orphan = [result];
+
+        for messages in [&complete[..], &split[..], &orphan[..], &[][..]] {
+            assert_eq!(
+                tool_round_integrity_satisfied(messages),
+                crate::context_engine::is_balanced_cut(messages),
+                "the integrity invariant and the balanced-cut predicate must agree"
+            );
+        }
+        assert!(tool_round_integrity_satisfied(&complete));
+        assert!(!tool_round_integrity_satisfied(&split));
     }
 
     #[test]

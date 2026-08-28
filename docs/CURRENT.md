@@ -34,6 +34,13 @@ The desktop app currently includes:
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed
   from opencode/deepseek-harness), and the loop never executes a tool-call batch that
   the provider truncated at its output limit (borrowed from pi), re-asking instead.
+- Before the hard repeated-action stop, the loop injects an advisory reminder
+  into the model context when the same tool with identical canonical arguments
+  repeats consecutively (thresholds 3 and 5): the notice never vetoes or
+  rewrites the call, its argument preview is capped at 500 characters, and a
+  different call resets it. Context compaction and truncation cuts never split
+  an assistant tool-call round from its tool results; a cut that would land
+  inside a round falls back to the nearest balanced point.
 - A tool-call batch whose calls are all permissionless read-only tools (the
   registry `permissionless_read_tool` predicate shared with the subagent and
   plan-mode whitelists) is admitted for parallel execution without the
@@ -54,9 +61,11 @@ The desktop app currently includes:
   lazy singleton, not a character heuristic; the heuristic remains only as a
   fallback if tokenizer initialization fails.
 - Subagent delegation (borrowed from opencode/pi/deepseek-harness): a `task` tool
-  delegates to an isolated child run that sees only the delegated task (never the
-  parent transcript), and its answer returns to the parent as an internal
-  instruction. The child runs a bounded read-only tool loop (not a single
+  delegates to a child run seeded with a bounded prefix of the parent's balanced
+  completed rounds (at most 32 messages, in-flight unpaired tool-call rounds
+  excluded; an empty parent history keeps the former delegation-prompt-only
+  shape) ahead of the subagent contract and the delegated task, and its answer
+  returns to the parent as an internal instruction. The child runs a bounded read-only tool loop (not a single
   completion): each step it may call whitelisted read-only discovery tools
   (`file.read`, `file.list`, `file.search`, `file.glob`, `web.search`,
   `web.fetch`), whose observations are appended to its own isolated message

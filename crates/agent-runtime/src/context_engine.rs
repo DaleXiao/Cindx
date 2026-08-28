@@ -2,6 +2,7 @@ use crate::execution::{
     AGENT_EVIDENCE_CONTEXT_SCHEMA, COLLABORATION_GUIDANCE_SCHEMA, WORKFLOW_EXECUTION_CONTEXT_SCHEMA,
 };
 use agent_core::{Message, MessageRole};
+use std::collections::BTreeSet;
 
 const CONTEXT_BASE_TOKENS: u64 = 512;
 const MESSAGE_ENVELOPE_TOKENS: u64 = 6;
@@ -343,6 +344,9 @@ impl ContextEngine {
                 start = previous_turn;
             }
         }
+        // A compaction cut must never split an assistant tool-call round from
+        // its tool results; fall back to the nearest balanced cut point.
+        start = nearest_balanced_cut(history, start);
         if start == history.len() {
             start = history.len() - 1;
         }
@@ -416,6 +420,54 @@ pub fn context_prompt_reserve(context_window_tokens: u64) -> u64 {
 pub fn is_user_turn_start(message: &Message) -> bool {
     matches!(message.role, MessageRole::User)
         && message.metadata.get("kind").map(String::as_str) != Some("tool_observation")
+}
+
+/// Tool-call ids an assistant message proposes through its raw tool-call
+/// payload. Mirrors the governor's tool-round integrity extraction so both
+/// predicates can never drift apart.
+pub(crate) fn proposed_tool_call_ids(message: &Message) -> Vec<String> {
+    message
+        .metadata
+        .get("raw_tool_calls_json")
+        .and_then(|raw_calls| serde_json::from_str::<serde_json::Value>(raw_calls).ok())
+        .and_then(|value| value.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|call| {
+            call.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// True when the prefix `messages[..cut]` splits no tool round: every
+/// assistant-proposed tool call inside the prefix has its tool result inside
+/// the prefix, and every tool result inside the prefix belongs to a proposed
+/// call. Compaction and truncation cuts must stay on balanced points so an
+/// archived head and a retained tail never hold two halves of one round.
+pub fn is_balanced_cut(messages: &[Message]) -> bool {
+    let mut proposed = BTreeSet::new();
+    let mut observed = BTreeSet::new();
+    for message in messages {
+        proposed.extend(proposed_tool_call_ids(message));
+        if matches!(message.role, MessageRole::Tool) {
+            if let Some(call_id) = message.metadata.get("tool_call_id") {
+                observed.insert(call_id.clone());
+            }
+        }
+    }
+    proposed == observed
+}
+
+/// The nearest cut index at or before `proposed` for which [`is_balanced_cut`]
+/// holds. `0` is always balanced, so this always terminates.
+pub fn nearest_balanced_cut(messages: &[Message], proposed: usize) -> usize {
+    let mut cut = proposed.min(messages.len());
+    while cut > 0 && !is_balanced_cut(&messages[..cut]) {
+        cut -= 1;
+    }
+    cut
 }
 
 /// Serialize the compacted head of a transcript into a compact textual form a
@@ -498,6 +550,112 @@ mod tests {
             content: content.to_string(),
             metadata: Metadata::new(),
         }
+    }
+
+    fn assistant_tool_call(call_id: &str) -> Message {
+        let mut assistant = message(MessageRole::Assistant, "");
+        assistant.metadata.insert(
+            "raw_tool_calls_json".to_string(),
+            format!("[{{\"id\":\"{call_id}\"}}]"),
+        );
+        assistant
+    }
+
+    fn tool_result(call_id: &str) -> Message {
+        let mut result = message(MessageRole::Tool, "observation");
+        result
+            .metadata
+            .insert("tool_call_id".to_string(), call_id.to_string());
+        result
+    }
+
+    #[test]
+    fn balanced_cut_detects_split_rounds_and_one_sided_prefixes() {
+        assert!(is_balanced_cut(&[]), "an empty prefix is balanced");
+
+        let balanced = vec![
+            message(MessageRole::User, "request"),
+            assistant_tool_call("c1"),
+            tool_result("c1"),
+            message(MessageRole::Assistant, "answer"),
+        ];
+        assert!(
+            is_balanced_cut(&balanced),
+            "a complete round stays balanced"
+        );
+
+        // Cutting between the call and its result leaves a dangling call.
+        assert!(!is_balanced_cut(&balanced[..2]));
+        // A tool result without its proposed call is unbalanced too.
+        assert!(!is_balanced_cut(&[tool_result("orphan")]));
+        // An in-flight call with no result yet is unbalanced.
+        assert!(!is_balanced_cut(&[assistant_tool_call("pending")]));
+    }
+
+    #[test]
+    fn nearest_balanced_cut_falls_back_and_keeps_balanced_points() {
+        // The c1 round straddles the steer message, so any cut inside the
+        // round is unbalanced.
+        let history = vec![
+            message(MessageRole::User, "request"),
+            assistant_tool_call("c1"),
+            message(MessageRole::User, "steer"),
+            tool_result("c1"),
+        ];
+        // Cuts inside the straddled round fall back before the call.
+        assert_eq!(nearest_balanced_cut(&history, 3), 1);
+        assert_eq!(nearest_balanced_cut(&history, 2), 1);
+        // Already-balanced proposed cuts stay unchanged.
+        assert_eq!(nearest_balanced_cut(&history, 4), 4);
+        assert_eq!(nearest_balanced_cut(&history, 1), 1);
+        assert_eq!(nearest_balanced_cut(&history, 0), 0);
+        // One-sided transcripts only balance at the empty prefix.
+        assert_eq!(nearest_balanced_cut(&[tool_result("orphan")], 1), 0);
+        assert_eq!(
+            nearest_balanced_cut(&[assistant_tool_call("pending")], 1),
+            0
+        );
+        // A proposed cut beyond the end is clamped first.
+        assert_eq!(nearest_balanced_cut(&history, 99), 4);
+    }
+
+    #[test]
+    fn recent_history_cut_falls_back_when_a_tool_round_straddles_the_boundary() {
+        // The steer message is a user turn start, but the tool round around c1
+        // straddles it: the archived head would keep the call while the
+        // retained tail keeps the result unless the cut falls back.
+        let history = vec![
+            message(MessageRole::User, "older request"),
+            assistant_tool_call("c1"),
+            message(MessageRole::User, "user steer"),
+            tool_result("c1"),
+        ];
+        // Budget for exactly the last two messages would naively start at the
+        // steer message (index 2), splitting the c1 round.
+        let budget = estimate_message_tokens(&history[2]) + estimate_message_tokens(&history[3]);
+
+        let (start, _) = ContextEngine::default().recent_history_start(&history, budget);
+
+        assert!(is_balanced_cut(&history[..start]));
+        assert!(start <= 1, "the cut falls back before the straddling round");
+    }
+
+    #[test]
+    fn recent_history_cut_keeps_an_already_balanced_boundary() {
+        let history = vec![
+            message(MessageRole::User, "older request"),
+            assistant_tool_call("c1"),
+            tool_result("c1"),
+            message(MessageRole::Assistant, "older answer"),
+            message(MessageRole::User, "current request"),
+            message(MessageRole::Assistant, "working"),
+        ];
+        let budget = estimate_message_tokens(&history[4]) + estimate_message_tokens(&history[5]);
+
+        let (start, _) = ContextEngine::default().recent_history_start(&history, budget);
+
+        assert_eq!(start, 4, "a balanced user-turn boundary stays unchanged");
+        assert!(is_balanced_cut(&history[..start]));
     }
 
     #[test]

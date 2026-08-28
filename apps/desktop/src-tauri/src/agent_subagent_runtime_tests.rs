@@ -12,6 +12,7 @@ struct ScriptedProvider {
     responses: Mutex<VecDeque<ModelResponse>>,
     calls: AtomicUsize,
     modes: Mutex<Vec<ModelCallMode>>,
+    first_messages: Mutex<Option<Vec<Message>>>,
 }
 
 impl ScriptedProvider {
@@ -20,6 +21,7 @@ impl ScriptedProvider {
             responses: Mutex::new(responses.into_iter().collect()),
             calls: AtomicUsize::new(0),
             modes: Mutex::new(Vec::new()),
+            first_messages: Mutex::new(None),
         }
     }
 
@@ -29,6 +31,11 @@ impl ScriptedProvider {
 
     fn requested_modes(&self) -> Vec<ModelCallMode> {
         self.modes.lock().expect("modes poisoned").clone()
+    }
+
+    /// The message list of the first model call, once captured.
+    fn first_messages(&self) -> Option<Vec<Message>> {
+        self.first_messages.lock().expect("first messages poisoned").clone()
     }
 }
 
@@ -47,6 +54,12 @@ impl StreamingModelProvider for ScriptedProvider {
             .lock()
             .expect("modes poisoned")
             .push(request.mode.clone());
+        {
+            let mut first_messages = self.first_messages.lock().expect("first messages poisoned");
+            if first_messages.is_none() {
+                *first_messages = Some(request.messages.clone());
+            }
+        }
         self.responses
             .lock()
             .expect("scripted provider poisoned")
@@ -122,6 +135,7 @@ fn subagent_runs_read_only_loop_to_a_final_answer() {
         &tools,
         &task_id,
         None,
+        &[],
     );
 
     assert_eq!(answer, "README.md:1 says line one");
@@ -146,6 +160,7 @@ fn subagent_child_requests_streaming_mode() {
         &tools,
         &task_id,
         None,
+        &[],
     );
 
     assert_eq!(answer, "README.md:1 says line one");
@@ -176,6 +191,7 @@ fn subagent_loop_is_bounded_by_step_limit() {
         &tools,
         &task_id,
         None,
+        &[],
     );
 
     // The loop never exceeds the step budget even with an infinite tool-call
@@ -224,6 +240,7 @@ fn subagent_aborts_before_any_model_call_when_cancelled() {
         &tools,
         &task_id,
         None,
+        &[],
     );
 
     assert!(answer.contains("stopped"));
@@ -258,6 +275,7 @@ fn subagent_model_calls_draw_from_the_shared_worker_stage_budget() {
         &tools,
         &task_id,
         None,
+        &[],
     );
 
     assert!(answer.contains("budget"));
@@ -276,6 +294,179 @@ fn subagent_tool_surface_is_the_read_only_whitelist() {
     assert!(names.iter().any(|name| name == "web.fetch"));
     assert!(!names.iter().any(|name| name == "file.write"));
     assert!(!names.iter().any(|name| name == "shell.run"));
+}
+
+fn parent_user(content: &str) -> Message {
+    Message {
+        role: MessageRole::User,
+        content: content.to_string(),
+        metadata: Metadata::new(),
+    }
+}
+
+fn parent_assistant_text(content: &str) -> Message {
+    Message {
+        role: MessageRole::Assistant,
+        content: content.to_string(),
+        metadata: Metadata::new(),
+    }
+}
+
+fn parent_assistant_call(call_id: &str) -> Message {
+    let mut assistant = parent_assistant_text("");
+    assistant.metadata.insert(
+        "raw_tool_calls_json".to_string(),
+        format!("[{{\"id\":\"{call_id}\"}}]"),
+    );
+    assistant
+}
+
+fn parent_tool_result(call_id: &str) -> Message {
+    let mut result = Message {
+        role: MessageRole::Tool,
+        content: "observation".to_string(),
+        metadata: Metadata::new(),
+    };
+    result
+        .metadata
+        .insert("tool_call_id".to_string(), call_id.to_string());
+    result
+}
+
+/// Mirror of the fork `execute_subagent_delegations` performs before spawning
+/// children.
+fn fork_parent_context(messages: &[Message]) -> Vec<Message> {
+    agent_runtime::subagent_context_fork_prefix(
+        messages,
+        agent_runtime::SUBAGENT_CONTEXT_FORK_MAX_MESSAGES,
+    )
+}
+
+#[test]
+fn subagent_fork_seeds_the_balanced_parent_prefix_before_the_contract() {
+    let (_workspace, registry, task_id) = fixture();
+    let parent = vec![
+        parent_user("parent goal"),
+        parent_assistant_call("p1"),
+        parent_tool_result("p1"),
+        parent_assistant_text("parent completed finding"),
+    ];
+    let prefix = fork_parent_context(&parent);
+    assert_eq!(prefix.len(), parent.len());
+
+    let provider = ScriptedProvider::new(vec![final_answer("done")]);
+    let control = Arc::new(AgentRunControl::new("fast"));
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+    let (_description, answer) = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        &prefix,
+    );
+
+    assert_eq!(answer, "done");
+    let messages = provider.first_messages().expect("first call captured");
+    // The parent prefix leads, followed by the subagent system contract and
+    // the delegated prompt.
+    assert_eq!(messages.len(), prefix.len() + 2);
+    assert_eq!(&messages[..prefix.len()], &prefix[..]);
+    assert_eq!(messages[prefix.len()].role, MessageRole::System);
+    assert_eq!(messages[prefix.len() + 1].role, MessageRole::User);
+    assert!(messages[prefix.len() + 1].content.contains("inspect readme"));
+    assert!(
+        agent_runtime::is_balanced_cut(&messages[..prefix.len()]),
+        "the seeded prefix stays balanced"
+    );
+}
+
+#[test]
+fn subagent_fork_excludes_an_in_flight_parent_round() {
+    let (_workspace, registry, task_id) = fixture();
+    let mut parent = vec![
+        parent_user("parent goal"),
+        parent_assistant_call("p1"),
+        parent_tool_result("p1"),
+        parent_assistant_text("parent completed finding"),
+    ];
+    // The parent is mid-batch: this round's call has no result yet.
+    parent.push(parent_user("follow-up"));
+    parent.push(parent_assistant_call("p2"));
+
+    let prefix = fork_parent_context(&parent);
+
+    assert_eq!(prefix, &parent[..4], "the in-flight round is excluded");
+    let provider = ScriptedProvider::new(vec![final_answer("done")]);
+    let control = Arc::new(AgentRunControl::new("fast"));
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+    let (_description, _answer) = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        &prefix,
+    );
+
+    let messages = provider.first_messages().expect("first call captured");
+    assert!(
+        messages.iter().all(|message| !message
+            .metadata
+            .get("raw_tool_calls_json")
+            .map(|raw| raw.contains("p2"))
+            .unwrap_or(false)),
+        "no in-flight parent call reaches the child"
+    );
+}
+
+#[test]
+fn subagent_fork_caps_prefix_messages_and_stays_balanced() {
+    // Forty-message parent: ten completed rounds of four messages each.
+    let mut parent = Vec::new();
+    for round in 0..10 {
+        parent.push(parent_user(&format!("request {round}")));
+        parent.push(parent_assistant_call(&format!("p{round}")));
+        parent.push(parent_tool_result(&format!("p{round}")));
+        parent.push(parent_assistant_text(&format!("answer {round}")));
+    }
+    assert_eq!(parent.len(), 40);
+
+    let prefix = fork_parent_context(&parent);
+
+    assert!(prefix.len() <= agent_runtime::SUBAGENT_CONTEXT_FORK_MAX_MESSAGES);
+    assert!(agent_runtime::is_balanced_cut(&prefix));
+    assert_eq!(prefix.last(), parent.last());
+}
+
+#[test]
+fn subagent_fork_without_parent_history_keeps_the_isolated_shape() {
+    let (_workspace, registry, task_id) = fixture();
+    let prefix = fork_parent_context(&[]);
+    assert!(prefix.is_empty());
+
+    let provider = ScriptedProvider::new(vec![final_answer("done")]);
+    let control = Arc::new(AgentRunControl::new("fast"));
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+    let (_description, _answer) = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        &prefix,
+    );
+
+    let messages = provider.first_messages().expect("first call captured");
+    assert_eq!(messages.len(), 2, "only the system contract and delegation prompt");
+    assert_eq!(messages[0].role, MessageRole::System);
+    assert_eq!(messages[1].role, MessageRole::User);
 }
 
 fn write_run_context() -> Metadata {

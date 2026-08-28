@@ -902,3 +902,118 @@ fn model_request_metadata_carries_generation_temperature_only_when_configured() 
         .metadata
         .contains_key(agent_core::GENERATION_TEMPERATURE_KEY));
 }
+
+fn identical_read_request(call_id: &str) -> AgentToolRequest {
+    AgentToolRequest {
+        call_id: ToolCallId(call_id.to_string()),
+        tool_name: "file.read".to_string(),
+        input: r#"{"path":"README.md"}"#.to_string(),
+    }
+}
+
+fn apply_read_observation(state: &mut AgentLoopState, tools: &[ToolSpec], call_id: &str) {
+    AgentKernel::new(state, tools).apply_tool_observation(
+        &identical_read_request(call_id),
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::ReadOnly),
+        "tool=file.read\nstatus=succeeded\noutput=readme",
+    );
+}
+
+fn repetition_advisories(request: &ModelRequest) -> Vec<&Message> {
+    request
+        .messages
+        .iter()
+        .filter(|message| {
+            message.metadata.get("kind").map(String::as_str)
+                == Some(crate::REPETITION_ADVISORY_KIND)
+        })
+        .collect()
+}
+
+#[test]
+fn repeated_identical_calls_inject_an_advisory_into_the_next_turn() {
+    let mut state = start_agent_loop(
+        TaskId("repetition-advisory".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    let tools = vec![read_tool()];
+    for index in 0..3 {
+        apply_read_observation(&mut state, &tools, &format!("call-{index}"));
+    }
+    assert_eq!(state.repetition_advisory.streak(), 3);
+
+    let prepared = AgentKernel::new(&mut state, &tools)
+        .prepare_model_turn(None, None, 16_384, 2_048)
+        .expect("turn preparation succeeds with an advisory");
+    let advisories = repetition_advisories(&prepared.request);
+    assert_eq!(
+        advisories.len(),
+        1,
+        "one advisory is injected at the threshold"
+    );
+    assert!(advisories[0].content.contains("file.read"));
+    assert!(advisories[0].content.contains("advisory only"));
+    // The notice is a transient overlay, not a durable transcript message.
+    assert!(!state
+        .messages
+        .iter()
+        .any(|message| message.metadata.get("kind").map(String::as_str)
+            == Some(crate::REPETITION_ADVISORY_KIND)));
+}
+
+#[test]
+fn repetition_advisory_never_vetoes_the_repeated_call() {
+    let mut state = start_agent_loop(
+        TaskId("repetition-no-veto".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    let tools = vec![read_tool()];
+    for index in 0..3 {
+        apply_read_observation(&mut state, &tools, &format!("call-{index}"));
+    }
+
+    // The advisory is due, yet the loop still prepares a normal turn and still
+    // accepts another identical observation (the hard stop is owned elsewhere).
+    AgentKernel::new(&mut state, &tools)
+        .prepare_model_turn(None, None, 16_384, 2_048)
+        .expect("the advisory does not block turn preparation");
+    apply_read_observation(&mut state, &tools, "call-3");
+    assert_eq!(state.repetition_advisory.streak(), 4);
+}
+
+#[test]
+fn repetition_advisory_resets_when_the_call_changes() {
+    let mut state = start_agent_loop(
+        TaskId("repetition-reset".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    let tools = vec![read_tool()];
+    apply_read_observation(&mut state, &tools, "call-0");
+    apply_read_observation(&mut state, &tools, "call-1");
+    assert_eq!(state.repetition_advisory.streak(), 2);
+
+    // A different input resets the streak below every advisory threshold.
+    AgentKernel::new(&mut state, &tools).apply_tool_observation(
+        &AgentToolRequest {
+            call_id: ToolCallId("call-2".to_string()),
+            tool_name: "file.read".to_string(),
+            input: r#"{"path":"OTHER.md"}"#.to_string(),
+        },
+        &ToolOutcomeStatus::Succeeded,
+        Some(&ToolRisk::ReadOnly),
+        "tool=file.read\nstatus=succeeded\noutput=other",
+    );
+    assert_eq!(state.repetition_advisory.streak(), 1);
+
+    let prepared = AgentKernel::new(&mut state, &tools)
+        .prepare_model_turn(None, None, 16_384, 2_048)
+        .expect("turn preparation succeeds after a reset");
+    assert!(
+        repetition_advisories(&prepared.request).is_empty(),
+        "a reset streak injects no advisory"
+    );
+}
