@@ -331,6 +331,22 @@ Tool visibility does not grant authority.
   (`sudo`, `rm -rf`, `chmod 777`, `mkfs`, `dd`, writes to disk devices,
   download-piped-to-shell, and similar) always prompt even when a prefix
   matches, and a dangerous command can never be granted as a prefix.
+- Optional OS-level shell confinement (default off): each session carries a
+  sandbox mode — `full` (default, no wrapper, argv byte-identical to the
+  unconfined execution), `workspace-write`, or `read-only` — stored as
+  replayable session events (`sandbox_event = mode_changed`), so the effective
+  mode is a fold over the session's event log, survives restarts by replay,
+  and never crosses sessions. When the effective mode is not `full`,
+  `shell.run` wraps its command in macOS Seatbelt via
+  `/usr/bin/sandbox-exec -p <profile> -- /bin/zsh -c <cmd>` with a
+  deterministic SBPL profile (`(version 1)(allow default)(deny file-write*)`
+  plus a `/dev/null` write allowance; `workspace-write` additionally allows
+  writes under the workspace root and `/tmp`; paths are SBPL-escaped). The
+  profile and argv derivation are pure functions in `agent-core`
+  (`seatbelt_profile_args`, `confined_argv`); a mode without an available
+  sandbox-exec fails the command instead of silently running unconfined. The
+  mode is selected per session from the composer's model/effort menu ("Shell
+  sandbox") and read fresh before every shell execution.
 - An opt-in `guardian_auto_approval` provider setting (default off) runs a
   model-distinct Reviewer check on a permission request that would otherwise
   pause for user approval: the reviewer sees the objective, tool, arguments,

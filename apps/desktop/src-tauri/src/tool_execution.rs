@@ -156,6 +156,21 @@ fn execute_agent_tool_invocation_inner(
             .entry(key.clone())
             .or_insert_with(|| value.clone());
     }
+    // Confinement is session policy, not tool input: right before a shell
+    // execution, resolve the session's effective sandbox mode from the live
+    // event log and hand it to the tool through invocation metadata. Absent
+    // sessions or mode events keep the historical unconfined argv.
+    if invocation.tool_name == "shell.run" {
+        let sandbox_mode =
+            crate::sandbox_mode_runtime::effective_sandbox_mode_before_tool_execution(
+                state,
+                run_context,
+            )?;
+        invocation.metadata.insert(
+            agent_core::SANDBOX_MODE_METADATA_KEY.to_string(),
+            sandbox_mode.label().to_string(),
+        );
+    }
     if let Some(tool) = registry.get(&invocation.tool_name) {
         let effect_spec = tool.effect_spec(&invocation);
         agent_runtime::apply_tool_spec_runtime_metadata(&mut invocation, &effect_spec);

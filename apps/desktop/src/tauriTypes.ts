@@ -18,6 +18,8 @@ export type PersonalizationConfig = {
   responseLength: "concise" | "balanced" | "detailed";
 };
 
+export type SessionSandboxMode = "read-only" | "workspace-write" | "full";
+
 export type SidecarEndpointState = {
   path: string;
   exists: boolean;

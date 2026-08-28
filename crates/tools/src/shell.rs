@@ -7,8 +7,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRisk, ToolArtifact, ToolFailure, ToolInvocation,
-    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolSpec,
+    confined_argv, sandbox_mode_from_metadata, Metadata, PermissionRequest, PermissionRisk,
+    ToolArtifact, ToolFailure, ToolInvocation, ToolOutcomeStatus, ToolPostconditionEvidence,
+    ToolResult, ToolSpec,
 };
 
 use crate::process_control::terminate_process_group;
@@ -140,15 +141,18 @@ impl Tool for ShellRunTool {
             .join("tool-output")
             .join(format!("{:016x}", stable_hash(&invocation.id.0)));
         let output = run_shell_command(
-            &command,
+            &confined_argv(
+                sandbox_mode_from_metadata(&invocation.metadata),
+                &self.workspace_root,
+                &command,
+            ),
             &resolved_cwd,
             timeout_seconds,
             control,
             &artifact_dir,
         )?;
 
-        let mut combined = String::new();
-        combined.push_str(&String::from_utf8_lossy(&output.stdout.preview));
+        let mut combined = String::from_utf8_lossy(&output.stdout.preview).into_owned();
         if !output.stderr.preview.is_empty() {
             if !combined.is_empty() {
                 combined.push('\n');
@@ -184,16 +188,14 @@ impl Tool for ShellRunTool {
             exit_code: output.status.code(),
         });
 
-        let stdout_artifact = output
-            .stdout
-            .artifact_path
-            .as_deref()
-            .map(|path| workspace_relative_artifact(&self.workspace_root, path));
-        let stderr_artifact = output
-            .stderr
-            .artifact_path
-            .as_deref()
-            .map(|path| workspace_relative_artifact(&self.workspace_root, path));
+        let workspace_artifact = |capture: &BoundedStreamCapture| {
+            capture
+                .artifact_path
+                .as_deref()
+                .map(|path| workspace_relative_artifact(&self.workspace_root, path))
+        };
+        let stdout_artifact = workspace_artifact(&output.stdout);
+        let stderr_artifact = workspace_artifact(&output.stderr);
         let stdout_complete = stream_capture_is_complete(&output.stdout);
         let stderr_complete = stream_capture_is_complete(&output.stderr);
         let contract = shell_contract(ShellContractInput {
@@ -262,7 +264,7 @@ fn stream_capture_is_complete(capture: &BoundedStreamCapture) -> bool {
 }
 
 fn run_shell_command(
-    command: &str,
+    argv: &[String],
     cwd: &Path,
     timeout_seconds: u64,
     control: &ToolExecutionControl,
@@ -271,10 +273,9 @@ fn run_shell_command(
     fs::create_dir_all(artifact_dir).map_err(|error| {
         ToolError::new(format!("failed to create shell output directory: {error}"))
     })?;
-    let mut process = Command::new("/bin/zsh");
+    let mut process = Command::new(&argv[0]);
     process
-        .arg("-fc")
-        .arg(command)
+        .args(&argv[1..])
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -950,7 +951,9 @@ fn diskutil_segment_is_destructive(segment: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{TaskId, ToolCallId};
+    use agent_core::{
+        seatbelt_profile_args, SandboxMode, TaskId, ToolCallId, SANDBOX_MODE_METADATA_KEY,
+    };
 
     fn invocation(command: &str) -> ToolInvocation {
         ToolInvocation {
@@ -1038,6 +1041,99 @@ mod tests {
                 .map(String::as_str),
             Some("developer_safe_v1")
         );
+    }
+
+    fn invocation_with_metadata(command: &str, metadata: Metadata) -> ToolInvocation {
+        ToolInvocation {
+            id: ToolCallId("shell-sandbox-test".to_string()),
+            task_id: TaskId("task".to_string()),
+            tool_name: "shell.run".to_string(),
+            input_json: serde_json::json!({"command": command}).to_string(),
+            proposed_by_model: "test".to_string(),
+            metadata,
+        }
+    }
+
+    fn shell_execution_argv(
+        invocation: &ToolInvocation,
+        workspace_root: &Path,
+        command: &str,
+    ) -> Vec<String> {
+        confined_argv(
+            sandbox_mode_from_metadata(&invocation.metadata),
+            workspace_root,
+            command,
+        )
+    }
+
+    #[test]
+    fn full_access_shell_argv_is_byte_identical_to_the_historical_command_line() {
+        let root = temp_workspace();
+        // No sandbox metadata at all: the shell execution path must produce the
+        // exact argv it always used (`/bin/zsh -fc <command>`).
+        assert_eq!(
+            shell_execution_argv(&invocation("cargo test"), &root, "cargo test"),
+            vec!["/bin/zsh", "-fc", "cargo test"]
+        );
+        // An explicit full-access mode is equally unwrapped.
+        let mut metadata = Metadata::new();
+        metadata.insert(SANDBOX_MODE_METADATA_KEY.to_string(), "full".to_string());
+        assert_eq!(
+            shell_execution_argv(
+                &invocation_with_metadata("cargo test", metadata),
+                &root,
+                "cargo test"
+            ),
+            vec!["/bin/zsh", "-fc", "cargo test"]
+        );
+    }
+
+    #[test]
+    fn confined_shell_modes_wrap_execution_in_sandbox_exec_with_the_mode_profile() {
+        let root = temp_workspace();
+        for (mode, label) in [
+            (SandboxMode::ReadOnly, "read-only"),
+            (SandboxMode::WorkspaceWrite, "workspace-write"),
+        ] {
+            let mut metadata = Metadata::new();
+            metadata.insert(SANDBOX_MODE_METADATA_KEY.to_string(), label.to_string());
+            let argv =
+                shell_execution_argv(&invocation_with_metadata("pwd", metadata), &root, "pwd");
+            assert_eq!(argv[0], "/usr/bin/sandbox-exec");
+            assert_eq!(argv[1], "-p");
+            assert_eq!(argv[2], seatbelt_profile_args(mode, &root).join(""));
+            assert_eq!(&argv[3..], ["--", "/bin/zsh", "-c", "pwd"]);
+        }
+    }
+
+    #[test]
+    fn full_access_execution_still_succeeds_without_any_wrapper() {
+        let result = ShellRunTool::new(temp_workspace())
+            .execute(invocation("printf %s unconfined"))
+            .expect("shell should execute");
+        assert_eq!(result.status, ToolOutcomeStatus::Succeeded);
+        assert_eq!(result.output.trim(), "unconfined");
+    }
+
+    // Real sandbox-exec end-to-end check. Ignored by default because it only
+    // makes sense on macOS and depends on the OS sandbox being available.
+    #[test]
+    #[ignore]
+    fn read_only_confinement_denies_workspace_writes_under_real_sandbox_exec() {
+        let root = temp_workspace();
+        let mut metadata = Metadata::new();
+        metadata.insert(
+            SANDBOX_MODE_METADATA_KEY.to_string(),
+            "read-only".to_string(),
+        );
+        let result = ShellRunTool::new(&root)
+            .execute(invocation_with_metadata(
+                "touch must-not-exist && printf wrote",
+                metadata,
+            ))
+            .expect("shell should execute");
+        assert_eq!(result.status, ToolOutcomeStatus::Failed);
+        assert!(!root.join("must-not-exist").exists());
     }
 
     #[test]

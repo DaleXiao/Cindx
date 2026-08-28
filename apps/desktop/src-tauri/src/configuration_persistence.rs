@@ -365,9 +365,8 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
         return Err(error);
     }
     drop(file);
-    fs::rename(&temporary_path, &path).map_err(|error| {
+    fs::rename(&temporary_path, &path).inspect_err(|_| {
         let _ = fs::remove_file(&temporary_path);
-        error
     })
 }
 

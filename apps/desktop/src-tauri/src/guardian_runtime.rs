@@ -383,8 +383,10 @@ fn dispatch_guardian_review(
     std::thread::spawn(move || {
         use tauri::Manager as _;
         let state = thread_app.state::<AppState>();
-        let mut limits = crate::collaboration_execution::CollaborationCallLimits::default();
-        limits.no_progress_timeout = Some(GUARDIAN_REVIEW_TIMEOUT);
+        let limits = crate::collaboration_execution::CollaborationCallLimits {
+            no_progress_timeout: Some(GUARDIAN_REVIEW_TIMEOUT),
+            ..Default::default()
+        };
         let result = crate::collaboration_stage_runtime::run_collaboration_stage_with_limits(
             &state,
             &thread_config,
@@ -463,11 +465,12 @@ mod tests {
     use agent_core::TaskId;
 
     fn provider_config_with_guardian(enabled: bool, reviewer: &str, executor: &str) -> ProviderConfig {
-        let mut config = ProviderConfig::default();
-        config.guardian_auto_approval = enabled;
-        config.reviewer_model = reviewer.to_string();
-        config.executor_model = executor.to_string();
-        config
+        ProviderConfig {
+            guardian_auto_approval: enabled,
+            reviewer_model: reviewer.to_string(),
+            executor_model: executor.to_string(),
+            ..Default::default()
+        }
     }
 
     fn shell_permission_request(command: &str) -> PermissionRequest {

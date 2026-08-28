@@ -213,6 +213,8 @@ pub fn run() -> Result<(), String> {
             rename_session,
             set_session_effort,
             set_session_model,
+            sandbox_mode_runtime::set_session_sandbox_mode,
+            sandbox_mode_runtime::get_session_sandbox_mode,
             generate_session_title,
             stage_agent_attachment,
             abort_agent_attachment_batch,

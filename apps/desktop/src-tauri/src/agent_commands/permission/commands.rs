@@ -141,6 +141,7 @@ pub(crate) fn resolve_agent_permission_blocking(
     Err(original)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_agent_permission_blocking_inner(
     app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -216,21 +217,22 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     // derived from the approved command's own clean shell tokens; dangerous or
     // dynamically-structured commands never derive a prefix, so the approval
     // degrades to the exact-command session grant (fail-closed narrowing).
-    if grant_command_prefix && matches!(&decision, PermissionDecision::AllowForSession) {
-        if matches!(request.action.as_str(), "shell.run" | "process.start") {
-            let prefix = request
+    if grant_command_prefix
+        && matches!(&decision, PermissionDecision::AllowForSession)
+        && matches!(request.action.as_str(), "shell.run" | "process.start")
+    {
+        let prefix = request
+            .metadata
+            .get("command")
+            .map(String::as_str)
+            .and_then(agent_core::command_prefix_for_grant);
+        if let Some(prefix) = prefix {
+            request
                 .metadata
-                .get("command")
-                .map(String::as_str)
-                .and_then(agent_core::command_prefix_for_grant);
-            if let Some(prefix) = prefix {
-                request
-                    .metadata
-                    .insert("command_prefix".to_string(), prefix);
-                store
-                    .update_permission_request_metadata(&request)
-                    .map_err(|error| error.to_string())?;
-            }
+                .insert("command_prefix".to_string(), prefix);
+            store
+                .update_permission_request_metadata(&request)
+                .map_err(|error| error.to_string())?;
         }
     }
     drop(store);

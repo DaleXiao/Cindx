@@ -19,6 +19,7 @@ import type { NativeAgentHistoryPage, NativeAgentState, NativeAgentStateDelta } 
 import type {
   RuntimeStatus,
   PersonalizationConfig,
+  SessionSandboxMode,
   SidecarEndpointState,
   SidecarState,
   SidecarConfigInput,
@@ -892,6 +893,17 @@ export async function setSessionModel(
     };
     return browserProjectSessionState;
   }
+}
+
+export async function getSessionSandboxMode(sessionId: string): Promise<SessionSandboxMode> {
+  return await invoke<SessionSandboxMode>("get_session_sandbox_mode", { sessionId });
+}
+
+export async function setSessionSandboxMode(
+  sessionId: string,
+  mode: SessionSandboxMode
+): Promise<SessionSandboxMode> {
+  return await invoke<SessionSandboxMode>("set_session_sandbox_mode", { sessionId, mode });
 }
 
 export async function generateSessionTitle(

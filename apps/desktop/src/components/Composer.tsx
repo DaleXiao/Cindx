@@ -19,7 +19,9 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useArtifactImagePreview } from "../controllers/useArtifactImagePreview";
 import {
+  getSessionSandboxMode,
   modelSupportsThinking,
+  setSessionSandboxMode,
   type AgentAttachment,
   type AgentEffort,
   type ToolApprovalView
@@ -32,7 +34,7 @@ import {
 } from "../providerReadinessModel";
 import { applyCustomCommandTemplate } from "../customCommandsModel";
 import { composerTextareaSizing } from "../composerSizingModel";
-import type { CustomCommandView } from "../tauriTypes";
+import type { CustomCommandView, SessionSandboxMode } from "../tauriTypes";
 import { permissionFocusTarget } from "./accessibilityFocusModel";
 import { CustomCommandsMenu } from "./CustomCommandsMenu";
 import { VoiceInputButton } from "./VoiceInputButton";
@@ -65,6 +67,15 @@ const EFFORT_OPTIONS: Array<{
   { value: "default", label: "Default" },
   { value: "high", label: "High" },
   { value: "xhigh", label: "Extra High" }
+];
+
+const SANDBOX_OPTIONS: Array<{
+  value: SessionSandboxMode;
+  label: string;
+}> = [
+  { value: "full", label: "Full access" },
+  { value: "workspace-write", label: "Workspace write" },
+  { value: "read-only", label: "Read only" }
 ];
 
 function ComposerAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
@@ -171,7 +182,8 @@ export function Composer({
   const imeEnterSeenDuringCompositionRef = useRef(false);
   const suppressImeEnterUntilRef = useRef(0);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
-  const [menuStep, setMenuStep] = useState<"main" | "model" | "effort">("main");
+  const [menuStep, setMenuStep] = useState<"main" | "model" | "effort" | "sandbox">("main");
+  const [sandboxMode, setSandboxMode] = useState<SessionSandboxMode>("full");
   const [voiceStatus, setVoiceStatus] = useState<VoiceInputStatus>("idle");
   const hasInput = Boolean(value.trim() || attachments.length);
   const agentActive = working || canStop;
@@ -182,6 +194,7 @@ export function Composer({
   const canContinueRun = canContinue && !working && !canStop && !pendingApproval;
   const providerPreflight = providerSubmissionPreflight(providerReadiness);
   const activeEffort = EFFORT_OPTIONS.find((option) => option.value === effort)!;
+  const activeSandbox = SANDBOX_OPTIONS.find((option) => option.value === sandboxMode)!;
   const activeModelLabel = agentModel.trim()
     ? modelDisplayName(agentModel)
     : "Default model";
@@ -205,6 +218,31 @@ export function Composer({
   useEffect(() => {
     if (pendingApproval) setVoiceStatus("idle");
   }, [pendingApproval]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSandboxMode("full");
+    if (sessionId) {
+      void getSessionSandboxMode(sessionId)
+        .then((mode) => {
+          if (!cancelled) setSandboxMode(mode);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  function handleSandboxModeChange(next: SessionSandboxMode) {
+    const targetSessionId = sessionId;
+    if (!targetSessionId || next === sandboxMode) return;
+    const previous = sandboxMode;
+    setSandboxMode(next);
+    void setSessionSandboxMode(targetSessionId, next)
+      .then((persisted) => setSandboxMode(persisted))
+      .catch(() => setSandboxMode(previous));
+  }
 
   useLayoutEffect(() => {
     const currentRequestId = pendingApproval?.requestId ?? null;
@@ -558,6 +596,15 @@ export function Composer({
                             <span className="composer-effort-row-value">{activeEffort.label}</span>
                             <ChevronRight aria-hidden="true" />
                           </button>
+                          <button
+                            type="button"
+                            className="composer-effort-row"
+                            onClick={() => setMenuStep("sandbox")}
+                          >
+                            <span className="composer-effort-row-label">Shell sandbox</span>
+                            <span className="composer-effort-row-value">{activeSandbox.label}</span>
+                            <ChevronRight aria-hidden="true" />
+                          </button>
                         </div>
                       )}
                       {menuStep === "model" && (
@@ -637,6 +684,43 @@ export function Composer({
                             </button>
                             );
                           })}
+                        </div>
+                      )}
+                      {menuStep === "sandbox" && (
+                        <div className="composer-effort-group" role="group" aria-label="Shell sandbox">
+                          <button
+                            type="button"
+                            className="composer-effort-back"
+                            onClick={() => setMenuStep("main")}
+                          >
+                            <ChevronLeft aria-hidden="true" />
+                            <span>Shell sandbox</span>
+                          </button>
+                          {SANDBOX_OPTIONS.map((option) => (
+                            <button
+                              type="button"
+                              role="option"
+                              aria-selected={option.value === sandboxMode}
+                              data-selected={option.value === sandboxMode}
+                              key={option.value}
+                              onClick={(event) => {
+                                const restoreKeyboardFocus = event.detail === 0;
+                                handleSandboxModeChange(option.value);
+                                setEffortMenuOpen(false);
+                                setMenuStep("main");
+                                if (restoreKeyboardFocus) {
+                                  window.requestAnimationFrame(() =>
+                                    effortTriggerRef.current?.focus({ preventScroll: true })
+                                  );
+                                }
+                              }}
+                            >
+                              <span>
+                                <strong>{option.label}</strong>
+                              </span>
+                              {option.value === sandboxMode && <Check aria-hidden="true" />}
+                            </button>
+                          ))}
                         </div>
                       )}
                     </div>

@@ -16,6 +16,7 @@ mod routing_telemetry;
 pub mod run_decision_enums;
 mod run_identity;
 mod run_requirements;
+mod sandbox;
 
 pub use agent_policy::AgentPolicy;
 pub use direct_judge::{
@@ -72,6 +73,10 @@ pub use run_identity::{
 pub use run_requirements::{
     AgentRiskLevel, AgentRouteRequirements, AGENT_RUN_DECISION_SCHEMA,
     MAX_RUN_DECISION_QUERY_CHARS, MAX_RUN_DECISION_RATIONALE_CHARS,
+};
+pub use sandbox::{
+    confined_argv, sandbox_mode_from_metadata, sbpl_escape, seatbelt_profile_args, SandboxMode,
+    SANDBOX_MODE_METADATA_KEY,
 };
 
 pub type Metadata = BTreeMap<String, String>;
