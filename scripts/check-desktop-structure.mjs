@@ -2174,9 +2174,11 @@ assert(
 assert(
   composerSource.includes("const restoreKeyboardFocus = event.detail === 0") &&
     composerSource.includes("focus({ preventScroll: true })") &&
-    /\.composer-toolbar-actions \{[\s\S]*?display: grid;[\s\S]*?grid-template-columns: min-content 36px 36px;/.test(
+    /\.composer-toolbar-actions \{[\s\S]*?display: flex;[\s\S]*?justify-content: flex-end;[\s\S]*?margin-left: auto;/.test(
       styles
     ) &&
+    /\.composer-effort-control \{[\s\S]*?max-width: min\(280px, 46vw\);/.test(styles) &&
+    /\.composer-effort-trigger > span \{[\s\S]*?text-overflow: ellipsis;/.test(styles) &&
     /\.composer-primary-button \{[\s\S]*?width: 36px;[\s\S]*?min-width: 36px;[\s\S]*?max-width: 36px;/.test(
       styles
     ),
