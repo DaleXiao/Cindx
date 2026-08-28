@@ -1,6 +1,7 @@
 target/
 node_modules/
 dist/
+apps/desktop/src/**/*.js
 /.cindx/
 .DS_Store
 /.env
