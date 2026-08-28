@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Redo2, Undo2 } from "lucide-react";
 import type { WorkspaceUndoState } from "../tauriTypes";
 import {
   getWorkspaceUndoState,
@@ -66,24 +67,37 @@ export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoContr
   const redoEntry = undoneEntries[undoneEntries.length - 1];
 
   return (
-    <div className="composer-undo-control" role="group" aria-label="Workspace change history">
+    <div className="composer-undo-control" role="group" aria-label="Agent file change history">
+      <span className="composer-undo-caption" title="Files the agent changed in this session">
+        File changes
+      </span>
       <button
         type="button"
         className="composer-undo-button"
         disabled={busy || disabled || !state.canUndo}
         onClick={() => void applyChange("undo")}
-        title={latestEntry ? `Undo change to ${latestEntry.path}` : "Undo last workspace change"}
+        title={
+          latestEntry
+            ? `Undo the agent's change to ${latestEntry.path}`
+            : "Undo the agent's last file change"
+        }
       >
-        Undo
+        <Undo2 size={13} aria-hidden="true" />
+        <span>Undo</span>
       </button>
       <button
         type="button"
         className="composer-undo-button"
         disabled={busy || disabled || !state.canRedo}
         onClick={() => void applyChange("redo")}
-        title={redoEntry ? `Redo change to ${redoEntry.path}` : "Redo last undone change"}
+        title={
+          redoEntry
+            ? `Restore the undone change to ${redoEntry.path}`
+            : "Restore the last undone file change"
+        }
       >
-        Redo
+        <Redo2 size={13} aria-hidden="true" />
+        <span>Redo</span>
       </button>
       {error ? (
         <span className="composer-undo-error" role="alert">
