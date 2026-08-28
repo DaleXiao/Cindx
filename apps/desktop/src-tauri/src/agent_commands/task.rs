@@ -275,10 +275,10 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
             .metadata
             .insert("display_content".to_string(), display_prompt.clone());
     }
-    // Plan-then-confirm gate (High/Xhigh with the Composer toggle only): draft
-    // a read-only plan, then pause for the user's explicit decision before any
-    // preparation or execution. Plan drafting is charged to the Worker stage
-    // budget; a drafting failure proceeds without a plan.
+    // Plan-then-confirm gate (High/Xhigh with the Settings plan-first toggle
+    // enabled): draft a read-only plan, then pause for the user's explicit
+    // decision before any preparation or execution. Plan drafting is charged to
+    // the Worker stage budget; a drafting failure proceeds without a plan.
     match crate::agent_plan_mode_runtime::run_plan_mode_gate(
         &state,
         &config,

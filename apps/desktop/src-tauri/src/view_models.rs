@@ -438,6 +438,8 @@ pub(crate) struct ProviderConfigState {
     pub(crate) collaboration_policy: String,
     /// Mirrors `ProviderConfig::direct_judge_fail_closed` for the Settings toggle.
     pub(crate) direct_judge_fail_closed: bool,
+    /// Mirrors `ProviderConfig::plan_first_enabled` for the Settings toggle.
+    pub(crate) plan_first_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     pub(crate) ready: bool,
@@ -879,8 +881,9 @@ pub(crate) struct AgentTaskInput {
     pub(crate) effort: String,
     #[serde(default)]
     pub(crate) attachments: Vec<AgentAttachmentView>,
-    /// Plan-then-confirm toggle from the Composer. Honored only for High/Xhigh
-    /// effort; a request on any other tier is dropped at admission.
+    /// Plan-then-confirm request sourced from the Settings plan-first toggle.
+    /// Honored only for High/Xhigh effort; a request on any other tier is
+    /// dropped at admission.
     #[serde(default)]
     pub(crate) plan_mode: bool,
 }
@@ -924,6 +927,9 @@ pub(crate) struct ProviderConfigInput {
     /// Optional fail-closed delivery-judge toggle; absent means fail-open.
     #[serde(default)]
     pub(crate) direct_judge_fail_closed: bool,
+    /// Optional plan-first toggle; absent means plan mode stays off.
+    #[serde(default)]
+    pub(crate) plan_first_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     /// The models the user enabled in Settings; the composer offers exactly

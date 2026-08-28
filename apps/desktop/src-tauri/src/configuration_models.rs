@@ -98,6 +98,9 @@ pub(crate) struct ProviderConfig {
     /// grounded) fails closed instead of delivering the unverified candidate.
     /// Defaults false: the judge gate stays fail-open.
     pub(crate) direct_judge_fail_closed: bool,
+    /// Settings "Plan first" toggle: when true, High/Xhigh submissions request
+    /// plan-then-confirm. Defaults false; Fast/Default never honor it.
+    pub(crate) plan_first_enabled: bool,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     /// The models the user enabled in Settings; the composer offers exactly
@@ -161,6 +164,7 @@ impl Default for ProviderConfig {
             auth_verified_at_ms: None,
             collaboration_policy: "auto_router".to_string(),
             direct_judge_fail_closed: false,
+            plan_first_enabled: false,
             context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),
             enabled_models: Vec::new(),

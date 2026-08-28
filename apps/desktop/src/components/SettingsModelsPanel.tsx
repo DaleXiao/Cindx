@@ -143,6 +143,20 @@ export function SettingsModelsPanel({
               />
               <span>Fail closed when the delivery judge rejects a file-changing answer</span>
             </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                disabled={providerBusy}
+                checked={providerDraft.planFirstEnabled}
+                onChange={(event) =>
+                  setProviderDraft({
+                    ...providerDraft,
+                    planFirstEnabled: event.target.checked
+                  })
+                }
+              />
+              <span>Plan first (high/xhigh)</span>
+            </label>
             <ProviderModalityFields
               imageEndpointValidation={imageEndpointValidation}
               providerBusy={providerBusy}

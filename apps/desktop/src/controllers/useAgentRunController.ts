@@ -28,6 +28,7 @@ import {
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage
 } from "../sessionRuntimeModel";
+import { planModeForSubmission } from "../planModeModel";
 import type { useSessionRuntimeController } from "./useSessionRuntimeController";
 
 type SessionRuntime = ReturnType<typeof useSessionRuntimeController>;
@@ -40,6 +41,7 @@ type AgentRunControllerInput = {
   attachmentBusy: boolean;
   clearAttachments: (sessionId: string) => void;
   composerAttachments: AgentAttachment[];
+  planFirstEnabled: boolean;
   refreshPermissionReviews: () => Promise<unknown>;
   restoreAttachmentsIfEmpty: (sessionId: string, previous: AgentAttachment[]) => void;
   restoreDraftIfEmpty: (sessionId: string, value: string) => void;
@@ -55,6 +57,7 @@ export function useAgentRunController({
   attachmentBusy,
   clearAttachments,
   composerAttachments,
+  planFirstEnabled,
   refreshPermissionReviews,
   restoreAttachmentsIfEmpty,
   restoreDraftIfEmpty,
@@ -274,10 +277,13 @@ export function useAgentRunController({
     }
   }
 
-  async function handleSendPrompt(value: string, planMode = false) {
+  async function handleSendPrompt(value: string) {
     const nextPrompt = value.trim();
     const sessionId = activeSession?.id;
     const attachments = composerAttachments;
+    // Plan mode comes from the persisted Settings plan-first toggle; the
+    // High/Xhigh gate normalizes it away on every other tier.
+    const planMode = planModeForSubmission(agentEffort, planFirstEnabled);
     if (
       (!nextPrompt && attachments.length === 0) ||
       !sessionId ||

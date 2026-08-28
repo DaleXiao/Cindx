@@ -842,7 +842,7 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["agent_recovery_service.rs", 550],
   ["agent_runtime_snapshot.rs", 220],
   ["background_work_runtime.rs", 80],
-  ["configuration_persistence.rs", 402],
+  ["configuration_persistence.rs", 405],
   ["event_persistence.rs", 180],
   ["event_security.rs", 500],
   ["permission_service.rs", 220],
@@ -3069,8 +3069,8 @@ assert(
   appSource.includes("providerStatusText(providerReadiness)") &&
     composerSource.includes("providerSubmissionPreflight(providerReadiness)") &&
     composerSource.indexOf("if (!providerPreflight.allowSubmit)") <
-      composerSource.indexOf("onSend(prompt, planModeActive)") &&
-    composerSource.indexOf("onSend(prompt, planModeActive)") <
+      composerSource.indexOf("onSend(prompt)") &&
+    composerSource.indexOf("onSend(prompt)") <
       composerSource.indexOf('onChange("")') &&
     composerSource.includes("Configure Models") &&
     appSource.includes('openSettingsCategory("models")') &&
@@ -3083,6 +3083,42 @@ assert(
     ) &&
     rustLib.includes("ready: config.is_ready()"),
   "Provider first-use gate must preserve drafts, expose Models recovery, and use Rust readiness"
+);
+assert(
+  composerSource.includes("onSend: (prompt: string) => void;") &&
+    composerSource.includes("onSend(prompt);") &&
+    !composerSource.includes("composer-plan-toggle") &&
+    !composerSource.includes("planModeAvailable") &&
+    !composerSource.includes("planModeOffered") &&
+    !composerSource.includes("planModeActive") &&
+    !styles.includes(".composer-plan-toggle") &&
+    appSource.includes("onSend={(value) => void handleSendPrompt(value)}"),
+  "Composer must send without a plan toggle; the plan-first switch lives in Settings"
+);
+assert(
+  settingsModelsPanelSource.includes("checked={providerDraft.planFirstEnabled}") &&
+    settingsModelsPanelSource.includes("planFirstEnabled: event.target.checked") &&
+    settingsModelsPanelSource.includes("Plan first (high/xhigh)") &&
+    appSource.includes("planFirstEnabled: Boolean(phase4?.provider.planFirstEnabled)") &&
+    agentRunControllerSource.includes("planModeForSubmission(agentEffort, planFirstEnabled)") &&
+    agentRunControllerSource.includes(
+      "const receipt = await queueAgentMessage(nextPrompt, sessionId, attachments, agentEffort, queueId, planMode);"
+    ) &&
+    agentRunControllerSource.includes(
+      "const next = await runAgentTask(nextPrompt, sessionId, attachments, agentEffort, planMode);"
+    ) &&
+    tauriBridge.includes("planFirstEnabled: boolean"),
+  "Settings must expose the default-off plan-first toggle and the send path must read it"
+);
+assert(
+  rustLib.includes("pub(crate) plan_first_enabled: bool,") &&
+    rustLib.includes("plan_first_enabled: false,") &&
+    rustLib.includes("config.plan_first_enabled = input.plan_first_enabled;") &&
+    rustLib.includes('"plan_first_enabled" => config.plan_first_enabled = value.trim() == "true",') &&
+    rustLib.includes("plan_first_enabled={}") &&
+    rustLib.includes("plan_first_enabled: config.plan_first_enabled,") &&
+    rustLib.includes("plan_mode_gate_active(input.plan_mode, effort)"),
+  "The plan-first provider setting must persist, project to Settings, and keep the High/Xhigh admission gate"
 );
 assert(
   tauriBridge.includes("conductorModel: string") &&

@@ -1274,6 +1274,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         voiceModel: input.voiceModel,
         collaborationPolicy: input.collaborationPolicy || "auto_router",
         directJudgeFailClosed: input.directJudgeFailClosed === true,
+        planFirstEnabled: input.planFirstEnabled === true,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
         ready: Boolean(profile.baseUrl.trim() && apiKeySet && executorModel.trim()),

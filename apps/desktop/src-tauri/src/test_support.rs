@@ -29,6 +29,7 @@ pub(crate) fn provider_input_from_config(config: &ProviderConfig) -> ProviderCon
         voice_model: config.voice_model.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
         direct_judge_fail_closed: config.direct_judge_fail_closed,
+        plan_first_enabled: config.plan_first_enabled,
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
         enabled_models: config.enabled_models.clone(),

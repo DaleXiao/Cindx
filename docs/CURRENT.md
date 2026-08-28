@@ -135,8 +135,10 @@ requirements still lift tool/effect/vision constraints fail-closed during
 preparation.
 
 Plan mode (plan-then-confirm) is an opt-in interaction feature, not a planning
-system. The Composer shows a "Plan" toggle only for High and Extra High
-effort; Fast and Default never expose or honor it. When enabled, the run
+system. Settings exposes it as a default-off toggle ("Plan first (high/xhigh)"
+in Settings → Models, persisted as the provider `plan_first_enabled` setting)
+that applies only to High and Extra High effort; Fast and Default never honor
+it, and the Composer no longer shows a Plan button. When enabled, the run
 drafts a plan before any preparation or execution: a bounded read-only loop
 (the same `file.read`/`file.list`/`file.search`/`file.glob`/`web.search`/
 `web.fetch` whitelist and per-call enforcement as subagent delegation) whose

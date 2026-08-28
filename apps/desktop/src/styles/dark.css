@@ -687,20 +687,17 @@
   border-color: var(--border);
 }
 
-:root[data-theme="dark"] .plan-confirmation-actions button,
-:root[data-theme="dark"] .composer-plan-toggle {
+:root[data-theme="dark"] .plan-confirmation-actions button {
   color: var(--text);
   background: var(--surface);
   border-color: var(--border-strong);
 }
 
-:root[data-theme="dark"] .plan-confirmation-actions button:hover:not(:disabled),
-:root[data-theme="dark"] .composer-plan-toggle:hover:not(:disabled) {
+:root[data-theme="dark"] .plan-confirmation-actions button:hover:not(:disabled) {
   background: var(--surface-active);
 }
 
-:root[data-theme="dark"] .plan-confirmation-actions .plan-confirmation-approve,
-:root[data-theme="dark"] .composer-plan-toggle[data-active="true"] {
+:root[data-theme="dark"] .plan-confirmation-actions .plan-confirmation-approve {
   color: #ffffff;
   background: #2563eb;
   border-color: #2563eb;

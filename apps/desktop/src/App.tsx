@@ -368,6 +368,7 @@ export function App() {
     attachmentBusy,
     clearAttachments,
     composerAttachments,
+    planFirstEnabled: Boolean(phase4?.provider.planFirstEnabled),
     refreshPermissionReviews,
     restoreAttachmentsIfEmpty,
     restoreDraftIfEmpty,
@@ -683,7 +684,7 @@ export function App() {
                   openSettingsCategory("models");
                   void loadProviderState();
                 }}
-                onSend={(value, planMode) => void handleSendPrompt(value, planMode)}
+                onSend={(value) => void handleSendPrompt(value)}
                 onPickAttachments={(files) => void handlePickAttachments(files)}
                 onRemoveAttachment={handleRemoveAttachment}
                 onCancel={() => void handleCancelAgentTask()}

@@ -181,6 +181,7 @@
           "voiceModel": "voice-contract",
           "collaborationPolicy": "auto_router",
           "directJudgeFailClosed": false,
+          "planFirstEnabled": false,
           "contextWindowTokens": 128000,
           "agentSystemPrompt": "Contract prompt",
           "ready": true,
@@ -208,6 +209,7 @@
           "voiceModel": "",
           "collaborationPolicy": "single",
           "directJudgeFailClosed": false,
+          "planFirstEnabled": false,
           "contextWindowTokens": 4096,
           "agentSystemPrompt": "",
           "ready": false,
@@ -243,6 +245,7 @@
           "voiceModel": "voice-contract",
           "collaborationPolicy": "auto_router",
           "directJudgeFailClosed": true,
+          "planFirstEnabled": true,
           "contextWindowTokens": 64000,
           "agentSystemPrompt": "Contract prompt",
           "enabledModels": []
