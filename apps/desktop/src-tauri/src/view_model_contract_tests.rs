@@ -99,6 +99,7 @@ fn provider_state(auth_verified_at_ms: Option<u64>) -> ProviderConfigState {
         voice_model: if configured { "voice-contract" } else { "" }.to_string(),
         collaboration_policy: if configured { "auto_router" } else { "single" }.to_string(),
         direct_judge_fail_closed: false,
+        guardian_auto_approval: false,
         plan_first_enabled: false,
         context_window_tokens: if configured { 128_000 } else { 4_096 },
         agent_system_prompt: if configured { "Contract prompt" } else { "" }.to_string(),
@@ -475,6 +476,7 @@ fn validate_provider_input(value: Value) {
     assert_eq!(input.voice_model, "voice-contract");
     assert_eq!(input.collaboration_policy, "auto_router");
     assert!(input.direct_judge_fail_closed);
+    assert!(input.guardian_auto_approval);
     assert!(input.plan_first_enabled);
     assert_eq!(input.context_window_tokens, 64_000);
     assert_eq!(input.agent_system_prompt, "Contract prompt");

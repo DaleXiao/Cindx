@@ -169,6 +169,177 @@ fn session_permission_grant_only_covers_the_same_capability() {
 }
 
 #[test]
+fn session_prefix_grant_reuses_commands_under_the_prefix() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let mut granted = PermissionRequest {
+        id: PermissionRequestId("prefix-grant".to_string()),
+        task_id: phase16_task_id(),
+        risk: PermissionRisk::Execute,
+        action: "shell.run".to_string(),
+        reason: "run a command".to_string(),
+        scope: ".".to_string(),
+        metadata: [
+            ("session_id".to_string(), "session-a".to_string()),
+            ("agent_run_id".to_string(), "run-a".to_string()),
+            ("command".to_string(), "cargo test".to_string()),
+            ("session_reusable".to_string(), "true".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    granted
+        .metadata
+        .insert("command_prefix".to_string(), "cargo test".to_string());
+    store
+        .save_permission_request(granted.clone(), 1)
+        .expect("grant request should save");
+    store
+        .resolve_permission(PermissionResolution {
+            request_id: granted.id.clone(),
+            decision: PermissionDecision::AllowForSession,
+            resolved_at_ms: 2,
+            resolved_by: "local-user".to_string(),
+        })
+        .expect("grant should resolve");
+
+    let mut next = granted.clone();
+    next.id = PermissionRequestId("next-request".to_string());
+
+    // The granted command itself and extensions under the same token prefix
+    // reuse the grant.
+    assert!(
+        agent_session_permission_granted(&store, &phase16_task_id(), &next, Some("session-a"),)
+            .expect("matching grant should load")
+    );
+    next.metadata.insert(
+        "command".to_string(),
+        "cargo test --release -- --nocapture".to_string(),
+    );
+    assert!(
+        agent_session_permission_granted(&store, &phase16_task_id(), &next, Some("session-a"),)
+            .expect("prefix extension should load")
+    );
+
+    // Commands outside the prefix do not reuse the grant.
+    next.metadata
+        .insert("command".to_string(), "cargo build".to_string());
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("other prefix should load"));
+    next.metadata.insert("command".to_string(), "cargo".to_string());
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("shorter command should load"));
+
+    // Dangerous commands force the user prompt even under a matching prefix.
+    next.metadata
+        .insert("command".to_string(), "sudo cargo test".to_string());
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("dangerous command should load"));
+
+    // Prefix grants stay bound to their session and working directory.
+    next.metadata
+        .insert("command".to_string(), "cargo test --all".to_string());
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-b"),
+    )
+    .expect("other session should load"));
+    next.scope = "crates/tools".to_string();
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("prefix grants must remain bound to their working directory"));
+
+    // Non-reusable requests never ride a prefix grant.
+    next.scope = ".".to_string();
+    next.metadata
+        .insert("session_reusable".to_string(), "false".to_string());
+    assert!(!agent_session_permission_granted(
+        &store,
+        &phase16_task_id(),
+        &next,
+        Some("session-a"),
+    )
+    .expect("dynamic commands must fail closed"));
+}
+
+#[test]
+fn session_prefix_grant_never_covers_dynamic_or_hidden_commands() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let mut granted = PermissionRequest {
+        id: PermissionRequestId("prefix-grant-shell".to_string()),
+        task_id: phase16_task_id(),
+        risk: PermissionRisk::Execute,
+        action: "shell.run".to_string(),
+        reason: "run a command".to_string(),
+        scope: ".".to_string(),
+        metadata: [
+            ("session_id".to_string(), "session-a".to_string()),
+            ("command".to_string(), "cargo test".to_string()),
+            ("session_reusable".to_string(), "true".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    granted
+        .metadata
+        .insert("command_prefix".to_string(), "cargo test".to_string());
+    store
+        .save_permission_request(granted.clone(), 1)
+        .expect("grant request should save");
+    store
+        .resolve_permission(PermissionResolution {
+            request_id: granted.id.clone(),
+            decision: PermissionDecision::AllowForSession,
+            resolved_at_ms: 2,
+            resolved_by: "local-user".to_string(),
+        })
+        .expect("grant should resolve");
+
+    let mut next = granted.clone();
+    next.id = PermissionRequestId("next-hidden".to_string());
+    for command in [
+        "cargo test $(touch should-not-run)",
+        "cargo test `id`",
+        "cargo test && rm -rf out",
+        "cargo test > /etc/passwd",
+        "printf '%s' \"$(touch should-not-run)\"",
+    ] {
+        next.metadata
+            .insert("command".to_string(), command.to_string());
+        assert!(
+            !agent_session_permission_granted(
+                &store,
+                &phase16_task_id(),
+                &next,
+                Some("session-a"),
+            )
+            .expect("dynamic command should load"),
+            "dynamic command must fail closed: {command}"
+        );
+    }
+}
+
+#[test]
 fn pending_permissions_are_isolated_by_agent_run() {
     let mut store = SqliteStore::in_memory().expect("store should open");
     for (id, run_id) in [("pending-old", "run-old"), ("pending-new", "run-new")] {

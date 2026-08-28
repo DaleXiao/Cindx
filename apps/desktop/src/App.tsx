@@ -690,8 +690,13 @@ export function App() {
                 onCancel={() => void handleCancelAgentTask()}
                 onRetry={() => void handleRetryAgentTask()}
                 onDismissError={() => setComposerError(null)}
-                onResolvePermission={(requestId, decision) =>
-                  void handleResolveAgentPermission(requestId, decision)
+                onResolvePermission={(requestId, decision, grantCommandPrefix) =>
+                  void handleResolveAgentPermission(
+                    requestId,
+                    decision,
+                    undefined,
+                    grantCommandPrefix
+                  )
                 }
               />
             </div>

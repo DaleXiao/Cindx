@@ -337,6 +337,8 @@ export type ProviderConfigState = {
   collaborationPolicy: string;
   /** Fail-closed delivery judge: a judged-but-unresolved mutation-bearing run fails instead of delivering the unverified candidate. */
   directJudgeFailClosed: boolean;
+  /** Guardian auto-approval: a model-distinct review may auto-approve non-destructive permission prompts; off means every prompt waits for the user. */
+  guardianAutoApproval: boolean;
   /** Plan first: High/Xhigh submissions draft a read-only plan and wait for approval before executing. */
   planFirstEnabled: boolean;
   contextWindowTokens: number;
@@ -370,6 +372,8 @@ export type ProviderConfigInput = {
   collaborationPolicy: string;
   /** Fail-closed delivery judge toggle; omitted by older clients means fail-open. */
   directJudgeFailClosed: boolean;
+  /** Guardian auto-approval toggle; omitted by older clients means the guardian never runs. */
+  guardianAutoApproval: boolean;
   /** Plan-first toggle; omitted by older clients means plan mode stays off. */
   planFirstEnabled: boolean;
   contextWindowTokens: number;

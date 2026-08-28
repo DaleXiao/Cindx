@@ -296,7 +296,26 @@ test("permission waiting resolves against the original session contract", async 
     args: {
       requestId: "permission-a",
       decision: "allow_for_session",
-      sessionId: "session-a"
+      sessionId: "session-a",
+      grantCommandPrefix: false
+    },
+    options: undefined
+  });
+
+  calls.length = 0;
+  await tauri.resolveAgentPermission(
+    review.pending[0].requestId,
+    "allow_for_session",
+    "session-a",
+    true
+  );
+  assert.deepEqual(commandCalls()[0], {
+    command: "resolve_agent_permission",
+    args: {
+      requestId: "permission-a",
+      decision: "allow_for_session",
+      sessionId: "session-a",
+      grantCommandPrefix: true
     },
     options: undefined
   });

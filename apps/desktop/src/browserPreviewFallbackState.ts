@@ -161,6 +161,7 @@ return {
     voiceModel: "gpt-realtime-2.1",
     collaborationPolicy: "auto_router",
     directJudgeFailClosed: false,
+    guardianAutoApproval: false,
     planFirstEnabled: false,
     contextWindowTokens: 1047576,
     agentSystemPrompt:

@@ -438,6 +438,8 @@ pub(crate) struct ProviderConfigState {
     pub(crate) collaboration_policy: String,
     /// Mirrors `ProviderConfig::direct_judge_fail_closed` for the Settings toggle.
     pub(crate) direct_judge_fail_closed: bool,
+    /// Mirrors `ProviderConfig::guardian_auto_approval` for the Settings toggle.
+    pub(crate) guardian_auto_approval: bool,
     /// Mirrors `ProviderConfig::plan_first_enabled` for the Settings toggle.
     pub(crate) plan_first_enabled: bool,
     pub(crate) context_window_tokens: u64,
@@ -927,6 +929,10 @@ pub(crate) struct ProviderConfigInput {
     /// Optional fail-closed delivery-judge toggle; absent means fail-open.
     #[serde(default)]
     pub(crate) direct_judge_fail_closed: bool,
+    /// Optional guardian auto-approval toggle; absent means the guardian never
+    /// runs and every consequential action prompts the user.
+    #[serde(default)]
+    pub(crate) guardian_auto_approval: bool,
     /// Optional plan-first toggle; absent means plan mode stays off.
     #[serde(default)]
     pub(crate) plan_first_enabled: bool,

@@ -108,6 +108,13 @@ fn verification_required_from_run_context(run_context: &Metadata) -> bool {
 }
 
 fn direct_judge_attribution(role: ModelRole) -> AgentModelAttribution {
+    guardian_or_verifier_attribution(role)
+}
+
+/// Shared Reviewer/Owner attribution for single-shot non-streaming review
+/// calls: the delivery judge and the permission guardian both dispatch through
+/// the same collaboration-stage infrastructure.
+pub(crate) fn guardian_or_verifier_attribution(role: ModelRole) -> AgentModelAttribution {
     match role {
         ModelRole::Reviewer => AgentModelAttribution::actor(
             AgentActor::IndependentVerifier,

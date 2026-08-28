@@ -255,6 +255,40 @@ pub(crate) fn run_collaboration_stage(
     .map_err(CollaborationStageError::message)
 }
 
+/// Variant of [`run_collaboration_stage`] that lets the caller bound the
+/// single non-streaming review call (for example the permission guardian's
+/// no-progress timeout) instead of inheriting the default limits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_collaboration_stage_with_limits(
+    state: &tauri::State<'_, AppState>,
+    config: &ProviderConfig,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    collaboration_id: &str,
+    stage: &str,
+    role: ModelRole,
+    model: &str,
+    prompt: String,
+    attribution: AgentModelAttribution,
+    limits: CollaborationCallLimits,
+) -> Result<String, String> {
+    run_collaboration_stage_typed(
+        state,
+        config,
+        task_id,
+        run_context,
+        collaboration_id,
+        stage,
+        role,
+        model,
+        prompt,
+        attribution,
+        limits,
+        |_| {},
+    )
+    .map_err(CollaborationStageError::message)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_collaboration_stage_typed(
     state: &tauri::State<'_, AppState>,

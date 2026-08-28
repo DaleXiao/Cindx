@@ -1,3 +1,4 @@
+use crate::exec_policy::{prefix_rule_matches, ExecPrefixRule};
 use crate::{PermissionRequest, PermissionRisk};
 
 pub fn permission_capability_matches(
@@ -36,10 +37,24 @@ fn permission_capability_metadata_matches(
     granted: &PermissionRequest,
     requested: &PermissionRequest,
 ) -> bool {
-    !matches!(requested.action.as_str(), "shell.run" | "process.start")
-        || requested.metadata.get("command").is_some_and(|command| {
-            granted.metadata.get("command").map(String::as_str) == Some(command.as_str())
-        })
+    if !matches!(requested.action.as_str(), "shell.run" | "process.start") {
+        return true;
+    }
+    let Some(command) = requested.metadata.get("command") else {
+        return false;
+    };
+    if let Some(prefix) = granted.metadata.get("command_prefix") {
+        // Prefix session grants reuse by shell-token prefix; the matcher is
+        // fail-closed and never matches dangerous commands, so exact grants
+        // (no `command_prefix` metadata) keep their exact-match behavior.
+        return prefix_rule_matches(
+            &ExecPrefixRule {
+                prefix: prefix.clone(),
+            },
+            command,
+        );
+    }
+    granted.metadata.get("command").map(String::as_str) == Some(command.as_str())
 }
 
 #[cfg(test)]
@@ -153,6 +168,78 @@ mod tests {
         assert!(!permission_capability_matches(
             &granted,
             &process_start_request("cargo check", "/workspace")
+        ));
+    }
+
+    fn shell_prefix_grant(prefix: &str, command: &str, scope: &str) -> PermissionRequest {
+        let mut request = shell_request(command, scope);
+        request
+            .metadata
+            .insert("command_prefix".to_string(), prefix.to_string());
+        request
+    }
+
+    #[test]
+    fn shell_prefix_session_capability_reuses_commands_under_the_prefix() {
+        let granted = shell_prefix_grant("cargo test", "cargo test", "/workspace");
+        let same = shell_request("cargo test", "/workspace");
+        let extended = shell_request("cargo test --release -- --nocapture", "/workspace");
+
+        assert!(permission_capability_matches(&granted, &same));
+        assert!(permission_capability_matches(&granted, &extended));
+    }
+
+    #[test]
+    fn shell_prefix_session_capability_never_covers_a_different_prefix() {
+        let granted = shell_prefix_grant("cargo test", "cargo test", "/workspace");
+        let other_command = shell_request("cargo build", "/workspace");
+        let shorter = shell_request("cargo", "/workspace");
+        let hidden_side_effect = shell_request("cargo test && touch should-not-run", "/workspace");
+        let missing_command = request("shell.run", PermissionRisk::Execute, "/workspace");
+
+        assert!(!permission_capability_matches(&granted, &other_command));
+        assert!(!permission_capability_matches(&granted, &shorter));
+        assert!(!permission_capability_matches(
+            &granted,
+            &hidden_side_effect
+        ));
+        assert!(!permission_capability_matches(&granted, &missing_command));
+    }
+
+    #[test]
+    fn shell_prefix_session_capability_forces_a_prompt_for_dangerous_commands() {
+        let granted = shell_prefix_grant("rm", "rm notes.md", "/workspace");
+        let benign = shell_request("rm notes.md", "/workspace");
+        let destructive = shell_request("rm -rf /workspace", "/workspace");
+
+        assert!(permission_capability_matches(&granted, &benign));
+        assert!(!permission_capability_matches(&granted, &destructive));
+    }
+
+    #[test]
+    fn shell_prefix_session_capability_stays_bound_to_scope_and_reuse_markers() {
+        let granted = shell_prefix_grant("cargo test", "cargo test", "/workspace");
+        let another_workspace = shell_request("cargo test --release", "/other");
+        assert!(!permission_capability_matches(&granted, &another_workspace));
+
+        let mut dynamic = shell_request("cargo test --release", "/workspace");
+        dynamic
+            .metadata
+            .insert("session_reusable".to_string(), "false".to_string());
+        assert!(!permission_capability_matches(&granted, &dynamic));
+    }
+
+    #[test]
+    fn exact_command_grants_keep_their_behavior_without_a_prefix_marker() {
+        let granted = shell_request("cargo test", "/workspace");
+        assert!(!granted.metadata.contains_key("command_prefix"));
+        assert!(permission_capability_matches(
+            &granted,
+            &shell_request("cargo test", "/workspace")
+        ));
+        assert!(!permission_capability_matches(
+            &granted,
+            &shell_request("cargo test --release", "/workspace")
         ));
     }
 

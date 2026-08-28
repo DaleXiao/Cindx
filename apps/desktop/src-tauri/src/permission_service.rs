@@ -1,6 +1,6 @@
 use agent_core::{
-    permission_can_allow_session, permission_requires_exact_scope, PermissionDecision,
-    PermissionRequest, PermissionRisk, TaskId,
+    permission_can_allow_session, permission_requires_exact_scope, prefix_rule_matches,
+    ExecPrefixRule, PermissionDecision, PermissionRequest, PermissionRisk, TaskId,
 };
 use agent_storage::{PermissionStore, SqliteStore, StorageError};
 
@@ -20,13 +20,38 @@ pub(crate) fn agent_session_permission_granted(
     if require_capability_key && !request.metadata.contains_key("command") {
         return Ok(false);
     }
-    store.has_session_permission_capability(
+    if store.has_session_permission_capability(
         task_id,
         session_id,
         request,
         permission_requires_exact_scope(request),
         require_capability_key,
-    )
+    )? {
+        return Ok(true);
+    }
+    // Prefix session grants: a shell grant may record a `command_prefix`
+    // covering every later command whose shell tokens start with the granted
+    // token sequence. Matching is fail-closed — `prefix_rule_matches` rejects
+    // untokenizable and dangerous commands, so destructive commands always
+    // prompt even under a matching prefix. Exact grants keep the SQL
+    // capability-key path above and never consult this listing.
+    if require_capability_key {
+        if let Some(command) = request.metadata.get("command") {
+            let grants =
+                store.list_session_permission_grant_metadata(task_id, session_id, request)?;
+            return Ok(grants.iter().any(|metadata| {
+                metadata.get("command_prefix").is_some_and(|prefix| {
+                    prefix_rule_matches(
+                        &ExecPrefixRule {
+                            prefix: prefix.clone(),
+                        },
+                        command,
+                    )
+                })
+            }));
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn pending_agent_permissions_for_run(

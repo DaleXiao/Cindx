@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod agent_policy;
 mod direct_judge;
 mod event_contract;
+mod exec_policy;
 pub mod execution_contract;
 mod knowledge_plan;
 mod learning_evidence;
@@ -25,6 +26,10 @@ pub use direct_judge::{
 pub use event_contract::{
     decode_event_type, insert_event_type_v1, DecodedEventType, EventTypeBuildError, EventTypeV1,
     TypedEventRef, EVENT_TYPE_METADATA_KEY,
+};
+pub use exec_policy::{
+    command_prefix_for_grant, is_dangerous_command, prefix_rule_matches, shell_command_tokens,
+    ExecPrefixRule,
 };
 pub use execution_contract::{
     ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy, MAX_PLANNING_STEPS,

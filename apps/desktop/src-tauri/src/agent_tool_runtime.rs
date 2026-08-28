@@ -636,17 +636,42 @@ fn execute_agent_tool_batch_serial(
 
         if completed_result.is_none() {
             if let Some(request) = permission_request {
-                if evaluate_agent_tool_permission(
+                let guardian_request = request.clone();
+                let gate = evaluate_agent_tool_permission(
                     &mut store,
                     &runtime.task_id,
                     run_context,
                     session_id,
                     &invocation,
                     request,
-                )? == AgentToolPermissionGateOutcome::Pending
-                {
-                    waiting_for_permission = true;
-                    continue;
+                )?;
+                if gate == AgentToolPermissionGateOutcome::Pending {
+                    // Guardian auto-approval (default off): before pausing for
+                    // the user, a model-distinct reviewer may explicitly allow
+                    // the pending request. Deny, timeout, malformed answers,
+                    // unavailable reviewers, and destructive risk all fall
+                    // back to the ordinary user prompt (fail-closed). The
+                    // store lock is released across the bounded review call.
+                    drop(store);
+                    let context_excerpt =
+                        crate::guardian_runtime::guardian_context_excerpt(&runtime.messages);
+                    let guardian_approved =
+                        crate::guardian_runtime::guardian_auto_approve_pending_permission(
+                            app,
+                            state,
+                            run_context,
+                            &guardian_request,
+                            prompt,
+                            &context_excerpt,
+                        )?;
+                    store = state
+                        .store
+                        .lock()
+                        .map_err(|error| format!("store lock poisoned: {error}"))?;
+                    if !guardian_approved {
+                        waiting_for_permission = true;
+                        continue;
+                    }
                 }
             }
         }

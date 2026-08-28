@@ -9,6 +9,20 @@ fn persist_permission_resolution_rows(
     run_context: &Metadata,
 ) -> Result<(), StorageError> {
     store.resolve_permission_in_transaction(resolution)?;
+    let mut metadata = [
+        ("permission_id".to_string(), resolution.request_id.0.clone()),
+        (
+            "decision".to_string(),
+            permission_decision_label(&resolution.decision).to_string(),
+        ),
+        ("tool".to_string(), request.action.clone()),
+        ("resolved_by".to_string(), resolution.resolved_by.clone()),
+    ]
+    .into_iter()
+    .collect::<Metadata>();
+    if let Some(prefix) = request.metadata.get("command_prefix") {
+        metadata.insert("command_prefix".to_string(), prefix.clone());
+    }
     append_event(
         store,
         &request.task_id,
@@ -17,20 +31,7 @@ fn persist_permission_resolution_rows(
             "Permission {}",
             permission_decision_past_tense(&resolution.decision)
         ),
-        metadata_with_context(
-            [
-                ("permission_id".to_string(), resolution.request_id.0.clone()),
-                (
-                    "decision".to_string(),
-                    permission_decision_label(&resolution.decision).to_string(),
-                ),
-                ("tool".to_string(), request.action.clone()),
-                ("resolved_by".to_string(), resolution.resolved_by.clone()),
-            ]
-            .into_iter()
-            .collect(),
-            run_context,
-        ),
+        metadata_with_context(metadata, run_context),
     )
 }
 

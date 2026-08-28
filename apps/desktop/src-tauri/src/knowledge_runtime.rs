@@ -980,6 +980,7 @@ pub(crate) fn provider_config_state(config: &ProviderConfig) -> ProviderConfigSt
         voice_model: config.voice_model.clone(),
         collaboration_policy: config.collaboration_policy.clone(),
         direct_judge_fail_closed: config.direct_judge_fail_closed,
+        guardian_auto_approval: config.guardian_auto_approval,
         plan_first_enabled: config.plan_first_enabled,
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),

@@ -495,7 +495,8 @@ export function useAgentRunController({
   async function handleResolveAgentPermission(
     requestId: string,
     decision: "allow_once" | "allow_for_session" | "deny",
-    targetSessionId = activeSession?.id
+    targetSessionId = activeSession?.id,
+    grantCommandPrefix = false
   ) {
     const sessionId = targetSessionId;
     if (!sessionId) return;
@@ -530,7 +531,7 @@ export function useAgentRunController({
     }
     let completedState: AgentState | null = null;
     try {
-      const next = await resolveAgentPermission(requestId, decision, sessionId);
+      const next = await resolveAgentPermission(requestId, decision, sessionId, grantCommandPrefix);
       completedState = next;
       applyAgentStateForSession(sessionId, next);
       if (activeSessionIdRef.current === sessionId) setComposerError(next.lastError);

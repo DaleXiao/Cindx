@@ -321,7 +321,26 @@ Tool visibility does not grant authority.
 - Side effects pass through the desktop permission path.
 - A session grant is matched against task, session, action, risk, scope, and
   capability metadata. `shell.run` and `process.start` also require a command
-  capability key.
+  capability key. In addition to the exact-command reuse, a `shell.run`
+  approval may grant a command prefix for the session ("Allow prefix"): the
+  grant records a `command_prefix` derived from the approved command, and later
+  `shell.run` calls whose shell tokens begin with that exact token sequence
+  reuse it without a new prompt; exact-command grants and every other session
+  grant keep their exact-match behavior. Prefix reuse is fail-closed: commands
+  with shell metacharacters never tokenize, and obviously destructive commands
+  (`sudo`, `rm -rf`, `chmod 777`, `mkfs`, `dd`, writes to disk devices,
+  download-piped-to-shell, and similar) always prompt even when a prefix
+  matches, and a dangerous command can never be granted as a prefix.
+- An opt-in `guardian_auto_approval` provider setting (default off) runs a
+  model-distinct Reviewer check on a permission request that would otherwise
+  pause for user approval: the reviewer sees the objective, tool, arguments,
+  risk level, and a bounded recent-context excerpt under a 20-second cap and
+  must answer one strict single-line JSON verdict; only an explicit `allow`
+  auto-approves (as allow-once, resolved by `guardian-auto-approval`), while a
+  `deny`, timeout, malformed answer, or unavailable reviewer falls back to the
+  ordinary user prompt without failing the task, and Destructive-risk requests
+  are never auto-approved. Every review records a shadow
+  `guardian_disposition` on the run's permission events for observability.
 - Allow-once, session approval, denial, cancellation, and policy/capability
   rejection remain distinct durable outcomes.
 - A denied or blocked obligation is not marked complete and must be disclosed

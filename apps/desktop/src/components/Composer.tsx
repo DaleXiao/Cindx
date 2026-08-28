@@ -118,7 +118,8 @@ type ComposerProps = {
   onDismissError: () => void;
   onResolvePermission: (
     requestId: string,
-    decision: "allow_once" | "allow_for_session" | "deny"
+    decision: "allow_once" | "allow_for_session" | "deny",
+    grantCommandPrefix?: boolean
   ) => void;
 };
 
@@ -289,14 +290,15 @@ export function Composer({
   }
 
   function resolvePendingPermission(
-    decision: "allow_once" | "allow_for_session" | "deny"
+    decision: "allow_once" | "allow_for_session" | "deny",
+    grantCommandPrefix = false
   ) {
     if (!pendingApproval) return;
     restoreComposerAfterPermissionRef.current = {
       requestId: pendingApproval.requestId,
       sessionId
     };
-    onResolvePermission(pendingApproval.requestId, decision);
+    onResolvePermission(pendingApproval.requestId, decision, grantCommandPrefix);
   }
 
   return (
@@ -363,6 +365,20 @@ export function Composer({
                   </span>
                 </button>
               )}
+              {pendingApproval.canAllowSession &&
+                (pendingApproval.toolName === "shell.run" ||
+                  pendingApproval.toolName === "process.start") && (
+                  <button
+                    className="permission-session"
+                    type="button"
+                    disabled={permissionBusy}
+                    onClick={() => resolvePendingPermission("allow_for_session", true)}
+                    title="Reuse commands that start with this exact command in this session. Dangerous commands always prompt."
+                  >
+                    <CheckCheck aria-hidden="true" />
+                    <span>Allow prefix</span>
+                  </button>
+                )}
               <button
                 className="permission-deny"
                 type="button"

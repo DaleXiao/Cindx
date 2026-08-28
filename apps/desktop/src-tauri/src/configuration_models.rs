@@ -98,6 +98,12 @@ pub(crate) struct ProviderConfig {
     /// grounded) fails closed instead of delivering the unverified candidate.
     /// Defaults false: the judge gate stays fail-open.
     pub(crate) direct_judge_fail_closed: bool,
+    /// When true, a permission request that would pause the run for user
+    /// approval first goes through a model-distinct guardian review; only an
+    /// explicit guardian `allow` auto-approves (allow-once), every other
+    /// outcome falls back to the ordinary user prompt. Destructive-risk
+    /// requests are never auto-approved. Defaults false.
+    pub(crate) guardian_auto_approval: bool,
     /// Settings "Plan first" toggle: when true, High/Xhigh submissions request
     /// plan-then-confirm. Defaults false; Fast/Default never honor it.
     pub(crate) plan_first_enabled: bool,
@@ -164,6 +170,7 @@ impl Default for ProviderConfig {
             auth_verified_at_ms: None,
             collaboration_policy: "auto_router".to_string(),
             direct_judge_fail_closed: false,
+            guardian_auto_approval: false,
             plan_first_enabled: false,
             context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),

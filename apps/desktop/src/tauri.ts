@@ -1274,6 +1274,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         voiceModel: input.voiceModel,
         collaborationPolicy: input.collaborationPolicy || "auto_router",
         directJudgeFailClosed: input.directJudgeFailClosed === true,
+        guardianAutoApproval: input.guardianAutoApproval === true,
         planFirstEnabled: input.planFirstEnabled === true,
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
@@ -1754,13 +1755,15 @@ export async function retryAgentTask(sessionId: string): Promise<AgentState> {
 export async function resolveAgentPermission(
   requestId: string,
   decision: "allow_once" | "allow_for_session" | "deny",
-  sessionId: string
+  sessionId: string,
+  grantCommandPrefix = false
 ): Promise<AgentState> {
   try {
     return await invoke<NativeAgentState>("resolve_agent_permission", {
       requestId,
       decision,
-      sessionId
+      sessionId,
+      grantCommandPrefix
     });
   } catch (error) {
     if (isTauriRuntime()) throw error;

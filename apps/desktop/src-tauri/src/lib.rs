@@ -47,6 +47,7 @@ mod direct_judge_shadow_runtime;
 mod event_persistence;
 mod event_projection;
 mod event_security;
+mod guardian_runtime;
 mod integration_commands;
 mod knowledge_commands;
 mod knowledge_embedding_runtime;

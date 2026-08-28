@@ -51,6 +51,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     voiceModel: provider.voiceModel,
     collaborationPolicy: normalizedEffortPolicy(provider.collaborationPolicy),
     directJudgeFailClosed: provider.directJudgeFailClosed,
+    guardianAutoApproval: provider.guardianAutoApproval,
     planFirstEnabled: provider.planFirstEnabled,
     contextWindowTokens: provider.contextWindowTokens,
     agentSystemPrompt: provider.agentSystemPrompt,

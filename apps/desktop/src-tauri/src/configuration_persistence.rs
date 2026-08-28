@@ -127,6 +127,7 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
         _ => "auto_router".to_string(),
     };
     config.direct_judge_fail_closed = input.direct_judge_fail_closed;
+    config.guardian_auto_approval = input.guardian_auto_approval;
     config.plan_first_enabled = input.plan_first_enabled;
     config.context_window_tokens = if input.context_window_tokens < 4_096 {
         defaults
@@ -235,6 +236,7 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
             }
             "collaboration_policy" => config.collaboration_policy = value.to_string(),
             "direct_judge_fail_closed" => config.direct_judge_fail_closed = value.trim() == "true",
+            "guardian_auto_approval" => config.guardian_auto_approval = value.trim() == "true",
             "plan_first_enabled" => config.plan_first_enabled = value.trim() == "true",
             "context_window_tokens" => {
                 config.context_window_tokens = value.parse().unwrap_or(128_000)
@@ -363,18 +365,15 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
         return Err(error);
     }
     drop(file);
-    match fs::rename(&temporary_path, &path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&temporary_path);
-            Err(error)
-        }
-    }
+    fs::rename(&temporary_path, &path).map_err(|error| {
+        let _ = fs::remove_file(&temporary_path);
+        error
+    })
 }
 
 pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
     format!(
-        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ndirect_judge_fail_closed={}\nplan_first_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
+        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ndirect_judge_fail_closed={}\nguardian_auto_approval={}\nplan_first_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
         sanitize_config_value(&config.provider_id),
         sanitize_config_value(&config.provider_resource),
         sanitize_config_value(&config.base_url),
@@ -395,6 +394,7 @@ pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
         config.auth_verified_at_ms.unwrap_or_default(),
         sanitize_config_value(&config.collaboration_policy),
         config.direct_judge_fail_closed,
+        config.guardian_auto_approval,
         config.plan_first_enabled,
         config.context_window_tokens,
         config_hex_encode(&config.agent_system_prompt),

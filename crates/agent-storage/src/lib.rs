@@ -1016,6 +1016,57 @@ impl SqliteStore {
         Ok(statement.step()? == StepResult::Row)
     }
 
+    /// Session grants for the same task/session/action/risk/scope that carry a
+    /// resolved `allow_for_session` decision, returned as raw request metadata
+    /// so the caller can apply capability rules (for example shell command
+    /// prefix matching) that cannot be expressed as an exact SQL key.
+    pub fn list_session_permission_grant_metadata(
+        &self,
+        task_id: &TaskId,
+        session_id: &str,
+        request: &PermissionRequest,
+    ) -> Result<Vec<Metadata>, StorageError> {
+        let mut statement = self.prepare(
+            "select pr.metadata_text
+             from permission_requests pr
+             inner join permission_resolutions rr on rr.request_id = pr.id
+             where pr.task_id = ?1
+               and pr.session_id = ?2
+               and pr.risk = ?3
+               and pr.action = ?4
+               and pr.scope = ?5
+               and rr.decision = 'allow_for_session'",
+        )?;
+        statement.bind_text(1, &task_id.0)?;
+        statement.bind_text(2, session_id)?;
+        statement.bind_text(3, permission_risk_to_str(&request.risk))?;
+        statement.bind_text(4, &request.action)?;
+        statement.bind_text(5, &request.scope)?;
+        let mut grants = Vec::new();
+        while statement.step()? == StepResult::Row {
+            grants.push(metadata_from_text(&statement.column_text(0)?)?);
+        }
+        Ok(grants)
+    }
+
+    /// Replace a persisted permission request's metadata (and recompute its
+    /// capability key) without touching its identity, timestamps, or status.
+    /// Used to record a `command_prefix` session-grant marker on the approved
+    /// request before its resolution rows are written.
+    pub fn update_permission_request_metadata(
+        &mut self,
+        request: &PermissionRequest,
+    ) -> Result<(), StorageError> {
+        let capability_key = permission_capability_key(request);
+        let mut statement = self.prepare(
+            "update permission_requests set metadata_text = ?1, capability_key = ?2 where id = ?3",
+        )?;
+        statement.bind_text(1, &metadata_to_text(&request.metadata))?;
+        statement.bind_optional_text(2, capability_key.as_deref())?;
+        statement.bind_text(3, &request.id.0)?;
+        statement.expect_done()
+    }
+
     pub fn delete_records_by_metadata(
         &mut self,
         key: &str,
@@ -2732,6 +2783,148 @@ mod tests {
         assert!(!store
             .has_session_permission_capability(&task_id, "session-a", &another_risk, false, true,)
             .expect("risk query should succeed"));
+    }
+
+    #[test]
+    fn prefix_grant_metadata_round_trips_through_session_capability_listing() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-agent".to_string());
+        let request_id = PermissionRequestId("perm-shell-prefix".to_string());
+        let mut request = PermissionRequest {
+            id: request_id.clone(),
+            task_id: task_id.clone(),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "test".to_string(),
+            scope: "/workspace".to_string(),
+            metadata: [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("command".to_string(), "cargo test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        store
+            .save_permission_request(request.clone(), 100)
+            .expect("permission should save");
+
+        // Record the prefix marker on the approved request the way the
+        // resolution path does, then resolve it for the session.
+        request
+            .metadata
+            .insert("command_prefix".to_string(), "cargo test".to_string());
+        store
+            .update_permission_request_metadata(&request)
+            .expect("prefix marker should persist");
+        let persisted = store
+            .get_permission_request(&request_id)
+            .expect("request should load")
+            .expect("request should exist");
+        assert_eq!(
+            persisted.metadata.get("command_prefix").map(String::as_str),
+            Some("cargo test")
+        );
+        store
+            .resolve_permission(PermissionResolution {
+                request_id,
+                decision: PermissionDecision::AllowForSession,
+                resolved_at_ms: 110,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+
+        let grants = store
+            .list_session_permission_grant_metadata(&task_id, "session-a", &request)
+            .expect("grant listing should succeed");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            grants[0].get("command_prefix").map(String::as_str),
+            Some("cargo test")
+        );
+
+        // The grant stays bound to its session, scope, action, and risk.
+        assert!(store
+            .list_session_permission_grant_metadata(&task_id, "session-b", &request)
+            .expect("grant listing should succeed")
+            .is_empty());
+        let mut other_scope = request.clone();
+        other_scope.scope = "/other".to_string();
+        assert!(store
+            .list_session_permission_grant_metadata(&task_id, "session-a", &other_scope)
+            .expect("grant listing should succeed")
+            .is_empty());
+        let mut other_risk = request.clone();
+        other_risk.risk = PermissionRisk::Write;
+        assert!(store
+            .list_session_permission_grant_metadata(&task_id, "session-a", &other_risk)
+            .expect("grant listing should succeed")
+            .is_empty());
+
+        // The exact capability key of the approved command keeps working even
+        // with the prefix marker attached.
+        assert!(store
+            .has_session_permission_capability(&task_id, "session-a", &request, true, true)
+            .expect("capability query should succeed"));
+    }
+
+    #[test]
+    fn unresolved_requests_never_appear_as_session_grants() {
+        let mut store = SqliteStore::in_memory().expect("store should open");
+        let task_id = TaskId("task-agent".to_string());
+        let mut request = PermissionRequest {
+            id: PermissionRequestId("perm-shell-pending".to_string()),
+            task_id: task_id.clone(),
+            risk: PermissionRisk::Execute,
+            action: "shell.run".to_string(),
+            reason: "test".to_string(),
+            scope: "/workspace".to_string(),
+            metadata: [
+                ("session_id".to_string(), "session-a".to_string()),
+                ("command".to_string(), "cargo test".to_string()),
+                ("command_prefix".to_string(), "cargo test".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        store
+            .save_permission_request(request.clone(), 100)
+            .expect("permission should save");
+        assert!(store
+            .list_session_permission_grant_metadata(&task_id, "session-a", &request)
+            .expect("grant listing should succeed")
+            .is_empty());
+
+        // A deny decision also never becomes a reusable grant.
+        store
+            .resolve_permission(PermissionResolution {
+                request_id: request.id.clone(),
+                decision: PermissionDecision::Deny,
+                resolved_at_ms: 110,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+        assert!(store
+            .list_session_permission_grant_metadata(&task_id, "session-a", &request)
+            .expect("grant listing should succeed")
+            .is_empty());
+
+        // Allow-once resolves the request but still grants no session reuse.
+        request.id = PermissionRequestId("perm-shell-once".to_string());
+        store
+            .save_permission_request(request.clone(), 120)
+            .expect("permission should save");
+        store
+            .resolve_permission(PermissionResolution {
+                request_id: request.id.clone(),
+                decision: PermissionDecision::AllowOnce,
+                resolved_at_ms: 130,
+                resolved_by: "user".to_string(),
+            })
+            .expect("permission should resolve");
+        assert!(store
+            .list_session_permission_grant_metadata(&task_id, "session-a", &request)
+            .expect("grant listing should succeed")
+            .is_empty());
     }
 
     #[test]

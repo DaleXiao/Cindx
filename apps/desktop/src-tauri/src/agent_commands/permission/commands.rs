@@ -23,10 +23,18 @@ pub(crate) async fn resolve_agent_permission(
     request_id: String,
     decision: String,
     session_id: String,
+    grant_command_prefix: Option<bool>,
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        resolve_agent_permission_blocking(&app, state, request_id, decision, session_id)
+        resolve_agent_permission_blocking(
+            &app,
+            state,
+            request_id,
+            decision,
+            session_id,
+            grant_command_prefix.unwrap_or(false),
+        )
     })
     .await
     .map_err(|error| format!("agent permission resume failed to join: {error}"))?
@@ -38,6 +46,7 @@ pub(crate) fn resolve_agent_permission_blocking(
     request_id: String,
     decision: String,
     session_id: String,
+    grant_command_prefix: bool,
 ) -> Result<AgentState, String> {
     // A write subagent's patch approval belongs to a run that is still
     // executing (parked inside the delegating tool batch): resolve it in
@@ -111,6 +120,7 @@ pub(crate) fn resolve_agent_permission_blocking(
         decision,
         session_id.clone(),
         effort,
+        grant_command_prefix,
         &cancellation,
     );
     let Err(original) = outcome else {
@@ -138,6 +148,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     decision: String,
     session_id: String,
     effort: AgentPolicy,
+    grant_command_prefix: bool,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
@@ -155,11 +166,11 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     }
     let decision = parse_permission_decision(&decision).map_err(|error| error.to_string())?;
     let request_id = PermissionRequestId(request_id);
-    let store = state
+    let mut store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
-    let request = store
+    let mut request = store
         .get_permission_request(&request_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "permission request not found".to_string())?;
@@ -198,6 +209,29 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
             session_id,
         )
         .map_err(|error| error.to_string());
+    }
+
+    // "Allow prefix for this session": record a `command_prefix` marker on the
+    // approved request before its resolution rows persist. The prefix is
+    // derived from the approved command's own clean shell tokens; dangerous or
+    // dynamically-structured commands never derive a prefix, so the approval
+    // degrades to the exact-command session grant (fail-closed narrowing).
+    if grant_command_prefix && matches!(&decision, PermissionDecision::AllowForSession) {
+        if matches!(request.action.as_str(), "shell.run" | "process.start") {
+            let prefix = request
+                .metadata
+                .get("command")
+                .map(String::as_str)
+                .and_then(agent_core::command_prefix_for_grant);
+            if let Some(prefix) = prefix {
+                request
+                    .metadata
+                    .insert("command_prefix".to_string(), prefix);
+                store
+                    .update_permission_request_metadata(&request)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
     }
     drop(store);
 
