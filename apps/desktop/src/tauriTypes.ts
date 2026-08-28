@@ -240,7 +240,7 @@ export type QueuedAgentMessage = {
   attachments: AgentAttachment[];
   effort: AgentEffort;
   mode: "queue" | "steer";
-  planMode?: boolean;
+  planMode: boolean;
   createdAtMs: number;
   updatedAtMs: number;
 };

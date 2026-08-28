@@ -31,7 +31,10 @@ export type NativeChatMessageView = ChatMessageView & {
   attachments: NonNullable<ChatMessageView["attachments"]>;
 };
 
-export type NativeAgentState = Omit<AgentState, "timeline" | "messages"> & {
+export type NativeAgentState = Omit<
+  AgentState,
+  "timeline" | "messages" | "pendingPlanConfirmation"
+> & {
   timeline: NativeTimelineEntry[];
   messages: NativeChatMessageView[];
 };
