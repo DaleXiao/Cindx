@@ -147,23 +147,6 @@ export function SettingsModelsPanel({
               <input
                 type="checkbox"
                 disabled={providerBusy}
-                checked={providerDraft.guardianAutoApproval}
-                onChange={(event) =>
-                  setProviderDraft({
-                    ...providerDraft,
-                    guardianAutoApproval: event.target.checked
-                  })
-                }
-              />
-              <span>
-                Guardian auto-approval: a distinct reviewer may approve non-destructive prompts
-                (denials, timeouts, and malformed answers still fall back to you)
-              </span>
-            </label>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                disabled={providerBusy}
                 checked={providerDraft.planFirstEnabled}
                 onChange={(event) =>
                   setProviderDraft({

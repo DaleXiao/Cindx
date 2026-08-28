@@ -701,6 +701,22 @@ export function SettingsPage(props: SettingsPageProps) {
                         </span>
                         <span>{providerDraft.agentSystemPrompt.length.toLocaleString()} / 32,000</span>
                       </div>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          disabled={providerBusy}
+                          checked={providerDraft.guardianAutoApproval}
+                          onChange={(event) =>
+                            setProviderDraft({
+                              ...providerDraft,
+                              guardianAutoApproval: event.target.checked
+                            })
+                          }
+                        />
+                        <span title="A distinct reviewer may approve non-destructive prompts; denials, timeouts, and malformed answers still fall back to you.">
+                          Guardian auto-approval
+                        </span>
+                      </label>
                       <button
                         className="secondary-button"
                         type="button"
