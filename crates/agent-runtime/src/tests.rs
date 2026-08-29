@@ -1430,7 +1430,7 @@ fn typed_tool_observation_keeps_model_evidence_separate_from_full_details() {
         message: "FULL_FAILURE_SENTINEL".to_string(),
         retryable: false,
     });
-    let evidence = format!("HEAD_SENTINEL{}TAIL_SENTINEL", "x".repeat(8_000));
+    let evidence = format!("HEAD_SENTINEL{}TAIL_SENTINEL", "x".repeat(20_000));
     result.model_observation = Some(
         agent_core::ToolObservationV2::new(
             "shell.run",
@@ -1441,7 +1441,7 @@ fn typed_tool_observation_keeps_model_evidence_separate_from_full_details() {
                 ("exit_code".to_string(), "2".to_string()),
                 (
                     "long_fact".to_string(),
-                    format!("LONG_FACT_HEAD{}LONG_FACT_TAIL", "f".repeat(4_000)),
+                    format!("LONG_FACT_HEAD{}LONG_FACT_TAIL", "f".repeat(20_000)),
                 ),
             ]
             .into_iter()
@@ -1468,7 +1468,7 @@ fn typed_tool_observation_keeps_model_evidence_separate_from_full_details() {
     assert!(!observation.contains("METADATA_SENTINEL"));
     assert!(!observation.contains("BASE64_SENTINEL"));
     assert_eq!(observation.matches("output=").count(), 1);
-    assert!(observation.chars().count() <= 6_000);
+    assert!(observation.chars().count() <= 12_000);
 }
 
 fn tool(name: &str, schema: &str) -> ToolSpec {

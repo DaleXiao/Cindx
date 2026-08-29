@@ -7,10 +7,12 @@
 
 use agent_core::{Message, MessageRole};
 
-pub const SUBAGENT_MAX_STEPS: usize = 8;
+// Raised from 8 so delegated work can run deeper multi-step loops.
+pub const SUBAGENT_MAX_STEPS: usize = 12;
 
 /// Maximum parent messages a subagent context fork may seed into the child.
-pub const SUBAGENT_CONTEXT_FORK_MAX_MESSAGES: usize = 32;
+// Raised from 32 so a forked subagent inherits more of the parent's context.
+pub const SUBAGENT_CONTEXT_FORK_MAX_MESSAGES: usize = 48;
 
 /// Tools a subagent may use: read-only discovery. Effectful, delegation, and
 /// working-memory tools are denied (mirrors opencode deriveSubagentSessionPermission).
@@ -171,15 +173,15 @@ mod tests {
 
     #[test]
     fn fork_prefix_caps_message_count_and_stays_balanced() {
-        // Ten completed rounds of four messages each.
+        // Fourteen completed rounds of four messages each (56 > the 48 cap).
         let mut history = Vec::new();
-        for round in 0..10 {
+        for round in 0..14 {
             history.push(message(MessageRole::User, &format!("request {round}")));
             history.push(assistant_tool_call(&format!("c{round}")));
             history.push(tool_result(&format!("c{round}")));
             history.push(message(MessageRole::Assistant, &format!("answer {round}")));
         }
-        assert_eq!(history.len(), 40);
+        assert_eq!(history.len(), 56);
 
         let prefix = subagent_context_fork_prefix(&history, SUBAGENT_CONTEXT_FORK_MAX_MESSAGES);
 

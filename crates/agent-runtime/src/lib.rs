@@ -985,7 +985,9 @@ pub fn observation_from_tool_result(tool_name: &str, status: &str, output: &str)
 }
 
 pub fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) -> String {
-    const MODEL_OBSERVATION_LIMIT: usize = 6000;
+    // Raised from 6000 so the model sees more of each tool result (bandwidth),
+    // trading modest context for better signal on a 1M-token window.
+    const MODEL_OBSERVATION_LIMIT: usize = 12000;
     const TOOL_NAME_LIMIT: usize = 256;
     const SUMMARY_LIMIT: usize = 512;
     const FAILURE_CODE_LIMIT: usize = 256;
