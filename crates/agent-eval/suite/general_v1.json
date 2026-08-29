@@ -1,0 +1,125 @@
+[
+  {
+    "id": "code_edit-fix-function",
+    "category": "code_edit",
+    "prompt": "Fix the farewell function in src/greeter.py so its greeting ends with an exclamation mark, then confirm the change.",
+    "fixture": [
+      {
+        "path": "src/greeter.py",
+        "content": "def greet(name):\n    return \"Hello, \" + name\n\n\ndef farewell(name):\n    return \"Goodbye \" + name\n"
+      }
+    ],
+    "allowed_tools": ["file.read", "file.write"],
+    "postconditions": [
+      {
+        "type": "file_contains",
+        "path": "src/greeter.py",
+        "needle": "return \"Goodbye \" + name + \"!\""
+      },
+      { "type": "output_contains", "needle": "Updated farewell" }
+    ],
+    "budget": { "max_turns": 6, "max_tool_calls": 8 }
+  },
+  {
+    "id": "code_edit-rewrite-config",
+    "category": "code_edit",
+    "prompt": "Switch config/app.json to release mode with 3 retries, keeping the same JSON layout.",
+    "fixture": [
+      {
+        "path": "config/app.json",
+        "content": "{\n  \"mode\": \"debug\",\n  \"retries\": 1\n}\n"
+      }
+    ],
+    "allowed_tools": ["file.read", "file.write"],
+    "postconditions": [
+      {
+        "type": "file_equals",
+        "path": "config/app.json",
+        "content": "{\n  \"mode\": \"release\",\n  \"retries\": 3\n}\n"
+      },
+      { "type": "output_contains", "needle": "release mode" }
+    ],
+    "budget": { "max_turns": 6, "max_tool_calls": 8 }
+  },
+  {
+    "id": "multi_step-summarize-notes",
+    "category": "multi_step",
+    "prompt": "Read notes/todo.txt and notes/done.txt, then write a combined summary to summary.md with done items first and todo items second.",
+    "fixture": [
+      { "path": "notes/todo.txt", "content": "ship the eval crate\nwrite the docs\n" },
+      { "path": "notes/done.txt", "content": "read the contract\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write"],
+    "postconditions": [
+      { "type": "file_contains", "path": "summary.md", "needle": "- ship the eval crate" },
+      { "type": "file_contains", "path": "summary.md", "needle": "- read the contract" },
+      { "type": "output_contains", "needle": "summary.md" }
+    ],
+    "budget": { "max_turns": 6, "max_tool_calls": 8 }
+  },
+  {
+    "id": "multi_step-collect-versions",
+    "category": "multi_step",
+    "prompt": "Read versions/libs.txt and versions/app.txt, then merge all entries alphabetically into versions/combined.txt.",
+    "fixture": [
+      { "path": "versions/libs.txt", "content": "serde=1\nsha2=0.10\n" },
+      { "path": "versions/app.txt", "content": "agent-eval=0.1.0\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write"],
+    "postconditions": [
+      {
+        "type": "file_equals",
+        "path": "versions/combined.txt",
+        "content": "agent-eval=0.1.0\nserde=1\nsha2=0.10\n"
+      },
+      { "type": "output_contains", "needle": "combined" }
+    ],
+    "budget": { "max_turns": 6, "max_tool_calls": 8 }
+  },
+  {
+    "id": "recovery-invalid-path",
+    "category": "recovery",
+    "prompt": "Update report.txt by appending the line 'recovered'. If a write is rejected, retry with a valid in-workspace path.",
+    "fixture": [{ "path": "report.txt", "content": "baseline\n" }],
+    "allowed_tools": ["file.write"],
+    "postconditions": [
+      { "type": "file_contains", "path": "report.txt", "needle": "recovered" },
+      { "type": "output_contains", "needle": "Recovered" }
+    ],
+    "budget": { "max_turns": 6, "max_tool_calls": 8 }
+  },
+  {
+    "id": "recovery-missing-file",
+    "category": "recovery",
+    "prompt": "Read data/expected.csv, or if it is missing fall back to data/actual.csv, and report the data rows you found.",
+    "fixture": [{ "path": "data/actual.csv", "content": "a,b\n1,2\n" }],
+    "allowed_tools": ["file.read"],
+    "postconditions": [{ "type": "output_contains", "needle": "1,2" }],
+    "budget": { "max_turns": 6, "max_tool_calls": 8 }
+  },
+  {
+    "id": "shell-write-output",
+    "category": "shell",
+    "prompt": "Use the shell to write the line 'eval-ok' into out.txt, then confirm the file exists.",
+    "fixture": [],
+    "allowed_tools": ["shell.run"],
+    "postconditions": [
+      { "type": "command_exit_code", "cmd": "test -f out.txt", "code": 0 },
+      { "type": "file_contains", "path": "out.txt", "needle": "eval-ok" },
+      { "type": "output_contains", "needle": "out.txt" }
+    ],
+    "budget": { "max_turns": 4, "max_tool_calls": 4 }
+  },
+  {
+    "id": "output-final-answer",
+    "category": "output",
+    "prompt": "Answer with the magic token exactly as requested: XYZZY-42.",
+    "fixture": [],
+    "allowed_tools": [],
+    "postconditions": [
+      { "type": "output_contains", "needle": "XYZZY-42" },
+      { "type": "command_exit_code", "cmd": "true", "code": 0 }
+    ],
+    "budget": { "max_turns": 2, "max_tool_calls": 0 }
+  }
+]

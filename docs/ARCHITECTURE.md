@@ -71,6 +71,7 @@ legacy and are not reclassified from display strings.
 | Crate | Current owner responsibility |
 | --- | --- |
 | `agent-core` | Transport-free IDs, messages, events, permissions, tool/model contracts, and shared schemas |
+| `agent-eval` | Deterministic portable evaluation skeleton: case schema, postcondition checks, scripted-provider runner, and suite reports; no production consumer and no provider network calls |
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, system-prompt composition, model-turn and tool-runtime semantics |
 | `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
