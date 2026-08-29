@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Redo2, Undo2 } from "lucide-react";
+import { ChevronDown, ChevronUp, History, Redo2, Undo2 } from "lucide-react";
 import type { WorkspaceUndoState } from "../tauriTypes";
 import {
   getWorkspaceUndoState,
@@ -16,6 +16,7 @@ export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoContr
   const [state, setState] = useState<WorkspaceUndoState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const activeSessionRef = useRef(sessionId);
 
   const refresh = useCallback(async () => {
@@ -66,39 +67,61 @@ export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoContr
   const undoneEntries = state.entries.filter((entry) => entry.undone);
   const redoEntry = undoneEntries[undoneEntries.length - 1];
 
+  const changeCount = state.entries.length;
+
   return (
     <div className="composer-undo-control" role="group" aria-label="Agent file change history">
-      <span className="composer-undo-caption" title="Files the agent changed in this session">
-        File changes
-      </span>
       <button
         type="button"
-        className="composer-undo-button"
-        disabled={busy || disabled || !state.canUndo}
-        onClick={() => void applyChange("undo")}
+        className="composer-undo-toggle"
+        onClick={() => setExpanded((current) => !current)}
+        aria-expanded={expanded}
         title={
-          latestEntry
-            ? `Undo the agent's change to ${latestEntry.path}`
-            : "Undo the agent's last file change"
+          expanded
+            ? "Hide undo/redo for agent file changes"
+            : `Show undo/redo for the agent's ${changeCount} file change${changeCount === 1 ? "" : "s"}`
         }
       >
-        <Undo2 size={13} aria-hidden="true" />
-        <span>Undo</span>
+        <History size={13} aria-hidden="true" />
+        <span>File changes ({changeCount})</span>
+        {expanded ? (
+          <ChevronUp size={13} aria-hidden="true" />
+        ) : (
+          <ChevronDown size={13} aria-hidden="true" />
+        )}
       </button>
-      <button
-        type="button"
-        className="composer-undo-button"
-        disabled={busy || disabled || !state.canRedo}
-        onClick={() => void applyChange("redo")}
-        title={
-          redoEntry
-            ? `Restore the undone change to ${redoEntry.path}`
-            : "Restore the last undone file change"
-        }
-      >
-        <Redo2 size={13} aria-hidden="true" />
-        <span>Redo</span>
-      </button>
+      {expanded && (
+        <>
+          <button
+            type="button"
+            className="composer-undo-button"
+            disabled={busy || disabled || !state.canUndo}
+            onClick={() => void applyChange("undo")}
+            title={
+              latestEntry
+                ? `Undo the agent's change to ${latestEntry.path}`
+                : "Undo the agent's last file change"
+            }
+          >
+            <Undo2 size={13} aria-hidden="true" />
+            <span>Undo</span>
+          </button>
+          <button
+            type="button"
+            className="composer-undo-button"
+            disabled={busy || disabled || !state.canRedo}
+            onClick={() => void applyChange("redo")}
+            title={
+              redoEntry
+                ? `Restore the undone change to ${redoEntry.path}`
+                : "Restore the last undone file change"
+            }
+          >
+            <Redo2 size={13} aria-hidden="true" />
+            <span>Redo</span>
+          </button>
+        </>
+      )}
       {error ? (
         <span className="composer-undo-error" role="alert">
           {error}
