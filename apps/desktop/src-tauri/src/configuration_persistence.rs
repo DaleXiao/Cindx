@@ -6,15 +6,14 @@ use crate::provider_profiles::{
     same_provider_model_identity, ProviderProfile, PROVIDER_CUSTOM,
 };
 use crate::runtime_values::{
-    config_hex_decode, config_hex_encode, normalized_agent_instructions, normalized_config_value,
-    sanitize_config_value,
+    config_hex_decode, config_hex_encode, normalized_agent_instructions,
+    normalized_approval_policy, normalized_config_value, sanitize_config_value,
 };
 use crate::view_models::ProviderConfigInput;
 use std::collections::HashSet;
-use std::fs;
-use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::{fs, io::Write};
 
 pub(crate) fn clone_provider_config(
     state: &tauri::State<'_, AppState>,
@@ -129,6 +128,7 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
     config.direct_judge_fail_closed = input.direct_judge_fail_closed;
     config.guardian_auto_approval = input.guardian_auto_approval;
     config.plan_first_enabled = input.plan_first_enabled;
+    config.approval_policy = normalized_approval_policy(&input.approval_policy);
     config.context_window_tokens = if input.context_window_tokens < 4_096 {
         defaults
             .map(|value| value.context_window_tokens)
@@ -238,6 +238,7 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
             "direct_judge_fail_closed" => config.direct_judge_fail_closed = value.trim() == "true",
             "guardian_auto_approval" => config.guardian_auto_approval = value.trim() == "true",
             "plan_first_enabled" => config.plan_first_enabled = value.trim() == "true",
+            "approval_policy" => config.approval_policy = normalized_approval_policy(value),
             "context_window_tokens" => {
                 config.context_window_tokens = value.parse().unwrap_or(128_000)
             }
@@ -372,7 +373,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
 
 pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
     format!(
-        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ndirect_judge_fail_closed={}\nguardian_auto_approval={}\nplan_first_enabled={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
+        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ndirect_judge_fail_closed={}\nguardian_auto_approval={}\nplan_first_enabled={}\napproval_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
         sanitize_config_value(&config.provider_id),
         sanitize_config_value(&config.provider_resource),
         sanitize_config_value(&config.base_url),
@@ -395,6 +396,7 @@ pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
         config.direct_judge_fail_closed,
         config.guardian_auto_approval,
         config.plan_first_enabled,
+        sanitize_config_value(&config.approval_policy),
         config.context_window_tokens,
         config_hex_encode(&config.agent_system_prompt),
         config.enabled_models.join(",")

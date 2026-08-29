@@ -734,9 +734,13 @@ export function SettingsPage(props: SettingsPageProps) {
                 {settingsCategory === "permissions" && (
                   <SettingsPermissionsPanel
                     activeReviews={activePermissionReviews}
+                    approvalPolicy={providerDraft?.approvalPolicy ?? "strict"}
                     busy={permissionBusy}
                     busySessionIds={busySessionIds}
                     ignoredReviews={ignoredPermissionReviews}
+                    onApprovalPolicyChange={(policy) =>
+                      setProviderDraft((current) => current && { ...current, approvalPolicy: policy })
+                    }
                     onIgnore={handleIgnorePermissionReview}
                     onResolve={handleResolvePermissionReview}
                     onRestore={handleRestorePermissionReview}

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import desktopPackage from "../package.json" with { type: "json" };
 import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerProfiles.ts";
+import { normalizeApprovalPolicy } from "./approvalPolicyModel.ts";
 import * as projectMemory from "./memoryManagementModel.ts";
 import { decodeNativeRuntimeStatus } from "./tauriRuntimeContract.ts";
 
@@ -1288,6 +1289,7 @@ export async function saveProviderConfig(input: ProviderConfigInput): Promise<Ph
         directJudgeFailClosed: input.directJudgeFailClosed === true,
         guardianAutoApproval: input.guardianAutoApproval === true,
         planFirstEnabled: input.planFirstEnabled === true,
+        approvalPolicy: normalizeApprovalPolicy(input.approvalPolicy),
         contextWindowTokens: Math.max(4096, input.contextWindowTokens || 128000),
         agentSystemPrompt: input.agentSystemPrompt,
         ready: Boolean(profile.baseUrl.trim() && apiKeySet && executorModel.trim()),

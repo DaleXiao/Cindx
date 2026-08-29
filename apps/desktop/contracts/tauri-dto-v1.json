@@ -183,6 +183,7 @@
           "directJudgeFailClosed": false,
           "guardianAutoApproval": false,
           "planFirstEnabled": false,
+          "approvalPolicy": "strict",
           "contextWindowTokens": 128000,
           "agentSystemPrompt": "Contract prompt",
           "ready": true,
@@ -212,6 +213,7 @@
           "directJudgeFailClosed": false,
           "guardianAutoApproval": false,
           "planFirstEnabled": false,
+          "approvalPolicy": "strict",
           "contextWindowTokens": 4096,
           "agentSystemPrompt": "",
           "ready": false,
@@ -249,6 +251,7 @@
           "directJudgeFailClosed": true,
           "guardianAutoApproval": true,
           "planFirstEnabled": true,
+          "approvalPolicy": "session",
           "contextWindowTokens": 64000,
           "agentSystemPrompt": "Contract prompt",
           "enabledModels": []

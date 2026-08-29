@@ -107,6 +107,12 @@ pub(crate) struct ProviderConfig {
     /// Settings "Plan first" toggle: when true, High/Xhigh submissions request
     /// plan-then-confirm. Defaults false; Fast/Default never honor it.
     pub(crate) plan_first_enabled: bool,
+    /// Three-tier approval policy for agent permission requests: "strict"
+    /// (default, every request prompts), "session" (auto-approve
+    /// non-destructive requests within their session), or "all" (auto-approve
+    /// every non-destructive request). Destructive-risk requests always
+    /// prompt, under every policy. Unknown values fail closed to "strict".
+    pub(crate) approval_policy: String,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     /// The models the user enabled in Settings; the composer offers exactly
@@ -172,6 +178,7 @@ impl Default for ProviderConfig {
             direct_judge_fail_closed: false,
             guardian_auto_approval: false,
             plan_first_enabled: false,
+            approval_policy: "strict".to_string(),
             context_window_tokens: defaults.context_window_tokens,
             agent_system_prompt: String::new(),
             enabled_models: Vec::new(),

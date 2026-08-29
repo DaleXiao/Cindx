@@ -101,6 +101,7 @@ fn provider_state(auth_verified_at_ms: Option<u64>) -> ProviderConfigState {
         direct_judge_fail_closed: false,
         guardian_auto_approval: false,
         plan_first_enabled: false,
+        approval_policy: "strict".to_string(),
         context_window_tokens: if configured { 128_000 } else { 4_096 },
         agent_system_prompt: if configured { "Contract prompt" } else { "" }.to_string(),
         ready: configured,
@@ -478,6 +479,7 @@ fn validate_provider_input(value: Value) {
     assert!(input.direct_judge_fail_closed);
     assert!(input.guardian_auto_approval);
     assert!(input.plan_first_enabled);
+    assert_eq!(input.approval_policy, "session");
     assert_eq!(input.context_window_tokens, 64_000);
     assert_eq!(input.agent_system_prompt, "Contract prompt");
 }

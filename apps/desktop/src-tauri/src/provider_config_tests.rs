@@ -35,6 +35,7 @@ fn provider_config_input_preserves_existing_key_when_blank() {
             direct_judge_fail_closed: false,
             guardian_auto_approval: false,
             plan_first_enabled: false,
+            approval_policy: "strict".to_string(),
             context_window_tokens: 128_000,
             agent_system_prompt: "Be concise.\nUse Chinese when asked.".to_string(),
             enabled_models: Vec::new(),
@@ -120,6 +121,45 @@ fn plan_first_enabled_config_round_trip_defaults_off() {
     input.plan_first_enabled = true;
     apply_provider_config_input(&mut config, input);
     assert!(config.plan_first_enabled);
+}
+
+#[test]
+fn approval_policy_config_round_trip_defaults_strict() {
+    // Legacy configs predate the key and must load strict, so every
+    // permission request keeps prompting the user.
+    let legacy = provider_config_from_text("base_url=https://example.test/v1\nmodel=base\n");
+    assert_eq!(legacy.approval_policy, "strict");
+    assert!(provider_config_text(&legacy).contains("approval_policy=strict"));
+
+    for policy in ["session", "all"] {
+        let loaded = provider_config_from_text(&format!(
+            "base_url=https://example.test/v1\napproval_policy={policy}\n",
+        ));
+        assert_eq!(loaded.approval_policy, policy);
+        let reloaded = provider_config_from_text(&provider_config_text(&loaded));
+        assert_eq!(reloaded.approval_policy, policy);
+    }
+
+    // Unknown or malformed persisted values fail closed to strict.
+    for value in ["always", "SESSION", "", "auto"] {
+        let fallback = provider_config_from_text(&format!(
+            "base_url=https://example.test/v1\napproval_policy={value}\n",
+        ));
+        assert_eq!(fallback.approval_policy, "strict", "value {value:?}");
+    }
+
+    let mut config = ProviderConfig::default();
+    assert_eq!(config.approval_policy, "strict");
+    let mut input = provider_input_from_config(&config);
+    input.approval_policy = "session".to_string();
+    apply_provider_config_input(&mut config, input);
+    assert_eq!(config.approval_policy, "session");
+
+    // An unknown input value fails closed instead of widening authority.
+    let mut input = provider_input_from_config(&config);
+    input.approval_policy = "everything".to_string();
+    apply_provider_config_input(&mut config, input);
+    assert_eq!(config.approval_policy, "strict");
 }
 
 #[test]

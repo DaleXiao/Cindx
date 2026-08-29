@@ -377,6 +377,16 @@ Tool visibility does not grant authority.
   ordinary user prompt without failing the task, and Destructive-risk requests
   are never auto-approved. Every review records a shadow
   `guardian_disposition` on the run's permission events for observability.
+- The Settings permissions panel offers a three-tier approval policy for agent
+  permission requests (default Strict): Strict keeps the current behavior and
+  prompts for every request; Approve in session auto-approves every
+  non-Destructive request for the duration of its session; Approve all
+  auto-approves every non-Destructive request without prompting. Destructive-risk
+  requests are never auto-approved under any policy and always pause for manual
+  confirmation. Every policy auto-approval records a `PermissionResolved` event
+  with an `auto_session` or `auto_all` decision for audit, and the policy is
+  persisted as the provider `approval_policy` setting (a missing or unknown
+  persisted value falls back to Strict).
 - Allow-once, session approval, denial, cancellation, and policy/capability
   rejection remain distinct durable outcomes.
 - A denied or blocked obligation is not marked complete and must be disclosed

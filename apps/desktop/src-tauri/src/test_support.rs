@@ -31,6 +31,7 @@ pub(crate) fn provider_input_from_config(config: &ProviderConfig) -> ProviderCon
         direct_judge_fail_closed: config.direct_judge_fail_closed,
         guardian_auto_approval: config.guardian_auto_approval,
         plan_first_enabled: config.plan_first_enabled,
+        approval_policy: config.approval_policy.clone(),
         context_window_tokens: config.context_window_tokens,
         agent_system_prompt: config.agent_system_prompt.clone(),
         enabled_models: config.enabled_models.clone(),

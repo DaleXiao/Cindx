@@ -19,6 +19,7 @@ import {
   providerSupportsModelDiscovery,
   providerVoiceTransport
 } from "../providerProfiles";
+import { normalizeApprovalPolicy } from "../approvalPolicyModel";
 import {
   resolveProviderReadiness,
   type ProviderReadiness
@@ -53,6 +54,7 @@ function providerDraftFromState(provider: ProviderConfigState): ProviderConfigIn
     directJudgeFailClosed: provider.directJudgeFailClosed,
     guardianAutoApproval: provider.guardianAutoApproval,
     planFirstEnabled: provider.planFirstEnabled,
+    approvalPolicy: normalizeApprovalPolicy(provider.approvalPolicy),
     contextWindowTokens: provider.contextWindowTokens,
     agentSystemPrompt: provider.agentSystemPrompt,
     enabledModels: provider.enabledModels

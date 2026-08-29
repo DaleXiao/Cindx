@@ -6,15 +6,18 @@ import {
   ShieldCheck,
   XCircle
 } from "lucide-react";
-import type { PermissionReviewItem } from "../tauri";
+import type { ApprovalPolicy, PermissionReviewItem } from "../tauri";
+import { APPROVAL_POLICY_OPTIONS, normalizeApprovalPolicy } from "../approvalPolicyModel";
 
 type PermissionDecision = "allow_once" | "allow_for_session" | "deny";
 
 type SettingsPermissionsPanelProps = {
   activeReviews: PermissionReviewItem[];
+  approvalPolicy: ApprovalPolicy;
   busy: boolean;
   busySessionIds: Set<string>;
   ignoredReviews: PermissionReviewItem[];
+  onApprovalPolicyChange: (policy: ApprovalPolicy) => void;
   onIgnore: (requestId: string) => void;
   onResolve: (review: PermissionReviewItem, decision: PermissionDecision) => Promise<void>;
   onRestore: (requestId: string) => void;
@@ -46,15 +49,34 @@ function DisclosureChevron() {
 
 export function SettingsPermissionsPanel({
   activeReviews,
+  approvalPolicy,
   busy,
   busySessionIds,
   ignoredReviews,
+  onApprovalPolicyChange,
   onIgnore,
   onResolve,
   onRestore
 }: SettingsPermissionsPanelProps) {
   return (
     <section className="settings-section" data-settings-group="permissions">
+      <label className="approval-policy-field">
+        <span>Approval policy</span>
+        <select
+          value={approvalPolicy}
+          onChange={(event) => onApprovalPolicyChange(normalizeApprovalPolicy(event.target.value))}
+        >
+          {APPROVAL_POLICY_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="settings-section-copy">
+        Strict prompts for every request; Approve in session and Approve all auto-approve
+        non-destructive requests. Destructive actions always require confirmation.
+      </p>
       <div className="permission-review-heading">
         <div className="section-title">
           <ShieldCheck size={17} aria-hidden="true" />

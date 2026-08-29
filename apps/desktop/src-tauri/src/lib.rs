@@ -161,6 +161,8 @@ mod agent_session_isolation_tests;
 #[cfg(test)]
 mod agent_state_view_tests;
 #[cfg(test)]
+mod agent_tool_runtime_tests;
+#[cfg(test)]
 mod agent_trace_runtime_tests;
 #[cfg(test)]
 mod app_store_persistence_tests;

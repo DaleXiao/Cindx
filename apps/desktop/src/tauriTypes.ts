@@ -319,6 +319,9 @@ export type PermissionReviewState = {
   pending: PermissionReviewItem[];
 };
 
+/** Three-tier agent permission approval policy; destructive actions always prompt. */
+export type ApprovalPolicy = "strict" | "session" | "all";
+
 export type ProviderConfigState = {
   providerId: ProviderId;
   providerResource: string;
@@ -343,6 +346,8 @@ export type ProviderConfigState = {
   guardianAutoApproval: boolean;
   /** Plan first: High/Xhigh submissions draft a read-only plan and wait for approval before executing. */
   planFirstEnabled: boolean;
+  /** Approval policy for agent permission prompts; destructive actions always prompt. */
+  approvalPolicy: ApprovalPolicy;
   contextWindowTokens: number;
   agentSystemPrompt: string;
   ready: boolean;
@@ -378,6 +383,8 @@ export type ProviderConfigInput = {
   guardianAutoApproval: boolean;
   /** Plan-first toggle; omitted by older clients means plan mode stays off. */
   planFirstEnabled: boolean;
+  /** Approval policy for agent permission prompts; omitted by older clients means strict. */
+  approvalPolicy: ApprovalPolicy;
   contextWindowTokens: number;
   agentSystemPrompt: string;
   /** The models the user enabled in Settings; the composer offers exactly these. Empty = all catalog models. */

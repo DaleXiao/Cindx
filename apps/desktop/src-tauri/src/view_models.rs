@@ -442,6 +442,10 @@ pub(crate) struct ProviderConfigState {
     pub(crate) guardian_auto_approval: bool,
     /// Mirrors `ProviderConfig::plan_first_enabled` for the Settings toggle.
     pub(crate) plan_first_enabled: bool,
+    /// Mirrors `ProviderConfig::approval_policy` for the Settings permissions
+    /// dropdown: "strict", "session", or "all". Destructive-risk requests
+    /// always prompt regardless of the policy.
+    pub(crate) approval_policy: String,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     pub(crate) ready: bool,
@@ -936,6 +940,11 @@ pub(crate) struct ProviderConfigInput {
     /// Optional plan-first toggle; absent means plan mode stays off.
     #[serde(default)]
     pub(crate) plan_first_enabled: bool,
+    /// Optional approval policy ("strict", "session", or "all"); absent or
+    /// unknown values fail closed to "strict" so every request keeps
+    /// prompting the user.
+    #[serde(default)]
+    pub(crate) approval_policy: String,
     pub(crate) context_window_tokens: u64,
     pub(crate) agent_system_prompt: String,
     /// The models the user enabled in Settings; the composer offers exactly

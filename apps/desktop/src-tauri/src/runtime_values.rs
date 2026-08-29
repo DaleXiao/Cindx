@@ -221,6 +221,16 @@ pub(crate) fn normalized_agent_instructions(value: &str) -> String {
     }
 }
 
+/// Normalizes the permission approval policy to one of the three known
+/// values ("strict", "session", "all"); unknown or malformed values fail
+/// closed to "strict" so every request keeps prompting the user.
+pub(crate) fn normalized_approval_policy(value: &str) -> String {
+    match value.trim() {
+        "session" | "all" => value.trim().to_string(),
+        _ => "strict".to_string(),
+    }
+}
+
 pub(crate) fn normalized_current_time_context(value: &str) -> String {
     let context = sanitize_config_value(value.trim())
         .chars()
