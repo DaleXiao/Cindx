@@ -433,6 +433,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             remaining_model_calls: self.state.loop_observers.remaining_model_calls(),
             terminal_model_call_reserve: self.state.loop_observers.terminal_model_call_reserve(),
             consecutive_identical_calls: self.state.repetition_advisory.streak(),
+            reasoning_tier_max_budget: self.state.loop_observers.reasoning_tier_max_budget(),
             observation_excerpt: String::new(),
         }
     }
@@ -457,6 +458,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             remaining_model_calls: self.state.loop_observers.remaining_model_calls(),
             terminal_model_call_reserve: self.state.loop_observers.terminal_model_call_reserve(),
             consecutive_identical_calls: self.state.repetition_advisory.streak(),
+            reasoning_tier_max_budget: self.state.loop_observers.reasoning_tier_max_budget(),
             observation_excerpt: crate::loop_observers::observation_excerpt(observation),
         }
     }

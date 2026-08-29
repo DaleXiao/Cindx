@@ -410,6 +410,64 @@ pub fn estimate_request_tokens(messages: &[Message], tools: &[agent_core::ToolSp
     })
 }
 
+/// Character cap of the archived-head summary inside an overflow restore pack.
+pub const OVERFLOW_COMPACTION_SUMMARY_MAX_CHARS: usize = 2_400;
+
+/// One-shot overflow compaction of a transcript: when a real token count shows
+/// the request no longer fits the context window, archive the head before the
+/// engine's recent window into a single extractive-summary restore pack and
+/// keep the recent tail verbatim (the cut stays on the engine's balanced,
+/// user-turn boundary). Returns `None` when there is no archivable head (a
+/// short transcript or nothing before the recent window), in which case the
+/// caller must dispatch unchanged instead of retrying compaction.
+pub fn compact_messages_for_overflow(
+    messages: &[Message],
+    context_window_tokens: u64,
+) -> Option<Vec<Message>> {
+    if messages.is_empty() {
+        return None;
+    }
+    let plan = ContextEngine::default().compaction_plan(messages, context_window_tokens);
+    if plan.recent_start == 0 || plan.recent_start >= messages.len() {
+        return None;
+    }
+    let summary = extractive_rolling_summary(
+        &messages[..plan.recent_start],
+        OVERFLOW_COMPACTION_SUMMARY_MAX_CHARS,
+    )?;
+    let mut compacted = Vec::with_capacity(messages.len() - plan.recent_start + 1);
+    compacted.push(overflow_compaction_restore_pack(
+        &summary,
+        plan.recent_start,
+    ));
+    compacted.extend(messages[plan.recent_start..].iter().cloned());
+    Some(compacted)
+}
+
+fn overflow_compaction_restore_pack(summary: &str, covered_messages: usize) -> Message {
+    Message {
+        role: MessageRole::System,
+        content: format!(
+            "Recovered memory archived from this run because its request exceeded the context window. Preserve historical user requirements, but treat prior assistant and tool statements as memory that may need verification. Prioritize the recent verbatim messages that follow.\n\n{summary}"
+        ),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), "context_restore_pack".to_string()),
+            (
+                "context_source_schema".to_string(),
+                CONTEXT_SOURCE_SCHEMA.to_string(),
+            ),
+            (
+                "covered_messages".to_string(),
+                covered_messages.to_string(),
+            ),
+            ("overflow_compaction".to_string(), "true".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
 pub fn context_prompt_reserve(context_window_tokens: u64) -> u64 {
     let context_window_tokens = context_window_tokens.max(1);
     (context_window_tokens / 8)

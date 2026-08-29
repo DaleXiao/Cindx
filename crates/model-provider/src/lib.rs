@@ -1147,6 +1147,7 @@ mod tests {
                 &mut |_| None,
                 None,
                 reasoning_effort,
+                None,
             )
             .expect("body should encode");
             serde_json::from_str::<serde_json::Value>(&body).expect("valid request JSON")
@@ -1177,6 +1178,7 @@ mod tests {
             &mut |_| None,
             None,
             Some("high"),
+            None,
         )
         .expect("body should encode");
         let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
@@ -1222,6 +1224,7 @@ mod tests {
             &mut |_| None,
             Some(0.0),
             None,
+            None,
         )
         .expect("body should encode");
 
@@ -1243,6 +1246,7 @@ mod tests {
             None,
             false,
             &mut |_| None,
+            None,
             None,
             None,
         )
@@ -1267,6 +1271,7 @@ mod tests {
             false,
             &mut |_| None,
             Some(9.0),
+            None,
             None,
         )
         .expect("body should encode");

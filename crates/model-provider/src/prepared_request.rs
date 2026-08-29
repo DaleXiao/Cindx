@@ -20,6 +20,10 @@ impl OpenAiCompatibleProvider {
             .metadata
             .get(agent_core::REASONING_EFFORT_KEY)
             .map(String::as_str);
+        let thinking_budget_override = request
+            .metadata
+            .get(agent_core::THINKING_BUDGET_KEY)
+            .and_then(|value| value.parse::<u32>().ok());
         let estimated_prompt_tokens = estimate_request_tokens(&request.messages, &request.tools);
         let request_body =
             crate::request_builder::build_chat_request_json_with_tools_output_limit_vision_and_images(
@@ -32,6 +36,7 @@ impl OpenAiCompatibleProvider {
             &mut |path| self.image_cache.resolve(path),
             generation_temperature,
             reasoning_effort,
+            thinking_budget_override,
         )?;
         Ok(PreparedStreamingModelRequest::encoded(
             request_body,
@@ -299,6 +304,7 @@ mod tests {
             },
             None,
             None,
+            None,
         )
         .expect("text request should encode");
 
@@ -333,6 +339,7 @@ mod tests {
                     base64::engine::general_purpose::STANDARD.encode(path)
                 )))
             },
+            None,
             None,
             None,
         )

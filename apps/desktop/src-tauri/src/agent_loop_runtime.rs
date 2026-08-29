@@ -261,6 +261,32 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 }
             }
         }
+        if !runtime.loop_observers.overflow_compact_used() {
+            let request_tokens =
+                agent_runtime::estimate_request_tokens(&runtime.messages, &tools);
+            let overflow_budget = max_output_tokens
+                .saturating_add(agent_runtime::context_prompt_reserve(
+                    config.context_window_tokens,
+                ));
+            if config.context_window_tokens > overflow_budget
+                && request_tokens
+                    > config.context_window_tokens.saturating_sub(overflow_budget)
+            {
+                if let Some(compacted) = agent_runtime::compact_messages_for_overflow(
+                    &runtime.messages,
+                    config.context_window_tokens,
+                ) {
+                    runtime.messages = compacted;
+                    runtime.loop_observers.mark_overflow_compact_used();
+                    cancellation.mark_progress_at(
+                        run_context_steer_epoch(&run_context),
+                        "compaction",
+                        "Request exceeded the context window; compacted before dispatch",
+                    );
+                    continue 'agent_loop;
+                }
+            }
+        }
         let prepared_turn = match AgentKernel::new(&mut runtime, &tools).prepare_model_turn(
             Some(&config.agent_system_prompt),
             runtime_context.as_deref(),
@@ -336,6 +362,22 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 return Ok(AgentLoopExecutionOutcome::Finished(*agent_state))
             }
         };
+        let pre_response_message_count = runtime.messages.len();
+        if response.tool_calls.is_empty()
+            && agent_runtime::consume_leaked_tool_call_retry(
+                &mut runtime,
+                &response.message.content,
+                pre_response_message_count,
+            )
+            .is_some()
+        {
+            cancellation.mark_progress_at(
+                run_context_steer_epoch(&run_context),
+                "repair",
+                "Model leaked a tool call as text; asking it to use the tool interface",
+            );
+            continue 'agent_loop;
+        }
         let visible_stream = active_collaboration.is_none();
         let previous_message_count = runtime.messages.len();
         let response_commit = cancellation.commit_execution_step_with(epoch_lease, || {

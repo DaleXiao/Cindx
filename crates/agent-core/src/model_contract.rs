@@ -2,6 +2,9 @@ use crate::{Message, Metadata, ModelRole, ToolSpec};
 
 pub const GENERATION_TEMPERATURE_KEY: &str = "generation_temperature";
 pub const REASONING_EFFORT_KEY: &str = "reasoning_effort";
+/// Per-turn thinking-budget override (tokens). Applied on top of the run's
+/// reasoning-effort tier, never above that tier's own budget.
+pub const THINKING_BUDGET_KEY: &str = "thinking_budget";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCallMode {

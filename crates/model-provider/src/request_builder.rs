@@ -124,6 +124,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
         &mut image_data_url,
         None,
         None,
+        None,
     )
 }
 
@@ -138,6 +139,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
     image_resolver: &mut dyn FnMut(&str) -> Option<Arc<str>>,
     temperature: Option<f64>,
     reasoning_effort: Option<&str>,
+    thinking_budget_override: Option<u32>,
 ) -> Result<String, ModelError> {
     let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
@@ -196,7 +198,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
         .filter(|value| *value > 0)
         .map(|value| format!(",\"max_tokens\":{value}"))
         .unwrap_or_default();
-    let thinking_json = thinking_json_for(model, reasoning_effort);
+    let thinking_json = thinking_json_for(model, reasoning_effort, thinking_budget_override);
     let temperature_json = temperature
         .map(|value| value.clamp(0.0, 2.0))
         .map(|value| format!(",\"temperature\":{value}"))
@@ -234,16 +236,37 @@ pub fn model_disables_thinking_by_default(model: &str) -> bool {
 /// Maps the run's reasoning level to the provider's thinking params. For the
 /// models that think by default (qwen/qwq/glm/kimi/deepseek), Fast keeps
 /// thinking off; Default/High/Xhigh enable thinking with a growing token budget.
-/// Other models are untouched.
-fn thinking_json_for(model: &str, reasoning_effort: Option<&str>) -> &'static str {
+/// A per-turn thinking-budget override (the adaptive reasoning observer) may
+/// lower or raise the budget inside the tier, but it is clamped to the tier's
+/// own budget and never crosses into a higher tier. Other models are untouched.
+fn thinking_json_for(
+    model: &str,
+    reasoning_effort: Option<&str>,
+    thinking_budget_override: Option<u32>,
+) -> String {
     if !model_disables_thinking_by_default(model) {
-        return "";
+        return String::new();
     }
     match reasoning_effort {
-        Some("default") => ",\"enable_thinking\":true,\"thinking_budget\":1024",
-        Some("high") => ",\"enable_thinking\":true,\"thinking_budget\":4096",
-        Some("xhigh") => ",\"enable_thinking\":true,\"thinking_budget\":16384",
-        _ => ",\"enable_thinking\":false",
+        Some("default") => {
+            format!(
+                ",\"enable_thinking\":true,\"thinking_budget\":{}",
+                thinking_budget_override.unwrap_or(1024).min(1024)
+            )
+        }
+        Some("high") => {
+            format!(
+                ",\"enable_thinking\":true,\"thinking_budget\":{}",
+                thinking_budget_override.unwrap_or(4096).min(4096)
+            )
+        }
+        Some("xhigh") => {
+            format!(
+                ",\"enable_thinking\":true,\"thinking_budget\":{}",
+                thinking_budget_override.unwrap_or(16384).min(16384)
+            )
+        }
+        _ => ",\"enable_thinking\":false".to_string(),
     }
 }
 

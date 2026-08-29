@@ -838,7 +838,10 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["attachment_commands.rs", 190],
   ["attachment_upload_batches.rs", 170],
   ["agent_run_engine.rs", 250],
-  ["agent_loop_runtime.rs", 560],
+  // 560 -> 610: the loop now hosts two bounded re-entry guards wired from the
+  // observer work (one-shot overflow compaction before dispatch, one-shot
+  // leaked-tool-call retry before commit).
+  ["agent_loop_runtime.rs", 610],
   ["agent_recovery_service.rs", 550],
   ["agent_runtime_snapshot.rs", 220],
   ["background_work_runtime.rs", 80],

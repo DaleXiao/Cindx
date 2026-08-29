@@ -68,11 +68,12 @@ pub use context_compiler::{
     MAX_CONTEXT_COMPILER_RECEIPT_BYTES,
 };
 pub use context_engine::{
-    compaction_summary_instruction, context_prompt_reserve, estimate_context_tokens,
-    estimate_message_tokens, estimate_request_tokens, estimate_text_tokens,
-    extractive_rolling_summary, is_balanced_cut, is_user_turn_start, nearest_balanced_cut,
-    serialize_transcript_for_compaction, ContextCompactionPlan, ContextCompactionPolicy,
-    ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
+    compact_messages_for_overflow, compaction_summary_instruction, context_prompt_reserve,
+    estimate_context_tokens, estimate_message_tokens, estimate_request_tokens,
+    estimate_text_tokens, extractive_rolling_summary, is_balanced_cut, is_user_turn_start,
+    nearest_balanced_cut, serialize_transcript_for_compaction, ContextCompactionPlan,
+    ContextCompactionPolicy, ContextEngine, ContextSourceKind, CONTEXT_SOURCE_SCHEMA,
+    OVERFLOW_COMPACTION_SUMMARY_MAX_CHARS,
 };
 pub use context_governor::{
     bounded_max_output_tokens, ContextBudgetAllocation, ContextGovernorReport,
@@ -108,13 +109,16 @@ pub use kernel::{
     PreparedAgentTurn,
 };
 pub use loop_observers::{
-    clear_doom_loop_confirmation, generic_hint_message, http_hosts_for_tool_io, normalize_host,
-    observation_excerpt, quarantined_web_target_host, stuck_target_blocked_observation,
-    DoomLoopObserver, FinalizationObserver, Intervention, LoopObserver, LoopObservers,
-    ObserverContext, ObserverEmission, ObserverRegistry, RepetitionAdvisoryObserver,
-    StuckTargetObserver, DOOM_LOOP_CONFIRMATION_KIND, DOOM_LOOP_CONFIRMATION_THRESHOLD,
-    FORCE_FINAL_TURN_INSTRUCTION, LOOP_OBSERVER_HINT_KIND, STUCK_TARGET_BLOCKED_CODE,
-    STUCK_TARGET_QUARANTINE_THRESHOLD, STUCK_TARGET_TOOLS,
+    append_internal_instruction, assistant_text_leaks_tool_call, clear_doom_loop_confirmation,
+    consume_leaked_tool_call_retry, generic_hint_message, http_hosts_for_tool_io, normalize_host,
+    observation_excerpt, quarantined_web_target_host, reasoning_tier_max_thinking_budget,
+    stuck_target_blocked_observation, AdaptiveReasoningObserver, DoomLoopObserver,
+    FinalizationObserver, Intervention, LoopObserver, LoopObservers, ObserverContext,
+    ObserverEmission, ObserverRegistry, RepetitionAdvisoryObserver, StuckTargetObserver,
+    ADAPTIVE_REASONING_ESCALATION_THRESHOLD, ADAPTIVE_REASONING_STUCK_REPETITION,
+    DOOM_LOOP_CONFIRMATION_KIND, DOOM_LOOP_CONFIRMATION_THRESHOLD, FORCE_FINAL_TURN_INSTRUCTION,
+    LEAKED_TOOL_CALL_RETRY_INSTRUCTION, LEAKED_TOOL_CALL_RETRY_KIND, LOOP_OBSERVER_HINT_KIND,
+    STUCK_TARGET_BLOCKED_CODE, STUCK_TARGET_QUARANTINE_THRESHOLD, STUCK_TARGET_TOOLS,
 };
 pub use model_transport::{
     exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
@@ -660,6 +664,14 @@ pub fn model_request_for_turn_with_context_budget_and_overlays(
             reasoning_effort,
         );
     }
+    // Adaptive reasoning interventions (observer-proposed thinking budgets)
+    // apply to the next request's reasoning metadata, bounded by the tier.
+    if let Some(thinking_budget) = state.loop_observers.pending_thinking_budget() {
+        metadata.insert(
+            agent_core::THINKING_BUDGET_KEY.to_string(),
+            thinking_budget.to_string(),
+        );
+    }
     report.insert_metadata(&mut metadata);
 
     (
@@ -805,19 +817,6 @@ pub fn advance_with_model_response(
     }
 
     AgentAdvance::Completed { answer: content }
-}
-
-pub fn append_internal_instruction(state: &mut AgentLoopState, kind: &str, instruction: &str) {
-    state.messages.push(Message {
-        role: MessageRole::System,
-        content: instruction.to_string(),
-        metadata: [
-            ("internal".to_string(), "true".to_string()),
-            ("kind".to_string(), kind.to_string()),
-        ]
-        .into_iter()
-        .collect(),
-    });
 }
 
 pub fn ensure_terminal_commit_instruction(state: &mut AgentLoopState) -> bool {

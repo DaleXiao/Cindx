@@ -24,6 +24,19 @@ pub const STUCK_TARGET_QUARANTINE_THRESHOLD: usize = 3;
 /// Consecutive identical tool calls before a doom-loop confirmation is
 /// requested. Sits above the advisory repetition thresholds (3/5).
 pub const DOOM_LOOP_CONFIRMATION_THRESHOLD: usize = 4;
+/// Consecutive failure/stuck signals before the adaptive reasoning observer
+/// raises the next model turn's thinking budget.
+pub const ADAPTIVE_REASONING_ESCALATION_THRESHOLD: usize = 2;
+/// Repetition streak (identical consecutive calls) that counts as a stuck
+/// signal for adaptive reasoning escalation. Reuses the first advisory
+/// repetition threshold so the budget reacts at the same point the model is
+/// first warned.
+pub const ADAPTIVE_REASONING_STUCK_REPETITION: usize = REPETITION_ADVISORY_THRESHOLDS[0];
+/// Metadata kind of the one-shot leaked tool-call retry instruction.
+pub const LEAKED_TOOL_CALL_RETRY_KIND: &str = "leaked_tool_call_retry";
+/// One-shot repair instruction injected when a model turn writes a tool call
+/// as body text instead of using the structured tool interface.
+pub const LEAKED_TOOL_CALL_RETRY_INSTRUCTION: &str = "Your previous reply wrote a tool call as plain text in the message body instead of using the tool interface. Re-issue the intended action now through the structured tool interface; do not output tool-call JSON in the message body.";
 /// Metadata kind of generic observer hint overlays.
 pub const LOOP_OBSERVER_HINT_KIND: &str = "loop_observer_hint";
 /// Permission-request metadata kind identifying a doom-loop confirmation.
@@ -62,6 +75,10 @@ pub enum Intervention {
     ForceFinalTurn,
     /// Pause the run and ask the user whether the stuck loop may continue.
     RequestDoomLoopConfirmation { tool: String },
+    /// Set the next model turn's thinking budget (tokens). Always bounded by
+    /// the run's reasoning-effort tier; the kernel writes it into the request
+    /// reasoning metadata.
+    SetThinkingBudget(u32),
 }
 
 /// An intervention together with the observer that proposed it.
@@ -85,6 +102,9 @@ pub struct ObserverContext {
     pub remaining_model_calls: usize,
     pub terminal_model_call_reserve: usize,
     pub consecutive_identical_calls: usize,
+    /// Maximum thinking budget of the run's reasoning-effort tier (0 when the
+    /// tier does not enable thinking). Adaptive reasoning never exceeds it.
+    pub reasoning_tier_max_budget: u32,
     /// Bounded excerpt of the tool observation for output-marker detection.
     pub observation_excerpt: String,
 }
@@ -385,10 +405,101 @@ impl LoopObserver for DoomLoopObserver {
     }
 }
 
+/// Maximum per-turn thinking budget of a reasoning-effort tier. Mirrors the
+/// provider's tier budgets; `0` marks tiers that do not enable thinking
+/// (fast/absent), where adaptive reasoning stays inactive.
+pub fn reasoning_tier_max_thinking_budget(effort: Option<&str>) -> u32 {
+    match effort {
+        Some("default") => 1024,
+        Some("high") => 4096,
+        Some("xhigh") => 16384,
+        _ => 0,
+    }
+}
+
+/// Per-turn adaptive reasoning budget (prepareNextTurn-style). Watches tool
+/// outcomes for consecutive failure/stuck signals — failed outcomes and
+/// repetition streaks at the advisory threshold — and raises the next model
+/// turn's thinking budget inside the run's effort tier; a succeeding tool
+/// falls back to the tier's base budget. The ceiling is always the tier's own
+/// maximum (`default` 1024 / `high` 4096 / `xhigh` 16384), never crossing
+/// into a higher tier, and a tier without thinking (cap 0) never emits.
+/// Without any signal the observer emits nothing, so the request keeps the
+/// tier's default budget.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AdaptiveReasoningObserver {
+    failure_streak: usize,
+    current_budget: u32,
+    observed_cap: u32,
+}
+
+impl AdaptiveReasoningObserver {
+    /// The economical base budget of a tier: one quarter of the tier ceiling,
+    /// at least one token.
+    pub fn base_budget(tier_max_budget: u32) -> u32 {
+        (tier_max_budget / 4).max(1)
+    }
+
+    /// The budget the observer currently holds for the next turn.
+    pub fn current_budget(&self) -> u32 {
+        self.current_budget
+    }
+
+    /// The consecutive failure/stuck signal count.
+    pub fn failure_streak(&self) -> usize {
+        self.failure_streak
+    }
+}
+
+impl LoopObserver for AdaptiveReasoningObserver {
+    fn name(&self) -> &'static str {
+        "adaptive_reasoning"
+    }
+
+    fn after_tool_observation(&mut self, ctx: &ObserverContext) -> Vec<Intervention> {
+        let cap = ctx.reasoning_tier_max_budget;
+        if cap == 0 {
+            return Vec::new();
+        }
+        if self.observed_cap != cap {
+            self.observed_cap = cap;
+            self.current_budget = Self::base_budget(cap);
+            self.failure_streak = 0;
+        }
+        let failed = matches!(ctx.outcome_status, Some(ToolOutcomeStatus::Failed));
+        let stuck = ctx.consecutive_identical_calls >= ADAPTIVE_REASONING_STUCK_REPETITION;
+        if failed || stuck {
+            self.failure_streak = self.failure_streak.saturating_add(1);
+            if self.failure_streak >= ADAPTIVE_REASONING_ESCALATION_THRESHOLD
+                && self.current_budget < cap
+            {
+                self.current_budget = self.current_budget.saturating_mul(2).min(cap);
+                return vec![Intervention::SetThinkingBudget(self.current_budget)];
+            }
+            return Vec::new();
+        }
+        if matches!(ctx.outcome_status, Some(ToolOutcomeStatus::Succeeded)) {
+            self.failure_streak = 0;
+            let base = Self::base_budget(cap);
+            if self.current_budget > base {
+                self.current_budget = base;
+                return vec![Intervention::SetThinkingBudget(base)];
+            }
+        }
+        Vec::new()
+    }
+
+    fn clone_box(&self) -> Box<dyn LoopObserver> {
+        Box::new(*self)
+    }
+}
+
 /// Runtime-only observer host carried by the loop state: the observer registry
 /// plus the intervention effects (quarantine set, forced-final flag, pending
-/// doom-loop confirmation, pending hint overlays, and the published model-call
-/// budget). Not persisted: restored runs start with a fresh host.
+/// doom-loop confirmation, pending hint overlays, pending thinking budget, the
+/// one-shot leaked-retry flag, the one-shot overflow-compaction flag, and the
+/// published model-call budget). Not persisted: restored runs start with a
+/// fresh host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopObservers {
     registry: ObserverRegistry,
@@ -396,6 +507,10 @@ pub struct LoopObservers {
     force_final_turn: bool,
     pending_doom_loop_confirmation: Option<String>,
     hint_overlays: Vec<Message>,
+    pending_thinking_budget: Option<u32>,
+    reasoning_tier_max_budget: u32,
+    leaked_retry_used: bool,
+    overflow_compact_used: bool,
     remaining_model_calls: usize,
     terminal_model_call_reserve: usize,
 }
@@ -406,13 +521,18 @@ impl Default for LoopObservers {
             .with_observer(Box::new(RepetitionAdvisoryObserver))
             .with_observer(Box::new(StuckTargetObserver::default()))
             .with_observer(Box::new(FinalizationObserver))
-            .with_observer(Box::new(DoomLoopObserver::default()));
+            .with_observer(Box::new(DoomLoopObserver::default()))
+            .with_observer(Box::new(AdaptiveReasoningObserver::default()));
         Self {
             registry,
             quarantined_hosts: BTreeSet::new(),
             force_final_turn: false,
             pending_doom_loop_confirmation: None,
             hint_overlays: Vec::new(),
+            pending_thinking_budget: None,
+            reasoning_tier_max_budget: 0,
+            leaked_retry_used: false,
+            overflow_compact_used: false,
             remaining_model_calls: UNKNOWN_REMAINING_MODEL_CALLS,
             terminal_model_call_reserve: DEFAULT_TERMINAL_MODEL_CALL_RESERVE,
         }
@@ -462,6 +582,9 @@ impl LoopObservers {
             Intervention::ForceFinalTurn => self.arm_force_final_turn(),
             Intervention::RequestDoomLoopConfirmation { tool } => {
                 self.request_doom_loop_confirmation(tool.clone());
+            }
+            Intervention::SetThinkingBudget(budget) => {
+                self.pending_thinking_budget = Some(*budget);
             }
         }
     }
@@ -513,6 +636,45 @@ impl LoopObservers {
     /// Drains the pending hint overlays for injection into the next turn.
     pub fn take_hint_overlays(&mut self) -> Vec<Message> {
         std::mem::take(&mut self.hint_overlays)
+    }
+
+    /// The thinking budget the observers set for the next model request, if
+    /// any. Persists across turns until the observers change it; the kernel
+    /// writes it into the request reasoning metadata.
+    pub fn pending_thinking_budget(&self) -> Option<u32> {
+        self.pending_thinking_budget
+    }
+
+    /// Publishes the run's reasoning-effort tier ceiling so the adaptive
+    /// reasoning observer knows the budget range it may move inside (0 when
+    /// the tier does not enable thinking).
+    pub fn publish_reasoning_effort_budget(&mut self, tier_max_budget: u32) {
+        self.reasoning_tier_max_budget = tier_max_budget;
+    }
+
+    /// The published reasoning-effort tier ceiling.
+    pub fn reasoning_tier_max_budget(&self) -> u32 {
+        self.reasoning_tier_max_budget
+    }
+
+    /// True once the one-shot leaked tool-call retry has been consumed.
+    pub fn leaked_retry_used(&self) -> bool {
+        self.leaked_retry_used
+    }
+
+    /// Consumes the one-shot leaked tool-call retry allowance.
+    pub fn mark_leaked_retry_used(&mut self) {
+        self.leaked_retry_used = true;
+    }
+
+    /// True once the one-shot overflow compaction re-entry has been consumed.
+    pub fn overflow_compact_used(&self) -> bool {
+        self.overflow_compact_used
+    }
+
+    /// Consumes the one-shot overflow compaction allowance.
+    pub fn mark_overflow_compact_used(&mut self) {
+        self.overflow_compact_used = true;
     }
 
     pub fn remaining_model_calls(&self) -> usize {
@@ -585,6 +747,61 @@ pub fn generic_hint_message(observer: &str, text: &str) -> Message {
         .into_iter()
         .collect::<Metadata>(),
     }
+}
+
+/// Heuristic detection of a tool call that leaked into assistant body text:
+/// an explicit `<tool_call>` marker, a ```json fence naming a `"name"` field,
+/// or a `{"name": ..., "arguments": ...}` object literal.
+pub fn assistant_text_leaks_tool_call(content: &str) -> bool {
+    content.contains("<tool_call")
+        || (content.contains("```json") && content.contains("\"name\""))
+        || (content.contains("{\"name\"") && content.contains("\"arguments\""))
+}
+
+/// Append an internal (model-visible, non-surface) instruction message to the
+/// loop state, tagged with a stable `kind` for attribution and dedupe.
+pub fn append_internal_instruction(
+    state: &mut crate::AgentLoopState,
+    kind: &str,
+    instruction: &str,
+) {
+    state.messages.push(Message {
+        role: MessageRole::System,
+        content: instruction.to_string(),
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), kind.to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
+}
+
+/// One-shot repair for a completed turn whose body text leaked a tool call.
+/// When the answer carries a leaked call and the retry allowance is unused,
+/// withdraws the assistant message added since `previous_message_count`,
+/// records the allowance as used, injects the one-shot repair instruction,
+/// and returns the retry instruction for the loop to re-enter the same turn.
+/// Returns `None` (no retry) when there is no leak or the allowance is
+/// already spent, so the loop never retries twice.
+pub fn consume_leaked_tool_call_retry(
+    state: &mut crate::AgentLoopState,
+    answer: &str,
+    previous_message_count: usize,
+) -> Option<String> {
+    if state.loop_observers.leaked_retry_used() || !assistant_text_leaks_tool_call(answer) {
+        return None;
+    }
+    state
+        .messages
+        .truncate(previous_message_count.min(state.messages.len()));
+    state.loop_observers.mark_leaked_retry_used();
+    append_internal_instruction(
+        state,
+        LEAKED_TOOL_CALL_RETRY_KIND,
+        LEAKED_TOOL_CALL_RETRY_INSTRUCTION,
+    );
+    Some(LEAKED_TOOL_CALL_RETRY_INSTRUCTION.to_string())
 }
 
 /// HTTP hosts attributed to one tool call: parsed from the call arguments
@@ -764,6 +981,7 @@ mod tests {
             remaining_model_calls: usize::MAX,
             terminal_model_call_reserve: 4,
             consecutive_identical_calls: 0,
+            reasoning_tier_max_budget: 0,
             observation_excerpt: String::new(),
         }
     }
@@ -1041,7 +1259,8 @@ mod tests {
                 REPETITION_ADVISORY_KIND,
                 "stuck_target",
                 "finalization",
-                "doom_loop"
+                "doom_loop",
+                "adaptive_reasoning"
             ]
         );
         assert_eq!(host.remaining_model_calls(), usize::MAX);
@@ -1076,5 +1295,136 @@ mod tests {
             .loop_observers
             .pending_doom_loop_confirmation()
             .is_none());
+    }
+
+    fn reasoning_context(cap: u32, failed: bool, identical: usize) -> ObserverContext {
+        ObserverContext {
+            tool_name: "shell.run".to_string(),
+            input_fingerprint: "fp".to_string(),
+            canonical_input: "{}".to_string(),
+            outcome_status: Some(if failed {
+                ToolOutcomeStatus::Failed
+            } else {
+                ToolOutcomeStatus::Succeeded
+            }),
+            http_hosts: Vec::new(),
+            remaining_model_calls: usize::MAX,
+            terminal_model_call_reserve: 4,
+            consecutive_identical_calls: identical,
+            reasoning_tier_max_budget: cap,
+            observation_excerpt: String::new(),
+        }
+    }
+
+    fn escalated_budgets(observer: &mut AdaptiveReasoningObserver, cap: u32, n: usize) -> Vec<u32> {
+        let mut seen = Vec::new();
+        for _ in 0..n {
+            for intervention in observer.after_tool_observation(&reasoning_context(cap, true, 0)) {
+                if let Intervention::SetThinkingBudget(budget) = intervention {
+                    seen.push(budget);
+                }
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn adaptive_reasoning_escalates_on_failures_and_stays_capped() {
+        let mut observer = AdaptiveReasoningObserver::default();
+        let cap = 4096u32;
+        let seen = escalated_budgets(&mut observer, cap, 8);
+        assert!(!seen.is_empty(), "failures should escalate the budget");
+        assert!(seen.iter().all(|budget| *budget <= cap));
+        assert_eq!(
+            seen[seen.len() - 1],
+            cap,
+            "escalation saturates at the tier cap"
+        );
+    }
+
+    #[test]
+    fn adaptive_reasoning_backs_off_to_base_on_success() {
+        let mut observer = AdaptiveReasoningObserver::default();
+        let cap = 4096u32;
+        escalated_budgets(&mut observer, cap, 4);
+        assert!(observer.current_budget() > AdaptiveReasoningObserver::base_budget(cap));
+        observer.after_tool_observation(&reasoning_context(cap, false, 0));
+        assert_eq!(
+            observer.current_budget(),
+            AdaptiveReasoningObserver::base_budget(cap)
+        );
+    }
+
+    #[test]
+    fn adaptive_reasoning_is_inert_without_a_thinking_tier() {
+        let mut observer = AdaptiveReasoningObserver::default();
+        let interventions = observer.after_tool_observation(&reasoning_context(0, true, 0));
+        assert!(
+            interventions.is_empty(),
+            "cap 0 means the tier does not think"
+        );
+    }
+
+    #[test]
+    fn leaked_tool_call_retry_is_one_shot() {
+        let mut state = start_agent_loop(
+            TaskId("leak".to_string()),
+            "do the thing",
+            AgentRuntimeConfig::default(),
+        );
+        let before = state.messages.len();
+        let leaked = "I will now call {\"name\": \"file.read\", \"arguments\": {}} inline";
+        assert!(consume_leaked_tool_call_retry(&mut state, leaked, before).is_some());
+        assert!(state.loop_observers.leaked_retry_used());
+        assert_eq!(
+            state.messages.len(),
+            before + 1,
+            "repair instruction appended"
+        );
+        let after = state.messages.len();
+        assert!(
+            consume_leaked_tool_call_retry(&mut state, leaked, after).is_none(),
+            "the allowance is spent after one retry"
+        );
+    }
+
+    #[test]
+    fn plain_answer_does_not_trigger_a_leaked_retry() {
+        let mut state = start_agent_loop(
+            TaskId("noleak".to_string()),
+            "do the thing",
+            AgentRuntimeConfig::default(),
+        );
+        let len = state.messages.len();
+        assert!(consume_leaked_tool_call_retry(&mut state, "A plain final answer.", len).is_none());
+    }
+
+    #[test]
+    fn overflow_compaction_archives_a_long_head_and_skips_short_transcripts() {
+        use agent_core::{Message, MessageRole};
+        let mut messages = vec![Message {
+            role: MessageRole::User,
+            content: "start".to_string(),
+            metadata: Default::default(),
+        }];
+        for i in 0..60 {
+            messages.push(Message {
+                role: MessageRole::User,
+                content: format!("question {i} {}", "x".repeat(400)),
+                metadata: Default::default(),
+            });
+            messages.push(Message {
+                role: MessageRole::Assistant,
+                content: format!("answer {i} {}", "y".repeat(400)),
+                metadata: Default::default(),
+            });
+        }
+        let compacted = crate::compact_messages_for_overflow(&messages, 2_000);
+        assert!(compacted.is_some(), "a long overflowing head must archive");
+        assert!(compacted.unwrap().len() < messages.len());
+        assert!(
+            crate::compact_messages_for_overflow(&messages[..1], 100_000).is_none(),
+            "a short transcript has no archivable head"
+        );
     }
 }
