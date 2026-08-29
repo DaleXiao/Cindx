@@ -1,0 +1,92 @@
+[
+  {
+    "id": "v3-signature-refactor",
+    "category": "code_edit",
+    "prompt": "Change src/price.js so price(amount, currency) returns cents using rates {usd:100, eur:110}. Update every call site (src/cart.js, src/main.js) to pass the currency \"usd\" so the program still runs. Verify src/main.js executes and the pricing behavior is correct.",
+    "fixture": [
+      { "path": "src/price.js", "content": "function price(amount) { return amount * 100; }\nmodule.exports = { price };\n" },
+      { "path": "src/cart.js", "content": "const { price } = require(\"./price.js\");\nfunction total(items) { return items.reduce((s, i) => s + price(i), 0); }\nmodule.exports = { total };\n" },
+      { "path": "src/main.js", "content": "const { total } = require(\"./cart.js\");\nconsole.log(total([1, 2]));\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write", "file.search", "file.list", "shell.run"],
+    "postconditions": [
+      { "type": "command_exit_code", "cmd": "node src/main.js", "code": 0 },
+      { "type": "command_exit_code", "cmd": "node -e \"const {price}=require('./src/price.js'); if(price(2,'usd')!==200) process.exit(1); if(price(2,'eur')!==220) process.exit(1);\"", "code": 0 },
+      { "type": "file_contains", "path": "src/price.js", "needle": "currency" }
+    ],
+    "budget": { "max_turns": 10, "max_tool_calls": 16 }
+  },
+  {
+    "id": "v3-fix-failing-suite",
+    "category": "code_edit",
+    "prompt": "The test suite tests/run.js currently fails because of a bug in src/sort.js. Fix src/sort.js so the entire suite passes, then run it to confirm.",
+    "fixture": [
+      { "path": "src/sort.js", "content": "function sortAsc(xs) { return xs.slice().sort((a, b) => a > b ? 1 : -1); }\nmodule.exports = { sortAsc };\n" },
+      { "path": "tests/run.js", "content": "const { sortAsc } = require(\"../src/sort.js\");\nconst eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);\nconst cases = [\n  [[3, 1, 2], [1, 2, 3]],\n  [[-1, -5, 3], [-5, -1, 3]],\n  [[10, 9, 2], [2, 9, 10]],\n  [[], []]\n];\nfor (const [input, want] of cases) {\n  const got = sortAsc(input);\n  if (!eq(got, want)) { console.error(\"FAIL\", input, \"got\", got, \"want\", want); process.exit(1); }\n}\nconsole.log(\"all pass\");\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write", "file.list", "shell.run"],
+    "postconditions": [
+      { "type": "command_exit_code", "cmd": "node tests/run.js", "code": 0 }
+    ],
+    "budget": { "max_turns": 10, "max_tool_calls": 16 }
+  },
+  {
+    "id": "v3-implement-from-spec",
+    "category": "multi_step",
+    "prompt": "Implement the behavior described in SPEC.md: src/words.js must export countWords(str) and src/cli.js must read a file path argument and print the word count of its content. Verify with the provided data.txt.",
+    "fixture": [
+      { "path": "SPEC.md", "content": "# Spec\ncountWords(str) returns the number of whitespace-separated tokens.\ncli.js <path> prints countWords of the file content as a single integer.\n" },
+      { "path": "src/words.js", "content": "// TODO: implement countWords\nmodule.exports = { countWords: null };\n" },
+      { "path": "src/cli.js", "content": "// TODO: read path arg and print word count\n" },
+      { "path": "data.txt", "content": "hello brave new world\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write", "file.list", "shell.run"],
+    "postconditions": [
+      { "type": "command_exit_code", "cmd": "node src/cli.js data.txt", "code": 0 },
+      { "type": "command_exit_code", "cmd": "node -e \"const {countWords}=require('./src/words.js'); if(countWords('a b c')!==3) process.exit(1); if(countWords('')!==0) process.exit(1);\"", "code": 0 }
+    ],
+    "budget": { "max_turns": 10, "max_tool_calls": 16 }
+  },
+  {
+    "id": "v3-edge-case-bug",
+    "category": "code_edit",
+    "prompt": "src/max.js misbehaves on empty input. Fix it so maxOf([]) returns 0 while non-empty arrays still return the maximum. The tests in tests/max.test.js must pass.",
+    "fixture": [
+      { "path": "src/max.js", "content": "function maxOf(xs) { return Math.max(...xs); }\nmodule.exports = { maxOf };\n" },
+      { "path": "tests/max.test.js", "content": "const { maxOf } = require(\"../src/max.js\");\nif (maxOf([1, 5, 2]) !== 5) process.exit(1);\nif (maxOf([]) !== 0) process.exit(1);\nif (maxOf([-3, -1]) !== -1) process.exit(1);\nconsole.log(\"ok\");\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write", "shell.run"],
+    "postconditions": [
+      { "type": "command_exit_code", "cmd": "node tests/max.test.js", "code": 0 }
+    ],
+    "budget": { "max_turns": 10, "max_tool_calls": 16 }
+  },
+  {
+    "id": "v3-json-to-markdown",
+    "category": "multi_step",
+    "prompt": "Read data.json (an array of {name, score}) and write table.md containing a Markdown table with a header row (| name | score |) and one row per entry, preserving order.",
+    "fixture": [
+      { "path": "data.json", "content": "[\n  { \"name\": \"ada\", \"score\": 9 },\n  { \"name\": \"linus\", \"score\": 7 }\n]\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write", "shell.run"],
+    "postconditions": [
+      { "type": "file_contains", "path": "table.md", "needle": "| name | score |" },
+      { "type": "file_contains", "path": "table.md", "needle": "ada" },
+      { "type": "file_contains", "path": "table.md", "needle": "linus" }
+    ],
+    "budget": { "max_turns": 10, "max_tool_calls": 16 }
+  },
+  {
+    "id": "v3-shell-log-count",
+    "category": "shell",
+    "prompt": "Count the lines in logs/app.log that contain the word ERROR and write that integer to errors.txt.",
+    "fixture": [
+      { "path": "logs/app.log", "content": "INFO start\nERROR disk full\nINFO ok\nERROR timeout\nWARN slow\nERROR crash\n" }
+    ],
+    "allowed_tools": ["file.read", "file.write", "shell.run"],
+    "postconditions": [
+      { "type": "file_contains", "path": "errors.txt", "needle": "3" }
+    ],
+    "budget": { "max_turns": 10, "max_tool_calls": 16 }
+  }
+]
