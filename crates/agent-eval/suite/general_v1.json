@@ -2,7 +2,7 @@
   {
     "id": "code_edit-fix-function",
     "category": "code_edit",
-    "prompt": "Fix the farewell function in src/greeter.py so its greeting ends with an exclamation mark, then confirm the change.",
+    "prompt": "Fix the farewell function in src/greeter.py so its greeting ends with an exclamation mark, then confirm the change. End your final answer with the exact line: Updated farewell.",
     "fixture": [
       {
         "path": "src/greeter.py",
@@ -23,7 +23,7 @@
   {
     "id": "code_edit-rewrite-config",
     "category": "code_edit",
-    "prompt": "Switch config/app.json to release mode with 3 retries, keeping the same JSON layout.",
+    "prompt": "Switch config/app.json to release mode with 3 retries, keeping the same JSON layout. End your final answer with the exact line: release mode enabled.",
     "fixture": [
       {
         "path": "config/app.json",
@@ -79,7 +79,7 @@
   {
     "id": "recovery-invalid-path",
     "category": "recovery",
-    "prompt": "Update report.txt by appending the line 'recovered'. If a write is rejected, retry with a valid in-workspace path.",
+    "prompt": "Update report.txt by appending the line 'recovered'. If a write is rejected, retry with a valid in-workspace path. End your final answer with the exact line: Recovered.",
     "fixture": [{ "path": "report.txt", "content": "baseline\n" }],
     "allowed_tools": ["file.write"],
     "postconditions": [
