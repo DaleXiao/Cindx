@@ -134,7 +134,13 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         context_window_tokens: u64,
         max_output_tokens: u64,
     ) -> Result<PreparedAgentTurn, AgentTurnPreparationError> {
-        let cognitive_context = cognitive_state_message(self.state, self.tools);
+        self.run_before_model_turn_observers();
+        let turn_tools: &[ToolSpec] = if self.state.loop_observers.force_final_turn() {
+            &[]
+        } else {
+            self.tools
+        };
+        let cognitive_context = cognitive_state_message(self.state, turn_tools);
         self.prepare_model_turn_with_context(
             user_instructions,
             runtime_context,
@@ -174,9 +180,15 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         context_window_tokens: u64,
         max_output_tokens: u64,
     ) -> Result<PreparedAgentTurn, AgentTurnPreparationError> {
+        self.run_before_model_turn_observers();
+        let turn_tools: &[ToolSpec] = if self.state.loop_observers.force_final_turn() {
+            &[]
+        } else {
+            self.tools
+        };
         let cognitive_context = cognitive_state_message_with_requirement(
             self.state,
-            self.tools,
+            turn_tools,
             workspace_verification_required,
         );
         self.prepare_model_turn_with_context(
@@ -220,25 +232,44 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
                 grounding_evidence_message(context, observation_token_budget, steer_epoch)
             })
             .collect::<Vec<_>>();
+        let forced_final_turn =
+            enforce_actor_turn_budget && self.state.loop_observers.force_final_turn();
+        let final_turn_context;
+        let runtime_context = if forced_final_turn {
+            final_turn_context = match runtime_context
+                .map(str::trim)
+                .filter(|context| !context.is_empty())
+            {
+                Some(context) => format!(
+                    "{context}\n\n{}",
+                    crate::loop_observers::FORCE_FINAL_TURN_INSTRUCTION
+                ),
+                None => crate::loop_observers::FORCE_FINAL_TURN_INSTRUCTION.to_string(),
+            };
+            Some(final_turn_context.as_str())
+        } else {
+            runtime_context
+        };
         let runtime_context = merged_runtime_context(runtime_context, has_grounding_evidence);
         let has_cognitive_context = cognitive_context.is_some();
-        // Advisory repetition reminder: injected as a transient overlay on the
-        // actor decision path when the identical-call streak reaches a
-        // threshold. It never vetoes or rewrites the repeated call; the
-        // invariant-repair fallback below drops it like the cognitive overlay.
-        let repetition_advisory = if enforce_actor_turn_budget {
-            self.state.repetition_advisory.advisory_message()
+        // Advisory observer hints (the migrated repetition notice among them):
+        // injected as transient overlays on the actor decision path. They never
+        // veto or rewrite a call; the invariant-repair fallback below drops
+        // them like the cognitive overlay.
+        let observer_hints = if enforce_actor_turn_budget {
+            self.observer_hint_overlays()
         } else {
-            None
+            Vec::new()
         };
-        let mut overlays = Vec::with_capacity(evidence_contexts.len() + 2);
+        let effective_tools: &[ToolSpec] = if forced_final_turn { &[] } else { self.tools };
+        let mut overlays = Vec::with_capacity(evidence_contexts.len() + 1 + observer_hints.len());
         overlays.extend(cognitive_context);
         overlays.extend(evidence_contexts.iter().cloned());
-        overlays.extend(repetition_advisory);
+        overlays.extend(observer_hints);
         let (mut request, mut context) = if overlays.is_empty() {
             model_request_for_turn_with_context_budget(
                 self.state,
-                self.tools,
+                effective_tools,
                 user_instructions,
                 runtime_context.as_deref(),
                 context_window_tokens,
@@ -247,7 +278,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         } else {
             model_request_for_turn_with_context_budget_and_overlays(
                 self.state,
-                self.tools,
+                effective_tools,
                 user_instructions,
                 runtime_context.as_deref(),
                 &overlays,
@@ -259,7 +290,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             (request, context) = if evidence_contexts.is_empty() {
                 model_request_for_turn_with_context_budget(
                     self.state,
-                    self.tools,
+                    effective_tools,
                     user_instructions,
                     runtime_context.as_deref(),
                     context_window_tokens,
@@ -268,7 +299,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             } else {
                 model_request_for_turn_with_context_budget_and_overlays(
                     self.state,
-                    self.tools,
+                    effective_tools,
                     user_instructions,
                     runtime_context.as_deref(),
                     &evidence_contexts,
@@ -310,7 +341,7 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
             reproject_prepared_request_with_overlays(
                 &mut request,
                 &mut context,
-                self.tools,
+                self.effective_turn_tools(),
                 &overlays,
                 context_window_tokens,
                 max_output_tokens,
@@ -335,6 +366,113 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
 
     pub fn advance_model_response(&mut self, response: ModelResponse) -> AgentAdvance {
         advance_with_model_response(self.state, response, self.tools)
+    }
+
+    /// Runs the before-model-turn observers and applies their interventions to
+    /// the loop state. Observer panics are isolated by the registry and never
+    /// propagate into turn preparation.
+    fn run_before_model_turn_observers(&mut self) {
+        let ctx = self.turn_boundary_observer_context();
+        let emissions = self.state.loop_observers.notify_before_model_turn(&ctx);
+        for emission in emissions {
+            self.apply_observer_emission(&emission, &ctx);
+        }
+    }
+
+    /// Runs the after-tool-observation observers and applies their
+    /// interventions to the loop state. Observer panics are isolated by the
+    /// registry and never propagate into the observation transition.
+    fn run_after_tool_observation_observers(
+        &mut self,
+        request: &AgentToolRequest,
+        status: &ToolOutcomeStatus,
+        observation: &str,
+    ) {
+        let ctx = self.tool_observer_context(request, status, observation);
+        let emissions = self
+            .state
+            .loop_observers
+            .notify_after_tool_observation(&ctx);
+        for emission in emissions {
+            self.apply_observer_emission(&emission, &ctx);
+        }
+    }
+
+    fn apply_observer_emission(
+        &mut self,
+        emission: &crate::ObserverEmission,
+        _ctx: &crate::ObserverContext,
+    ) {
+        match &emission.intervention {
+            // The repetition observer reuses the existing advisory overlay
+            // message byte-for-byte; other hints enter as generic overlays.
+            crate::Intervention::Hint(text) => {
+                let message = if emission.observer == crate::REPETITION_ADVISORY_KIND {
+                    self.state.repetition_advisory.advisory_message()
+                } else {
+                    Some(crate::generic_hint_message(&emission.observer, text))
+                };
+                if let Some(message) = message {
+                    self.state.loop_observers.push_hint_overlay(message);
+                }
+            }
+            _ => self.state.loop_observers.apply_emission(emission),
+        }
+    }
+
+    fn turn_boundary_observer_context(&self) -> crate::ObserverContext {
+        crate::ObserverContext {
+            tool_name: self.state.repetition_advisory.tool_name().to_string(),
+            input_fingerprint: tool_input_fingerprint(
+                self.state.repetition_advisory.tool_name(),
+                self.state.repetition_advisory.canonical_input(),
+            ),
+            canonical_input: self.state.repetition_advisory.canonical_input().to_string(),
+            outcome_status: None,
+            http_hosts: Vec::new(),
+            remaining_model_calls: self.state.loop_observers.remaining_model_calls(),
+            terminal_model_call_reserve: self.state.loop_observers.terminal_model_call_reserve(),
+            consecutive_identical_calls: self.state.repetition_advisory.streak(),
+            observation_excerpt: String::new(),
+        }
+    }
+
+    fn tool_observer_context(
+        &self,
+        request: &AgentToolRequest,
+        status: &ToolOutcomeStatus,
+        observation: &str,
+    ) -> crate::ObserverContext {
+        let canonical_input = crate::repetition_advisory::canonical_tool_input(&request.input);
+        crate::ObserverContext {
+            tool_name: request.tool_name.clone(),
+            input_fingerprint: tool_input_fingerprint(&request.tool_name, &request.input),
+            canonical_input: canonical_input.clone(),
+            outcome_status: Some(status.clone()),
+            http_hosts: crate::loop_observers::http_hosts_for_tool_io(
+                &request.tool_name,
+                &canonical_input,
+                observation,
+            ),
+            remaining_model_calls: self.state.loop_observers.remaining_model_calls(),
+            terminal_model_call_reserve: self.state.loop_observers.terminal_model_call_reserve(),
+            consecutive_identical_calls: self.state.repetition_advisory.streak(),
+            observation_excerpt: crate::loop_observers::observation_excerpt(observation),
+        }
+    }
+
+    fn observer_hint_overlays(&mut self) -> Vec<Message> {
+        self.state.loop_observers.take_hint_overlays()
+    }
+
+    /// The tool set visible to the prepared turn. A forced final turn removes
+    /// every tool so the model can only produce its final answer.
+    fn effective_turn_tools(&self) -> &[ToolSpec] {
+        if self.state.loop_observers.force_final_turn() {
+            &[]
+        } else {
+            self.tools
+        }
     }
 
     pub fn apply_steer(&mut self, instruction: impl Into<String>, metadata: Metadata) -> usize {
@@ -596,6 +734,34 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         tool_invocation_from_request(&self.state.task_id, request)
     }
 
+    /// The quarantined host blocking this web.search/web.fetch call before it
+    /// executes, if any. A blocked call must not run; the caller records a
+    /// denied "stuck target blocked" observation instead.
+    pub fn stuck_target_block_for(&self, request: &AgentToolRequest) -> Option<String> {
+        crate::loop_observers::quarantined_web_target_host(
+            self.state,
+            &request.tool_name,
+            &request.input,
+        )
+    }
+
+    /// The pending doom-loop confirmation tool, if observers requested one.
+    pub fn pending_doom_loop_confirmation(&self) -> Option<&str> {
+        self.state.loop_observers.pending_doom_loop_confirmation()
+    }
+
+    /// Publishes the run's remaining model-call budget and terminal reserve so
+    /// the finalization observer can force the closing turn in time.
+    pub fn publish_model_call_budget(
+        &mut self,
+        remaining_model_calls: usize,
+        terminal_reserve: usize,
+    ) {
+        self.state
+            .loop_observers
+            .publish_model_call_budget(remaining_model_calls, terminal_reserve);
+    }
+
     pub fn apply_tool_observation(
         &mut self,
         request: &AgentToolRequest,
@@ -780,6 +946,10 @@ impl<'state, 'tools> AgentKernel<'state, 'tools> {
         self.state
             .repetition_advisory
             .observe(&request.tool_name, &request.input);
+        // Loop observers run after the observation is applied; their
+        // interventions update loop state (quarantines, forced final turn,
+        // doom-loop confirmation) and queue advisory hints for the next turn.
+        self.run_after_tool_observation_observers(request, status, observation);
         let new_evidence = self
             .state
             .task_contract

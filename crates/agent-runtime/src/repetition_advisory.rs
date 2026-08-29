@@ -52,6 +52,16 @@ impl RepetitionAdvisoryTracker {
         self.count
     }
 
+    /// The tool name of the current identical-call streak.
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    /// The canonical argument string of the current identical-call streak.
+    pub fn canonical_input(&self) -> &str {
+        &self.canonical_input
+    }
+
     /// True exactly when the current streak reaches an advisory threshold.
     pub fn advisory_due(&self) -> bool {
         REPETITION_ADVISORY_THRESHOLDS.contains(&self.count)
@@ -63,27 +73,45 @@ impl RepetitionAdvisoryTracker {
         if !self.advisory_due() {
             return None;
         }
-        let preview =
-            bounded_argument_preview(&self.canonical_input, REPETITION_ADVISORY_PREVIEW_MAX_CHARS);
-        Some(Message {
-            role: MessageRole::System,
-            content: format!(
-                "Advisory repetition notice: `{}` has now been called {} consecutive times with identical arguments: {}. This notice is advisory only; it does not block or rewrite the call. Before repeating it, change the approach (different arguments, a different check, or move on); the run's hard repeated-action limit still applies.",
-                self.tool_name, self.count, preview
+        Some(advisory_message_from(
+            repetition_advisory_content(&self.tool_name, self.count, &self.canonical_input),
+            self.count,
+            &self.tool_name,
+        ))
+    }
+}
+
+/// The advisory notice text for a repeated-call streak. Shared by the tracker
+/// and the repetition observer so both emit byte-identical advisories.
+pub(crate) fn repetition_advisory_content(
+    tool_name: &str,
+    count: usize,
+    canonical_input: &str,
+) -> String {
+    let preview = bounded_argument_preview(canonical_input, REPETITION_ADVISORY_PREVIEW_MAX_CHARS);
+    format!(
+        "Advisory repetition notice: `{}` has now been called {} consecutive times with identical arguments: {}. This notice is advisory only; it does not block or rewrite the call. Before repeating it, change the approach (different arguments, a different check, or move on); the run's hard repeated-action limit still applies.",
+        tool_name, count, preview
+    )
+}
+
+/// Builds the advisory overlay message from a prepared content string.
+pub(crate) fn advisory_message_from(content: String, count: usize, tool_name: &str) -> Message {
+    Message {
+        role: MessageRole::System,
+        content,
+        metadata: [
+            ("internal".to_string(), "true".to_string()),
+            ("kind".to_string(), REPETITION_ADVISORY_KIND.to_string()),
+            (
+                "repetition_advisory_schema".to_string(),
+                REPETITION_ADVISORY_SCHEMA.to_string(),
             ),
-            metadata: [
-                ("internal".to_string(), "true".to_string()),
-                ("kind".to_string(), REPETITION_ADVISORY_KIND.to_string()),
-                (
-                    "repetition_advisory_schema".to_string(),
-                    REPETITION_ADVISORY_SCHEMA.to_string(),
-                ),
-                ("repetition_streak".to_string(), self.count.to_string()),
-                ("tool_name".to_string(), self.tool_name.clone()),
-            ]
-            .into_iter()
-            .collect::<Metadata>(),
-        })
+            ("repetition_streak".to_string(), count.to_string()),
+            ("tool_name".to_string(), tool_name.to_string()),
+        ]
+        .into_iter()
+        .collect::<Metadata>(),
     }
 }
 

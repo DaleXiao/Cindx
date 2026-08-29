@@ -38,9 +38,29 @@ The desktop app currently includes:
   into the model context when the same tool with identical canonical arguments
   repeats consecutively (thresholds 3 and 5): the notice never vetoes or
   rewrites the call, its argument preview is capped at 500 characters, and a
-  different call resets it. Context compaction and truncation cuts never split
-  an assistant tool-call round from its tool results; a cut that would land
-  inside a round falls back to the nearest balanced point.
+  different call resets it. The reminder is produced by the loop-observer
+  registry below, so its advisory behavior is unchanged. Context compaction and
+  truncation cuts never split an assistant tool-call round from its tool
+  results; a cut that would land inside a round falls back to the nearest
+  balanced point.
+- The loop carries an advisory observer registry (`agent_runtime::loop_observers`)
+  that hooks two kernel points — after each tool observation and before each
+  model turn — and proposes interventions the kernel applies to loop state. A
+  panicking observer is caught, logged once, and isolated; it can never abort
+  the loop or disturb the other observers. The standard observers are: the
+  migrated repetition advisory notice (behavior unchanged); a stuck-target
+  guard that quarantines a host after three consecutive failed `web.search` /
+  `web.fetch` calls (a success clears that host's count), after which calls to
+  the quarantined host are blocked before execution with a denied
+  `stuck target blocked: <host>` observation; a finalization guard that forces
+  the closing turn once the remaining model-call budget reaches the terminal
+  reserve (removing all tools and appending a final-answer instruction); and a
+  doom-loop guard that, when the same tool with identical arguments repeats to
+  its threshold (4), pauses the run behind an explicit user confirmation
+  ("Agent appears stuck on <tool>; continue?") that never auto-continues —
+  allowing resumes the suspended run exactly once after resetting the streak,
+  denying terminates the run as cancelled. The quarantine set, forced-final
+  flag, and pending confirmation are runtime-only and are not persisted.
 - A tool-call batch whose calls are all permissionless read-only tools (the
   registry `permissionless_read_tool` predicate shared with the subagent and
   plan-mode whitelists) is admitted for parallel execution without the

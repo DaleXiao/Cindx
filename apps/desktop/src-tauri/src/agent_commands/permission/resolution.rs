@@ -2,7 +2,7 @@ use super::observations::permission_tool_observation_metadata;
 use super::restore_permission_run_context;
 use crate::*;
 
-fn persist_permission_resolution_rows(
+pub(crate) fn persist_permission_resolution_rows(
     store: &mut SqliteStore,
     request: &PermissionRequest,
     resolution: &PermissionResolution,

@@ -163,6 +163,7 @@ impl AgentTaskStateSnapshot {
             prepared_task_state,
             context_token_ledger: Default::default(),
             repetition_advisory: crate::RepetitionAdvisoryTracker::default(),
+            loop_observers: crate::LoopObservers::default(),
             generation_temperature: None,
             reasoning_effort: None,
         })

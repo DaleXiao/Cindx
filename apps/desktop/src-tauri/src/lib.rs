@@ -1,5 +1,6 @@
 mod agent_commands;
 mod agent_completion_runtime;
+mod agent_doom_loop_runtime;
 mod agent_effort_decision_runtime;
 // Effort-tier planning core (phase 3): the deterministic planner that replaces
 // the orchestrator/conductor planning surface in run preparation.

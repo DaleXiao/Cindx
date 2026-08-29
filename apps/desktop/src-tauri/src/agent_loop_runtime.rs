@@ -37,7 +37,6 @@ use crate::{
     view_models::AgentState,
 };
 
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pause_agent_loop_for_control_stop(
     app: &tauri::AppHandle,
@@ -203,6 +202,9 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 .map(AgentLoopExecutionOutcome::Finished)
             }
             AgentSteerApplication::NoPending => {}
+        }
+        if let Some(paused) = crate::agent_doom_loop_runtime::agent_loop_observer_checkpoint(state, workspace_root, &mut runtime, &prompt, &run_context, active_collaboration, cancellation)? {
+            return Ok(AgentLoopExecutionOutcome::Finished(paused));
         }
         let max_output_tokens =
             bounded_max_output_tokens(config.context_window_tokens, AGENT_MAX_OUTPUT_TOKENS);

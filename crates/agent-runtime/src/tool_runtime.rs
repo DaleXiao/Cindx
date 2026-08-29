@@ -996,6 +996,26 @@ pub fn recovery_source_scope_matches(
         })
 }
 
+pub(crate) fn tool_outcome_status_label(status: &ToolOutcomeStatus) -> &'static str {
+    match status {
+        ToolOutcomeStatus::Succeeded => "succeeded",
+        ToolOutcomeStatus::Failed => "failed",
+        ToolOutcomeStatus::Cancelled => "cancelled",
+        ToolOutcomeStatus::Denied => "denied",
+    }
+}
+
+pub(crate) fn truncate_observation(output: &str) -> String {
+    const LIMIT: usize = 6000;
+    if output.chars().count() <= LIMIT {
+        return output.to_string();
+    }
+
+    let mut truncated = output.chars().take(LIMIT).collect::<String>();
+    truncated.push_str("\n...[truncated]");
+    truncated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

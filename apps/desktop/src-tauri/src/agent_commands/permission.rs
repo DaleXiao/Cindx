@@ -11,6 +11,7 @@ mod tests;
 
 pub(crate) use commands::resolve_agent_permission;
 pub(crate) use recovery::recovery_task_state_with_persisted_permission_denials;
+pub(crate) use resolution::persist_permission_resolution_rows;
 
 const PERMISSION_RUN_CONTEXT_KEYS: &[&str] = &[
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY,

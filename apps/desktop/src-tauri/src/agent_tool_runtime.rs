@@ -575,6 +575,68 @@ fn execute_agent_tool_batch_serial(
             continue;
         }
 
+        if completed_result.is_none() {
+            if let Some(host) = AgentKernel::new(&mut *runtime, tools).stuck_target_block_for(&call)
+            {
+                let denial = agent_runtime::AgentActionDenialFeedback::runtime_policy(
+                    agent_runtime::STUCK_TARGET_BLOCKED_CODE,
+                    agent_runtime::AgentActionRecovery::Replan,
+                );
+                let observation = observation_from_tool_result(
+                    &call.tool_name,
+                    "denied",
+                    &agent_runtime::stuck_target_blocked_observation(&host),
+                );
+                append_tool_finished_event(
+                    &mut store,
+                    &runtime.task_id,
+                    &call.call_id.0,
+                    &call.tool_name,
+                    "denied",
+                    &observation,
+                    [("failure_code".to_string(), denial.code.to_string())]
+                        .into_iter()
+                        .collect(),
+                    Some(run_context),
+                )
+                .map_err(|error| error.to_string())?;
+                drop(store);
+                let commit = commit_agent_tool_observation(
+                    state,
+                    runtime,
+                    run_context,
+                    cancellation,
+                    epoch_lease,
+                    tools,
+                    &call,
+                    &ToolOutcomeStatus::Denied,
+                    tool_risk.as_ref(),
+                    effect_spec.as_ref(),
+                    None,
+                    &observation,
+                    Some(&denial),
+                    None,
+                    &[],
+                    snapshot_cursor,
+                )?;
+                if let Some(outcome) = agent_tool_batch_outcome_after_commit(
+                    commit,
+                    app,
+                    state,
+                    workspace_root,
+                    runtime,
+                    prompt,
+                    run_context,
+                    active_collaboration,
+                    cancellation,
+                    epoch_lease,
+                )? {
+                    return Ok(outcome);
+                }
+                continue;
+            }
+        }
+
         let Some(tool) = tool else {
             let denial = agent_runtime::AgentActionDenialFeedback::capability_unavailable(
                 "tool_capability_unavailable",

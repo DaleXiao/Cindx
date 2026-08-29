@@ -1017,3 +1017,210 @@ fn repetition_advisory_resets_when_the_call_changes() {
         "a reset streak injects no advisory"
     );
 }
+
+fn web_fetch_request(call_id: &str, url: &str) -> AgentToolRequest {
+    AgentToolRequest {
+        call_id: ToolCallId(call_id.to_string()),
+        tool_name: "web.fetch".to_string(),
+        input: format!(r#"{{"url":"{url}"}}"#),
+    }
+}
+
+#[test]
+fn stuck_target_failures_quarantine_the_host_and_block_the_next_call() {
+    let mut state = start_agent_loop(
+        TaskId("stuck-target".to_string()),
+        "research a page",
+        AgentRuntimeConfig::default(),
+    );
+    for index in 0..3 {
+        AgentKernel::new(&mut state, &[]).apply_tool_observation(
+            &web_fetch_request(&format!("call-{index}"), "https://flaky.example.com/page"),
+            &ToolOutcomeStatus::Failed,
+            None,
+            "tool=web.fetch\nstatus=failed\noutput=\ncurl failed: timeout",
+        );
+    }
+    assert!(
+        state
+            .loop_observers
+            .is_host_quarantined("flaky.example.com"),
+        "three consecutive failures quarantine the host"
+    );
+
+    let blocked = AgentKernel::new(&mut state, &[]).stuck_target_block_for(&web_fetch_request(
+        "call-blocked",
+        "https://flaky.example.com/other",
+    ));
+    assert_eq!(blocked, Some("flaky.example.com".to_string()));
+
+    let open = AgentKernel::new(&mut state, &[]).stuck_target_block_for(&web_fetch_request(
+        "call-open",
+        "https://healthy.example.org/",
+    ));
+    assert!(blocked.is_some() && open.is_none());
+}
+
+#[test]
+fn stuck_target_success_clears_the_failure_streak() {
+    let mut state = start_agent_loop(
+        TaskId("stuck-target-clear".to_string()),
+        "research a page",
+        AgentRuntimeConfig::default(),
+    );
+    for index in 0..2 {
+        AgentKernel::new(&mut state, &[]).apply_tool_observation(
+            &web_fetch_request(&format!("call-{index}"), "https://flaky.example.com/page"),
+            &ToolOutcomeStatus::Failed,
+            None,
+            "tool=web.fetch\nstatus=failed\noutput=\ncurl failed",
+        );
+    }
+    AgentKernel::new(&mut state, &[]).apply_tool_observation(
+        &web_fetch_request("call-ok", "https://flaky.example.com/page"),
+        &ToolOutcomeStatus::Succeeded,
+        None,
+        "tool=web.fetch\nstatus=succeeded\noutput=\npage body",
+    );
+    assert!(
+        !state
+            .loop_observers
+            .is_host_quarantined("flaky.example.com"),
+        "a success before the threshold leaves the host unquarantined"
+    );
+    // Two more failures after a success are not enough to quarantine again.
+    AgentKernel::new(&mut state, &[]).apply_tool_observation(
+        &web_fetch_request("call-late-1", "https://flaky.example.com/page"),
+        &ToolOutcomeStatus::Failed,
+        None,
+        "tool=web.fetch\nstatus=failed\noutput=\ncurl failed",
+    );
+    AgentKernel::new(&mut state, &[]).apply_tool_observation(
+        &web_fetch_request("call-late-2", "https://flaky.example.com/page"),
+        &ToolOutcomeStatus::Failed,
+        None,
+        "tool=web.fetch\nstatus=failed\noutput=\ncurl failed",
+    );
+    assert!(!state
+        .loop_observers
+        .is_host_quarantined("flaky.example.com"));
+    assert_eq!(
+        AgentKernel::new(&mut state, &[])
+            .stuck_target_block_for(&web_fetch_request("call-x", "https://flaky.example.com/")),
+        None
+    );
+}
+
+#[test]
+fn finalization_budget_inside_the_reserve_forces_a_tool_free_closing_turn() {
+    let mut state = start_agent_loop(
+        TaskId("finalization".to_string()),
+        "finish the report",
+        AgentRuntimeConfig::default(),
+    );
+    let tools = vec![read_tool()];
+    AgentKernel::new(&mut state, &[]).publish_model_call_budget(4, 4);
+
+    let prepared = AgentKernel::new(&mut state, &tools)
+        .prepare_model_turn(None, None, 16_384, 2_048)
+        .expect("the forced final turn still prepares");
+    assert!(
+        prepared.request.tools.is_empty(),
+        "the forced final turn removes every tool"
+    );
+    let system = &prepared.request.messages[0];
+    assert_eq!(system.role, MessageRole::System);
+    assert!(
+        system
+            .content
+            .contains(crate::loop_observers::FORCE_FINAL_TURN_INSTRUCTION),
+        "the system prompt carries the finalization instruction"
+    );
+}
+
+#[test]
+fn finalization_observer_stays_quiet_outside_the_reserve() {
+    let mut state = start_agent_loop(
+        TaskId("finalization-quiet".to_string()),
+        "finish the report",
+        AgentRuntimeConfig::default(),
+    );
+    let tools = vec![read_tool()];
+    AgentKernel::new(&mut state, &[]).publish_model_call_budget(5, 4);
+
+    let prepared = AgentKernel::new(&mut state, &tools)
+        .prepare_model_turn(None, None, 16_384, 2_048)
+        .expect("a normal turn prepares outside the reserve");
+    assert_eq!(prepared.request.tools.len(), 1);
+    assert!(!state.loop_observers.force_final_turn());
+}
+
+#[test]
+fn doom_loop_threshold_requests_a_user_confirmation() {
+    let mut state = start_agent_loop(
+        TaskId("doom-loop".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    let tools = vec![read_tool()];
+    for index in 0..4 {
+        apply_read_observation(&mut state, &tools, &format!("call-{index}"));
+    }
+    assert_eq!(
+        AgentKernel::new(&mut state, &tools).pending_doom_loop_confirmation(),
+        Some("file.read"),
+        "the fourth identical observation requests a confirmation"
+    );
+
+    crate::loop_observers::clear_doom_loop_confirmation(&mut state);
+    assert_eq!(
+        AgentKernel::new(&mut state, &tools).pending_doom_loop_confirmation(),
+        None
+    );
+    assert_eq!(state.repetition_advisory.streak(), 0);
+}
+
+#[test]
+fn a_panicking_observer_never_blocks_observation_or_turn_preparation() {
+    struct ExplodingObserver;
+    impl crate::LoopObserver for ExplodingObserver {
+        fn name(&self) -> &'static str {
+            "exploding"
+        }
+        fn after_tool_observation(
+            &mut self,
+            _ctx: &crate::ObserverContext,
+        ) -> Vec<crate::Intervention> {
+            panic!("observer explosion");
+        }
+        fn before_model_turn(&mut self, _ctx: &crate::ObserverContext) -> Vec<crate::Intervention> {
+            panic!("observer explosion");
+        }
+        fn clone_box(&self) -> Box<dyn crate::LoopObserver> {
+            Box::new(ExplodingObserver)
+        }
+    }
+
+    let mut state = start_agent_loop(
+        TaskId("observer-isolation".to_string()),
+        "inspect the workspace",
+        AgentRuntimeConfig::default(),
+    );
+    state.loop_observers.register(Box::new(ExplodingObserver));
+    let tools = vec![read_tool()];
+    for index in 0..3 {
+        apply_read_observation(&mut state, &tools, &format!("call-{index}"));
+    }
+    let prepared = AgentKernel::new(&mut state, &tools)
+        .prepare_model_turn(None, None, 16_384, 2_048)
+        .expect("the loop survives a panicking observer");
+    assert_eq!(state.repetition_advisory.streak(), 3);
+    assert!(
+        repetition_advisories(&prepared.request).len() == 1,
+        "healthy observers still emit their interventions"
+    );
+    assert!(state
+        .loop_observers
+        .failed_observers()
+        .contains("exploding"));
+}

@@ -33,6 +33,7 @@ mod grounding_policy;
 mod grounding_policy_tests;
 mod grounding_tools;
 mod kernel;
+mod loop_observers;
 mod model_transport;
 mod parallel;
 mod prepared_task_state;
@@ -105,6 +106,15 @@ pub use kernel::{
     AgentKernel, AgentKernelInstruction, AgentKernelInstructionKind,
     AgentToolObservationTransition, AgentTurnPreparationError, GroundedCompletionDecision,
     PreparedAgentTurn,
+};
+pub use loop_observers::{
+    clear_doom_loop_confirmation, generic_hint_message, http_hosts_for_tool_io, normalize_host,
+    observation_excerpt, quarantined_web_target_host, stuck_target_blocked_observation,
+    DoomLoopObserver, FinalizationObserver, Intervention, LoopObserver, LoopObservers,
+    ObserverContext, ObserverEmission, ObserverRegistry, RepetitionAdvisoryObserver,
+    StuckTargetObserver, DOOM_LOOP_CONFIRMATION_KIND, DOOM_LOOP_CONFIRMATION_THRESHOLD,
+    FORCE_FINAL_TURN_INSTRUCTION, LOOP_OBSERVER_HINT_KIND, STUCK_TARGET_BLOCKED_CODE,
+    STUCK_TARGET_QUARANTINE_THRESHOLD, STUCK_TARGET_TOOLS,
 };
 pub use model_transport::{
     exhausted_model_transport_error_stop_reason, model_response_checkpoint_evidence,
@@ -229,6 +239,10 @@ pub struct AgentLoopState {
     /// Consecutive identical tool-call streak used for the advisory repetition
     /// reminder. Runtime-only; restored runs start with a fresh streak.
     pub repetition_advisory: RepetitionAdvisoryTracker,
+    /// Advisory loop observers and their runtime-only intervention effects
+    /// (host quarantine, forced-final-turn flag, pending doom-loop
+    /// confirmation). Runtime-only; restored runs start with a fresh host.
+    pub loop_observers: LoopObservers,
     pub generation_temperature: Option<String>,
     /// The run's reasoning level (fast/default/high/xhigh); maps to the
     /// provider's thinking/reasoning effort parameter.
@@ -459,6 +473,7 @@ pub fn start_agent_loop(
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
         repetition_advisory: RepetitionAdvisoryTracker::default(),
+        loop_observers: LoopObservers::default(),
         generation_temperature: None,
         reasoning_effort: None,
     }
@@ -489,6 +504,7 @@ pub fn start_agent_loop_with_history(
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
         repetition_advisory: RepetitionAdvisoryTracker::default(),
+        loop_observers: LoopObservers::default(),
         generation_temperature: None,
         reasoning_effort: None,
     }
@@ -535,6 +551,7 @@ pub fn resume_agent_loop_from_messages(
         adaptive_loop_cursor: AdaptiveLoopCursor::default(),
         context_token_ledger: Default::default(),
         repetition_advisory: RepetitionAdvisoryTracker::default(),
+        loop_observers: LoopObservers::default(),
         generation_temperature: None,
         reasoning_effort: None,
     };
@@ -964,7 +981,7 @@ pub fn tool_invocation_from_request(
 pub fn observation_from_tool_result(tool_name: &str, status: &str, output: &str) -> String {
     format!(
         "tool={tool_name}\nstatus={status}\noutput=\n{}",
-        truncate_observation(output)
+        crate::tool_runtime::truncate_observation(output)
     )
 }
 
@@ -1001,7 +1018,7 @@ pub fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) 
         }
         return observation_from_tool_result(
             tool_name,
-            tool_outcome_status_label(&result.status),
+            crate::tool_runtime::tool_outcome_status_label(&result.status),
             &output,
         );
     };
@@ -1021,7 +1038,7 @@ pub fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) 
     );
     let mut rendered = format!(
         "tool={effective_tool_name}\nstatus={}\nschema={}\nsummary={}\nevidence_complete={}",
-        tool_outcome_status_label(&result.status),
+        crate::tool_runtime::tool_outcome_status_label(&result.status),
         TOOL_OBSERVATION_V2_SCHEMA,
         summary,
         observation.evidence_complete,
@@ -1087,15 +1104,6 @@ pub fn observation_from_agent_tool_result(tool_name: &str, result: &ToolResult) 
         evidence_budget,
     ));
     rendered
-}
-
-fn tool_outcome_status_label(status: &ToolOutcomeStatus) -> &'static str {
-    match status {
-        ToolOutcomeStatus::Succeeded => "succeeded",
-        ToolOutcomeStatus::Failed => "failed",
-        ToolOutcomeStatus::Cancelled => "cancelled",
-        ToolOutcomeStatus::Denied => "denied",
-    }
 }
 
 fn single_line_observation_field(value: &str) -> String {
@@ -1428,17 +1436,6 @@ fn original_tool_name(model_name: &str, tools: &[ToolSpec]) -> String {
         .find(|tool| tool.name == model_name || tool_function_name(&tool.name) == model_name)
         .map(|tool| tool.name.clone())
         .unwrap_or_else(|| model_name.replace('_', "."))
-}
-
-fn truncate_observation(output: &str) -> String {
-    const LIMIT: usize = 6000;
-    if output.chars().count() <= LIMIT {
-        return output.to_string();
-    }
-
-    let mut truncated = output.chars().take(LIMIT).collect::<String>();
-    truncated.push_str("\n...[truncated]");
-    truncated
 }
 
 #[cfg(test)]

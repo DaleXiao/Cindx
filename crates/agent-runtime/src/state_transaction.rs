@@ -1,4 +1,6 @@
-use crate::{AdaptiveLoopCursor, AgentLoopState, AgentTaskContract, PreparedTaskState};
+use crate::{
+    AdaptiveLoopCursor, AgentLoopState, AgentTaskContract, LoopObservers, PreparedTaskState,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -15,6 +17,7 @@ struct AgentLoopControlCheckpoint {
     task_contract: AgentTaskContract,
     prepared_task_state: PreparedTaskState,
     adaptive_loop_cursor: AdaptiveLoopCursor,
+    loop_observers: LoopObservers,
 }
 
 impl AgentLoopControlCheckpoint {
@@ -32,6 +35,7 @@ impl AgentLoopControlCheckpoint {
             task_contract: state.task_contract.clone(),
             prepared_task_state: state.prepared_task_state().clone(),
             adaptive_loop_cursor: state.adaptive_loop_cursor.clone(),
+            loop_observers: state.loop_observers.clone(),
         }
     }
 
@@ -48,6 +52,7 @@ impl AgentLoopControlCheckpoint {
         state.task_contract = self.task_contract;
         state.replace_prepared_task_state(self.prepared_task_state);
         state.adaptive_loop_cursor = self.adaptive_loop_cursor;
+        state.loop_observers = self.loop_observers;
     }
 }
 

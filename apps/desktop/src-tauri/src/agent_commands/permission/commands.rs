@@ -167,7 +167,7 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     }
     let decision = parse_permission_decision(&decision).map_err(|error| error.to_string())?;
     let request_id = PermissionRequestId(request_id);
-    let mut store = state
+    let store = state
         .store
         .lock()
         .map_err(|error| format!("store lock poisoned: {error}"))?;
@@ -211,6 +211,28 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
         )
         .map_err(|error| error.to_string());
     }
+    drop(store);
+
+    // A doom-loop confirmation is not a tool permission: allow resumes the
+    // suspended run exactly once, deny terminates the run as cancelled.
+    if let Some(outcome) = crate::agent_doom_loop_runtime::resolve_doom_loop_confirmation_if_pending(
+        app,
+        state.clone(),
+        &request,
+        &decision,
+        session_id.unwrap_or_default(),
+        effort,
+        cancellation,
+        &run_context,
+        &config,
+    )? {
+        return Ok(outcome);
+    }
+
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
 
     // "Allow prefix for this session": record a `command_prefix` marker on the
     // approved request before its resolution rows persist. The prefix is
