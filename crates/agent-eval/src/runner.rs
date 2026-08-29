@@ -24,8 +24,9 @@ use agent_core::{
 };
 use agent_runtime::{
     advance_with_model_response, append_observation, append_tool_observation,
-    model_request_for_turn, observation_from_agent_tool_result, record_tool_outcome,
-    start_agent_loop, tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig,
+    compose_base_agent_system_prompt, model_request_for_turn_with_system_prompt,
+    observation_from_agent_tool_result, record_tool_outcome, start_agent_loop,
+    tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig,
     AgentToolRequest,
 };
 use tools::ToolRegistry;
@@ -301,9 +302,13 @@ fn run_loop<P: EvalModelProvider>(
         },
     );
     let mut tool_call_count = 0usize;
+    // Measure the product agent, not a bare loop: inject the same base system
+    // prompt the desktop composes (core contract + no user override).
+    let system_prompt = compose_base_agent_system_prompt(None);
 
     loop {
-        let request = model_request_for_turn(&state, &prepared.specs);
+        let request =
+            model_request_for_turn_with_system_prompt(&state, &prepared.specs, Some(&system_prompt));
         let response = match provider.complete(&request) {
             Ok(response) => response,
             Err(provider_error) => {
