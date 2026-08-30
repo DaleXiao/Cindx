@@ -2879,9 +2879,11 @@ assert(
   "Composer must use one crisp 24px shell instead of stitched child corners"
 );
 assert(
-  /\.settings-view,\s*\.schedule-view \{[^}]*--form-control-radius: 10px;[^}]*--form-control-focus-ring: 0 0 0 2px rgb\(37 99 235 \/ 14%\);/.test(
-    styles
-  ) &&
+  // Single source of truth: foundation :root defines the rounder form-control
+  // radius and the soft accent focus ring; no scoped overrides remain.
+  styles.includes("--form-control-radius: var(--radius-lg);") &&
+    styles.includes("--form-control-focus-ring: 0 0 0 2px rgb(37 99 235 / 14%);") &&
+    !/--form-control-radius: 10px;/.test(styles) &&
     /\.schedule-field input,[\s\S]*?\.schedule-field textarea \{[^}]*background-clip: padding-box;[^}]*border-radius: var\(--form-control-radius\);[^}]*box-shadow: none;/.test(
       styles
     ) &&

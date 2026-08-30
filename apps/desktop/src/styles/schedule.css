@@ -266,12 +266,8 @@
   font-size: 17px;
 }
 
-.settings-view,
-.schedule-view {
-  --form-control-radius: 10px;
-  --form-control-focus-ring: 0 0 0 2px rgb(37 99 235 / 14%);
-}
-
+/* --form-control-radius / --form-control-focus-ring live in foundation.css
+   (:root) as the single source of truth. */
 .settings-view {
   --settings-element-radius: var(--form-control-radius);
 }
