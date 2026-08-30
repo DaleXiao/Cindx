@@ -950,6 +950,7 @@ pub(crate) fn trace_step_status(event: &Event, audits: &[PermissionAuditRecord])
             .unwrap_or_else(|| "done".to_string()),
         EventKind::TaskStatusChanged => match event.summary.as_str() {
             "Agent task waiting for permission" => "waiting".to_string(),
+            "Drafting a plan for confirmation" => "running".to_string(),
             "Agent task paused" => "paused".to_string(),
             "Agent task completed" => "completed".to_string(),
             "Agent task cancelled" => "cancelled".to_string(),

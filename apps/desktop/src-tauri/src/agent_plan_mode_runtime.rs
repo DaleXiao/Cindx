@@ -557,21 +557,38 @@ pub(crate) fn run_plan_mode_gate(
         &plan_tools,
         task_id,
         &mut |tool: &str, call_id: &str, detail: &str| {
-            // Surface each read-only exploration call as a standard tool
-            // observation so the thread groups it under "Agent actions".
+            // Surface each read-only exploration call as start/finish/observation
+            // events so the thread shows a live "Agent actions" chain and the run
+            // reads as working while the plan is drafted.
             if let Ok(mut store) = state.store.lock() {
+                let base = |status: &str| {
+                    let mut metadata = agent_core::Metadata::new();
+                    metadata.insert("kind".to_string(), "tool_observation".to_string());
+                    metadata.insert("tool".to_string(), tool.to_string());
+                    metadata.insert("tool_call_id".to_string(), call_id.to_string());
+                    metadata.insert("status".to_string(), status.to_string());
+                    crate::project_session_persistence::metadata_with_context(metadata, run_context)
+                };
+                let _ = crate::event_persistence::append_event(
+                    &mut store,
+                    task_id,
+                    agent_core::EventKind::ToolCallStarted,
+                    format!("Plan exploration: {tool}"),
+                    base("running"),
+                );
                 let _ = crate::event_persistence::append_message_event_with_metadata(
                     &mut store,
                     task_id,
                     MessageRole::Tool,
                     detail,
-                    [
-                        ("kind".to_string(), "tool_observation".to_string()),
-                        ("tool_call_id".to_string(), call_id.to_string()),
-                        ("tool".to_string(), tool.to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    base("done"),
+                );
+                let _ = crate::event_persistence::append_event(
+                    &mut store,
+                    task_id,
+                    agent_core::EventKind::ToolCallFinished,
+                    format!("Plan exploration done: {tool}"),
+                    base("done"),
                 );
             }
         },
