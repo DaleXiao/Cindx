@@ -948,6 +948,9 @@ details[open] > summary .settings-disclosure-chevron > svg {
 .provider-form select,
 .provider-form textarea,
 .approval-policy-field select,
+.personalization-form input,
+.personalization-form select,
+.personalization-form textarea,
 .tool-runner input,
 .tool-runner select,
 .tool-runner textarea {
@@ -970,6 +973,9 @@ details[open] > summary .settings-disclosure-chevron > svg {
 .provider-form select:focus,
 .provider-form textarea:focus,
 .approval-policy-field select:focus,
+.personalization-form input:focus,
+.personalization-form select:focus,
+.personalization-form textarea:focus,
 .tool-runner input:focus,
 .tool-runner select:focus,
 .tool-runner textarea:focus {
@@ -980,6 +986,8 @@ details[open] > summary .settings-disclosure-chevron > svg {
 .provider-form input,
 .provider-form select,
 .approval-policy-field select,
+.personalization-form input,
+.personalization-form select,
 .tool-runner input,
 .tool-runner select {
   height: 32px;

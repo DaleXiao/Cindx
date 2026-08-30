@@ -47,6 +47,8 @@
   --radius-pill: 999px;
   --radius-round: 50%;
   --radius: var(--radius-sm);
+  --form-control-radius: 10px;
+  --form-control-focus-ring: 0 0 0 2px rgb(37 99 235 / 14%);
   --icon-radius: var(--radius-md);
   --titlebar-height: 46px;
   --titlebar-control-size: 28px;

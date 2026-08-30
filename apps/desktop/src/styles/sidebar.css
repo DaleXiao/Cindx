@@ -518,8 +518,17 @@
   padding: 0 6px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  border-radius: var(--form-control-radius);
+  outline: 0;
   font-size: 13px;
+  transition:
+    border-color 100ms ease-out,
+    box-shadow 100ms ease-out;
+}
+
+.project-rename-form input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--form-control-focus-ring);
 }
 
 .project-rename-form button {
@@ -608,8 +617,17 @@
   padding: 0 7px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
+  border-radius: var(--form-control-radius);
+  outline: 0;
   font-size: 13px;
+  transition:
+    border-color 100ms ease-out,
+    box-shadow 100ms ease-out;
+}
+
+.session-rename-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--form-control-focus-ring);
 }
 
 .session-rename-action {
