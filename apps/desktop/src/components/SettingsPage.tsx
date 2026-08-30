@@ -87,7 +87,7 @@ const settingsCategories = [
   { id: "tools", label: "Tools" },
   { id: "mcp", label: "MCP" },
   { id: "skills", label: "Skills" },
-  { id: "permissions", label: "Pending Reviews" },
+  { id: "permissions", label: "Permissions" },
   { id: "personalization", label: "Personalization" },
   { id: "about", label: "About" }
 ] as const;
