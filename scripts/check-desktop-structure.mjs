@@ -1001,7 +1001,8 @@ const toolsModuleBudgets = new Map([
   ["process_time.rs", 80],
   ["process_tests.rs", 740],
   ["process_tools.rs", 370],
-  ["shell.rs", 950],
+  // 950 -> 960: the http.server dev-server exemption + its test.
+  ["shell.rs", 960],
   ["shell_postcondition.rs", 200],
   ["stream_capture.rs", 60],
   ["tool_contract_v2.rs", 650],

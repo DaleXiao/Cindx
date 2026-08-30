@@ -781,6 +781,14 @@ fn opaque_interpreter_execution(segment: &[String], executable: &str) -> bool {
                 || !argument.starts_with('-')
         }),
         "python" | "python3" | "node" | "ruby" | "perl" | "php" => {
+            // `python3 -m http.server` is a read-only local dev server, not
+            // opaque code execution; keep it at Execute so session/all approval
+            // policies can auto-approve it.
+            if let Some(module_index) = arguments.iter().position(|argument| argument == "-m") {
+                if arguments.get(module_index + 1).map(String::as_str) == Some("http.server") {
+                    return false;
+                }
+            }
             arguments.iter().any(|argument| {
                 short_option_enables(argument, 'c')
                     || short_option_enables(argument, 'e')
@@ -1154,6 +1162,20 @@ mod tests {
             assert_eq!(
                 classify_shell_permission(command),
                 (PermissionRisk::Execute, None)
+            );
+        }
+    }
+
+    #[test]
+    fn local_dev_server_module_is_not_opaque_destructive() {
+        for command in [
+            "python3 -m http.server 8765",
+            "nohup python3 -m http.server 8765 --bind 127.0.0.1",
+        ] {
+            assert_eq!(
+                classify_shell_permission(command),
+                (PermissionRisk::Execute, None),
+                "{command} should be auto-approvable under session/all policies"
             );
         }
     }
