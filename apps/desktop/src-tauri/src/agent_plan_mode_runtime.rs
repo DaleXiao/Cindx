@@ -153,12 +153,8 @@ pub(crate) fn run_plan_phase(
     registry: &ToolRegistry,
     plan_tools: &[ToolSpec],
     task_id: &TaskId,
-    app: Option<&tauri::AppHandle>,
-    session_id: Option<&str>,
+    on_tool_call: &mut dyn FnMut(&str, &str),
 ) -> PlanPhaseOutcome {
-    // Stream the drafting text into the thread so the user sees live activity
-    // instead of a blank output area while the plan is drafted.
-    let request_id = format!("plan-{}", crate::runtime_values::current_time_millis());
     let mut messages = vec![
         Message {
             role: MessageRole::System,
@@ -193,17 +189,8 @@ pub(crate) fn run_plan_phase(
             metadata: Metadata::new(),
         };
         let mut should_cancel = || agent_run_should_stop(cancellation);
-        let response = actor_provider.complete_streaming_cancellable(
-            request,
-            &mut |delta: &str| {
-                if let Some(app) = app {
-                    crate::agent_query_commands::emit_agent_stream_delta(
-                        app, &request_id, session_id, delta, false, false, None,
-                    );
-                }
-            },
-            &mut should_cancel,
-        );
+        let response =
+            actor_provider.complete_streaming_cancellable(request, &mut |_| {}, &mut should_cancel);
         cancellation.finish_model_call();
         let response = match response {
             Ok(response) => response,
@@ -218,11 +205,6 @@ pub(crate) fn run_plan_phase(
             if plan.is_empty() {
                 return PlanPhaseOutcome::Unavailable(
                     "plan drafting returned an empty plan".to_string(),
-                );
-            }
-            if let Some(app) = app {
-                crate::agent_query_commands::emit_agent_stream_delta(
-                    app, &request_id, session_id, "", true, false, None,
                 );
             }
             return PlanPhaseOutcome::Proposed(truncate_plan_to_budget(&plan));
@@ -250,6 +232,7 @@ pub(crate) fn run_plan_phase(
         for call in &response.tool_calls {
             let observation =
                 crate::agent_subagent_runtime::execute_subagent_tool_call(registry, task_id, call);
+            on_tool_call(&call.name, &observation);
             messages.push(Message {
                 role: MessageRole::Tool,
                 content: observation,
@@ -540,7 +523,6 @@ pub(crate) enum PlanModeGateOutcome {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_plan_mode_gate(
     state: &tauri::State<'_, crate::app_state::AppState>,
-    app: &tauri::AppHandle,
     config: &crate::configuration_models::ProviderConfig,
     workspace_root: &Path,
     task_id: &TaskId,
@@ -574,8 +556,24 @@ pub(crate) fn run_plan_mode_gate(
         &registry,
         &plan_tools,
         task_id,
-        Some(app),
-        session_id,
+        &mut |tool: &str, detail: &str| {
+            // Surface each read-only exploration call as a visible tool message so
+            // the thread shows it under "Agent actions" instead of streaming text.
+            if let Ok(mut store) = state.store.lock() {
+                let _ = crate::event_persistence::append_message_event_with_metadata(
+                    &mut store,
+                    task_id,
+                    MessageRole::Tool,
+                    detail,
+                    [
+                        ("kind".to_string(), "plan_exploration".to_string()),
+                        ("tool".to_string(), tool.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                );
+            }
+        },
     );
     let plan = match outcome {
         PlanPhaseOutcome::Proposed(plan) => plan,

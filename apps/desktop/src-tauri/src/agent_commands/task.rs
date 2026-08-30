@@ -281,7 +281,6 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     // the Worker stage budget; a drafting failure proceeds without a plan.
     match crate::agent_plan_mode_runtime::run_plan_mode_gate(
         &state,
-        app,
         &config,
         &root,
         &task_id,
