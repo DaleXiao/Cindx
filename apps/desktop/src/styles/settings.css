@@ -983,6 +983,21 @@ details[open] > summary .settings-disclosure-chevron > svg {
   box-shadow: var(--form-control-focus-ring);
 }
 
+/* Form controls carry their own accent focus ring; drop the global black
+   focus-visible outline so they match the app design language. */
+.provider-form input:focus-visible,
+.provider-form select:focus-visible,
+.provider-form textarea:focus-visible,
+.approval-policy-field select:focus-visible,
+.personalization-form input:focus-visible,
+.personalization-form select:focus-visible,
+.personalization-form textarea:focus-visible,
+.tool-runner input:focus-visible,
+.tool-runner select:focus-visible,
+.tool-runner textarea:focus-visible {
+  outline: 0;
+}
+
 .provider-form input,
 .provider-form select,
 .approval-policy-field select,

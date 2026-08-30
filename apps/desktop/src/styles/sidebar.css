@@ -630,6 +630,11 @@
   box-shadow: var(--form-control-focus-ring);
 }
 
+.session-rename-input:focus-visible,
+.project-rename-form input:focus-visible {
+  outline: 0;
+}
+
 .session-rename-action {
   display: inline-grid;
   width: 24px;
