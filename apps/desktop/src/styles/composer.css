@@ -1136,7 +1136,7 @@ textarea::placeholder {
   display: grid;
   grid-column: 1 / -1;
   gap: 8px;
-  width: min(100%, 760px);
+  width: min(100%, 796px);
   margin: 4px auto 0;
   padding: 10px 12px;
   border: 1px solid rgba(0, 0, 0, 0.1);
@@ -1159,6 +1159,13 @@ textarea::placeholder {
 .plan-confirmation-header strong {
   font-size: 12px;
   font-weight: 600;
+}
+
+.plan-confirmation-countdown {
+  margin-left: auto;
+  color: #8a8a8a;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .plan-confirmation p {
