@@ -1157,8 +1157,8 @@ mod tests {
         assert_eq!(build(Some("fast"))["enable_thinking"], false);
         // Default/High/Xhigh enable thinking with a growing budget.
         assert_eq!(build(Some("default"))["enable_thinking"], true);
-        assert_eq!(build(Some("default"))["thinking_budget"], 1024);
-        assert_eq!(build(Some("high"))["thinking_budget"], 4096);
+        assert_eq!(build(Some("default"))["thinking_budget"], 4096);
+        assert_eq!(build(Some("high"))["thinking_budget"], 8192);
         assert_eq!(build(Some("xhigh"))["thinking_budget"], 16384);
         // Absent reasoning effort keeps thinking off (unchanged default).
         assert_eq!(build(None)["enable_thinking"], false);

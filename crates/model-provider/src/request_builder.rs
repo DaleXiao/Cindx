@@ -251,13 +251,13 @@ fn thinking_json_for(
         Some("default") => {
             format!(
                 ",\"enable_thinking\":true,\"thinking_budget\":{}",
-                thinking_budget_override.unwrap_or(1024).min(1024)
+                thinking_budget_override.unwrap_or(4096).min(4096)
             )
         }
         Some("high") => {
             format!(
                 ",\"enable_thinking\":true,\"thinking_budget\":{}",
-                thinking_budget_override.unwrap_or(4096).min(4096)
+                thinking_budget_override.unwrap_or(8192).min(8192)
             )
         }
         Some("xhigh") => {

@@ -410,8 +410,8 @@ impl LoopObserver for DoomLoopObserver {
 /// (fast/absent), where adaptive reasoning stays inactive.
 pub fn reasoning_tier_max_thinking_budget(effort: Option<&str>) -> u32 {
     match effort {
-        Some("default") => 1024,
-        Some("high") => 4096,
+        Some("default") => 4096,
+        Some("high") => 8192,
         Some("xhigh") => 16384,
         _ => 0,
     }
@@ -422,7 +422,7 @@ pub fn reasoning_tier_max_thinking_budget(effort: Option<&str>) -> u32 {
 /// repetition streaks at the advisory threshold — and raises the next model
 /// turn's thinking budget inside the run's effort tier; a succeeding tool
 /// falls back to the tier's base budget. The ceiling is always the tier's own
-/// maximum (`default` 1024 / `high` 4096 / `xhigh` 16384), never crossing
+/// maximum (`default` 4096 / `high` 8192 / `xhigh` 16384), never crossing
 /// into a higher tier, and a tier without thinking (cap 0) never emits.
 /// Without any signal the observer emits nothing, so the request keeps the
 /// tier's default budget.
@@ -437,7 +437,9 @@ impl AdaptiveReasoningObserver {
     /// The economical base budget of a tier: one quarter of the tier ceiling,
     /// at least one token.
     pub fn base_budget(tier_max_budget: u32) -> u32 {
-        (tier_max_budget / 4).max(1)
+        // Half the tier ceiling (raised from a quarter) so even steady turns
+        // get meaningful thinking depth.
+        (tier_max_budget / 2).max(1)
     }
 
     /// The budget the observer currently holds for the next turn.
