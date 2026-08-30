@@ -373,7 +373,7 @@
   align-self: center;
   padding: 12px 2px 18px;
   cursor: default;
-  border-bottom: 0.5px solid #f2f2f2;
+  border-bottom: 0;
   content-visibility: auto;
   contain-intrinsic-size: auto 148px;
 }
@@ -384,11 +384,11 @@
 
 .thread-message:hover,
 .thread-message.selected {
-  border-bottom-color: #dedede;
+  border-bottom-color: transparent;
 }
 
 .thread-message-streaming {
-  border-bottom-style: dashed;
+  border-bottom-style: none;
   animation: thread-message-arrive 180ms var(--ease-out-quart) both;
 }
 

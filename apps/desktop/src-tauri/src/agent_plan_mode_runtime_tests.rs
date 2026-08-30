@@ -186,7 +186,7 @@ fn plan_mode_contract_loop_runs_read_only_tools_to_a_plan() {
         &registry,
         &tools,
         &task_id,
-        &mut |_, _| {},
+        &mut |_, _, _| {},
     );
 
     assert_eq!(outcome, PlanPhaseOutcome::Proposed(plan_text().to_string()));
@@ -213,7 +213,7 @@ fn plan_mode_contract_loop_denies_effectful_tools() {
         &registry,
         &tools,
         &task_id,
-        &mut |_, _| {},
+        &mut |_, _, _| {},
     );
 
     // The effectful call became a denied observation, the loop continued, and
@@ -259,7 +259,7 @@ fn plan_mode_contract_model_calls_charge_the_worker_stage_budget() {
 
     let provider = ScriptedProvider::new(vec![final_answer(plan_text())]);
     let tools = plan_phase_tool_specs(&registry);
-    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _| {});
+    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _, _| {});
 
     assert!(matches!(
         outcome,
@@ -276,7 +276,7 @@ fn plan_mode_contract_loop_aborts_before_any_model_call_when_cancelled() {
     control.request_cancel();
     let tools = plan_phase_tool_specs(&registry);
 
-    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _| {});
+    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _, _| {});
 
     assert_eq!(outcome, PlanPhaseOutcome::Stopped);
     assert_eq!(provider.served(), 0);
@@ -293,7 +293,7 @@ fn plan_mode_contract_loop_is_bounded_by_step_limit() {
     let control = Arc::new(AgentRunControl::new("high"));
     let tools = plan_phase_tool_specs(&registry);
 
-    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _| {});
+    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _, _| {});
 
     assert!(matches!(
         outcome,

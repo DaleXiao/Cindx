@@ -153,7 +153,7 @@ pub(crate) fn run_plan_phase(
     registry: &ToolRegistry,
     plan_tools: &[ToolSpec],
     task_id: &TaskId,
-    on_tool_call: &mut dyn FnMut(&str, &str),
+    on_tool_call: &mut dyn FnMut(&str, &str, &str),
 ) -> PlanPhaseOutcome {
     let mut messages = vec![
         Message {
@@ -232,7 +232,7 @@ pub(crate) fn run_plan_phase(
         for call in &response.tool_calls {
             let observation =
                 crate::agent_subagent_runtime::execute_subagent_tool_call(registry, task_id, call);
-            on_tool_call(&call.name, &observation);
+            on_tool_call(&call.name, &call.id, &observation);
             messages.push(Message {
                 role: MessageRole::Tool,
                 content: observation,
@@ -556,9 +556,9 @@ pub(crate) fn run_plan_mode_gate(
         &registry,
         &plan_tools,
         task_id,
-        &mut |tool: &str, detail: &str| {
-            // Surface each read-only exploration call as a visible tool message so
-            // the thread shows it under "Agent actions" instead of streaming text.
+        &mut |tool: &str, call_id: &str, detail: &str| {
+            // Surface each read-only exploration call as a standard tool
+            // observation so the thread groups it under "Agent actions".
             if let Ok(mut store) = state.store.lock() {
                 let _ = crate::event_persistence::append_message_event_with_metadata(
                     &mut store,
@@ -566,7 +566,8 @@ pub(crate) fn run_plan_mode_gate(
                     MessageRole::Tool,
                     detail,
                     [
-                        ("kind".to_string(), "plan_exploration".to_string()),
+                        ("kind".to_string(), "tool_observation".to_string()),
+                        ("tool_call_id".to_string(), call_id.to_string()),
                         ("tool".to_string(), tool.to_string()),
                     ]
                     .into_iter()
