@@ -408,7 +408,25 @@ export function App() {
   const agentCanRetry = Boolean(activeAgentState?.canRetry);
   const pendingPlanConfirmation = activeAgentState?.pendingPlanConfirmation ?? null;
   const agentCanContinue = Boolean(activeAgentState?.canContinue) && !pendingPlanConfirmation;
-  const agentWorking = Boolean(activeSessionBusy || activeAgentState?.status === "running");
+  // Optimistic "working" feedback: the send button and thread show activity the
+  // moment the user sends or approves a plan, closing the gap before the first
+  // run event arrives so the app never looks frozen.
+  const [optimisticWorking, setOptimisticWorking] = useState(false);
+  const agentStatus = activeAgentState?.status;
+  useEffect(() => {
+    if (
+      optimisticWorking &&
+      (agentStatus === "completed" || agentStatus === "failed" || agentStatus === "cancelled")
+    ) {
+      setOptimisticWorking(false);
+    }
+  }, [agentStatus, optimisticWorking]);
+  const agentWorking = Boolean(
+    activeSessionBusy ||
+      agentStatus === "running" ||
+      agentStatus === "waiting_for_permission" ||
+      optimisticWorking
+  );
 
   async function handleResolvePermissionReview(
     review: PermissionReviewItem,
@@ -650,7 +668,7 @@ export function App() {
                 onDelete={handleDeleteQueuedMessage}
               />
               {pendingPlanConfirmation && activeSession?.id && (
-                <PlanConfirmationCard sessionId={activeSession.id} confirmation={pendingPlanConfirmation} onResolved={applyAgentStateForSession} onError={setComposerError} />
+                <PlanConfirmationCard sessionId={activeSession.id} confirmation={pendingPlanConfirmation} onResolved={(sid, next) => { setOptimisticWorking(true); applyAgentStateForSession(sid, next); }} onError={setComposerError} />
               )}
               <Composer
                 value={composerDraft}
@@ -685,7 +703,7 @@ export function App() {
                   openSettingsCategory("models");
                   void loadProviderState();
                 }}
-                onSend={(value) => void handleSendPrompt(value)}
+                onSend={(value) => { setOptimisticWorking(true); void handleSendPrompt(value); }}
                 onPickAttachments={(files) => void handlePickAttachments(files)}
                 onRemoveAttachment={handleRemoveAttachment}
                 onCancel={() => void handleCancelAgentTask()}

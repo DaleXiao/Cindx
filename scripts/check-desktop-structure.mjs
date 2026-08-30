@@ -1159,7 +1159,9 @@ assert(
 );
 
 assert(
-  appLineCount <= 900 &&
+  // 900 -> 920: App now owns an optimistic "working" feedback state so the send
+  // button/thread show activity immediately after send / plan approve.
+  appLineCount <= 920 &&
     appUseStateCount <= 8 &&
     appUseStateCounterProbe === 3 &&
     // 1400 -> 1410: the guardian auto-approval toggle moved from the Models panel
@@ -3100,7 +3102,8 @@ assert(
     !composerSource.includes("planModeOffered") &&
     !composerSource.includes("planModeActive") &&
     !styles.includes(".composer-plan-toggle") &&
-    appSource.includes("onSend={(value) => void handleSendPrompt(value)}"),
+    appSource.includes("setOptimisticWorking(true); void handleSendPrompt(value)") &&
+    appSource.includes("setOptimisticWorking(true); applyAgentStateForSession(sid, next)"),
   "Composer must send without a plan toggle; the plan-first switch lives in Settings"
 );
 assert(
