@@ -83,7 +83,6 @@ export function PlanConfirmationCard({
       aria-describedby="plan-confirmation-description"
       onPointerDown={engage}
       onFocus={engage}
-      onMouseEnter={engage}
     >
       <div className="plan-confirmation-header">
         <ListChecks aria-hidden="true" />

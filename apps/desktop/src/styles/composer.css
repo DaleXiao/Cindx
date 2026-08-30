@@ -1136,7 +1136,8 @@ textarea::placeholder {
   display: grid;
   grid-column: 1 / -1;
   gap: 8px;
-  width: min(100%, 796px);
+  /* Match the visible composer input shell (796 outer minus 18px side padding). */
+  width: min(100%, 760px);
   margin: 4px auto 0;
   padding: 10px 12px;
   border: 1px solid rgba(0, 0, 0, 0.1);
