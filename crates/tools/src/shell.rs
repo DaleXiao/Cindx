@@ -774,29 +774,20 @@ fn opaque_interpreter_execution(segment: &[String], executable: &str) -> bool {
     let arguments = &segment[executable_index.saturating_add(1)..];
     match executable.as_str() {
         "eval" => true,
+        // Inline code (`-c`/`--command`) is opaque and stays destructive. A
+        // positional script file is the user's own workspace code, so running it
+        // is Execute (auto-approvable under session/all policies).
         "sh" | "bash" | "zsh" | "dash" | "ksh" => arguments.iter().any(|argument| {
             short_option_enables(argument, 'c')
                 || argument == "--command"
                 || argument.starts_with("--command=")
-                || !argument.starts_with('-')
         }),
-        "python" | "python3" | "node" | "ruby" | "perl" | "php" => {
-            // `python3 -m http.server` is a read-only local dev server, not
-            // opaque code execution; keep it at Execute so session/all approval
-            // policies can auto-approve it.
-            if let Some(module_index) = arguments.iter().position(|argument| argument == "-m") {
-                if arguments.get(module_index + 1).map(String::as_str) == Some("http.server") {
-                    return false;
-                }
-            }
-            arguments.iter().any(|argument| {
-                short_option_enables(argument, 'c')
-                    || short_option_enables(argument, 'e')
-                    || argument == "--eval"
-                    || argument.starts_with("--eval=")
-                    || (!argument.starts_with('-') && !matches!(argument.as_str(), "-" | "--"))
-            })
-        }
+        "python" | "python3" | "node" | "ruby" | "perl" | "php" => arguments.iter().any(|argument| {
+            short_option_enables(argument, 'c')
+                || short_option_enables(argument, 'e')
+                || argument == "--eval"
+                || argument.starts_with("--eval=")
+        }),
         _ => false,
     }
 }
@@ -1171,6 +1162,10 @@ mod tests {
         for command in [
             "python3 -m http.server 8765",
             "nohup python3 -m http.server 8765 --bind 127.0.0.1",
+            "python3 verify.py",
+            "node build.js",
+            "bash scripts/build.sh",
+            "zsh ./scripts/mutate.sh",
         ] {
             assert_eq!(
                 classify_shell_permission(command),
@@ -1188,7 +1183,6 @@ mod tests {
             "bash -c 'git reset --hard HEAD'",
             "python3 -c 'import os; os.remove(\"a.txt\")'",
             "node -e 'require(\"fs\").rmSync(\"target\", {recursive:true})'",
-            "zsh ./scripts/mutate.sh",
             "find . -exec sh -c 'rm -rf target' {} +",
             "printf '%s\\n' target | xargs sh -c 'rm -rf \"$@\"' --",
         ] {
