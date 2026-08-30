@@ -306,6 +306,34 @@ export function useProviderSettingsController({
     }
   }, [providerDraft, refreshProviderModels, showSaved]);
 
+  // The approval-policy dropdown persists immediately on selection so the
+  // change takes effect without a separate Save press.
+  const handleSaveApprovalPolicy = useCallback(
+    async (policy: string) => {
+      if (!providerDraft || providerConnectInFlightRef.current) return;
+      const nextDraft = {
+        ...providerDraft,
+        approvalPolicy: normalizeApprovalPolicy(policy)
+      };
+      setProviderDraftState(nextDraft);
+      providerStateRequestRef.current += 1;
+      providerConnectInFlightRef.current = true;
+      setProviderBusy(true);
+      setProviderSettingsError(null);
+      try {
+        const next = await saveProviderConfig(nextDraft);
+        setPhase4(next);
+        setProviderDraftState(providerDraftFromState(next.provider));
+      } catch (error) {
+        setProviderSettingsError(error instanceof Error ? error.message : String(error));
+      } finally {
+        providerConnectInFlightRef.current = false;
+        setProviderBusy(false);
+      }
+    },
+    [providerDraft]
+  );
+
   const handleLoadProviderModels = useCallback(async () => {
     if (
       !providerDraft ||
@@ -336,6 +364,7 @@ export function useProviderSettingsController({
     modelProfileCount,
     handleLoadProviderModels,
     handleSaveProviderConfig,
+    handleSaveApprovalPolicy,
     imageEndpointValidation,
     loadProviderState,
     phase4,

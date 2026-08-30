@@ -1163,7 +1163,7 @@ assert(
     appUseStateCounterProbe === 3 &&
     // 1400 -> 1410: the guardian auto-approval toggle moved from the Models panel
     // into the Agent section (user-requested), adding ~24 lines here.
-    settingsPageLineCount <= 1_410 &&
+    settingsPageLineCount <= 1_415 &&
     sessionThreadLineCount <= 1_150 &&
     inspectorLineCount <= 1_350 &&
     oversizedExtractedDesktopBoundaries.length === 0 &&

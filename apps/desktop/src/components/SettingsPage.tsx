@@ -157,6 +157,7 @@ export type SettingsPageProps = {
   handleRunTool: () => Promise<void>;
   handleSavePersonalization: () => Promise<void>;
   handleSaveProviderConfig: () => Promise<void>;
+  handleSaveApprovalPolicy: (policy: string) => Promise<void>;
   handleSaveSidecars: () => Promise<void>;
   handleSaveWebSearch: () => Promise<void>;
   handleSaveWorkspace: () => Promise<void>;
@@ -310,6 +311,7 @@ export function SettingsPage(props: SettingsPageProps) {
     handleRunTool,
     handleSavePersonalization,
     handleSaveProviderConfig,
+    handleSaveApprovalPolicy,
     handleSaveSidecars,
     handleSaveWebSearch,
     handleSaveWorkspace,
@@ -738,9 +740,10 @@ export function SettingsPage(props: SettingsPageProps) {
                     busy={permissionBusy}
                     busySessionIds={busySessionIds}
                     ignoredReviews={ignoredPermissionReviews}
-                    onApprovalPolicyChange={(policy) =>
-                      setProviderDraft((current) => current && { ...current, approvalPolicy: policy })
-                    }
+                    onApprovalPolicyChange={(policy) => {
+                      setProviderDraft((current) => current && { ...current, approvalPolicy: policy });
+                      void handleSaveApprovalPolicy(policy);
+                    }}
                     onIgnore={handleIgnorePermissionReview}
                     onResolve={handleResolvePermissionReview}
                     onRestore={handleRestorePermissionReview}
