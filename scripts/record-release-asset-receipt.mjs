@@ -30,9 +30,17 @@ const release = await releaseResponse.json();
 
 const assets = [];
 for (const asset of release.assets ?? []) {
-  const download = await fetch(asset.browser_download_url, {
+  let download = await fetch(asset.browser_download_url, {
     headers: { accept: "application/octet-stream" }
   });
+  if (!download.ok) {
+    // Private repositories may refuse browser_download_url; the API asset
+    // endpoint with an octet-stream Accept is the authenticated fallback.
+    download = await fetch(
+      `https://api.github.com/repos/${repo}/releases/assets/${asset.id}`,
+      { headers: { ...headers, accept: "application/octet-stream" } }
+    );
+  }
   if (!download.ok) {
     console.error(`asset download failed: ${asset.name} (${download.status})`);
     process.exit(1);
