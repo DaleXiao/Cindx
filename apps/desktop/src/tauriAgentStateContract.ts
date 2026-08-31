@@ -53,6 +53,14 @@ function nonNegativeInteger(value: unknown, path: string): number {
   return value as number;
 }
 
+/** Percentages are f64 on the wire (e.g. 85.5); validate kind and bounds only. */
+function nonNegativeNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${path} must be a non-negative finite number`);
+  }
+  return value;
+}
+
 function status(value: unknown, path: string): (typeof AGENT_STATUS_VALUES)[number] {
   if (!AGENT_STATUS_VALUES.includes(value as (typeof AGENT_STATUS_VALUES)[number])) {
     throw new Error(`${path} must be a known agent status`);
@@ -85,7 +93,7 @@ export function decodeNativeAgentState(value: unknown): NativeAgentState {
   nonNegativeInteger(source.transcriptMessages, "AgentState.transcriptMessages");
   nonNegativeInteger(source.contextTokensUsed, "AgentState.contextTokensUsed");
   nonNegativeInteger(source.contextWindowTokens, "AgentState.contextWindowTokens");
-  nonNegativeInteger(source.contextRemainingPercent, "AgentState.contextRemainingPercent");
+  nonNegativeNumber(source.contextRemainingPercent, "AgentState.contextRemainingPercent");
   boolean(source.contextUsageEstimated, "AgentState.contextUsageEstimated");
   nonNegativeInteger(source.runStartedAtMs, "AgentState.runStartedAtMs");
   nonNegativeInteger(source.runBudgetMs, "AgentState.runBudgetMs");

@@ -47,6 +47,15 @@ test("a contract-shaped agent state decodes", () => {
   assert.equal(decoded.status, "running");
 });
 
+test("the context remaining percent accepts fractional wire values", () => {
+  // The native view computes the percentage as f64 (e.g. 85.5); the decoder
+  // must not require an integer here.
+  const fractional = { ...validState(), contextRemainingPercent: 85.5 };
+  assert.equal(decodeNativeAgentState(fractional).contextRemainingPercent, 85.5);
+  const negative = { ...validState(), contextRemainingPercent: -1 };
+  assert.throws(() => decodeNativeAgentState(negative), /non-negative finite number/);
+});
+
 test("agent state decoding is fail-closed against contract drift", () => {
   for (const mutate of [
     (state: any) => delete state.taskId,
