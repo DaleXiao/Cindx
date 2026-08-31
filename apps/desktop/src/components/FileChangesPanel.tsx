@@ -1,22 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, History, Redo2, Undo2 } from "lucide-react";
-import type { WorkspaceUndoState } from "../tauriTypes";
+import { FileDiff, FilePlus2, History, Redo2, Undo2 } from "lucide-react";
+import type { WorkspaceUndoEntryView, WorkspaceUndoState } from "../tauriTypes";
 import {
   getWorkspaceUndoState,
   redoWorkspaceChange,
   undoWorkspaceChange
 } from "../tauri";
 
-type WorkspaceUndoControlProps = {
+type FileChangesPanelProps = {
   sessionId: string | null;
-  disabled?: boolean;
+  /** Agent run status; a transition (e.g. running → completed) refetches the list. */
+  status: string;
+  working?: boolean;
 };
 
-export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoControlProps) {
+function actionIcon(entry: WorkspaceUndoEntryView) {
+  return entry.action === "created" ? (
+    <FilePlus2 size={13} aria-hidden="true" />
+  ) : (
+    <FileDiff size={13} aria-hidden="true" />
+  );
+}
+
+/**
+ * Session file-change history shown above the Composer once the agent has
+ * touched workspace files: the File changes summary and Undo/Redo actions sit
+ * on the header row, and every changed file is listed below (newest first)
+ * with its action, tool, and undone state.
+ */
+export function FileChangesPanel({ sessionId, status, working }: FileChangesPanelProps) {
   const [state, setState] = useState<WorkspaceUndoState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
   const activeSessionRef = useRef(sessionId);
 
   const refresh = useCallback(async () => {
@@ -37,14 +52,14 @@ export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoContr
   useEffect(() => {
     activeSessionRef.current = sessionId;
     void refresh();
-  }, [sessionId, refresh]);
+  }, [sessionId, status, refresh]);
 
   if (!sessionId || !state || state.entries.length === 0) {
     return null;
   }
 
   const applyChange = async (action: "undo" | "redo") => {
-    if (busy || disabled || !sessionId) return;
+    if (busy || working || !sessionId) return;
     setBusy(true);
     setError(null);
     try {
@@ -66,36 +81,24 @@ export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoContr
   const latestEntry = [...state.entries].reverse().find((entry) => !entry.undone);
   const undoneEntries = state.entries.filter((entry) => entry.undone);
   const redoEntry = undoneEntries[undoneEntries.length - 1];
-
   const changeCount = state.entries.length;
+  const rows = [...state.entries].reverse();
 
   return (
-    <div className="composer-undo-control" role="group" aria-label="Agent file change history">
-      <button
-        type="button"
-        className="composer-undo-toggle"
-        onClick={() => setExpanded((current) => !current)}
-        aria-expanded={expanded}
-        title={
-          expanded
-            ? "Hide undo/redo for agent file changes"
-            : `Show undo/redo for the agent's ${changeCount} file change${changeCount === 1 ? "" : "s"}`
-        }
-      >
+    <section className="file-changes-panel" role="group" aria-label="Agent file change history">
+      <div className="file-changes-header">
         <History size={13} aria-hidden="true" />
-        <span>File changes ({changeCount})</span>
-        {expanded ? (
-          <ChevronUp size={13} aria-hidden="true" />
-        ) : (
-          <ChevronDown size={13} aria-hidden="true" />
-        )}
-      </button>
-      {expanded && (
-        <>
+        <strong>File changes ({changeCount})</strong>
+        {error ? (
+          <span className="file-changes-error" role="alert">
+            {error}
+          </span>
+        ) : null}
+        <span className="file-changes-actions">
           <button
             type="button"
-            className="composer-undo-button"
-            disabled={busy || disabled || !state.canUndo}
+            className="file-changes-button"
+            disabled={busy || working || !state.canUndo}
             onClick={() => void applyChange("undo")}
             title={
               latestEntry
@@ -108,8 +111,8 @@ export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoContr
           </button>
           <button
             type="button"
-            className="composer-undo-button"
-            disabled={busy || disabled || !state.canRedo}
+            className="file-changes-button"
+            disabled={busy || working || !state.canRedo}
             onClick={() => void applyChange("redo")}
             title={
               redoEntry
@@ -120,13 +123,25 @@ export function WorkspaceUndoControl({ sessionId, disabled }: WorkspaceUndoContr
             <Redo2 size={13} aria-hidden="true" />
             <span>Redo</span>
           </button>
-        </>
-      )}
-      {error ? (
-        <span className="composer-undo-error" role="alert">
-          {error}
         </span>
-      ) : null}
-    </div>
+      </div>
+      <ol className="file-changes-list">
+        {rows.map((entry) => (
+          <li
+            key={`${entry.toolCallId}-${entry.sequence}`}
+            className="file-changes-row"
+            data-undone={entry.undone || undefined}
+          >
+            {actionIcon(entry)}
+            <code className="file-changes-path" title={entry.path}>
+              {entry.path}
+            </code>
+            <span className="file-changes-action">{entry.action}</span>
+            <span className="file-changes-tool">{entry.tool}</span>
+            {entry.undone && <span className="file-changes-undone">undone</span>}
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }

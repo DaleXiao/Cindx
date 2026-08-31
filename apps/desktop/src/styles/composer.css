@@ -993,38 +993,48 @@ textarea::placeholder {
   height: 11px;
 }
 
-.composer-undo-control {
-  display: flex;
+.file-changes-panel {
   grid-column: 1 / -1;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
   width: min(100%, 760px);
   margin: 4px auto 0;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
 }
 
-.composer-undo-toggle {
-  display: inline-flex;
-  min-height: 22px;
+.file-changes-header {
+  display: flex;
   align-items: center;
-  gap: 5px;
-  margin-right: auto;
-  padding: 2px 9px;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: #8a8a8a;
-  font-size: 10.5px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.composer-undo-toggle:hover {
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   color: #5c5c5c;
-  background: rgba(0, 0, 0, 0.04);
 }
 
-.composer-undo-button {
+.file-changes-header > svg {
+  flex: 0 0 auto;
+  color: #8a8a8a;
+}
+
+.file-changes-header strong {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #333333;
+}
+
+.file-changes-error {
+  color: #9f2d25;
+  font-size: 11px;
+}
+
+.file-changes-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.file-changes-button {
   display: inline-flex;
   min-height: 22px;
   align-items: center;
@@ -1039,18 +1049,68 @@ textarea::placeholder {
   cursor: pointer;
 }
 
-.composer-undo-button:hover:not(:disabled) {
+.file-changes-button:hover:not(:disabled) {
   background: #eeeeee;
 }
 
-.composer-undo-button:disabled {
+.file-changes-button:disabled {
   opacity: 0.45;
   cursor: default;
 }
 
-.composer-undo-error {
-  color: #9f2d25;
+.file-changes-list {
+  display: grid;
+  gap: 1px;
+  max-height: 180px;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.file-changes-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  color: #3c3c3c;
   font-size: 11px;
+}
+
+.file-changes-row > svg {
+  color: #8a8a8a;
+}
+
+.file-changes-row[data-undone] {
+  opacity: 0.55;
+}
+
+.file-changes-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.file-changes-action {
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.05);
+  color: #5c5c5c;
+  font-size: 10.5px;
+  text-transform: capitalize;
+}
+
+.file-changes-tool {
+  color: #8a8a8a;
+  font-size: 10.5px;
+}
+
+.file-changes-undone {
+  color: #9f2d25;
+  font-size: 10.5px;
+  font-weight: 600;
 }
 
 

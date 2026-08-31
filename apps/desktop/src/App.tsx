@@ -11,6 +11,7 @@ import {
 import { CheckCircle2 } from "lucide-react";
 import { Inspector } from "./components/Inspector";
 import { Composer } from "./components/Composer";
+import { FileChangesPanel } from "./components/FileChangesPanel";
 import { PlanConfirmationCard } from "./components/PlanConfirmationCard";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { Sidebar } from "./components/Sidebar";
@@ -670,6 +671,11 @@ export function App() {
               {pendingPlanConfirmation && activeSession?.id && (
                 <PlanConfirmationCard sessionId={activeSession.id} confirmation={pendingPlanConfirmation} approvalPolicy={providerDraft?.approvalPolicy ?? "strict"} onResolved={(sid, next) => { setOptimisticWorking(true); applyAgentStateForSession(sid, next); }} onError={setComposerError} />
               )}
+              <FileChangesPanel
+                sessionId={activeSession?.id ?? null}
+                status={agentStatus ?? "idle"}
+                working={agentWorking}
+              />
               <Composer
                 value={composerDraft}
                 working={agentWorking}

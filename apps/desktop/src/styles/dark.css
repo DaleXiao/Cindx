@@ -700,6 +700,42 @@
   border-top-color: var(--border);
 }
 
+:root[data-theme="dark"] .file-changes-panel {
+  background: var(--surface-active);
+  border-color: var(--border);
+}
+
+:root[data-theme="dark"] .file-changes-header {
+  border-bottom-color: var(--border);
+  color: var(--text-dim);
+}
+
+:root[data-theme="dark"] .file-changes-header > svg,
+:root[data-theme="dark"] .file-changes-row > svg,
+:root[data-theme="dark"] .file-changes-tool {
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .file-changes-header strong,
+:root[data-theme="dark"] .file-changes-row {
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .file-changes-button {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .file-changes-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+:root[data-theme="dark"] .file-changes-action {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+}
+
 :root[data-theme="dark"] .plan-confirmation-actions button {
   color: var(--text);
   background: var(--surface);

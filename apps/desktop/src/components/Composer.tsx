@@ -38,7 +38,6 @@ import type { CustomCommandView, SessionSandboxMode } from "../tauriTypes";
 import { permissionFocusTarget } from "./accessibilityFocusModel";
 import { CustomCommandsMenu } from "./CustomCommandsMenu";
 import { VoiceInputButton } from "./VoiceInputButton";
-import { WorkspaceUndoControl } from "./WorkspaceUndoControl";
 
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 58;
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 180;
@@ -800,7 +799,6 @@ export function Composer({
           </button>
         </div>
       )}
-      <WorkspaceUndoControl sessionId={sessionId} disabled={working} />
     </form>
   );
 }
