@@ -77,6 +77,6 @@ pub(crate) const MACOS_SIDEBAR_MATERIAL_TAG: isize = 91_376_254;
 #[cfg(target_os = "macos")]
 pub(crate) const MACOS_SIDEBAR_DEFAULT_WIDTH: f64 = 236.0;
 #[cfg(target_os = "macos")]
-pub(crate) const MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS: [u64; 3] = [96, 320, 900];
+pub(crate) const MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS: [u64; 3] = [0, 120, 400];
 #[cfg(target_os = "macos")]
 pub(crate) static MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION: AtomicU64 = AtomicU64::new(0);

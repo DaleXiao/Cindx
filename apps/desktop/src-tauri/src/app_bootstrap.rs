@@ -181,6 +181,7 @@ pub fn run() -> Result<(), String> {
         })
         .invoke_handler(tauri::generate_handler![
             reveal_main_window,
+            report_frontend_crash,
             set_sidebar_material_width,
             get_runtime_status,
             integration_commands::get_sidecar_state,

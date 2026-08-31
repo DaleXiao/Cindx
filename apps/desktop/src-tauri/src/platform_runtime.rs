@@ -179,6 +179,16 @@ pub(crate) fn schedule_macos_traffic_light_position_repair(
 ) {
 }
 
+/// Best-effort crash telemetry from the frontend error boundary: the window
+/// is transparent, so an uncaught render error used to leave a blank window
+/// with no evidence. The boundary now renders a recovery panel and reports
+/// the stack here for the startup log.
+#[tauri::command]
+pub(crate) fn report_frontend_crash(message: String) -> Result<(), String> {
+    append_startup_log(&format!("frontend crash boundary caught: {message}"));
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) fn reveal_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let window = app

@@ -122,6 +122,16 @@ export async function revealMainWindow(): Promise<void> {
   await invoke<void>("reveal_main_window");
 }
 
+/** Best-effort crash telemetry for the top-level error boundary; never throws. */
+export async function reportFrontendCrash(message: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    await invoke<void>("report_frontend_crash", { message });
+  } catch {
+    // Telemetry must never mask the recovery UI.
+  }
+}
+
 export async function setSidebarMaterialWidth(width: number): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke<void>("set_sidebar_material_width", { width });

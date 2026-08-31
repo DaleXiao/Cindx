@@ -700,7 +700,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   the Tauri builder and command registration live in `app_bootstrap.rs`.
   Portable crates own substantial contracts, but desktop orchestration
   remains the primary coupling hotspot.
-- The frontend has been split into components and style sheets. The browser
+- The frontend has been split into components and style sheets. A top-level
+  error boundary converts an uncaught render error into a visible recovery
+  panel (with reload) and records the stack in the startup log, so the
+  transparent window can no longer fail as an unexplained blank surface. The browser
   preview fallback state now lives in its own module beside `tauri.ts`, and
   Composer textarea sizing plus attachment batch limits are extracted into
   pure, node-tested models (`composerSizingModel`, `attachmentLimitsModel`).

@@ -1436,7 +1436,7 @@ assert(
     rustLib.includes("fn schedule_macos_traffic_light_position_repair(") &&
     rustLib.includes("MACOS_TRAFFIC_LIGHT_REPAIR_GENERATION") &&
     rustLib.includes(
-      "MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS: [u64; 3] = [96, 320, 900]"
+      "MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS: [u64; 3] = [0, 120, 400]"
     ) &&
     rustLib.includes("for delay_ms in MACOS_TRAFFIC_LIGHT_REPAIR_DELAYS_MS") &&
     rustLib.includes("tauri::WindowEvent::Focused(_)") &&
