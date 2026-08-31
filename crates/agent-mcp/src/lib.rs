@@ -803,11 +803,7 @@ impl McpHttpClient {
         {
             header_lines.push(format!("MCP-Session-Id: {session_id}"));
         }
-        let header_path = std::env::temp_dir().join(format!(
-            "cindx-mcp-headers-{}-{}",
-            std::process::id(),
-            current_time_millis()
-        ));
+        let header_path = mcp_header_file_path();
         write_private_text(&header_path, &header_lines.join("\n"))?;
         let mut command = Command::new("/usr/bin/curl");
         command
@@ -1576,6 +1572,20 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<(), McpErr
     write_private_text(path, &text)
 }
 
+/// Per-request header file for curl-based MCP HTTP calls. The name carries a
+/// process-wide atomic counter on top of pid+millis so concurrent requests in
+/// the same millisecond can never collide on (or clobber) the same path.
+fn mcp_header_file_path() -> std::path::PathBuf {
+    static HEADER_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = HEADER_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "cindx-mcp-headers-{}-{}-{}",
+        std::process::id(),
+        current_time_millis(),
+        sequence
+    ))
+}
+
 fn write_private_text(path: &Path, text: &str) -> Result<(), McpError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -1923,5 +1933,25 @@ mod tests {
             .structured_output_json
             .as_deref()
             .is_some_and(|value| value.len() > 300 * 1024));
+    }
+
+    #[test]
+    fn concurrent_mcp_header_files_never_collide() {
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            handles.push(std::thread::spawn(|| {
+                (0..64).map(|_| mcp_header_file_path()).collect::<Vec<_>>()
+            }));
+        }
+        let all: Vec<std::path::PathBuf> = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("header path thread should finish"))
+            .collect();
+        let distinct: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            all.len(),
+            "same-millisecond concurrent requests must not share a header file"
+        );
     }
 }

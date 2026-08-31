@@ -848,7 +848,9 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["agent_recovery_service.rs", 550],
   ["agent_runtime_snapshot.rs", 220],
   ["background_work_runtime.rs", 80],
-  ["configuration_persistence.rs", 405],
+  // 405 -> 410: the provider API key moved to the macOS login keychain
+  // (provider_secret_store); load/save keep the two integration calls.
+  ["configuration_persistence.rs", 410],
   ["event_persistence.rs", 180],
   ["event_security.rs", 500],
   ["permission_service.rs", 220],
@@ -1010,7 +1012,9 @@ const toolsModuleBudgets = new Map([
   // shell_classification.rs.
   ["shell.rs", 800],
   // Classification policy split out of shell.rs.
-  ["shell_classification.rs", 580],
+  // 580 -> 620: added network-egress and sensitive-read classification so
+  // confidentiality/exfiltration are their own auto-grant axis (audit P1-03).
+  ["shell_classification.rs", 620],
   ["shell_postcondition.rs", 200],
   ["stream_capture.rs", 60],
   ["tool_contract_v2.rs", 650],

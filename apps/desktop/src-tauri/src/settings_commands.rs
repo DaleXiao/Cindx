@@ -97,6 +97,9 @@ pub(crate) async fn save_provider_config(
             .lock()
             .map_err(|error| format!("provider config lock poisoned: {error}"))?
             .clone();
+        crate::provider_secret_store::validate_provider_base_url_for_credentials(
+            &input.base_url,
+        )?;
         apply_provider_config_input(&mut config, input);
         if !config.is_ready() {
             return Err("Provider endpoint, API key, and Chat model are required".to_string());

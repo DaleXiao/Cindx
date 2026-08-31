@@ -34,6 +34,13 @@ pub(crate) struct ShellCommandClassification {
     /// False when approval is one-shot: destructive commands and commands
     /// running an unrecognized executable.
     pub(crate) session_reusable: bool,
+    /// The command performs network egress (curl/ssh/...): confidentiality
+    /// and exfiltration are outside the destructive/non-destructive axis, so
+    /// these never auto-grant even though they are Execute risk.
+    pub(crate) network_egress: bool,
+    /// The command reads a well-known sensitive location (keys, credentials,
+    /// env secrets): never auto-grant for the same reason.
+    pub(crate) sensitive_read: bool,
 }
 
 impl ShellCommandClassification {
@@ -44,6 +51,8 @@ impl ShellCommandClassification {
             auto_grant_eligible: false,
             prefix_grant_eligible: false,
             session_reusable: false,
+            network_egress: false,
+            sensitive_read: false,
         }
     }
 }
@@ -232,6 +241,7 @@ const KNOWN_SHELL_EXECUTABLES: &[&str] = &[
     "defaults",
     "lipo",
     "otool",
+    "security",
     // interpreters running positional script files stay Execute-risk, but the
     // script-file detection below removes their auto-grant eligibility.
     "sh",
@@ -349,14 +359,54 @@ pub(crate) fn classify_shell_permission(command: &str) -> ShellCommandClassifica
     // Execute risk, but unrecognized executables and positional script-file
     // executions never auto-grant, never derive a prefix grant, and
     // unrecognized executables are approved one-shot (fail-closed default).
+    // Network egress and sensitive reads stay Execute risk but likewise never
+    // auto-grant: confidentiality and exfiltration are their own axis.
     let restricted = !recognized || script_file_execution;
+    let network_egress = command_performs_network_egress(&executables);
+    let sensitive_read = command_reads_sensitive_location(command);
     ShellCommandClassification {
         risk: PermissionRisk::Execute,
         reason: None,
-        auto_grant_eligible: !restricted,
+        auto_grant_eligible: !restricted && !network_egress && !sensitive_read,
         prefix_grant_eligible: !restricted,
         session_reusable: recognized && shell_command_can_reuse_session_permission(command),
+        network_egress,
+        sensitive_read,
     }
+}
+
+/// Executables whose primary effect is moving bytes across the network boundary.
+fn command_performs_network_egress(executables: &[String]) -> bool {
+    executables.iter().any(|name| {
+        matches!(
+            name.as_str(),
+            "curl" | "wget" | "ssh" | "scp" | "sftp" | "nc" | "netcat" | "rsync"
+        )
+    })
+}
+
+/// Well-known sensitive locations and secret-store CLIs. Matching is
+/// deliberately conservative (substring over the lowercased command): false
+/// positives only cost a manual approval, false negatives would auto-grant a
+/// credential read.
+fn command_reads_sensitive_location(command: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "~/.ssh",
+        "~/.aws",
+        "~/.gnupg",
+        "~/.netrc",
+        "~/.config/gcloud",
+        "/etc/shadow",
+        "/etc/sudoers",
+        ".env",
+        "id_rsa",
+        "id_ed25519",
+        "credentials",
+        "security find-generic-password",
+        "security find-internet-password",
+    ];
+    let lower = command.to_lowercase();
+    PATTERNS.iter().any(|pattern| lower.contains(pattern))
 }
 
 /// True when the command pipes one stage's output into an interpreter

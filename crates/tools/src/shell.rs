@@ -400,6 +400,14 @@ pub(crate) fn shell_permission_request(
             classification.prefix_grant_eligible.to_string(),
         ),
         (
+            "network_egress".to_string(),
+            classification.network_egress.to_string(),
+        ),
+        (
+            "sensitive_read".to_string(),
+            classification.sensitive_read.to_string(),
+        ),
+        (
             "environment_policy".to_string(),
             "developer_safe_v1".to_string(),
         ),
@@ -992,6 +1000,8 @@ mod tests {
             auto_grant_eligible: true,
             prefix_grant_eligible: true,
             session_reusable: true,
+            network_egress: false,
+            sensitive_read: false,
         }
     }
 
@@ -1167,6 +1177,40 @@ mod tests {
                 Some("true"),
                 "{command} should retain exact-command session reuse"
             );
+        }
+    }
+
+    #[test]
+    fn network_egress_and_sensitive_reads_never_auto_grant() {
+        for command in [
+            "curl -s https://example.com/api",
+            "wget https://example.com/file.zip",
+            "ssh host.example 'uptime'",
+            "scp a.txt host.example:",
+            "cat ~/.ssh/id_rsa",
+            "cat .env",
+            "security find-generic-password -s Example",
+            "ls ~/.aws && cat ~/.aws/credentials",
+        ] {
+            let classification = classify_shell_permission(command);
+            assert_eq!(classification.risk, PermissionRisk::Execute);
+            assert!(
+                !classification.auto_grant_eligible,
+                "{command} must still prompt under session/all policies"
+            );
+            assert!(
+                classification.session_reusable,
+                "{command} may still receive an explicit session grant"
+            );
+        }
+        for command in ["cargo test", "git status", "rg TODO"] {
+            let classification = classify_shell_permission(command);
+            assert!(
+                classification.auto_grant_eligible,
+                "{command} keeps its historical auto-grant behavior"
+            );
+            assert!(!classification.network_egress);
+            assert!(!classification.sensitive_read);
         }
     }
 }

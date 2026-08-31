@@ -48,17 +48,17 @@ export function planAutoApprovalActive(state: {
 }
 
 /**
- * Milliseconds left before auto-approval fires. The window starts at the
- * later of the proposal time and `windowStartMs` (a failed resolution resets
- * the window instead of retrying immediately), and is clamped into
- * [0, PLAN_AUTO_APPROVAL_WINDOW_MS].
+ * Advance the auto-approval countdown by one tick. The countdown accumulates
+ * *active* time only: while the user reads, the document is hidden, or the
+ * window is unfocused the remaining time is unchanged, so leaving and coming
+ * back can never cause an immediate approval (the previous wall-clock model
+ * did). A failed resolution resets the countdown to the full window.
  */
-export function planAutoApproveRemainingMs(
-  proposedAtMs: number,
-  windowStartMs: number,
-  nowMs: number
+export function advancePlanAutoApproval(
+  remainingMs: number,
+  tickMs: number,
+  active: boolean
 ): number {
-  const start = Math.max(proposedAtMs, windowStartMs);
-  const elapsed = Math.max(0, nowMs - start);
-  return Math.max(0, PLAN_AUTO_APPROVAL_WINDOW_MS - elapsed);
+  if (!active) return remainingMs;
+  return Math.max(0, remainingMs - tickMs);
 }

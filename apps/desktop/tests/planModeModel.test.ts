@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createInitialPhase4State } from "../src/browserPreviewFallbackState.ts";
 import {
+  advancePlanAutoApproval,
   planAutoApprovalActive,
   planAutoApprovalAllowed,
-  planAutoApproveRemainingMs,
   planModeAvailable,
   planModeForSubmission,
   PLAN_AUTO_APPROVAL_WINDOW_MS
@@ -48,33 +48,34 @@ test("plan auto-approval pauses while reading, hidden, or unfocused", () => {
   assert.equal(planAutoApprovalActive({ ...idle, windowFocused: false }), false);
 });
 
-test("the plan auto-approval window counts down from the proposal time", () => {
-  const proposedAt = 1_000_000;
+test("the plan auto-approval countdown accumulates active time only", () => {
+  let remaining = PLAN_AUTO_APPROVAL_WINDOW_MS;
+  for (let tick = 0; tick < 12; tick += 1) {
+    remaining = advancePlanAutoApproval(remaining, 1000, true);
+  }
+  assert.equal(remaining, PLAN_AUTO_APPROVAL_WINDOW_MS - 12_000);
+
+  // Hidden or unfocused ticks do not count, so leaving for 30s and returning
+  // can never cause an immediate approval.
+  for (let tick = 0; tick < 30; tick += 1) {
+    remaining = advancePlanAutoApproval(remaining, 1000, false);
+  }
+  assert.equal(remaining, PLAN_AUTO_APPROVAL_WINDOW_MS - 12_000);
+
+  for (let tick = 0; tick < 18; tick += 1) {
+    remaining = advancePlanAutoApproval(remaining, 1000, true);
+  }
+  assert.equal(remaining, 0);
   assert.equal(
-    planAutoApproveRemainingMs(proposedAt, proposedAt, proposedAt),
-    PLAN_AUTO_APPROVAL_WINDOW_MS
-  );
-  assert.equal(
-    planAutoApproveRemainingMs(proposedAt, proposedAt, proposedAt + 12_000),
-    PLAN_AUTO_APPROVAL_WINDOW_MS - 12_000
-  );
-  assert.equal(
-    planAutoApproveRemainingMs(proposedAt, proposedAt, proposedAt + 30_000),
-    0
-  );
-  assert.equal(
-    planAutoApproveRemainingMs(proposedAt, proposedAt, proposedAt + 999_999),
+    advancePlanAutoApproval(0, 1000, true),
     0,
-    "the window never goes negative"
+    "the countdown never goes negative"
   );
 });
 
 test("a failed resolution restarts the full plan auto-approval window", () => {
-  const proposedAt = 1_000_000;
-  const failureResetAt = proposedAt + 29_000;
-  assert.equal(
-    planAutoApproveRemainingMs(proposedAt, failureResetAt, failureResetAt + 1_000),
-    PLAN_AUTO_APPROVAL_WINDOW_MS - 1_000,
-    "the window restarts from the failure reset, not the proposal time"
-  );
+  // The card resets remaining to the full window on a failed resolution; the
+  // model must treat a fresh full window as a complete countdown.
+  const reset = PLAN_AUTO_APPROVAL_WINDOW_MS;
+  assert.equal(advancePlanAutoApproval(reset, 1000, true), PLAN_AUTO_APPROVAL_WINDOW_MS - 1000);
 });

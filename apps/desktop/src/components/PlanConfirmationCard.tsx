@@ -7,9 +7,9 @@ import {
   type PendingPlanConfirmationView
 } from "../tauri";
 import {
+  advancePlanAutoApproval,
   planAutoApprovalActive,
   planAutoApprovalAllowed,
-  planAutoApproveRemainingMs,
   PLAN_AUTO_APPROVAL_WINDOW_MS,
   type PlanConfirmationDecision,
   type PlanResolvedBy
@@ -57,7 +57,6 @@ export function PlanConfirmationCard({
   // A failed resolution restarts the whole window instead of retrying
   // immediately, so a backend error can never become an approve-per-second
   // loop.
-  const [windowStartMs, setWindowStartMs] = useState(() => Date.now());
   const [remainingMs, setRemainingMs] = useState(PLAN_AUTO_APPROVAL_WINDOW_MS);
   const autoApprovalAllowed = planAutoApprovalAllowed(approvalPolicy);
 
@@ -70,7 +69,6 @@ export function PlanConfirmationCard({
       onResolved(sessionId, next);
     } catch (error) {
       setDismissed(false);
-      setWindowStartMs(Date.now());
       setRemainingMs(PLAN_AUTO_APPROVAL_WINDOW_MS);
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -82,7 +80,9 @@ export function PlanConfirmationCard({
   resolveRef.current = resolve;
 
   // Pause the countdown while the user reads (hover/press/focus/scroll), the
-  // window is hidden, or the app is unfocused.
+  // window is hidden, or the app is unfocused. The countdown accumulates
+  // active time, so time spent hidden or unfocused never counts toward the
+  // auto-approval window.
   useEffect(() => {
     const update = () =>
       setAttention({ documentVisible: !document.hidden, windowFocused: document.hasFocus() });
@@ -99,28 +99,21 @@ export function PlanConfirmationCard({
   useEffect(() => {
     if (dismissed || !autoApprovalAllowed) return;
     const timer = setInterval(() => {
-      if (
-        !planAutoApprovalActive({
-          engaged: engagedRef.current,
-          documentVisible: attention.documentVisible,
-          windowFocused: attention.windowFocused
-        })
-      ) {
-        return;
-      }
-      const remaining = planAutoApproveRemainingMs(
-        confirmation.proposedAtMs,
-        windowStartMs,
-        Date.now()
-      );
-      setRemainingMs(remaining);
-      if (remaining <= 0) {
-        clearInterval(timer);
-        void resolveRef.current("approve", "auto-timeout");
-      }
+      const active = planAutoApprovalActive({
+        engaged: engagedRef.current,
+        documentVisible: attention.documentVisible,
+        windowFocused: attention.windowFocused
+      });
+      setRemainingMs((current) => advancePlanAutoApproval(current, 1000, active));
     }, 1000);
     return () => clearInterval(timer);
-  }, [dismissed, autoApprovalAllowed, attention, windowStartMs, confirmation.proposedAtMs]);
+  }, [dismissed, autoApprovalAllowed, attention]);
+
+  useEffect(() => {
+    if (remainingMs === 0 && !dismissed && autoApprovalAllowed) {
+      void resolveRef.current("approve", "auto-timeout");
+    }
+  }, [remainingMs, dismissed, autoApprovalAllowed]);
 
   // Hooks must run before any early return (React #300).
   const planDocument = useMemo(

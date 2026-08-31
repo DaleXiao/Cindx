@@ -81,6 +81,7 @@ mod project_instructions_runtime;
 mod project_lifecycle_runtime;
 mod project_session_persistence;
 mod provider_profiles;
+mod provider_secret_store;
 mod queue_service;
 mod rag_operation_runtime;
 mod routing_learning_runtime;

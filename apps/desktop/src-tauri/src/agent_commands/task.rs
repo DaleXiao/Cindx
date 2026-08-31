@@ -1112,17 +1112,6 @@ pub(crate) fn resolve_agent_plan_confirmation_blocking(
             );
         }
     }
-    let pending = {
-        let store = state
-            .store
-            .lock()
-            .map_err(|error| format!("store lock poisoned: {error}"))?;
-        let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
-            .map_err(|error| error.to_string())?;
-        let active_events = active_agent_events_for_session(&events, Some(&session_id));
-        crate::agent_plan_mode_runtime::pending_plan_confirmation(&active_events)
-            .ok_or_else(|| "no plan is awaiting confirmation for this session".to_string())?
-    };
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
     {
         let mut store = state
@@ -1132,6 +1121,11 @@ pub(crate) fn resolve_agent_plan_confirmation_blocking(
         let events = agent_events_for_session(&store, &phase16_task_id(), Some(&session_id))
             .map_err(|error| error.to_string())?;
         let active_events = active_agent_events_for_session(&events, Some(&session_id));
+        // Compare-and-set under one lock: the resolution is appended only while
+        // the same plan is still pending, so concurrent resolutions cannot both
+        // write contradictory durable decisions.
+        let pending = crate::agent_plan_mode_runtime::pending_plan_confirmation(&active_events)
+            .ok_or_else(|| "no plan is awaiting confirmation for this session".to_string())?;
         if let Some(start) = active_events
             .iter()
             .find(|event| is_agent_run_start_event(event))

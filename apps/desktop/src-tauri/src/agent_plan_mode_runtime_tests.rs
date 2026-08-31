@@ -592,3 +592,15 @@ fn an_explicit_plan_request_always_wins_over_triviality() {
         );
     }
 }
+
+#[test]
+fn a_resolved_plan_is_no_longer_pending_for_a_second_resolution() {
+    let events = vec![
+        proposed_event(1, plan_text()),
+        resolved_event(2, plan_text(), PlanConfirmationDecision::Approved),
+    ];
+    assert!(
+        pending_plan_confirmation(&events).is_none(),
+        "once a resolution is durable, a concurrent second resolution must find no pending plan"
+    );
+}

@@ -682,3 +682,31 @@ fn custom_catalog_must_include_the_configured_chat_model() {
         .expect_err("a different model must not validate the configured custom model");
     assert!(error.contains("configured Chat model is unavailable"));
 }
+
+#[test]
+fn provider_base_url_credential_rules_restrict_plaintext_http() {
+    use crate::provider_secret_store::validate_provider_base_url_for_credentials;
+    for ok in [
+        "https://api.example.com/v1",
+        "http://localhost:11434",
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+        "",
+    ] {
+        assert!(
+            validate_provider_base_url_for_credentials(ok).is_ok(),
+            "{ok} must be allowed"
+        );
+    }
+    for bad in [
+        "http://example.com",
+        "http://10.0.0.5:8080",
+        "ftp://example.com",
+        "http://evil.localhost.example.com",
+    ] {
+        assert!(
+            validate_provider_base_url_for_credentials(bad).is_err(),
+            "{bad} must be rejected"
+        );
+    }
+}

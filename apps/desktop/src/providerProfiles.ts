@@ -167,7 +167,14 @@ export function providerBaseUrl(
 export function isValidProviderBaseUrl(value: string) {
   try {
     const url = new URL(value.trim());
-    return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
+    if (url.protocol === "https:") return Boolean(url.hostname);
+    // Plaintext http may only target loopback: the request carries the API
+    // key, so a non-loopback http endpoint would send the credential in the
+    // clear. The backend enforces the same rule on save.
+    if (url.protocol === "http:") {
+      return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
+    }
+    return false;
   } catch {
     return false;
   }

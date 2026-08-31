@@ -172,7 +172,9 @@ pub(crate) fn load_provider_config() -> ProviderConfig {
     let Ok(text) = fs::read_to_string(provider_config_path()) else {
         return ProviderConfig::default();
     };
-    provider_config_from_text(&text)
+    let mut config = provider_config_from_text(&text);
+    crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
+    config
 }
 
 pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
@@ -342,6 +344,7 @@ fn legacy_image_endpoint_is_custom(profile: &ProviderProfile, image_endpoint: &s
 }
 
 pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<(), std::io::Error> {
+    let disk_config = crate::provider_secret_store::config_for_disk(config);
     let path = provider_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -352,7 +355,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(&temporary_path)?;
-    if let Err(error) = file.write_all(provider_config_text(config).as_bytes()) {
+    if let Err(error) = file.write_all(provider_config_text(&disk_config).as_bytes()) {
         let _ = fs::remove_file(&temporary_path);
         return Err(error);
     }
