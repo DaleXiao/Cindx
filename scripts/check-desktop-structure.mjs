@@ -140,6 +140,9 @@ const settingsModelsImplementationSource = [
 const settingsPermissionsPanelSource = read(
   "apps/desktop/src/components/SettingsPermissionsPanel.tsx"
 );
+const planConfirmationCardSource = read(
+  "apps/desktop/src/components/PlanConfirmationCard.tsx"
+);
 const settingsToolsPanelSource = read(
   "apps/desktop/src/components/SettingsToolsPanel.tsx"
 );
@@ -3729,6 +3732,13 @@ assert(
   "Agent trace must expose the real model, latency, evidence, and completion status for each collaboration role"
 );
 
+
+assert(
+  planConfirmationCardSource.includes("const planDocument = useMemo(") &&
+    planConfirmationCardSource.indexOf("const planDocument = useMemo(") <
+      planConfirmationCardSource.indexOf("if (dismissed) return null;"),
+  "Plan confirmation card must run every hook before its dismissed early return (React #300)"
+);
 
 const nonGrayColors = [...styles.matchAll(/#([0-9a-fA-F]{6})(?![0-9a-fA-F])/g)]
   .map((match) => match[1].toLowerCase())

@@ -122,6 +122,12 @@ export function PlanConfirmationCard({
     return () => clearInterval(timer);
   }, [dismissed, autoApprovalAllowed, attention, windowStartMs, confirmation.proposedAtMs]);
 
+  // Hooks must run before any early return (React #300).
+  const planDocument = useMemo(
+    () => parsePlanDocument(confirmation.planMarkdown),
+    [confirmation.planMarkdown]
+  );
+
   if (dismissed) return null;
 
   const engage = () => {
@@ -130,10 +136,6 @@ export function PlanConfirmationCard({
   };
 
   const countdownSeconds = Math.ceil(remainingMs / 1000);
-  const planDocument = useMemo(
-    () => parsePlanDocument(confirmation.planMarkdown),
-    [confirmation.planMarkdown]
-  );
 
   const copyCode = (content: string) => {
     void navigator.clipboard
