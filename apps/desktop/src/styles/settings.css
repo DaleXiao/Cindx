@@ -180,11 +180,6 @@
   gap: 5px;
 }
 
-.approval-policy-field > span {
-  color: var(--muted);
-  font-size: 11px;
-}
-
 .settings-segmented,
 .appearance-options {
   display: grid;

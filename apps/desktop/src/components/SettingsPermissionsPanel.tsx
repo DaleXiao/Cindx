@@ -2,6 +2,7 @@ import {
   CheckCircle2,
   ChevronDown,
   EyeOff,
+  LockKeyhole,
   RefreshCw,
   ShieldCheck,
   XCircle
@@ -60,9 +61,13 @@ export function SettingsPermissionsPanel({
 }: SettingsPermissionsPanelProps) {
   return (
     <section className="settings-section" data-settings-group="permissions">
+      <div className="section-title approval-policy-title">
+        <LockKeyhole size={17} aria-hidden="true" />
+        <h2>Approval policy</h2>
+      </div>
       <label className="approval-policy-field">
-        <span>Approval policy</span>
         <select
+          aria-label="Approval policy"
           value={approvalPolicy}
           onChange={(event) => onApprovalPolicyChange(normalizeApprovalPolicy(event.target.value))}
         >
