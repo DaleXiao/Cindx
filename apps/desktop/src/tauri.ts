@@ -4,6 +4,10 @@ import desktopPackage from "../package.json" with { type: "json" };
 import { providerApiKeySetAfterSave, resolveProviderProfile } from "./providerProfiles.ts";
 import { normalizeApprovalPolicy } from "./approvalPolicyModel.ts";
 import * as projectMemory from "./memoryManagementModel.ts";
+import {
+  decodeNativeAgentState,
+  decodeNativeAgentStateDelta
+} from "./tauriAgentStateContract.ts";
 import { decodeNativeRuntimeStatus } from "./tauriRuntimeContract.ts";
 
 export const DESKTOP_VERSION = desktopPackage.version;
@@ -1385,9 +1389,9 @@ export async function sendModelPrompt(prompt: string): Promise<Phase4State> {
 
 export async function getAgentState(sessionId?: string | null): Promise<AgentState> {
   try {
-    return await invoke<NativeAgentState>("get_agent_state", {
+    return decodeNativeAgentState(await invoke<unknown>("get_agent_state", {
       sessionId: sessionId ?? null
-    });
+    }));
   } catch (error) {
     if (isTauriRuntime()) throw error;
     return browserAgentState;
@@ -1414,10 +1418,10 @@ export async function getAgentStateDelta(
   afterSequence: number
 ): Promise<AgentStateDelta> {
   try {
-    return await invoke<NativeAgentStateDelta>("get_agent_state_delta", {
+    return decodeNativeAgentStateDelta(await invoke<unknown>("get_agent_state_delta", {
       sessionId,
       afterSequence
-    });
+    }));
   } catch (error) {
     if (isTauriRuntime()) throw error;
     return {
@@ -1506,9 +1510,9 @@ export async function runAgentTask(
   planMode = false
 ): Promise<AgentState> {
   try {
-    return await invoke<NativeAgentState>("run_agent_task", {
+    return decodeNativeAgentState(await invoke<unknown>("run_agent_task", {
       input: { prompt, sessionId, currentTime: currentAgentTimeContext(), effort, attachments, planMode }
-    });
+    }));
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -1676,9 +1680,10 @@ export async function steerQueuedAgentMessage(
 
 export async function runNextQueuedAgentMessage(sessionId: string): Promise<AgentState | null> {
   try {
-    return await invoke<NativeAgentState | null>("run_next_queued_agent_message", {
+    const raw = await invoke<unknown>("run_next_queued_agent_message", {
       input: { sessionId }
     });
+    return raw === null ? null : decodeNativeAgentState(raw);
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const queued = browserAgentState.queuedMessages[0];
@@ -1711,7 +1716,7 @@ export async function runNextQueuedAgentMessage(sessionId: string): Promise<Agen
 
 export async function cancelAgentTask(sessionId: string): Promise<AgentState> {
   try {
-    return await invoke<NativeAgentState>("cancel_agent_task", { input: { sessionId } });
+    return decodeNativeAgentState(await invoke<unknown>("cancel_agent_task", { input: { sessionId } }));
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -1740,7 +1745,7 @@ export async function cancelAgentTask(sessionId: string): Promise<AgentState> {
 
 export async function retryAgentTask(sessionId: string): Promise<AgentState> {
   try {
-    return await invoke<NativeAgentState>("retry_agent_task", { input: { sessionId } });
+    return decodeNativeAgentState(await invoke<unknown>("retry_agent_task", { input: { sessionId } }));
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -1773,12 +1778,12 @@ export async function resolveAgentPermission(
   grantCommandPrefix = false
 ): Promise<AgentState> {
   try {
-    return await invoke<NativeAgentState>("resolve_agent_permission", {
+    return decodeNativeAgentState(await invoke<unknown>("resolve_agent_permission", {
       requestId,
       decision,
       sessionId,
       grantCommandPrefix
-    });
+    }));
   } catch (error) {
     if (isTauriRuntime()) throw error;
     const now = Date.now();
@@ -1813,11 +1818,11 @@ export async function resolveAgentPlanConfirmation(
   resolvedBy: PlanResolvedBy
 ): Promise<AgentState> {
   try {
-    return await invoke<NativeAgentState>("resolve_agent_plan_confirmation", {
+    return decodeNativeAgentState(await invoke<unknown>("resolve_agent_plan_confirmation", {
       sessionId,
       decision,
       resolvedBy
-    });
+    }));
   } catch (error) {
     if (isTauriRuntime()) throw error;
     browserAgentState = {

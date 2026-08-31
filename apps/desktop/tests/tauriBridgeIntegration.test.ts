@@ -271,9 +271,37 @@ test("permission waiting resolves against the original session contract", async 
     pending: [{ requestId: "permission-a", sessionId: "session-a" }]
   } as unknown as PermissionReviewState;
   const agentState = {
+    taskId: "phase-16-agent-loop",
+    projectId: null,
+    projectName: null,
+    sessionId: "session-a",
+    sessionName: null,
     status: "running",
+    turnCount: 0,
+    maxTurns: 0,
+    transcriptMessages: 0,
+    contextTokensUsed: 0,
+    contextWindowTokens: 0,
+    contextRemainingPercent: 100,
+    contextUsageEstimated: false,
+    runStartedAtMs: 0,
+    runBudgetMs: 0,
+    runModelCallBudget: 0,
+    runToolCallBudget: 0,
+    canCancel: true,
+    canRetry: false,
+    canContinue: false,
+    eventCount: 0,
+    latestSequence: 0,
+    oldestSequence: 0,
+    hasOlderHistory: false,
+    timeline: [],
+    messages: [],
     pendingApprovals: [],
-    sessionId: "session-a"
+    queuedMessages: [],
+    pendingPlanConfirmation: null,
+    latestAnswer: null,
+    lastError: null
   } as unknown as AgentState;
   replies.set("get_permission_review_state", reviewState);
   replies.set("resolve_agent_permission", agentState);

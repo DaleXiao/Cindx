@@ -358,6 +358,68 @@ export function mergeQueuedAgentMessage(
   return next;
 }
 
+/**
+ * The mutable optimistic-queue records one session-runtime controller owns.
+ * Kept outside React state because they coordinate in-flight acknowledgements
+ * across several controllers; reconciliation mutates them in place and returns
+ * the merged state.
+ */
+export type OptimisticQueueRecords = {
+  /** Queue ids the user steered (optimistically removed from the queue). */
+  steeredQueueIds: Set<string>;
+  /** queueId -> sessionId the optimistic deletion belongs to. */
+  optimisticallyDeleted: Map<string, string>;
+  /** sessionId -> optimistic user message bubbles still awaiting commitment. */
+  optimisticUserMessages: Map<string, ChatMessageView[]>;
+  /** queueId -> optimistic queue entry still awaiting server echo. */
+  optimisticQueued: Map<string, QueuedAgentMessage>;
+};
+
+/**
+ * Merge a fresh backend AgentState with the controller's optimistic queue
+ * records without losing or duplicating entries:
+ *
+ * - steered entries whose steer is committed (applied, restored, or
+ *   discarded) drop their optimistic user bubble; pending steers keep it;
+ * - optimistically deleted entries stay hidden until the backend catches up;
+ * - optimistic entries not yet echoed by the backend merge into the queue.
+ *
+ * Returns the input state unchanged when nothing needed merging.
+ */
+export function reconcileOptimisticQueuedMessages(
+  sessionId: string,
+  state: AgentState,
+  records: OptimisticQueueRecords
+): AgentState {
+  records.steeredQueueIds.forEach((queueId) => {
+    if (records.optimisticallyDeleted.get(queueId) !== sessionId) return;
+    const resolution = committedSteerReconciliation(state, queueId);
+    if (resolution === "pending") return;
+    records.steeredQueueIds.delete(queueId);
+    records.optimisticallyDeleted.delete(queueId);
+    const optimistic = records.optimisticUserMessages.get(sessionId);
+    if (!optimistic) return;
+    const next = optimistic.filter((message) => message.queueId !== queueId);
+    if (next.length > 0) {
+      records.optimisticUserMessages.set(sessionId, next);
+    } else {
+      records.optimisticUserMessages.delete(sessionId);
+    }
+  });
+  let queuedMessages = state.queuedMessages;
+  records.optimisticallyDeleted.forEach((targetSessionId, queueId) => {
+    if (targetSessionId === sessionId) {
+      queuedMessages = queuedMessages.filter((message) => message.id !== queueId);
+    }
+  });
+  records.optimisticQueued.forEach((message) => {
+    if (message.sessionId === sessionId) {
+      queuedMessages = mergeQueuedAgentMessage(queuedMessages, message);
+    }
+  });
+  return queuedMessages === state.queuedMessages ? state : { ...state, queuedMessages };
+}
+
 export function mergeSequencedItems<Item extends { sequence?: number }>(
   current: Item[],
   incoming: Item[]

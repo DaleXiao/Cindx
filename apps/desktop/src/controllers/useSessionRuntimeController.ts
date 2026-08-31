@@ -32,12 +32,11 @@ import { normalizedSessionEffort } from "../appShellModel";
 import {
   SessionRuntimeCache,
   agentStateUnchanged,
-  committedSteerReconciliation,
   containsOptimisticUserMessage,
   latestTraceStep,
   mergeAcknowledgedSessionActivity,
   mergeAgentStateSnapshot,
-  mergeQueuedAgentMessage,
+  reconcileOptimisticQueuedMessages,
   mergeSequencedItems
 } from "../sessionRuntimeModel";
 
@@ -153,33 +152,12 @@ export function useSessionRuntimeController({
   }, []);
 
   function preserveOptimisticQueuedMessages(sessionId: string, state: AgentState) {
-    steeredQueuedMessageIdsRef.current.forEach((queueId) => {
-      if (optimisticallyDeletedQueuedMessagesRef.current.get(queueId) !== sessionId) return;
-      const resolution = committedSteerReconciliation(state, queueId);
-      if (resolution === "pending") return;
-      steeredQueuedMessageIdsRef.current.delete(queueId);
-      optimisticallyDeletedQueuedMessagesRef.current.delete(queueId);
-      const optimistic = optimisticUserMessagesRef.current.get(sessionId);
-      if (!optimistic) return;
-      const next = optimistic.filter((message) => message.queueId !== queueId);
-      if (next.length > 0) {
-        optimisticUserMessagesRef.current.set(sessionId, next);
-      } else {
-        optimisticUserMessagesRef.current.delete(sessionId);
-      }
+    return reconcileOptimisticQueuedMessages(sessionId, state, {
+      steeredQueueIds: steeredQueuedMessageIdsRef.current,
+      optimisticallyDeleted: optimisticallyDeletedQueuedMessagesRef.current,
+      optimisticUserMessages: optimisticUserMessagesRef.current,
+      optimisticQueued: optimisticQueuedMessagesRef.current
     });
-    let queuedMessages = state.queuedMessages;
-    optimisticallyDeletedQueuedMessagesRef.current.forEach((targetSessionId, queueId) => {
-      if (targetSessionId === sessionId) {
-        queuedMessages = queuedMessages.filter((message) => message.id !== queueId);
-      }
-    });
-    optimisticQueuedMessagesRef.current.forEach((message) => {
-      if (message.sessionId === sessionId) {
-        queuedMessages = mergeQueuedAgentMessage(queuedMessages, message);
-      }
-    });
-    return queuedMessages === state.queuedMessages ? state : { ...state, queuedMessages };
   }
 
   const loadOlderAgentHistory = useCallback(async () => {

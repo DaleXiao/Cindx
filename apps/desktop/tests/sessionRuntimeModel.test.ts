@@ -285,3 +285,95 @@ test("adjacent partial and final assistant commits collapse to the longer one", 
   ]);
   assert.equal(distinct.length, 2);
 });
+
+import { reconcileOptimisticQueuedMessages } from "../src/sessionRuntimeModel.ts";
+
+function queuedMessage(id: string, sessionId: string, mode: "queue" | "steer") {
+  return {
+    id,
+    sessionId,
+    prompt: `prompt-${id}`,
+    attachments: [],
+    effort: "default",
+    mode,
+    planMode: false,
+    createdAtMs: 1,
+    updatedAtMs: 1
+  } as any;
+}
+
+function emptyRecords() {
+  return {
+    steeredQueueIds: new Set<string>(),
+    optimisticallyDeleted: new Map<string, string>(),
+    optimisticUserMessages: new Map<string, any[]>(),
+    optimisticQueued: new Map<string, any>()
+  };
+}
+
+function baseState(overrides: Record<string, unknown> = {}) {
+  return {
+    sessionId: "session-a",
+    status: "idle",
+    canCancel: false,
+    messages: [],
+    queuedMessages: [],
+    ...overrides
+  } as any;
+}
+
+test("reconciliation merges optimistic queue entries the backend has not echoed", () => {
+  const records = emptyRecords();
+  records.optimisticQueued.set("q1", queuedMessage("q1", "session-a", "queue"));
+  const state = baseState();
+
+  const merged = reconcileOptimisticQueuedMessages("session-a", state, records);
+  assert.deepEqual(merged.queuedMessages.map((m: any) => m.id), ["q1"]);
+});
+
+test("reconciliation ignores optimistic entries belonging to other sessions", () => {
+  const records = emptyRecords();
+  records.optimisticQueued.set("q-other", queuedMessage("q-other", "session-b", "queue"));
+  const state = baseState();
+
+  const merged = reconcileOptimisticQueuedMessages("session-a", state, records);
+  assert.equal(merged, state, "nothing to merge should return the same object");
+});
+
+test("reconciliation hides optimistically deleted entries until the backend catches up", () => {
+  const records = emptyRecords();
+  records.optimisticallyDeleted.set("q1", "session-a");
+  const state = baseState({ queuedMessages: [queuedMessage("q1", "session-a", "queue")] });
+
+  const merged = reconcileOptimisticQueuedMessages("session-a", state, records);
+  assert.equal(merged.queuedMessages.length, 0);
+});
+
+test("reconciliation drops a committed steer bubble but keeps a pending one", () => {
+  const committed = emptyRecords();
+  committed.steeredQueueIds.add("q1");
+  committed.optimisticallyDeleted.set("q1", "session-a");
+  committed.optimisticUserMessages.set("session-a", [
+    { role: "user", content: "steered", queueId: "q1" } as any
+  ]);
+  // The steer was applied: a user message carries the queueId.
+  const applied = baseState({
+    messages: [{ role: "user", content: "steered", queueId: "q1" }]
+  });
+  const mergedApplied = reconcileOptimisticQueuedMessages("session-a", applied, committed);
+  assert.equal(committed.steeredQueueIds.has("q1"), false);
+  assert.equal(committed.optimisticUserMessages.has("session-a"), false);
+  assert.equal(mergedApplied, applied);
+
+  const pending = emptyRecords();
+  pending.steeredQueueIds.add("q2");
+  pending.optimisticallyDeleted.set("q2", "session-a");
+  pending.optimisticUserMessages.set("session-a", [
+    { role: "user", content: "steering", queueId: "q2" } as any
+  ]);
+  // A run is in flight, so the steer is still pending and the bubble stays.
+  const inFlight = baseState({ status: "running", canCancel: true });
+  reconcileOptimisticQueuedMessages("session-a", inFlight, pending);
+  assert.equal(pending.steeredQueueIds.has("q2"), true);
+  assert.equal(pending.optimisticUserMessages.get("session-a")?.length, 1);
+});

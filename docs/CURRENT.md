@@ -700,8 +700,12 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   lifecycle commands, run and queued-message commands, and the runtime sync
   effects (polling, prefetch, subscriptions) live in `src/controllers/` as
   `useSessionRuntimeController`, `useProjectSessionController`,
-  `useAgentRunController`, and `useSessionRuntimeSync`. `tauri.ts`, settings,
-  inspector, and thread styling remain large change surfaces.
+  `useAgentRunController`, and `useSessionRuntimeSync`. Agent-state IPC
+  responses (`NativeAgentState` / `NativeAgentStateDelta`) are
+  runtime-validated at the boundary (`tauriAgentStateContract`), and the
+  optimistic queue reconciliation invariant lives in the node-tested
+  `sessionRuntimeModel` (`reconcileOptimisticQueuedMessages`). `tauri.ts`,
+  settings, inspector, and thread styling remain large change surfaces.
 - The `realworld-eval` feature and the `orchestrator`/`orchestrator-eval`
   crates are physically removed; there is no provider evaluation surface in the
   product build.

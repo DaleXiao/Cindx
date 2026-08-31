@@ -2570,8 +2570,10 @@ assert(
     rustLib.includes("queued_messages_preserve_a_permission_waiting_run") &&
     appCompositionSource.includes("steeredQueuedMessageIdsRef") &&
     sessionRuntimeModelSource.includes("function committedSteerReconciliation(") &&
-    appCompositionSource.includes("const resolution = committedSteerReconciliation(state, queueId)") &&
-    appCompositionSource.includes('if (resolution === "pending") return;') &&
+    sessionRuntimeModelSource.includes("function reconcileOptimisticQueuedMessages(") &&
+    sessionRuntimeModelSource.includes("const resolution = committedSteerReconciliation(state, queueId)") &&
+    sessionRuntimeModelSource.includes('if (resolution === "pending") return;') &&
+    appCompositionSource.includes("reconcileOptimisticQueuedMessages(sessionId, state") &&
     appCompositionSource.includes("receipt.steerCommitted") &&
     queueServiceSource.includes("steer_committed: bool") &&
     tauriBridge.includes("steerCommitted: boolean") &&
