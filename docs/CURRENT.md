@@ -736,6 +736,7 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   executor loop: Fast and Auto pin deterministic sampling (`0`), Pro keeps
   provider defaults.
 
-- The installed `0.2.77` build and the published `v0.2.77` archive are Apple
-  Silicon (`arm64`) and locally ad-hoc-signed. A normal-user distribution still
-  needs the appropriate Apple signing and notarization path.
+- Local builds are Apple Silicon (`arm64`) and ad-hoc-signed; the current
+  release's signing and notarization status is recorded in `HANDOFF.md`.
+  A normal-user distribution still needs the appropriate Apple signing and
+  notarization path.

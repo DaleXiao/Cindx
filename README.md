@@ -79,6 +79,8 @@ and are never implied by a green deterministic test run.
 ## Releases
 
 - [GitHub Releases](https://github.com/DaleXiao/Cindx/releases)
-- [Cindx v0.2.30](https://github.com/DaleXiao/Cindx/releases/tag/v0.2.30)
 
-The current published asset is `Cindx-0.2.30-macOS-arm64.zip`.
+The current release identity (version, tag, asset name/size/SHA-256, and
+installed bundle) is maintained in [HANDOFF.md](docs/HANDOFF.md). Do not
+commit application archives to the Git tree; publish them as GitHub Release
+assets.

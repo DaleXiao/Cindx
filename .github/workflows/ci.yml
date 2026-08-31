@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -52,13 +52,13 @@ jobs:
           echo "sha=$BASELINE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Check out performance baseline
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ steps.performance-baseline.outputs.sha }}
           path: .performance-baseline
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -132,7 +132,7 @@ jobs:
 
       - name: Upload quality reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Cindx-quality-gates-${{ github.sha }}
           path: |
@@ -189,9 +189,36 @@ jobs:
 
       - name: Upload test build
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Cindx-${{ github.sha }}-macOS-arm64
           path: ${{ env.CINDX_TEST_ARCHIVE }}
           if-no-files-found: error
           retention-days: 7
+
+  advisory:
+    name: Rust advisory scan (visibility, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: Scan workspace advisories
+        run: cargo audit --deny warnings || cargo audit > cargo-audit-report.txt
+
+      - name: Upload advisory report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cargo-audit-${{ github.sha }}
+          path: cargo-audit-report.txt
+          if-no-files-found: ignore
+          retention-days: 30

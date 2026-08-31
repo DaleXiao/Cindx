@@ -441,9 +441,9 @@ Release consistency requires:
 - a GitHub asset whose name, size, and SHA-256 match the built archive;
 - installed app version matching the release.
 
-The current release is
-[v0.2.30](https://github.com/DaleXiao/Cindx/releases/tag/v0.2.30), with
-`Cindx-0.2.30-macOS-arm64.zip`. Do not commit application archives to the Git
+The current release identity (version, tag, asset, installed bundle) is
+maintained in `docs/HANDOFF.md` (Release Identity); this section defines the
+consistency contract, not the version. Do not commit application archives to the Git
 tree; publish them as GitHub Release assets.
 
 The locally installed `0.2.34` model-semantics validation build is not a

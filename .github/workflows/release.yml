@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Validate tag and committed version
         env:
@@ -34,7 +34,7 @@ jobs:
         run: node scripts/check-release-version.mjs "$RELEASE_TAG"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -59,6 +59,9 @@ jobs:
       - name: Test release source
         run: |
           node scripts/check-docs.mjs
+          node scripts/check-gates-manifest.mjs
+          node scripts/check-desktop-layout.mjs
+          node scripts/check-desktop-dependency-policy.mjs
           cargo test --workspace --locked
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
           node scripts/check-desktop-dto-contract.mjs
@@ -71,7 +74,7 @@ jobs:
 
       - name: Upload shipping performance report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Cindx-shipping-performance-${{ github.sha }}
           path: target/shipping-performance-report.json
@@ -192,3 +195,21 @@ jobs:
           generateReleaseNotes: true
           releaseCommitish: ${{ github.sha }}
           args: --target universal-apple-darwin --bundles app
+
+      - name: Record published asset identity receipt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/record-release-asset-receipt.mjs "$RELEASE_TAG" release-asset-receipt.json
+          cat release-asset-receipt.json
+
+      - name: Upload release asset receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Cindx-release-asset-receipt-${{ github.sha }}
+          path: release-asset-receipt.json
+          if-no-files-found: error
+          retention-days: 90

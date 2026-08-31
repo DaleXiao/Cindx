@@ -210,8 +210,19 @@ function runGate(gate) {
     const child = spawn(executable, commandArgs, {
       cwd: path.resolve(repoRoot, gate.cwd ?? "."),
       env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
+    const timeoutMs = gate.timeout_ms ?? DEFAULT_GATE_TIMEOUT_MS;
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       process.stdout.write(chunk);
       stdoutTail = appendTail(stdoutTail, chunk);
@@ -225,6 +236,7 @@ function runGate(gate) {
       stderrDiagnostics.append(chunk);
     });
     child.on("error", (error) => {
+      clearTimeout(timeout);
       resolve({
         id: gate.id,
         category: gate.category,
@@ -238,13 +250,14 @@ function runGate(gate) {
       });
     });
     child.on("close", (exitCode) => {
+      clearTimeout(timeout);
       const errors =
-        exitCode === 0
+        exitCode === 0 && !timedOut
           ? [
               ...validateReport(gate),
               ...validateRequiredOutput(gate, requiredOutputObserved)
             ]
-          : [`exit code ${exitCode}`];
+          : [timedOut ? `gate timed out after ${timeoutMs}ms` : `exit code ${exitCode}`];
       resolve({
         id: gate.id,
         category: gate.category,
@@ -267,9 +280,30 @@ function gitCommit(root) {
   }).stdout?.trim();
 }
 
+function gitOutput(root, args) {
+  return spawnSync("git", args, { cwd: root, encoding: "utf8" }).stdout ?? "";
+}
+
+// The report binds the exact source state it measured: HEAD, whether the
+// worktree was dirty, and a digest of the tracked index. Readers can reject
+// reports whose identity does not match the revision under review.
+function sourceIdentity(root) {
+  const status = gitOutput(root, ["status", "--porcelain"]);
+  const tracked = gitOutput(root, ["ls-files", "-s"]);
+  return {
+    worktree_dirty: status.trim().length > 0,
+    tracked_tree_digest: crypto.createHash("sha256").update(tracked).digest("hex")
+  };
+}
+
+const DEFAULT_GATE_TIMEOUT_MS = 20 * 60 * 1000;
+
 const commit = gitCommit(repoRoot);
 const manifestCommit = gitCommit(manifestRoot);
+const identity = sourceIdentity(repoRoot);
 const startedAt = new Date().toISOString();
+// A stale report must never satisfy a fresh run's report-backed gates.
+if (fs.existsSync(reportPath)) fs.rmSync(reportPath);
 const results = [];
 for (const gate of selectedGates) results.push(await runGate(gate));
 const report = {
@@ -280,6 +314,9 @@ const report = {
   profile: profileName,
   profile_fingerprint: profileFingerprint,
   commit: commit || null,
+  worktree_dirty: identity.worktree_dirty,
+  tracked_tree_digest: identity.tracked_tree_digest,
+  run_nonce: crypto.randomUUID(),
   started_at: startedAt,
   finished_at: new Date().toISOString(),
   passed: results.every((result) => result.passed),

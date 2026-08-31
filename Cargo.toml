@@ -35,7 +35,7 @@ exclude = ["apps/desktop/src-tauri"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "UNLICENSED"
+license = "Apache-2.0"
 
 [profile.dev]
 debug = 1
