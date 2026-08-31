@@ -135,9 +135,33 @@ fn paused_event(sequence: u64) -> Event {
 }
 
 fn resolved_event(sequence: u64, plan_markdown: &str, decision: PlanConfirmationDecision) -> Event {
-    let mut metadata = plan_resolved_event_metadata(decision, &plan_digest(plan_markdown));
+    let mut metadata =
+        plan_resolved_event_metadata(decision, &plan_digest(plan_markdown), PLAN_RESOLVED_BY_USER);
     metadata.extend(run_context(true));
     event(sequence, PLAN_RESOLVED_SUMMARY, metadata)
+}
+
+#[test]
+fn plan_resolution_source_is_parsed_fail_closed_and_audited() {
+    assert_eq!(parse_plan_resolved_by("local-user").unwrap(), PLAN_RESOLVED_BY_USER);
+    assert_eq!(parse_plan_resolved_by("").unwrap(), PLAN_RESOLVED_BY_USER);
+    assert_eq!(
+        parse_plan_resolved_by("auto-timeout").unwrap(),
+        PLAN_RESOLVED_BY_AUTO_TIMEOUT
+    );
+    assert!(parse_plan_resolved_by("guardian").is_err());
+    assert!(parse_plan_resolved_by("timer").is_err());
+
+    let metadata = plan_resolved_event_metadata(
+        PlanConfirmationDecision::Approved,
+        "digest",
+        PLAN_RESOLVED_BY_AUTO_TIMEOUT,
+    );
+    assert_eq!(
+        metadata.get("plan_resolved_by").map(String::as_str),
+        Some(PLAN_RESOLVED_BY_AUTO_TIMEOUT),
+        "timeout approvals must be distinguishable from user clicks in the audit trail"
+    );
 }
 
 #[test]

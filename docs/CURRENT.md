@@ -186,6 +186,17 @@ through the ordinary paused-run continuation path. A plan-drafting failure
 (provider error, empty plan, or an exhausted Worker stage budget) is recorded
 and the run proceeds without a plan.
 
+The confirmation card additionally auto-approves after 30 idle seconds, but
+only under the strict approval policy: there every effect still prompts
+individually, so the timer merely unblocks the run. Under session/all
+policies the card never counts down and the backend rejects timeout
+resolutions, keeping the plan gate an explicit user decision. Any sign of
+reading (hover, press, focus, scroll), a hidden window, or an unfocused app
+pauses the countdown; a failed resolution restarts the full window instead of
+retrying. Every resolution records its source (`local-user` or `auto-timeout`)
+on the `plan_resolved` event so an audit can tell a timeout approval from an
+explicit click.
+
 Each tier can pin a configured default model (`fast_model`, `auto_model`,
 `pro_model` in the provider configuration). The Settings Models panel exposes
 the three tier pins plus the legacy compatibility fallback slot; the legacy

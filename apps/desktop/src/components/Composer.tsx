@@ -75,7 +75,7 @@ const SANDBOX_OPTIONS: Array<{
 }> = [
   { value: "full", label: "Full access" },
   { value: "workspace-write", label: "Workspace write" },
-  { value: "read-only", label: "Read only" }
+  { value: "read-only", label: "Read only (no file writes)" }
 ];
 
 function ComposerAttachmentPreview({ attachment }: { attachment: AgentAttachment }) {
@@ -721,6 +721,10 @@ export function Composer({
                               {option.value === sandboxMode && <Check aria-hidden="true" />}
                             </button>
                           ))}
+                          <p className="composer-sandbox-hint">
+                            Confines shell and managed-process execution via macOS Seatbelt.
+                            Read only blocks file writes; network and file reads stay allowed.
+                          </p>
                         </div>
                       )}
                     </div>

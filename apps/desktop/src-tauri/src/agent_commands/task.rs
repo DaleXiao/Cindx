@@ -1081,10 +1081,11 @@ pub(crate) async fn resolve_agent_plan_confirmation(
     app: tauri::AppHandle,
     session_id: String,
     decision: String,
+    resolved_by: String,
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        resolve_agent_plan_confirmation_blocking(&app, state, session_id, decision)
+        resolve_agent_plan_confirmation_blocking(&app, state, session_id, decision, resolved_by)
     })
     .await
     .map_err(|error| format!("agent plan confirmation failed to join: {error}"))?
@@ -1095,8 +1096,22 @@ pub(crate) fn resolve_agent_plan_confirmation_blocking(
     state: tauri::State<'_, AppState>,
     session_id: String,
     decision: String,
+    resolved_by: String,
 ) -> Result<AgentState, String> {
     let decision = crate::agent_plan_mode_runtime::parse_plan_confirmation_decision(&decision)?;
+    let resolved_by = crate::agent_plan_mode_runtime::parse_plan_resolved_by(&resolved_by)?;
+    if resolved_by == crate::agent_plan_mode_runtime::PLAN_RESOLVED_BY_AUTO_TIMEOUT {
+        // The idle auto-approve timer may only start an execution while the
+        // strict approval policy still gates every effect individually. Under
+        // session/all policies the run trends fully automatic, so the plan
+        // gate must stay an explicit user decision there (fail-closed).
+        let config = clone_provider_config(&state)?;
+        if config.approval_policy != "strict" {
+            return Err(
+                "automatic plan approval requires the strict approval policy".to_string(),
+            );
+        }
+    }
     let pending = {
         let store = state
             .store
@@ -1138,6 +1153,7 @@ pub(crate) fn resolve_agent_plan_confirmation_blocking(
                 crate::agent_plan_mode_runtime::plan_resolved_event_metadata(
                     decision,
                     &pending.plan_digest,
+                    resolved_by,
                 ),
                 &run_context,
             ),

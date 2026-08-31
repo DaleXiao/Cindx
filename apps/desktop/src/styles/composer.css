@@ -498,6 +498,14 @@
   border-top: 1px solid rgba(0, 0, 0, 0.07);
 }
 
+.composer-sandbox-hint {
+  margin: 4px 0 0;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
 .composer-effort-group-label {
   padding: 4px 9px;
   color: var(--muted);

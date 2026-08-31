@@ -62,6 +62,21 @@ pub(crate) fn parse_plan_confirmation_decision(
     }
 }
 
+/// Who resolved the plan confirmation: the user clicking a card action, or
+/// the card's idle auto-approve timer. The value is recorded on the
+/// `plan_resolved` event so an audit can always tell a timeout approval from
+/// an explicit user decision.
+pub(crate) const PLAN_RESOLVED_BY_USER: &str = "local-user";
+pub(crate) const PLAN_RESOLVED_BY_AUTO_TIMEOUT: &str = "auto-timeout";
+
+pub(crate) fn parse_plan_resolved_by(value: &str) -> Result<&'static str, String> {
+    match value {
+        "" | "local-user" => Ok(PLAN_RESOLVED_BY_USER),
+        "auto-timeout" => Ok(PLAN_RESOLVED_BY_AUTO_TIMEOUT),
+        other => Err(format!("unknown plan resolution source: {other}")),
+    }
+}
+
 /// The Composer entry exists only for High/Xhigh; Fast/Default never expose or
 /// honor plan mode.
 pub(crate) fn plan_mode_available_for_effort(effort: AgentPolicy) -> bool {
@@ -459,16 +474,19 @@ pub(crate) fn plan_proposed_event_metadata(plan_markdown: &str) -> Metadata {
 }
 
 /// Metadata carried by the `plan_resolved` event: the user's decision bound to
-/// the exact plan digest it answered.
+/// the exact plan digest it answered, plus the resolution source
+/// (`local-user` or `auto-timeout`) so timeout approvals stay auditable.
 pub(crate) fn plan_resolved_event_metadata(
     decision: PlanConfirmationDecision,
     plan_digest: &str,
+    resolved_by: &str,
 ) -> Metadata {
     let mut metadata = Metadata::new();
     metadata.insert("plan_event".to_string(), "resolved".to_string());
     metadata.insert("plan_schema".to_string(), PLAN_MODE_SCHEMA.to_string());
     metadata.insert("plan_digest".to_string(), plan_digest.to_string());
     metadata.insert("plan_decision".to_string(), decision.label().to_string());
+    metadata.insert("plan_resolved_by".to_string(), resolved_by.to_string());
     metadata
 }
 

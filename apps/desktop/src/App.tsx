@@ -668,7 +668,7 @@ export function App() {
                 onDelete={handleDeleteQueuedMessage}
               />
               {pendingPlanConfirmation && activeSession?.id && (
-                <PlanConfirmationCard sessionId={activeSession.id} confirmation={pendingPlanConfirmation} onResolved={(sid, next) => { setOptimisticWorking(true); applyAgentStateForSession(sid, next); }} onError={setComposerError} />
+                <PlanConfirmationCard sessionId={activeSession.id} confirmation={pendingPlanConfirmation} approvalPolicy={providerDraft?.approvalPolicy ?? "strict"} onResolved={(sid, next) => { setOptimisticWorking(true); applyAgentStateForSession(sid, next); }} onError={setComposerError} />
               )}
               <Composer
                 value={composerDraft}

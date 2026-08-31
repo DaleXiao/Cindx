@@ -15,7 +15,7 @@ export type * from "./memoryManagementModel";
 export type * from "./planModeModel";
 export { stageAgentAttachments } from "./attachmentIpc.ts";
 import type { AgentEffort } from "./agentRunBudgetModel";
-import type { PlanConfirmationDecision } from "./planModeModel";
+import type { PlanConfirmationDecision, PlanResolvedBy } from "./planModeModel";
 import type { NativeAgentHistoryPage, NativeAgentState, NativeAgentStateDelta } from "./tauriNativeTypes";
 import type {
   RuntimeStatus,
@@ -1809,12 +1809,14 @@ export async function resolveAgentPermission(
 
 export async function resolveAgentPlanConfirmation(
   sessionId: string,
-  decision: PlanConfirmationDecision
+  decision: PlanConfirmationDecision,
+  resolvedBy: PlanResolvedBy
 ): Promise<AgentState> {
   try {
     return await invoke<NativeAgentState>("resolve_agent_plan_confirmation", {
       sessionId,
-      decision
+      decision,
+      resolvedBy
     });
   } catch (error) {
     if (isTauriRuntime()) throw error;
