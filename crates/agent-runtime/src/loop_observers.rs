@@ -52,15 +52,16 @@ const MAX_OBSERVED_HOSTS: usize = 8;
 const MAX_HOST_CHARS: usize = 253;
 const OBSERVATION_EXCERPT_MAX_CHARS: usize = 8_192;
 /// Deterministic output markers that classify a succeeded web call as a
-/// stuck-target failure (no-result / error payloads).
-const STUCK_TARGET_FAILURE_MARKERS: &[&str] = &[
-    "no results",
-    "no result",
-    "0 results",
-    "error",
-    "timed out",
-    "could not resolve",
-];
+/// stuck-target failure (empty-result or transport-failure payloads). Bare
+/// words like "error" are deliberately not markers: they appear in ordinary
+/// page text and would quarantine healthy hosts.
+const STUCK_TARGET_FAILURE_MARKERS: &[&str] =
+    &["no results", "0 results", "timed out", "could not resolve"];
+
+/// Consecutive successes on a host that lift a prior quarantine: a host that
+/// starts answering again was quarantined on a transient or misread signal,
+/// and the block must not outlive the condition that caused it.
+const STUCK_TARGET_RELEASE_THRESHOLD: usize = 2;
 
 /// One intervention proposed by an observer. The kernel applies it to the loop
 /// state; observers never mutate the loop directly.
@@ -70,6 +71,8 @@ pub enum Intervention {
     Hint(String),
     /// Block future web.search/web.fetch calls targeting this host.
     QuarantineHost(String),
+    /// Lift a prior quarantine for this host after consecutive successes.
+    ReleaseHostQuarantine(String),
     /// The next model turn drops all tools and carries the finalization
     /// instruction so the run can close out inside its budget.
     ForceFinalTurn,
@@ -269,6 +272,7 @@ impl LoopObserver for RepetitionAdvisoryObserver {
 #[derive(Debug, Clone)]
 pub struct StuckTargetObserver {
     failure_streaks: BTreeMap<String, usize>,
+    success_streaks: BTreeMap<String, usize>,
     quarantine_threshold: usize,
 }
 
@@ -276,6 +280,7 @@ impl Default for StuckTargetObserver {
     fn default() -> Self {
         Self {
             failure_streaks: BTreeMap::new(),
+            success_streaks: BTreeMap::new(),
             quarantine_threshold: STUCK_TARGET_QUARANTINE_THRESHOLD,
         }
     }
@@ -314,6 +319,7 @@ impl LoopObserver for StuckTargetObserver {
         let mut interventions = Vec::new();
         for host in &ctx.http_hosts {
             if failed {
+                self.success_streaks.remove(host);
                 let streak = self.failure_streaks.entry(host.clone()).or_default();
                 *streak = streak.saturating_add(1);
                 if *streak >= self.quarantine_threshold {
@@ -321,6 +327,14 @@ impl LoopObserver for StuckTargetObserver {
                 }
             } else {
                 self.failure_streaks.remove(host);
+                let streak = self.success_streaks.entry(host.clone()).or_default();
+                *streak = streak.saturating_add(1);
+                if *streak >= STUCK_TARGET_RELEASE_THRESHOLD {
+                    self.success_streaks.remove(host);
+                    // Idempotent at the host: releasing a host that was never
+                    // quarantined is a no-op.
+                    interventions.push(Intervention::ReleaseHostQuarantine(host.clone()));
+                }
             }
         }
         interventions
@@ -434,11 +448,11 @@ pub struct AdaptiveReasoningObserver {
 }
 
 impl AdaptiveReasoningObserver {
-    /// The economical base budget of a tier: one quarter of the tier ceiling,
-    /// at least one token.
+    /// The economical base budget of a tier: half the tier ceiling, at least
+    /// one token.
     pub fn base_budget(tier_max_budget: u32) -> u32 {
-        // Half the tier ceiling (raised from a quarter) so even steady turns
-        // get meaningful thinking depth.
+        // Half the tier ceiling so even steady turns get meaningful thinking
+        // depth.
         (tier_max_budget / 2).max(1)
     }
 
@@ -581,6 +595,7 @@ impl LoopObservers {
                 .hint_overlays
                 .push(generic_hint_message(&emission.observer, text)),
             Intervention::QuarantineHost(host) => self.quarantine_host(host),
+            Intervention::ReleaseHostQuarantine(host) => self.release_host_quarantine(host),
             Intervention::ForceFinalTurn => self.arm_force_final_turn(),
             Intervention::RequestDoomLoopConfirmation { tool } => {
                 self.request_doom_loop_confirmation(tool.clone());
@@ -595,6 +610,16 @@ impl LoopObservers {
         let normalized = normalize_host(host);
         if !normalized.is_empty() {
             self.quarantined_hosts.insert(normalized);
+        }
+    }
+
+    /// Lift a host's quarantine. Releasing a host that is not quarantined is a
+    /// no-op, so observers may propose releases unconditionally after
+    /// consecutive successes.
+    pub fn release_host_quarantine(&mut self, host: &str) {
+        let normalized = normalize_host(host);
+        if !normalized.is_empty() {
+            self.quarantined_hosts.remove(&normalized);
         }
     }
 
@@ -1083,6 +1108,72 @@ mod tests {
             .after_tool_observation(&failed)
             .iter()
             .any(|intervention| matches!(intervention, Intervention::QuarantineHost(host) if host == "example.com")));
+    }
+
+    #[test]
+    fn stuck_target_observer_releases_quarantine_after_two_consecutive_successes() {
+        let mut observer = StuckTargetObserver::default();
+        let succeeded = tool_context("web.fetch", ToolOutcomeStatus::Succeeded, &["example.com"]);
+
+        assert_eq!(
+            observer.after_tool_observation(&succeeded),
+            Vec::new(),
+            "one success is not yet enough to release"
+        );
+        let interventions = observer.after_tool_observation(&succeeded);
+        assert_eq!(
+            interventions,
+            vec![Intervention::ReleaseHostQuarantine(
+                "example.com".to_string()
+            )]
+        );
+
+        // The success streak restarts after a release, so steady successes do
+        // not spam releases; a failure in between resets it entirely.
+        assert_eq!(observer.after_tool_observation(&succeeded), Vec::new());
+        let failed = tool_context("web.fetch", ToolOutcomeStatus::Failed, &["example.com"]);
+        observer.after_tool_observation(&failed);
+        assert_eq!(observer.after_tool_observation(&succeeded), Vec::new());
+    }
+
+    #[test]
+    fn succeeded_pages_mentioning_error_are_not_stuck_failures() {
+        let mut observer = StuckTargetObserver::default();
+        let mut healthy = tool_context("web.fetch", ToolOutcomeStatus::Succeeded, &["example.com"]);
+        healthy.observation_excerpt =
+            "status=succeeded\noutput=\nHow to read an error page: a tutorial.".to_string();
+
+        for _ in 0..4 {
+            observer.after_tool_observation(&healthy);
+        }
+        assert_eq!(
+            observer.failure_streak("example.com"),
+            0,
+            "the bare word 'error' in page text must not quarantine a healthy host"
+        );
+    }
+
+    #[test]
+    fn loop_observers_host_lifts_quarantine_through_release_emissions() {
+        let mut host = LoopObservers::default();
+        host.apply_emission(&ObserverEmission {
+            observer: "stuck_target".to_string(),
+            intervention: Intervention::QuarantineHost("example.com".to_string()),
+        });
+        assert!(host.is_host_quarantined("example.com"));
+
+        host.apply_emission(&ObserverEmission {
+            observer: "stuck_target".to_string(),
+            intervention: Intervention::ReleaseHostQuarantine("example.com".to_string()),
+        });
+        assert!(!host.is_host_quarantined("example.com"));
+
+        // Releasing an unquarantined host is a no-op.
+        host.apply_emission(&ObserverEmission {
+            observer: "stuck_target".to_string(),
+            intervention: Intervention::ReleaseHostQuarantine("example.com".to_string()),
+        });
+        assert!(!host.is_host_quarantined("example.com"));
     }
 
     #[test]

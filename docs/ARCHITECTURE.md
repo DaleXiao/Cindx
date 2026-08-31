@@ -100,11 +100,11 @@ changing product behavior:
   open/reveal operations.
 - Foreground orchestration glue and memory workers.
 
-This layer is not yet a thin adapter. `src/lib.rs` declares and imports a large
-set of sibling modules, and several workflows still cross desktop services by
-shared composition state. Future refactors should move a complete owner and its
-tests behind a narrow interface; merely creating more sibling files would not
-reduce coupling.
+This layer is not yet a thin adapter. `src/lib.rs` is a module index; the
+Tauri builder and command registration live in `app_bootstrap.rs`, and several
+workflows still cross desktop services by shared composition state. Future
+refactors should move a complete owner and its tests behind a narrow
+interface; merely creating more sibling files would not reduce coupling.
 
 ## Interactive Run Flow
 

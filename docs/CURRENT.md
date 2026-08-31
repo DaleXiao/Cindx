@@ -687,9 +687,10 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 - Project instruction files are enabled by default and can currently only be
   toggled or extended through `project_instructions.json` in the app support
   directory; a Settings UI is not wired yet.
-- `apps/desktop/src-tauri/src/lib.rs` is still a large composition root with
-  many sibling modules and broad imports. Portable crates now own substantial
-  contracts, but desktop orchestration remains the primary coupling hotspot.
+- `apps/desktop/src-tauri/src/lib.rs` is now a module index (around 230 lines);
+  the Tauri builder and command registration live in `app_bootstrap.rs`.
+  Portable crates own substantial contracts, but desktop orchestration
+  remains the primary coupling hotspot.
 - The frontend has been split into components and style sheets. The browser
   preview fallback state now lives in its own module beside `tauri.ts`, and
   Composer textarea sizing plus attachment batch limits are extracted into
