@@ -997,12 +997,17 @@ const toolsModuleBudgets = new Map([
   ["process_control.rs", 30],
   ["process_cpu.rs", 100],
   ["process_runtime.rs", 670],
-  ["process_supervisor.rs", 340],
+  ["process_supervisor.rs", 360],
   ["process_time.rs", 80],
   ["process_tests.rs", 740],
   ["process_tools.rs", 370],
   // 950 -> 960: the http.server dev-server exemption + its test.
-  ["shell.rs", 960],
+  // 960 -> 800: the classification policy (known-executable list, piped code
+  // execution, script-file and unrecognized-executable gates) moved to
+  // shell_classification.rs.
+  ["shell.rs", 800],
+  // Classification policy split out of shell.rs.
+  ["shell_classification.rs", 580],
   ["shell_postcondition.rs", 200],
   ["stream_capture.rs", 60],
   ["tool_contract_v2.rs", 650],

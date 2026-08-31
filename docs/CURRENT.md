@@ -339,6 +339,20 @@ image, MCP, skill, and selected local utility tools through typed contracts.
 Tool visibility does not grant authority.
 
 - Side effects pass through the desktop permission path.
+- Shell and managed-process command classification keeps Execute/Destructive
+  risk but tightens what Execute admits. Commands whose executable is outside
+  the known-executable list run at Execute risk yet are approved one-shot,
+  never auto-grant under session/all policies, and never derive a prefix
+  grant. Interpreter executions with a positional script file
+  (`bash scripts/build.sh`) run at Execute risk but always prompt and allow
+  only an exact-command session grant, never a prefix. Output piped into an
+  interpreter (`cat x | sh`) is Destructive; `||` remains the OR operator,
+  and module executions (`python3 -m http.server`) keep their historical
+  auto-grant eligibility. Guardian auto-approval skips any request the
+  approval policy itself would still prompt for.
+- Managed processes (`process.start`) honor the session sandbox mode exactly
+  like `shell.run`: non-full modes wrap the supervised launcher in
+  `sandbox-exec`, so a read-only session also confines long-running processes.
 - A session grant is matched against task, session, action, risk, scope, and
   capability metadata. `shell.run` and `process.start` also require a command
   capability key. In addition to the exact-command reuse, a `shell.run`

@@ -1,7 +1,8 @@
 use super::*;
 use crate::agent_tool_runtime::{
     approval_policy_allows_auto_grant, evaluate_agent_tool_permission,
-    pending_permission_matches_exact_invocation, AgentToolPermissionGateOutcome,
+    pending_permission_matches_exact_invocation, request_auto_grant_eligible,
+    AgentToolPermissionGateOutcome,
 };
 use agent_core::{PermissionDecision, PermissionResolution, ToolCallId};
 
@@ -421,4 +422,69 @@ fn strict_policy_keeps_prompting_without_reusing_policy_grants() {
     )
     .expect("strict evaluation must reach the ordinary gate");
     assert_eq!(strict, AgentToolPermissionGateOutcome::Pending);
+}
+
+#[test]
+fn request_eligibility_metadata_controls_auto_grant_admission() {
+    let mut request = permission_request(&invocation());
+    assert!(
+        request_auto_grant_eligible(&request),
+        "absent metadata must keep the historical auto-grant admission"
+    );
+    request
+        .metadata
+        .insert("auto_grant_eligible".to_string(), "true".to_string());
+    assert!(request_auto_grant_eligible(&request));
+    request
+        .metadata
+        .insert("auto_grant_eligible".to_string(), "false".to_string());
+    assert!(
+        !request_auto_grant_eligible(&request),
+        "explicit ineligibility must never auto-grant"
+    );
+}
+
+#[test]
+fn ineligible_requests_still_prompt_under_permissive_approval_policies() {
+    let mut store = SqliteStore::in_memory().expect("store should open");
+    let invocation = invocation();
+    let context = run_context("session-a");
+
+    // Baseline: an eligible request is auto-approved by the session policy.
+    let eligible = evaluate_agent_tool_permission(
+        &mut store,
+        &phase16_task_id(),
+        &context,
+        Some("session-a"),
+        &invocation,
+        permission_request(&invocation),
+        "session",
+    )
+    .expect("eligible requests should auto-grant under the session policy");
+    assert_eq!(eligible, AgentToolPermissionGateOutcome::Reused);
+
+    // The same capability flagged ineligible (unrecognized executable or a
+    // positional script file) must reach the user prompt instead, under both
+    // permissive policies.
+    for policy in ["session", "all"] {
+        let mut ineligible = permission_request(&invocation);
+        ineligible
+            .metadata
+            .insert("auto_grant_eligible".to_string(), "false".to_string());
+        let outcome = evaluate_agent_tool_permission(
+            &mut store,
+            &phase16_task_id(),
+            &context,
+            Some("session-a"),
+            &invocation,
+            ineligible,
+            policy,
+        )
+        .expect("ineligible requests must reach the ordinary gate");
+        assert_eq!(
+            outcome,
+            AgentToolPermissionGateOutcome::Pending,
+            "auto_grant_eligible=false must still prompt under the {policy} policy"
+        );
+    }
 }

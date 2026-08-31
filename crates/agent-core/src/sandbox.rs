@@ -84,6 +84,31 @@ pub fn seatbelt_profile_args(mode: SandboxMode, workspace_root: &Path) -> Vec<St
     }
 }
 
+/// Wrap an already-built argv in the session's sandbox confinement.
+/// [`SandboxMode::FullAccess`] returns the argv unchanged (the historical
+/// behavior); every other mode prefixes it with
+/// `/usr/bin/sandbox-exec -p <profile> --`. Used by execution paths whose
+/// argv is not a plain `/bin/zsh -c <command>` (notably the supervised
+/// process launcher, which must stay confined exactly like `shell.run`).
+pub fn sandboxed_argv(
+    mode: SandboxMode,
+    workspace_root: &Path,
+    inner_argv: Vec<String>,
+) -> Vec<String> {
+    let profile = seatbelt_profile_args(mode, workspace_root);
+    if profile.is_empty() {
+        return inner_argv;
+    }
+    let mut argv = vec![
+        "/usr/bin/sandbox-exec".to_string(),
+        "-p".to_string(),
+        profile.join(""),
+        "--".to_string(),
+    ];
+    argv.extend(inner_argv);
+    argv
+}
+
 /// The argv used to run a shell command under the session's sandbox mode.
 /// [`SandboxMode::FullAccess`] returns the exact historical argv
 /// (`/bin/zsh -fc <command>`); every other mode wraps the command in

@@ -37,6 +37,7 @@ mod process_tests;
 mod process_time;
 mod process_tools;
 mod shell;
+mod shell_classification;
 mod shell_postcondition;
 mod stream_capture;
 mod subagent_tool;

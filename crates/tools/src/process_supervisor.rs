@@ -5,6 +5,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use agent_core::{sandboxed_argv, SandboxMode};
+
 use crate::process_capture::{ProcessCapture, ProcessStopCause};
 use crate::process_control::terminate_process_group;
 use crate::process_cpu::process_group_cpu_nanos;
@@ -42,6 +44,7 @@ pub(crate) struct SupervisedProcess {
     pub(crate) monitor: JoinHandle<()>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_supervised_process(
     command: &str,
     cwd: &Path,
@@ -49,8 +52,10 @@ pub(crate) fn spawn_supervised_process(
     control: ToolExecutionControl,
     capture: Arc<ProcessCapture>,
     input_slot: Arc<Mutex<Option<mpsc::SyncSender<ProcessInputRequest>>>>,
+    sandbox: SandboxMode,
+    workspace_root: &Path,
 ) -> Result<SupervisedProcess, String> {
-    let mut child = spawn_process(command, cwd, budgets.cpu_seconds)?;
+    let mut child = spawn_process(command, cwd, budgets.cpu_seconds, sandbox, workspace_root)?;
     let process_id = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -181,17 +186,47 @@ fn supervise_process(
     capture.finish(cause, exit_code, signal);
 }
 
-fn spawn_process(command: &str, cwd: &Path, cpu_seconds: u64) -> Result<Child, String> {
-    let mut process = Command::new("/bin/zsh");
+/// The argv used to launch a supervised process under the session's sandbox
+/// mode. [`SandboxMode::FullAccess`] returns the exact historical argv; every
+/// other mode wraps the wrapper shell in `/usr/bin/sandbox-exec`, so managed
+/// processes honor the same confinement as `shell.run`.
+#[cfg(unix)]
+pub(crate) fn process_spawn_argv(
+    command: &str,
+    sandbox: SandboxMode,
+    workspace_root: &Path,
+) -> Vec<String> {
+    let inner = vec![
+        "/bin/zsh".to_string(),
+        "-fc".to_string(),
+        PROCESS_WRAPPER.to_string(),
+        "cindx-process".to_string(),
+        std::process::id().to_string(),
+        command.to_string(),
+    ];
+    sandboxed_argv(sandbox, workspace_root, inner)
+}
+
+fn spawn_process(
+    command: &str,
+    cwd: &Path,
+    cpu_seconds: u64,
+    sandbox: SandboxMode,
+    workspace_root: &Path,
+) -> Result<Child, String> {
     #[cfg(unix)]
-    process
-        .arg("-fc")
-        .arg(PROCESS_WRAPPER)
-        .arg("cindx-process")
-        .arg(std::process::id().to_string())
-        .arg(command);
+    let argv = process_spawn_argv(command, sandbox, workspace_root);
     #[cfg(not(unix))]
-    process.arg("-fc").arg(command);
+    let argv = {
+        let _ = (sandbox, workspace_root);
+        vec![
+            "/bin/zsh".to_string(),
+            "-fc".to_string(),
+            command.to_string(),
+        ]
+    };
+    let mut process = Command::new(&argv[0]);
+    process.args(&argv[1..]);
     process
         .current_dir(cwd)
         .stdin(Stdio::piped())

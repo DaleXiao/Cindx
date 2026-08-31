@@ -76,8 +76,8 @@ pub use run_requirements::{
     MAX_RUN_DECISION_QUERY_CHARS, MAX_RUN_DECISION_RATIONALE_CHARS,
 };
 pub use sandbox::{
-    confined_argv, sandbox_mode_from_metadata, sbpl_escape, seatbelt_profile_args, SandboxMode,
-    SANDBOX_MODE_METADATA_KEY,
+    confined_argv, sandbox_mode_from_metadata, sandboxed_argv, sbpl_escape, seatbelt_profile_args,
+    SandboxMode, SANDBOX_MODE_METADATA_KEY,
 };
 
 pub type Metadata = BTreeMap<String, String>;

@@ -89,6 +89,15 @@ pub(super) fn approval_policy_allows_auto_grant(
     matches!(approval_policy, "session" | "all") && *risk != PermissionRisk::Destructive
 }
 
+/// Whether the request itself admits policy auto-approval. Shell requests
+/// running an unrecognized executable or a positional script file carry
+/// `auto_grant_eligible=false` and must still prompt under session/all
+/// policies; absent metadata keeps the historical behavior for every other
+/// tool and for requests persisted before this gate existed.
+pub(super) fn request_auto_grant_eligible(request: &PermissionRequest) -> bool {
+    request.metadata.get("auto_grant_eligible").map(String::as_str) != Some("false")
+}
+
 pub(super) fn evaluate_agent_tool_permission(
     store: &mut SqliteStore,
     runtime_task_id: &TaskId,
@@ -119,7 +128,9 @@ pub(super) fn evaluate_agent_tool_permission(
     request.metadata = merge_persistable_run_context(request.metadata, run_context);
     insert_run_objectives(&mut request.metadata, run_context);
 
-    if approval_policy_allows_auto_grant(approval_policy, &request.risk) {
+    if approval_policy_allows_auto_grant(approval_policy, &request.risk)
+        && request_auto_grant_eligible(&request)
+    {
         // The configured approval policy (session/all) auto-approves this
         // non-destructive request without a user prompt. No grant is written:
         // every request re-evaluates the policy, and an audit event records

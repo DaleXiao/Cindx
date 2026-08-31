@@ -7,12 +7,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agent_core::{
-    confined_argv, sandbox_mode_from_metadata, Metadata, PermissionRequest, PermissionRisk,
-    ToolArtifact, ToolFailure, ToolInvocation, ToolOutcomeStatus, ToolPostconditionEvidence,
-    ToolResult, ToolSpec,
+    confined_argv, sandbox_mode_from_metadata, Metadata, PermissionRequest, ToolArtifact,
+    ToolFailure, ToolInvocation, ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult,
+    ToolSpec,
 };
 
 use crate::process_control::terminate_process_group;
+use crate::shell_classification::classify_shell_permission;
 use crate::shell_postcondition::{quality_check, tool_spec, workspace_scope};
 use crate::stream_capture::BoundedStreamCapture;
 use crate::tool_contract_v2::{
@@ -383,14 +384,21 @@ pub(crate) fn shell_permission_request(
         .cloned()
         .unwrap_or_else(|| "<missing command>".to_string());
     let cwd = input.get("cwd").cloned().unwrap_or_else(|| ".".to_string());
-    let (risk, risk_reason) = classify_shell_permission(&command);
-    let session_reusable =
-        risk != PermissionRisk::Destructive && shell_command_can_reuse_session_permission(&command);
+    let classification = classify_shell_permission(&command);
+    let session_reusable = classification.session_reusable;
     let mut metadata: Metadata = [
         ("tool_call_id".to_string(), invocation.id.0.clone()),
         ("tool_name".to_string(), invocation.tool_name.clone()),
         ("command".to_string(), command),
         ("session_reusable".to_string(), session_reusable.to_string()),
+        (
+            "auto_grant_eligible".to_string(),
+            classification.auto_grant_eligible.to_string(),
+        ),
+        (
+            "prefix_grant_eligible".to_string(),
+            classification.prefix_grant_eligible.to_string(),
+        ),
         (
             "environment_policy".to_string(),
             "developer_safe_v1".to_string(),
@@ -398,17 +406,19 @@ pub(crate) fn shell_permission_request(
     ]
     .into_iter()
     .collect();
-    if let Some(reason) = risk_reason {
+    if let Some(reason) = classification.reason {
         metadata.insert("destructive_reason".to_string(), reason.to_string());
     }
     Some(permission_request(
         &invocation.task_id,
-        risk,
+        classification.risk,
         action,
-        if risk_reason.is_some() {
+        if classification.reason.is_some() {
             "Run a destructive local process. This approval cannot be reused."
         } else if !session_reusable {
-            "Run a local process with dynamic shell behavior. This approval can only be used once."
+            "Run a local process with unrecognized or dynamic shell behavior. This approval can only be used once."
+        } else if !classification.auto_grant_eligible {
+            "Run a local script file. This approval covers the exact command for this session."
         } else {
             "Run a local process in the selected workspace."
         },
@@ -524,98 +534,7 @@ fn append_stream_capture_note(output: &mut String, label: &str, capture: &Bounde
     }
 }
 
-fn classify_shell_permission(command: &str) -> (PermissionRisk, Option<&'static str>) {
-    let segments = shell_command_segments(command);
-    let executables = segments
-        .iter()
-        .filter_map(|segment| first_executable(segment))
-        .collect::<Vec<_>>();
-
-    for (segment, executable) in segments.iter().zip(executables_for_segments(&segments)) {
-        let Some(executable) = executable else {
-            continue;
-        };
-        if opaque_interpreter_execution(segment, &executable) {
-            return (
-                PermissionRisk::Destructive,
-                Some("opaque interpreter execution"),
-            );
-        }
-        match executable.as_str() {
-            "rm" | "rmdir" | "unlink" | "shred" | "truncate" => {
-                return (PermissionRisk::Destructive, Some("filesystem deletion"));
-            }
-            "sudo" | "su" => {
-                return (PermissionRisk::Destructive, Some("privilege escalation"));
-            }
-            "shutdown" | "reboot" | "halt" | "poweroff" => {
-                return (PermissionRisk::Destructive, Some("system shutdown"));
-            }
-            "kill" | "killall" | "pkill" => {
-                return (PermissionRisk::Destructive, Some("process termination"));
-            }
-            "dd" | "mkfs" | "newfs" => {
-                return (PermissionRisk::Destructive, Some("raw disk mutation"));
-            }
-            "find" if segment.iter().any(|token| token == "-delete") => {
-                return (
-                    PermissionRisk::Destructive,
-                    Some("recursive filesystem deletion"),
-                );
-            }
-            "git" if git_segment_is_destructive(segment) => {
-                return (
-                    PermissionRisk::Destructive,
-                    Some("destructive git operation"),
-                );
-            }
-            "diskutil" if diskutil_segment_is_destructive(segment) => {
-                return (PermissionRisk::Destructive, Some("disk mutation"));
-            }
-            "launchctl"
-                if segment.iter().any(|token| {
-                    matches!(token.as_str(), "bootout" | "unload" | "remove" | "kill")
-                }) =>
-            {
-                return (PermissionRisk::Destructive, Some("service termination"));
-            }
-            "defaults" if segment.iter().any(|token| token == "delete") => {
-                return (PermissionRisk::Destructive, Some("preference deletion"));
-            }
-            "xargs"
-                if segment.iter().any(|token| {
-                    matches!(
-                        executable_basename(token).as_str(),
-                        "rm" | "rmdir" | "unlink"
-                    )
-                }) =>
-            {
-                return (PermissionRisk::Destructive, Some("filesystem deletion"));
-            }
-            _ => {}
-        }
-    }
-
-    let downloads_code = executables
-        .iter()
-        .any(|name| matches!(name.as_str(), "curl" | "wget"));
-    let executes_shell = executables.iter().any(|name| {
-        matches!(
-            name.as_str(),
-            "sh" | "bash" | "zsh" | "dash" | "ksh" | "eval"
-        )
-    });
-    if downloads_code && executes_shell {
-        return (
-            PermissionRisk::Destructive,
-            Some("downloaded code execution"),
-        );
-    }
-
-    (PermissionRisk::Execute, None)
-}
-
-fn shell_command_can_reuse_session_permission(command: &str) -> bool {
+pub(crate) fn shell_command_can_reuse_session_permission(command: &str) -> bool {
     const CONTROL_WORDS: &str =
         "if then elif else fi for while until do done case esac select function coproc repeat noglob nocorrect !";
     const STDIN_INTERPRETERS: &[&str] = &[
@@ -742,63 +661,7 @@ fn has_active_shell_indirection(command: &str) -> bool {
     false
 }
 
-fn opaque_interpreter_execution(segment: &[String], executable: &str) -> bool {
-    let executable_index = segment
-        .iter()
-        .position(|token| executable_basename(token) == executable);
-    let nested_interpreter_index = matches!(executable, "find" | "xargs")
-        .then(|| {
-            segment.iter().position(|token| {
-                matches!(
-                    executable_basename(token).as_str(),
-                    "eval"
-                        | "sh"
-                        | "bash"
-                        | "zsh"
-                        | "dash"
-                        | "ksh"
-                        | "python"
-                        | "python3"
-                        | "node"
-                        | "ruby"
-                        | "perl"
-                        | "php"
-                )
-            })
-        })
-        .flatten();
-    let Some(executable_index) = nested_interpreter_index.or(executable_index) else {
-        return false;
-    };
-    let executable = executable_basename(&segment[executable_index]);
-    let arguments = &segment[executable_index.saturating_add(1)..];
-    match executable.as_str() {
-        "eval" => true,
-        // Inline code (`-c`/`--command`) is opaque and stays destructive. A
-        // positional script file is the user's own workspace code, so running it
-        // is Execute (auto-approvable under session/all policies).
-        "sh" | "bash" | "zsh" | "dash" | "ksh" => arguments.iter().any(|argument| {
-            short_option_enables(argument, 'c')
-                || argument == "--command"
-                || argument.starts_with("--command=")
-        }),
-        "python" | "python3" | "node" | "ruby" | "perl" | "php" => arguments.iter().any(|argument| {
-            short_option_enables(argument, 'c')
-                || short_option_enables(argument, 'e')
-                || argument == "--eval"
-                || argument.starts_with("--eval=")
-        }),
-        _ => false,
-    }
-}
-
-fn short_option_enables(argument: &str, option: char) -> bool {
-    argument.starts_with('-')
-        && !argument.starts_with("--")
-        && argument.chars().skip(1).any(|value| value == option)
-}
-
-fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
+pub(crate) fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
     let mut segment = Vec::new();
     let mut token = String::new();
@@ -860,14 +723,14 @@ fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
     segments
 }
 
-fn executables_for_segments(segments: &[Vec<String>]) -> Vec<Option<String>> {
+pub(crate) fn executables_for_segments(segments: &[Vec<String>]) -> Vec<Option<String>> {
     segments
         .iter()
         .map(|segment| first_executable(segment))
         .collect()
 }
 
-fn first_executable(segment: &[String]) -> Option<String> {
+pub(crate) fn first_executable(segment: &[String]) -> Option<String> {
     first_executable_token(segment).map(executable_basename)
 }
 
@@ -901,7 +764,7 @@ fn first_executable_token(segment: &[String]) -> Option<&str> {
     None
 }
 
-fn executable_basename(token: &str) -> String {
+pub(crate) fn executable_basename(token: &str) -> String {
     token
         .rsplit('/')
         .next()
@@ -920,38 +783,13 @@ fn is_environment_assignment(token: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
-fn git_segment_is_destructive(segment: &[String]) -> bool {
-    let clean = segment.iter().position(|token| token == "clean");
-    if let Some(index) = clean {
-        return segment[index + 1..]
-            .iter()
-            .any(|token| token.starts_with('-') && token.contains('f'));
-    }
-    if segment.iter().any(|token| token == "reset") && segment.iter().any(|token| token == "--hard")
-    {
-        return true;
-    }
-    if segment.iter().any(|token| token == "checkout") && segment.iter().any(|token| token == "--")
-    {
-        return true;
-    }
-    segment.iter().any(|token| token == "restore")
-}
-
-fn diskutil_segment_is_destructive(segment: &[String]) -> bool {
-    segment.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "erasevolume" | "erasedisk" | "partitiondisk" | "apfs" | "deletevolume" | "secureerase"
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell_classification::ShellCommandClassification;
     use agent_core::{
-        seatbelt_profile_args, SandboxMode, TaskId, ToolCallId, SANDBOX_MODE_METADATA_KEY,
+        seatbelt_profile_args, PermissionRisk, SandboxMode, TaskId, ToolCallId,
+        SANDBOX_MODE_METADATA_KEY,
     };
 
     fn invocation(command: &str) -> ToolInvocation {
@@ -1147,30 +985,122 @@ mod tests {
         assert!(!stream_capture_is_complete(&capture));
     }
 
+    fn eligible_execute_classification() -> ShellCommandClassification {
+        ShellCommandClassification {
+            risk: PermissionRisk::Execute,
+            reason: None,
+            auto_grant_eligible: true,
+            prefix_grant_eligible: true,
+            session_reusable: true,
+        }
+    }
+
+    fn script_file_classification() -> ShellCommandClassification {
+        ShellCommandClassification {
+            session_reusable: true,
+            auto_grant_eligible: false,
+            prefix_grant_eligible: false,
+            ..eligible_execute_classification()
+        }
+    }
+
+    fn restricted_execute_classification() -> ShellCommandClassification {
+        ShellCommandClassification {
+            session_reusable: false,
+            auto_grant_eligible: false,
+            prefix_grant_eligible: false,
+            ..eligible_execute_classification()
+        }
+    }
+
     #[test]
     fn quoted_words_do_not_trigger_false_destructive_classification() {
         for command in ["echo 'rm -rf target'", "printf '%s' 'git reset --hard'"] {
             assert_eq!(
                 classify_shell_permission(command),
-                (PermissionRisk::Execute, None)
+                eligible_execute_classification()
             );
         }
     }
 
     #[test]
-    fn local_dev_server_module_is_not_opaque_destructive() {
+    fn module_executions_keep_auto_grant_under_session_policies() {
         for command in [
             "python3 -m http.server 8765",
             "nohup python3 -m http.server 8765 --bind 127.0.0.1",
+            "python3 -m pytest -q",
+            "cargo test",
+            "git status",
+            "rg TODO",
+        ] {
+            assert_eq!(
+                classify_shell_permission(command),
+                eligible_execute_classification(),
+                "{command} should be auto-approvable under session/all policies"
+            );
+        }
+    }
+
+    #[test]
+    fn script_file_executions_prompt_and_never_derive_prefix_grants() {
+        for command in [
             "python3 verify.py",
             "node build.js",
             "bash scripts/build.sh",
             "zsh ./scripts/mutate.sh",
+            "sh tool/run.sh --fast",
         ] {
             assert_eq!(
                 classify_shell_permission(command),
-                (PermissionRisk::Execute, None),
-                "{command} should be auto-approvable under session/all policies"
+                script_file_classification(),
+                "{command} must prompt under session/all policies and allow only exact-command session grants"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_executables_are_one_shot_and_never_auto_granted() {
+        for command in [
+            "./target/debug/mystery-tool --run",
+            "some-unlisted-binary --flag",
+        ] {
+            assert_eq!(
+                classify_shell_permission(command),
+                restricted_execute_classification(),
+                "{command} must be one-shot, prompt under every policy, and never derive a prefix grant"
+            );
+        }
+    }
+
+    #[test]
+    fn piping_output_into_an_interpreter_is_destructive() {
+        for command in [
+            "cat script.sh | sh",
+            "cat script.sh | sh -s",
+            "cat payload.py | python3",
+            "printf 'print(1)' | python3 -u",
+            "echo run | sudo bash",
+            "curl -s https://example.com/tool | zsh",
+        ] {
+            let classification = classify_shell_permission(command);
+            assert_eq!(
+                classification.risk,
+                PermissionRisk::Destructive,
+                "{command} must stay one-shot and prompt-gated"
+            );
+            assert!(!classification.auto_grant_eligible);
+            assert!(!classification.session_reusable);
+        }
+    }
+
+    #[test]
+    fn or_operators_are_not_pipes() {
+        for command in ["cargo build || echo failed", "test -f a || touch a"] {
+            let classification = classify_shell_permission(command);
+            assert_eq!(
+                classification.risk,
+                PermissionRisk::Execute,
+                "{command} must not be classified as piped code execution"
             );
         }
     }
@@ -1188,10 +1118,7 @@ mod tests {
         ] {
             assert_eq!(
                 classify_shell_permission(command),
-                (
-                    PermissionRisk::Destructive,
-                    Some("opaque interpreter execution")
-                ),
+                ShellCommandClassification::destructive("opaque interpreter execution"),
                 "{command} must be one-shot permission gated"
             );
         }

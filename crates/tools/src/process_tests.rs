@@ -676,3 +676,32 @@ fn process_session_contract_gate() {
     process_children_do_not_inherit_unlisted_credentials();
     eprintln!("cindx.process-session-contract.v1");
 }
+
+#[cfg(unix)]
+#[test]
+fn process_spawn_argv_honors_the_session_sandbox_mode() {
+    use crate::process_supervisor::process_spawn_argv;
+    use agent_core::SandboxMode;
+
+    let root = Path::new("/workspace");
+
+    // FullAccess preserves the exact historical argv (no wrapper process).
+    let open = process_spawn_argv("echo hi", SandboxMode::FullAccess, root);
+    assert_eq!(open[0], "/bin/zsh");
+    assert_eq!(open[1], "-fc");
+    assert!(!open.iter().any(|token| token == "sandbox-exec"));
+
+    // ReadOnly wraps the wrapper shell in sandbox-exec with the deny-write
+    // profile, exactly like shell.run.
+    let read_only = process_spawn_argv("echo hi", SandboxMode::ReadOnly, root);
+    assert_eq!(read_only[0], "/usr/bin/sandbox-exec");
+    assert_eq!(read_only[1], "-p");
+    assert!(read_only[2].contains("(deny file-write*)"));
+    assert_eq!(read_only[3], "--");
+    assert_eq!(read_only[4], "/bin/zsh");
+    assert_eq!(read_only[5], "-fc");
+
+    // WorkspaceWrite additionally allows writes inside the workspace root.
+    let workspace_write = process_spawn_argv("echo hi", SandboxMode::WorkspaceWrite, root);
+    assert!(workspace_write[2].contains("(subpath \"/workspace\")"));
+}

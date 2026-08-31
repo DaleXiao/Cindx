@@ -31,6 +31,7 @@ pub(crate) const GUARDIAN_DISPOSITION_MALFORMED: &str = "guardian_malformed";
 pub(crate) const GUARDIAN_DISPOSITION_UNAVAILABLE: &str = "guardian_unavailable";
 pub(crate) const GUARDIAN_DISPOSITION_DISABLED: &str = "guardian_disabled";
 pub(crate) const GUARDIAN_DISPOSITION_DESTRUCTIVE_SKIPPED: &str = "guardian_destructive_skipped";
+pub(crate) const GUARDIAN_DISPOSITION_INELIGIBLE_COMMAND: &str = "guardian_ineligible_command";
 pub(crate) const GUARDIAN_DISPOSITION_NO_DISTINCT_REVIEWER: &str =
     "guardian_no_distinct_reviewer";
 
@@ -250,6 +251,13 @@ pub(crate) fn plan_guardian_review(
         executor_model,
         config.model_for_role(&ModelRole::Reviewer).as_str(),
     )?;
+    // Commands that are ineligible for policy auto-approval (unrecognized
+    // executables, positional script files) are equally ineligible for
+    // guardian auto-approval: the guardian must never approve what the
+    // approval policy itself would still prompt for.
+    if request.metadata.get("auto_grant_eligible").map(String::as_str) == Some("false") {
+        return Err(GUARDIAN_DISPOSITION_INELIGIBLE_COMMAND);
+    }
     let input_json = request
         .metadata
         .get("tool_input")
@@ -554,6 +562,43 @@ mod tests {
         assert!(plan.prompt.contains("execute"));
         assert!(plan.prompt.contains("user: run the tests"));
         assert!(plan.prompt.contains("\"decision\""));
+    }
+
+    #[test]
+    fn guardian_never_reviews_commands_the_policy_would_still_prompt_for() {
+        let enabled = provider_config_with_guardian(true, "reviewer-model", "executor-model");
+        // An unrecognized executable is classified auto_grant_eligible=false
+        // (see the tools crate classification), so the guardian must skip it
+        // even though it is Execute risk and the guardian is enabled with a
+        // distinct reviewer.
+        let mut ineligible = shell_permission_request("./target/debug/mystery-tool --run");
+        ineligible
+            .metadata
+            .insert("auto_grant_eligible".to_string(), "false".to_string());
+        assert_eq!(
+            plan_guardian_review(
+                &enabled,
+                &ineligible.risk,
+                "executor-model",
+                "objective",
+                &ineligible,
+                ""
+            )
+            .unwrap_err(),
+            GUARDIAN_DISPOSITION_INELIGIBLE_COMMAND
+        );
+
+        // A known command keeps its guardian eligibility.
+        let eligible = shell_permission_request("cargo test");
+        assert!(plan_guardian_review(
+            &enabled,
+            &eligible.risk,
+            "executor-model",
+            "objective",
+            &eligible,
+            ""
+        )
+        .is_ok());
     }
 
     #[test]

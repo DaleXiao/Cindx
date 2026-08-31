@@ -26,8 +26,7 @@ use agent_runtime::{
     advance_with_model_response, append_observation, append_tool_observation,
     compose_base_agent_system_prompt, model_request_for_turn_with_system_prompt,
     observation_from_agent_tool_result, record_tool_outcome, start_agent_loop,
-    tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig,
-    AgentToolRequest,
+    tool_invocation_from_request, AgentAdvance, AgentRuntimeConfig, AgentToolRequest,
 };
 use tools::ToolRegistry;
 
@@ -307,8 +306,11 @@ fn run_loop<P: EvalModelProvider>(
     let system_prompt = compose_base_agent_system_prompt(None);
 
     loop {
-        let request =
-            model_request_for_turn_with_system_prompt(&state, &prepared.specs, Some(&system_prompt));
+        let request = model_request_for_turn_with_system_prompt(
+            &state,
+            &prepared.specs,
+            Some(&system_prompt),
+        );
         let response = match provider.complete(&request) {
             Ok(response) => response,
             Err(provider_error) => {

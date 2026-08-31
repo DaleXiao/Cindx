@@ -239,9 +239,16 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
     // derived from the approved command's own clean shell tokens; dangerous or
     // dynamically-structured commands never derive a prefix, so the approval
     // degrades to the exact-command session grant (fail-closed narrowing).
+    // Commands flagged `prefix_grant_eligible=false` (script-file executions,
+    // unrecognized executables) also degrade to exact-command grants.
     if grant_command_prefix
         && matches!(&decision, PermissionDecision::AllowForSession)
         && matches!(request.action.as_str(), "shell.run" | "process.start")
+        && request
+            .metadata
+            .get("prefix_grant_eligible")
+            .map(String::as_str)
+            != Some("false")
     {
         let prefix = request
             .metadata

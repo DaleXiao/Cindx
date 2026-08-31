@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use agent_core::{Metadata, TaskId, ToolInvocation};
+use agent_core::{Metadata, SandboxMode, TaskId, ToolInvocation};
 
 use crate::process_capture::{ProcessCapture, ProcessSnapshot, ProcessStopCause};
 use crate::process_supervisor::{spawn_supervised_process, ProcessInputRequest, SupervisedProcess};
@@ -100,6 +100,8 @@ struct PendingLaunch {
     command: String,
     cwd: PathBuf,
     control: ToolExecutionControl,
+    sandbox: SandboxMode,
+    workspace_root: PathBuf,
 }
 
 struct ProcessEntry {
@@ -143,6 +145,7 @@ impl ProcessManager {
         Self { inner }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn reserve(
         &self,
         invocation: &ToolInvocation,
@@ -151,6 +154,8 @@ impl ProcessManager {
         cwd_label: String,
         budgets: ProcessBudgets,
         control: ToolExecutionControl,
+        sandbox: SandboxMode,
+        workspace_root: PathBuf,
     ) -> Result<ManagedProcessSnapshot, ProcessManagerError> {
         self.prune();
         let owner = ProcessOwner::from_invocation(invocation);
@@ -195,6 +200,8 @@ impl ProcessManager {
                 command,
                 cwd,
                 control,
+                sandbox,
+                workspace_root,
             })),
             stop_sender: Mutex::new(None),
             input_sender: Arc::new(Mutex::new(None)),
@@ -459,6 +466,8 @@ fn activate_entry(entry: &Arc<ProcessEntry>) {
         launch.control,
         Arc::clone(&entry.capture),
         Arc::clone(&entry.input_sender),
+        launch.sandbox,
+        &launch.workspace_root,
     ) {
         Ok(SupervisedProcess {
             stop_sender,

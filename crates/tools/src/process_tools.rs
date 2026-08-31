@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRisk, ToolFailure, ToolInvocation, ToolOutcomeStatus,
-    ToolResult, ToolSpec,
+    sandbox_mode_from_metadata, Metadata, PermissionRequest, PermissionRisk, ToolFailure,
+    ToolInvocation, ToolOutcomeStatus, ToolResult, ToolSpec,
 };
 
 use crate::process_contract::{
@@ -129,6 +129,8 @@ impl Tool for ProcessStartTool {
                 output_limit_bytes: output_limit_bytes as u64,
             },
             control.clone(),
+            sandbox_mode_from_metadata(&invocation.metadata),
+            self.workspace_root.clone(),
         ) {
             Ok(snapshot) => snapshot,
             Err(error) => return Ok(process_error_result(invocation.id, "process.start", error)),
