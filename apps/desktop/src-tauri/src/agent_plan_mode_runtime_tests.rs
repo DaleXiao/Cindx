@@ -543,3 +543,52 @@ fn plan_mode_contract_read_model_projects_the_pending_confirmation() {
     assert_eq!(pending.plan_markdown, plan_text());
     assert_eq!(pending.plan_digest, plan_digest(plan_text()));
 }
+
+#[test]
+fn adaptive_plan_gate_skips_conversational_and_trivial_requests() {
+    for prompt in [
+        "hi",
+        "hello there",
+        "你好",
+        "早上好！",
+        "thanks for the help",
+        "who are you?",
+        "what can you do?",
+        "今天天气怎么样",
+        "why is the sky blue?",
+        "",
+        "   ",
+    ] {
+        assert!(
+            !plan_first_warranted(prompt),
+            "{prompt:?} should skip the plan phase"
+        );
+    }
+}
+
+#[test]
+fn adaptive_plan_gate_keeps_engineering_work_planned() {
+    for prompt in [
+        "add a logout button to the sidebar",
+        "fix the race in the queue drain",
+        "refactor the permission runtime into modules",
+        "look at src/App.tsx and split it",
+        "implement rate limiting for the shell tool",
+        "把 Composer 的圆角统一一下",
+        "migrate the session store to the new schema",
+        // Long prompts are treated as real tasks regardless of vocabulary.
+        &"explain then improve the onboarding flow ".repeat(6),
+    ] {
+        assert!(plan_first_warranted(prompt), "{prompt:?} should keep the plan phase");
+    }
+}
+
+#[test]
+fn an_explicit_plan_request_always_wins_over_triviality() {
+    for prompt in ["plan", "give me a plan", "先给我一个计划", "做个规划再动手", "plan first please"] {
+        assert!(
+            plan_first_warranted(prompt),
+            "{prompt:?} explicitly asks for a plan"
+        );
+    }
+}

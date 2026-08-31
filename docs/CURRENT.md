@@ -167,20 +167,29 @@ Plan mode (plan-then-confirm) is an opt-in interaction feature, not a planning
 system. Settings exposes it as a default-off toggle ("Plan first (high/xhigh)"
 in Settings → Models, persisted as the provider `plan_first_enabled` setting)
 that applies only to High and Extra High effort; Fast and Default never honor
-it, and the Composer no longer shows a Plan button. When enabled, the run
+it, and the Composer no longer shows a Plan button. The toggle is adaptive: a
+deterministic, model-free complexity gate (`plan_first_warranted`) skips the
+plan phase for trivial requests (greetings, short questions, chit-chat) while
+keeping it for anything that reads like engineering work (paths/file
+references, change verbs, long prompts), and an explicit ask for a plan always
+wins; a skip is recorded as a progress event. When the gate admits the run, it
 drafts a plan before any preparation or execution: a bounded read-only loop
 (the same `file.read`/`file.list`/`file.search`/`file.glob`/`web.search`/
 `web.fetch` whitelist and per-call enforcement as subagent delegation) whose
-model calls are charged to the run's Worker stage budget. The drafted plan — an ordered step list plus
-the involved files, as bounded plain markdown — is persisted with the run
-events and the run pauses for an explicit user decision: approve and execute,
-discard and execute, or cancel the run. Approving injects the plan into the
-execution context through the project-instructions pipeline pattern (a
-protected internal source with a provenance digest receipt and
-untrusted-guidance boundary text); the plan is context content only and
-carries no scheduling authority. Discarding runs the ordinary path with the
-drafting budget still charged; cancelling terminates the run. The wait is the
-existing nonterminal pause with a durable recovery envelope, so an app restart
+model calls are charged to the run's Worker stage budget. The drafted plan — a
+structured Objective / numbered Steps (with per-step files notes) /
+Verification document, as bounded markdown — is persisted with the run events
+and the run pauses for an explicit user decision: approve and execute, discard
+and execute, or cancel the run. The confirmation card renders the plan as a
+visual step list (objective banner, numbered step cards, file chips,
+verification footer) when the structure parses, falling back to rich markdown
+rendering for freer plans. Approving injects the plan into the execution
+context through the project-instructions pipeline pattern (a protected
+internal source with a provenance digest receipt and untrusted-guidance
+boundary text); the plan is context content only and carries no scheduling
+authority. Discarding runs the ordinary path with the drafting budget still
+charged; cancelling terminates the run. The wait is the existing nonterminal
+pause with a durable recovery envelope, so an app restart
 re-presents the same pending confirmation, and resolving resumes the run
 through the ordinary paused-run continuation path. A plan-drafting failure
 (provider error, empty plan, or an exhausted Worker stage budget) is recorded

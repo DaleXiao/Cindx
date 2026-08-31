@@ -1184,18 +1184,80 @@ textarea::placeholder {
 }
 
 .plan-confirmation-plan {
-  max-height: 240px;
+  max-height: 280px;
   margin: 0;
-  padding: 8px 10px;
+  padding: 10px 12px;
   overflow-y: auto;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: #333333;
   background: #ffffff;
   border: 1px solid #e2e2e2;
   border-radius: var(--radius-md);
-  font-family: inherit;
   font-size: 12px;
+}
+
+.plan-confirmation-objective {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.plan-confirmation-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plan-confirmation-step {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.plan-confirmation-step-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(37, 99, 235, 0.12);
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.plan-confirmation-step-body strong {
+  font-size: 12.5px;
+}
+
+.plan-confirmation-step-body p {
+  margin: 2px 0 0;
+  color: var(--muted);
+}
+
+.plan-confirmation-step-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.plan-confirmation-step-files code {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 10.5px;
+}
+
+.plan-confirmation-verification {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e2e2;
+  color: var(--muted);
 }
 
 .plan-confirmation-actions {

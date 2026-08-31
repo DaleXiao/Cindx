@@ -90,6 +90,78 @@ pub(crate) fn plan_mode_gate_active(requested: bool, effort: AgentPolicy) -> boo
     requested && plan_mode_available_for_effort(effort)
 }
 
+/// Deterministic complexity gate for the plan-first toggle. Trivial requests
+/// (greetings, short questions, chit-chat) skip the plan phase even when the
+/// toggle is on, while anything that reads like engineering work keeps it; an
+/// explicit ask for a plan always wins. Pure and model-free, matching the
+/// deterministic planning philosophy: the toggle states intent, this gate
+/// states whether the request warrants a plan.
+pub(crate) fn plan_first_warranted(prompt: &str) -> bool {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if explicit_plan_request(trimmed) {
+        return true;
+    }
+    if trimmed.chars().count() > 160 {
+        return true;
+    }
+    if contains_path_or_file_reference(trimmed) {
+        return true;
+    }
+    contains_action_verb(trimmed)
+}
+
+fn explicit_plan_request(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    lower.contains("计划")
+        || lower.contains("规划")
+        || lower.starts_with("plan")
+        || lower.contains(" plan ")
+        || lower.contains("plan:")
+        || lower.contains("plan first")
+        || lower.contains("a plan")
+        || lower.contains("the plan")
+}
+
+fn contains_path_or_file_reference(prompt: &str) -> bool {
+    if prompt.contains('`') {
+        return true;
+    }
+    const FILE_EXTENSIONS: &[&str] = &[
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".json", ".toml", ".yaml", ".yml",
+        ".css", ".html", ".sh", ".mjs", ".cjs", ".go", ".swift", ".kt",
+    ];
+    if FILE_EXTENSIONS.iter().any(|extension| prompt.contains(extension)) {
+        return true;
+    }
+    // A slash between word characters reads as a path (src/foo, apps/desktop).
+    prompt
+        .as_bytes()
+        .windows(3)
+        .any(|window| window[1] == b'/' && window[0].is_ascii_alphanumeric() && window[2].is_ascii_alphanumeric())
+}
+
+fn contains_action_verb(prompt: &str) -> bool {
+    const ENGLISH_VERBS: &[&str] = &[
+        "add ", "adds ", "create ", "creates ", "build ", "builds ", "implement ",
+        "implements ", "refactor", "fix ", "fixes ", "write ", "writes ", "update ",
+        "updates ", "change ", "changes ", "delete ", "removes ", "remove ", "rename",
+        "move ", "moves ", "migrate", "integrate", "set up", "setup", "deploy",
+        "configure", "optimize", "improve", "generate", "make ", "install ", "upgrade",
+        "replace", "extract", "split", "merge ",
+    ];
+    const CHINESE_VERBS: &[&str] = &[
+        "加", "写", "改", "修", "建", "删", "重构", "实现", "添加", "创建", "修复", "更新",
+        "删除", "移动", "迁移", "配置", "优化", "生成", "搭建", "接入", "替换", "拆分", "合并",
+        "统一", "调整", "支持", "增加", "做一", "处理",
+    ];
+    let lower = prompt.to_lowercase();
+    ENGLISH_VERBS.iter().any(|verb| lower.contains(verb))
+        || CHINESE_VERBS.iter().any(|verb| prompt.contains(verb))
+}
+
 pub(crate) fn plan_mode_requested_in_context(run_context: &Metadata) -> bool {
     run_context.get(PLAN_MODE_REQUESTED_KEY).map(String::as_str) == Some("true")
 }
@@ -123,9 +195,15 @@ pub(crate) fn plan_phase_tool_specs(registry: &ToolRegistry) -> Vec<ToolSpec> {
 pub(crate) fn plan_mode_system_prompt() -> &'static str {
     "You draft execution plans for an agent run. You operate read-only: you may inspect the \
      workspace with the provided read-only tools, but you must never attempt to change anything. \
-     Answer with a concise markdown plan containing an ordered list of steps and a list of the \
-     files you expect to inspect or modify. Do not nest sub-plans, do not execute the plan, and \
-     do not ask questions; if information is missing, state the assumption inside the plan."
+     Answer with the plan only, in this exact shape:\n\
+     Objective: <one sentence>\n\
+     Steps:\n\
+     1. <imperative step title> - <one short line of detail> (files: path/a, path/b)\n\
+     2. ...\n\
+     Verification: <how the result will be checked>\n\
+     Keep it to at most 7 steps; omit the files note for steps that touch no files. Do not nest \
+     sub-plans, do not execute the plan, and do not ask questions; if information is missing, \
+     state the assumption inside the step."
 }
 
 pub(crate) fn build_plan_phase_user_prompt(objective: &str) -> String {
@@ -550,6 +628,18 @@ pub(crate) fn run_plan_mode_gate(
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PlanModeGateOutcome, String> {
     if !plan_mode_requested_in_context(run_context) || !plan_mode_available_for_effort(effort) {
+        return Ok(PlanModeGateOutcome::Proceed);
+    }
+    if !plan_first_warranted(prompt) {
+        // Adaptive plan-first: the toggle states intent, but a trivial request
+        // (greeting, short question) gains nothing from a plan phase. The skip
+        // is deterministic, recorded for observability, and never blocks the run.
+        crate::agent_query_commands::append_agent_progress_event(
+            state,
+            task_id,
+            run_context,
+            "Plan phase skipped: the request does not warrant a plan",
+        )?;
         return Ok(PlanModeGateOutcome::Proceed);
     }
     if !cancellation.begin_preparation() {

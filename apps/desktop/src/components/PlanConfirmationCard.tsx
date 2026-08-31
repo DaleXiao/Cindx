@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ListChecks, Play, Trash2, X } from "lucide-react";
 import {
   resolveAgentPlanConfirmation,
@@ -14,6 +14,8 @@ import {
   type PlanConfirmationDecision,
   type PlanResolvedBy
 } from "../planModeModel";
+import { parsePlanDocument } from "../planConfirmationModel";
+import { AgentMarkdown } from "./AgentMarkdown";
 
 type PlanConfirmationCardProps = {
   sessionId: string;
@@ -128,6 +130,16 @@ export function PlanConfirmationCard({
   };
 
   const countdownSeconds = Math.ceil(remainingMs / 1000);
+  const planDocument = useMemo(
+    () => parsePlanDocument(confirmation.planMarkdown),
+    [confirmation.planMarkdown]
+  );
+
+  const copyCode = (content: string) => {
+    void navigator.clipboard
+      .writeText(content)
+      .catch(() => onError("Could not copy the code block."));
+  };
 
   return (
     <section
@@ -149,9 +161,46 @@ export function PlanConfirmationCard({
       <p id="plan-confirmation-description">
         The agent drafted this plan read-only and has not executed anything yet.
       </p>
-      <pre className="plan-confirmation-plan" onScroll={engage}>
-        {confirmation.planMarkdown}
-      </pre>
+      <div className="plan-confirmation-plan" onScroll={engage}>
+        {planDocument.structured ? (
+          <>
+            {planDocument.objective && (
+              <p className="plan-confirmation-objective">{planDocument.objective}</p>
+            )}
+            <ol className="plan-confirmation-steps">
+              {planDocument.steps.map((step) => (
+                <li key={step.index} className="plan-confirmation-step">
+                  <span className="plan-confirmation-step-index" aria-hidden="true">
+                    {step.index}
+                  </span>
+                  <div className="plan-confirmation-step-body">
+                    <strong>{step.title}</strong>
+                    {step.detail && <p>{step.detail}</p>}
+                    {step.files.length > 0 && (
+                      <span className="plan-confirmation-step-files">
+                        {step.files.map((file) => (
+                          <code key={file}>{file}</code>
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {planDocument.verification && (
+              <p className="plan-confirmation-verification">
+                <strong>Verification:</strong> {planDocument.verification}
+              </p>
+            )}
+          </>
+        ) : (
+          <AgentMarkdown
+            content={confirmation.planMarkdown}
+            onOpenError={onError}
+            onCopyCode={copyCode}
+          />
+        )}
+      </div>
       <div className="plan-confirmation-actions">
         <button
           className="plan-confirmation-approve"

@@ -687,6 +687,19 @@
   border-color: var(--border);
 }
 
+:root[data-theme="dark"] .plan-confirmation-step-index {
+  background: rgba(96, 165, 250, 0.18);
+  color: #60a5fa;
+}
+
+:root[data-theme="dark"] .plan-confirmation-step-files code {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="dark"] .plan-confirmation-verification {
+  border-top-color: var(--border);
+}
+
 :root[data-theme="dark"] .plan-confirmation-actions button {
   color: var(--text);
   background: var(--surface);
