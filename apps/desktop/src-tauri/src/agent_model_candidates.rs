@@ -1,8 +1,8 @@
 use crate::configuration_models::ProviderConfig;
 use crate::provider_profiles::{provider_model_supports_tools, provider_model_supports_vision};
-use model_provider::model_supports_vision_content;
-use agent_core::{ModelCandidate, ModelCapabilitySource};
 use agent_core::ModelRole;
+use agent_core::{ModelCandidate, ModelCapabilitySource};
+use model_provider::model_supports_vision_content;
 
 /// The configured model pool as capability candidates: the compatibility model,
 /// the per-role models, and (when pinned) the effort-tier default model.

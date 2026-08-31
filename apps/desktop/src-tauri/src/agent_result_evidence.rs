@@ -1,10 +1,10 @@
 use agent_core::{Event, MessageRole, Metadata, ToolOutcomeStatus, ToolRisk, ToolSource, ToolSpec};
-use agent_runtime::{
-    AgentGoalDelta, AgentLoopState, AgentToolRequest, PostconditionVerificationReceipt,
-};
 use agent_core::{
     IndependentQualitySource, LearningAttribution, LearningEvidenceV1, LearningTermination,
     LearningUsageCompleteness,
+};
+use agent_runtime::{
+    AgentGoalDelta, AgentLoopState, AgentToolRequest, PostconditionVerificationReceipt,
 };
 use std::collections::BTreeMap;
 
@@ -357,8 +357,8 @@ mod tests {
         EventId, EventKind, Message, Metadata, PostconditionVerifierKind, TaskId,
         ToolEffectSemantics, ToolPostconditionEvidence,
     };
-    use agent_runtime::{AgentRunControl, ModelAttemptUsage, ModelUsageSource, RunStageClass};
     use agent_core::{LearningDisposition, LearningVerification};
+    use agent_runtime::{AgentRunControl, ModelAttemptUsage, ModelUsageSource, RunStageClass};
 
     fn tool_message<const N: usize>(metadata: [(&str, &str); N]) -> Message {
         Message {

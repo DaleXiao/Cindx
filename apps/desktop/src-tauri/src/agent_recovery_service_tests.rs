@@ -996,7 +996,8 @@ fn settled_resume_does_not_poison_later_retry_with_a_stale_claim() {
     .expect("claim should succeed")
     .expect("paused checkpoint should be claimed");
 
-    let active_claim = peek_agent_recovery_envelope(&store, &context, &[AgentRecoveryState::Paused]);
+    let active_claim =
+        peek_agent_recovery_envelope(&store, &context, &[AgentRecoveryState::Paused]);
     assert!(active_claim
         .expect_err("an in-flight resume must keep blocking new claims")
         .contains("already claimed"));

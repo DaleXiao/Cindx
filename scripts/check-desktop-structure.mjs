@@ -1271,7 +1271,8 @@ assert(packageJson.name === "cindx-desktop", "desktop package name changed");
 assert(packageJson.scripts.dev.includes("vite"), "desktop dev script must run Vite");
 assert(
   packageJson.scripts.test === "node --test tests/*.test.ts" &&
-    frontendCheckScript.includes("npm test && npm run build") &&
+    frontendCheckScript.includes("npm test && npm run lint && npm run build") &&
+    packageJson.scripts.lint === "eslint src tests" &&
     ciWorkflow.includes("run-quality-gates.mjs --profile ci-contract") &&
     releaseWorkflow.includes("npm --prefix apps/desktop test") &&
     qualityGateManifest.profiles["ci-contract"].includes("frontend-test") &&

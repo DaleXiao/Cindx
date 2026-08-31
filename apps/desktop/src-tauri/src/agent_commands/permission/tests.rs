@@ -79,12 +79,8 @@ fn permission_cold_recovery_preserves_browser_execution_intent() {
     let root = std::env::temp_dir().join("cindx-permission-browser-tool-plan");
     let mut registry = ToolRegistry::with_workspace_tools(root);
     registry.install_meta_tools();
-    let (tools, completion_intent) = crate::agent_loop_runtime::planned_agent_tools(
-        &registry,
-        &run_context,
-        objective,
-        128_000,
-    );
+    let (tools, completion_intent) =
+        crate::agent_loop_runtime::planned_agent_tools(&registry, &run_context, objective, 128_000);
     let names = tools
         .iter()
         .map(|tool| tool.name.as_str())
@@ -233,8 +229,7 @@ fn permission_recovery_keeps_logical_identity_on_the_physical_attempt() {
     );
     let recovery =
         permission_recovery_envelope("identity", AgentTaskStateSnapshot::capture(&runtime));
-    let recovered =
-        permission_recovery_run_context(&permission_run_context(0, 0), &recovery, 1);
+    let recovered = permission_recovery_run_context(&permission_run_context(0, 0), &recovery, 1);
 
     assert_eq!(
         recovered.get("agent_run_id").map(String::as_str),
@@ -723,8 +718,8 @@ fn cold_recovery_replays_all_permission_observations_without_duplicates() {
         .iter()
         .filter(|observation| observation.message_index >= boundary)
     {
-        let risk = (observation.tool_name == "computer.screenshot")
-            .then_some(ToolRisk::SensitiveContext);
+        let risk =
+            (observation.tool_name == "computer.screenshot").then_some(ToolRisk::SensitiveContext);
         let denial = matches!(observation.status, ToolOutcomeStatus::Denied)
             .then(agent_runtime::AgentActionDenialFeedback::user_permission);
         AgentKernel::new(&mut restored, &tools).apply_persisted_tool_observation_with_denial(
@@ -745,23 +740,19 @@ fn cold_recovery_replays_all_permission_observations_without_duplicates() {
         );
     }
     assert_eq!(
-        AgentKernel::new(&mut restored, &tools).repeated_tool_failure_count(
-            &AgentToolRequest {
-                call_id: agent_core::ToolCallId("probe-same".to_string()),
-                tool_name: "shell.run".to_string(),
-                input: r#"{"secret":"super-secret"}"#.to_string(),
-            }
-        ),
+        AgentKernel::new(&mut restored, &tools).repeated_tool_failure_count(&AgentToolRequest {
+            call_id: agent_core::ToolCallId("probe-same".to_string()),
+            tool_name: "shell.run".to_string(),
+            input: r#"{"secret":"super-secret"}"#.to_string(),
+        }),
         MAX_IDENTICAL_TOOL_FAILURES
     );
     assert_eq!(
-        AgentKernel::new(&mut restored, &tools).repeated_tool_failure_count(
-            &AgentToolRequest {
-                call_id: agent_core::ToolCallId("probe-changed".to_string()),
-                tool_name: "shell.run".to_string(),
-                input: r#"{"secret":"different"}"#.to_string(),
-            }
-        ),
+        AgentKernel::new(&mut restored, &tools).repeated_tool_failure_count(&AgentToolRequest {
+            call_id: agent_core::ToolCallId("probe-changed".to_string()),
+            tool_name: "shell.run".to_string(),
+            input: r#"{"secret":"different"}"#.to_string(),
+        }),
         0
     );
     restored.messages = transcript.clone();
@@ -1075,8 +1066,7 @@ fn cold_permission_recovery_reconstructs_verified_workspace_postcondition() {
             .metadata
             .remove(agent_runtime::TOOL_EFFECT_WITNESS_METADATA_KEY);
     }
-    let legacy_observations =
-        persisted_permission_observations(&legacy_transcript, &run_context);
+    let legacy_observations = persisted_permission_observations(&legacy_transcript, &run_context);
     assert!(legacy_observations
         .iter()
         .all(|observation| observation.effect_witness.is_none()));
@@ -1379,21 +1369,19 @@ fn subagent_permission_resolves_in_place_without_executing_or_resuming() {
         .expect("events should load");
     assert!(events.iter().any(|event| {
         event.kind == EventKind::PermissionResolved
-            && event.metadata.get("permission_id").map(String::as_str) == Some("agent-perm-subagent")
+            && event.metadata.get("permission_id").map(String::as_str)
+                == Some("agent-perm-subagent")
     }));
     // The in-place resolution executes nothing and writes no transcript
     // message: the waiting subagent thread performs the approved patch.
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::ToolCallFinished | EventKind::ToolCallStarted))
-    );
-    assert!(
-        !events.iter().any(|event| {
-            event.kind == EventKind::MessageAdded
-                && event.metadata.get("role").map(String::as_str) == Some("tool")
-        })
-    );
+    assert!(!events.iter().any(|event| matches!(
+        event.kind,
+        EventKind::ToolCallFinished | EventKind::ToolCallStarted
+    )));
+    assert!(!events.iter().any(|event| {
+        event.kind == EventKind::MessageAdded
+            && event.metadata.get("role").map(String::as_str) == Some("tool")
+    }));
 }
 
 #[test]

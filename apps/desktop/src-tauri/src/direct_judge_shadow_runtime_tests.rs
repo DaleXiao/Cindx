@@ -157,4 +157,3 @@ fn shadow_fitness_journal_bounds_growth_and_reloads_for_summary() {
     assert_eq!(summary.average_reward_bps, Some(10_000));
     assert!(!summary.promotion_eligible);
 }
-

@@ -35,7 +35,10 @@ impl ScriptedProvider {
 
     /// The message list of the first model call, once captured.
     fn first_messages(&self) -> Option<Vec<Message>> {
-        self.first_messages.lock().expect("first messages poisoned").clone()
+        self.first_messages
+            .lock()
+            .expect("first messages poisoned")
+            .clone()
     }
 }
 
@@ -376,7 +379,9 @@ fn subagent_fork_seeds_the_balanced_parent_prefix_before_the_contract() {
     assert_eq!(&messages[..prefix.len()], &prefix[..]);
     assert_eq!(messages[prefix.len()].role, MessageRole::System);
     assert_eq!(messages[prefix.len() + 1].role, MessageRole::User);
-    assert!(messages[prefix.len() + 1].content.contains("inspect readme"));
+    assert!(messages[prefix.len() + 1]
+        .content
+        .contains("inspect readme"));
     assert!(
         agent_runtime::is_balanced_cut(&messages[..prefix.len()]),
         "the seeded prefix stays balanced"
@@ -464,7 +469,11 @@ fn subagent_fork_without_parent_history_keeps_the_isolated_shape() {
     );
 
     let messages = provider.first_messages().expect("first call captured");
-    assert_eq!(messages.len(), 2, "only the system contract and delegation prompt");
+    assert_eq!(
+        messages.len(),
+        2,
+        "only the system contract and delegation prompt"
+    );
     assert_eq!(messages[0].role, MessageRole::System);
     assert_eq!(messages[1].role, MessageRole::User);
 }
@@ -475,10 +484,7 @@ fn write_run_context() -> Metadata {
         ("agent_run_id".to_string(), "run-a".to_string()),
         ("project_id".to_string(), "project-a".to_string()),
         ("steer_epoch".to_string(), "0".to_string()),
-        (
-            "prompt_contract_epoch".to_string(),
-            "0".to_string(),
-        ),
+        ("prompt_contract_epoch".to_string(), "0".to_string()),
     ]
     .into_iter()
     .collect()
@@ -508,10 +514,7 @@ fn allow_patches_gate_requires_request_and_effect_authority() {
         SubagentWriteMode::ReadOnly
     );
     assert_eq!(
-        subagent_write_mode(
-            &context,
-            r#"{"description":"d","allow_patches":"yes"}"#
-        ),
+        subagent_write_mode(&context, r#"{"description":"d","allow_patches":"yes"}"#),
         SubagentWriteMode::ReadOnly,
         "a malformed flag never widens the surface"
     );
@@ -543,7 +546,13 @@ fn write_subagent_surface_adds_exactly_the_patch_pair() {
     assert!(names.iter().any(|name| name == "file.read"));
     assert!(names.iter().any(|name| name == "file.patch"));
     assert!(names.iter().any(|name| name == "file.patch_batch"));
-    for denied in ["file.write", "shell.run", "process.start", "todo.write", "task"] {
+    for denied in [
+        "file.write",
+        "shell.run",
+        "process.start",
+        "todo.write",
+        "task",
+    ] {
         assert!(
             !names.iter().any(|name| name == denied),
             "{denied} must never enter the write-subagent surface"
@@ -710,12 +719,9 @@ fn write_subagent_observes_allow_once_and_deny_decisions() {
     let task_id = TaskId("subagent-test".to_string());
     let run_context = write_run_context();
     let mut store = SqliteStore::in_memory().expect("store should open");
-    for (index, decision) in [
-        PermissionDecision::AllowOnce,
-        PermissionDecision::Deny,
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, decision) in [PermissionDecision::AllowOnce, PermissionDecision::Deny]
+        .into_iter()
+        .enumerate()
     {
         let mut request = PermissionRequest {
             id: PermissionRequestId(format!("agent-perm-{index}")),
@@ -883,7 +889,7 @@ fn write_subagent_denial_never_executes_the_patch() {
     .expect("wait should return");
     assert_eq!(outcome, SubagentPermissionOutcome::Denied);
     // The denied patch never ran: the workspace file is untouched.
-    let content = std::fs::read_to_string(workspace.path().join("README.md"))
-        .expect("README should exist");
+    let content =
+        std::fs::read_to_string(workspace.path().join("README.md")).expect("README should exist");
     assert_eq!(content, "line one\nline two\n");
 }

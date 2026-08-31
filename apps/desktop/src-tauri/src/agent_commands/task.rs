@@ -4,11 +4,11 @@ use super::run_identity::{
     inherited_agent_run_identity, inherited_agent_run_identity_from_events,
 };
 use crate::agent_execution_constraint::AgentExecutionConstraint;
+use crate::agent_preparation_runtime::effective_prompt_objective_for_messages;
 use crate::agent_preparation_runtime::AgentMemoryEvaluationConstraint;
 use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
-use crate::agent_preparation_runtime::effective_prompt_objective_for_messages;
 use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
 use crate::suspended_run_runtime::{
     clear_suspended_agent_run, suspended_agent_run_control_snapshot, suspended_agent_run_policy,
@@ -1107,9 +1107,7 @@ pub(crate) fn resolve_agent_plan_confirmation_blocking(
         // gate must stay an explicit user decision there (fail-closed).
         let config = clone_provider_config(&state)?;
         if config.approval_policy != "strict" {
-            return Err(
-                "automatic plan approval requires the strict approval policy".to_string(),
-            );
+            return Err("automatic plan approval requires the strict approval policy".to_string());
         }
     }
     let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;

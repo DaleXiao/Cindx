@@ -8,4 +8,4 @@ if [ ! -d "apps/desktop/node_modules" ]; then
   exit 1
 fi
 
-(cd apps/desktop && npm test && npm run build)
+(cd apps/desktop && npm test && npm run lint && npm run build)

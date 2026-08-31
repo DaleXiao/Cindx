@@ -219,9 +219,9 @@
 :root[data-theme="dark"] .queued-message-menu button:focus-visible,
 :root[data-theme="dark"] .queued-message-edit-actions button:hover:not(:disabled),
 :root[data-theme="dark"] .queued-message-menu-trigger:hover:not(:disabled),
-:root[data-theme="dark"] .composer-effort-menu > button:hover,
-:root[data-theme="dark"] .composer-effort-menu > button:focus-visible,
-:root[data-theme="dark"] .composer-effort-menu > button[data-selected="true"],
+:root[data-theme="dark"] .composer-effort-menu button:hover,
+:root[data-theme="dark"] .composer-effort-menu button:focus-visible,
+:root[data-theme="dark"] .composer-effort-menu button[data-selected="true"],
 :root[data-theme="dark"] .permission-review-actions button:hover:not(:disabled),
 :root[data-theme="dark"] .permission-ignored-row button:hover:not(:disabled) {
   background: var(--surface-active);

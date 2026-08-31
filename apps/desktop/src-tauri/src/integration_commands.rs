@@ -158,8 +158,7 @@ pub(crate) fn import_external_mcp_servers(
     state: tauri::State<'_, AppState>,
 ) -> Result<McpStateView, String> {
     let workspace_root = active_workspace_root(&state).ok();
-    let candidate_paths =
-        agent_mcp::external_mcp_config_candidate_paths(workspace_root.as_deref());
+    let candidate_paths = agent_mcp::external_mcp_config_candidate_paths(workspace_root.as_deref());
     let mut incoming = Vec::new();
     for path in candidate_paths {
         let Ok(raw) = std::fs::read_to_string(&path) else {

@@ -44,6 +44,7 @@ import {
   revealArtifact
 } from "../tauri";
 import { useArtifactImagePreview } from "../controllers/useArtifactImagePreview";
+import { useDialogFocus } from "../useDialogFocus";
 import type {
   AgentOutputArtifactView,
   AgentState,
@@ -399,6 +400,9 @@ export function Inspector({
   );
   const [selectedOutputPath, setSelectedOutputPath] = useState<string | null>(null);
   const [outputPreviewFullscreen, setOutputPreviewFullscreen] = useState(false);
+  const outputPreviewDialogRef = useDialogFocus<HTMLElement>(outputPreviewFullscreen, {
+    onEscape: () => setOutputPreviewFullscreen(false)
+  });
   const [openingOutputPath, setOpeningOutputPath] = useState<string | null>(null);
   const [outputActionError, setOutputActionError] = useState<string | null>(null);
   const [outputHistoryBySession, setOutputHistoryBySession] = useState<
@@ -692,6 +696,7 @@ export function Inspector({
 
   const outputPreview = selectedOutput ? (
     <section
+      ref={outputPreviewFullscreen ? outputPreviewDialogRef : undefined}
       className="inspector-output-detail"
       aria-label="Output preview"
       aria-modal={outputPreviewFullscreen || undefined}

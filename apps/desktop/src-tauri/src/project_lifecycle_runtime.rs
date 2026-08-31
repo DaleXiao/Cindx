@@ -43,7 +43,7 @@ use std::{
 
 const PROJECT_LIFECYCLE_JOURNAL_SCHEMA: &str = "cindx.project-lifecycle-journal.v1";
 const PROJECT_LIFECYCLE_JOURNAL_DIRECTORY: &str = "project-lifecycle-journal";
-  const FORK_RECOVERY_METADATA_KEYS: [&str; 7] = [
+const FORK_RECOVERY_METADATA_KEYS: [&str; 7] = [
     "recovery_schema",
     "recovery_resume_key",
     "recovery_state",

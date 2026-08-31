@@ -134,7 +134,10 @@ fn incremental_workspace_index_fallback_restores_the_local_profile() {
             Ok(EmbeddingBatch {
                 provider: "first-cloud".to_string(),
                 model: "test-embedding".to_string(),
-                vectors: texts.iter().map(|text| vec![text.len() as f32, 1.0]).collect(),
+                vectors: texts
+                    .iter()
+                    .map(|text| vec![text.len() as f32, 1.0])
+                    .collect(),
             })
         }
     }
@@ -167,15 +170,16 @@ fn incremental_workspace_index_fallback_restores_the_local_profile() {
     assert_eq!(backend, "cloud");
 
     fs::write(root.join("a.md"), "alpha evidence lines extended").expect("a should update");
-    let (fallback, backend, model, fallback_error) = index_workspace_with_cloud_fallback_cancellable(
-        &root,
-        IndexOptions::default(),
-        &base,
-        &mut FailingEmbedder,
-        "test-embedding",
-        || false,
-    )
-    .expect("local fallback should build the index");
+    let (fallback, backend, model, fallback_error) =
+        index_workspace_with_cloud_fallback_cancellable(
+            &root,
+            IndexOptions::default(),
+            &base,
+            &mut FailingEmbedder,
+            "test-embedding",
+            || false,
+        )
+        .expect("local fallback should build the index");
 
     assert_eq!(backend, "local-fallback");
     assert_eq!(

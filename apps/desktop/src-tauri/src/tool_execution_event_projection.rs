@@ -10,7 +10,11 @@ pub(crate) fn message_view_from_event(event: &Event) -> Option<ChatMessageView> 
     // Continuation replays re-inject the user prompt for the model on resume;
     // they must not render as a second user bubble in the thread.
     if event.metadata.get("role").map(String::as_str) == Some("user")
-        && event.metadata.get("continuation_replay").map(String::as_str) == Some("true")
+        && event
+            .metadata
+            .get("continuation_replay")
+            .map(String::as_str)
+            == Some("true")
     {
         return None;
     }

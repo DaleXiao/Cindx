@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import { createPortal } from "react-dom";
+import { useDialogFocus } from "../useDialogFocus";
 import {
   diagramPanActivationReached,
   diagramScrollForCenter,
@@ -158,6 +159,7 @@ async function downloadDiagramPng(
 
 export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscreenProps) {
   const theme = useResolvedTheme();
+  const dialogRef = useDialogFocus<HTMLElement>(true);
   const viewportRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -307,6 +309,7 @@ export function DiagramFullscreen({ diagram, onClose, onError }: DiagramFullscre
 
   return createPortal(
     <section
+      ref={dialogRef}
       className="thread-diagram-fullscreen"
       role="dialog"
       aria-modal="true"

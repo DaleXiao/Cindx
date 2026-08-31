@@ -32,8 +32,7 @@ pub(crate) const GUARDIAN_DISPOSITION_UNAVAILABLE: &str = "guardian_unavailable"
 pub(crate) const GUARDIAN_DISPOSITION_DISABLED: &str = "guardian_disabled";
 pub(crate) const GUARDIAN_DISPOSITION_DESTRUCTIVE_SKIPPED: &str = "guardian_destructive_skipped";
 pub(crate) const GUARDIAN_DISPOSITION_INELIGIBLE_COMMAND: &str = "guardian_ineligible_command";
-pub(crate) const GUARDIAN_DISPOSITION_NO_DISTINCT_REVIEWER: &str =
-    "guardian_no_distinct_reviewer";
+pub(crate) const GUARDIAN_DISPOSITION_NO_DISTINCT_REVIEWER: &str = "guardian_no_distinct_reviewer";
 
 const GUARDIAN_RESOLVED_BY: &str = "guardian-auto-approval";
 
@@ -128,7 +127,10 @@ pub(crate) fn guardian_context_excerpt(messages: &[Message]) -> String {
             MessageRole::Assistant => "assistant",
             _ => "tool",
         };
-        lines.push(format!("{role}: {}", bound_field(&message.content, GUARDIAN_CONTEXT_MESSAGE_CHARS)));
+        lines.push(format!(
+            "{role}: {}",
+            bound_field(&message.content, GUARDIAN_CONTEXT_MESSAGE_CHARS)
+        ));
     }
     for line in lines.into_iter().rev() {
         if !excerpt.is_empty() {
@@ -255,7 +257,12 @@ pub(crate) fn plan_guardian_review(
     // executables, positional script files) are equally ineligible for
     // guardian auto-approval: the guardian must never approve what the
     // approval policy itself would still prompt for.
-    if request.metadata.get("auto_grant_eligible").map(String::as_str) == Some("false") {
+    if request
+        .metadata
+        .get("auto_grant_eligible")
+        .map(String::as_str)
+        == Some("false")
+    {
         return Err(GUARDIAN_DISPOSITION_INELIGIBLE_COMMAND);
     }
     let input_json = request
@@ -472,7 +479,11 @@ mod tests {
     use super::*;
     use agent_core::TaskId;
 
-    fn provider_config_with_guardian(enabled: bool, reviewer: &str, executor: &str) -> ProviderConfig {
+    fn provider_config_with_guardian(
+        enabled: bool,
+        reviewer: &str,
+        executor: &str,
+    ) -> ProviderConfig {
         ProviderConfig {
             guardian_auto_approval: enabled,
             reviewer_model: reviewer.to_string(),
@@ -508,8 +519,15 @@ mod tests {
         // Default off: no plan, no disposition-specific eligibility.
         let off = provider_config_with_guardian(false, "reviewer-model", "executor-model");
         assert_eq!(
-            plan_guardian_review(&off, &request.risk, "executor-model", "objective", &request, "")
-                .unwrap_err(),
+            plan_guardian_review(
+                &off,
+                &request.risk,
+                "executor-model",
+                "objective",
+                &request,
+                ""
+            )
+            .unwrap_err(),
             GUARDIAN_DISPOSITION_DISABLED
         );
 
@@ -605,7 +623,8 @@ mod tests {
     fn guardian_review_prompt_bounds_oversized_fields() {
         let huge_objective = "x".repeat(GUARDIAN_MAX_FIELD_CHARS + 100);
         let huge_input = "y".repeat(GUARDIAN_MAX_FIELD_CHARS + 100);
-        let prompt = guardian_review_prompt(&huge_objective, "shell.run", &huge_input, "execute", "");
+        let prompt =
+            guardian_review_prompt(&huge_objective, "shell.run", &huge_input, "execute", "");
         assert!(prompt.contains("…[truncated]"));
         assert!(!prompt.contains(&"x".repeat(GUARDIAN_MAX_FIELD_CHARS + 100)));
         assert!(prompt.contains("(none)"));
@@ -749,9 +768,7 @@ mod tests {
         persist_guardian_approval_rows(&mut store, &request, &Metadata::new(), "bounded")
             .expect("guardian approval should persist");
 
-        let audits = store
-            .list_permission_audits()
-            .expect("audits should load");
+        let audits = store.list_permission_audits().expect("audits should load");
         assert_eq!(audits.len(), 1);
         let resolution = audits[0]
             .resolution
@@ -819,8 +836,14 @@ mod tests {
             GUARDIAN_DISPOSITION_UNAVAILABLE,
             GUARDIAN_DISPOSITION_DESTRUCTIVE_SKIPPED,
         ] {
-            guardian_disposition_event_rows(&mut store, &request, &Metadata::new(), disposition, None)
-                .expect("disposition event should persist");
+            guardian_disposition_event_rows(
+                &mut store,
+                &request,
+                &Metadata::new(),
+                disposition,
+                None,
+            )
+            .expect("disposition event should persist");
         }
 
         let events = store.list_by_task(&task_id).expect("events should load");

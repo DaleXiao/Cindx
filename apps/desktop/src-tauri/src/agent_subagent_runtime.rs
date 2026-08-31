@@ -211,8 +211,7 @@ fn subagent_tool_specs_for_mode(registry: &ToolRegistry, write: bool) -> Vec<Too
         .specs()
         .into_iter()
         .filter(|spec| {
-            subagent_tool_allowed(&spec.name)
-                || (write && subagent_patch_tool_allowed(&spec.name))
+            subagent_tool_allowed(&spec.name) || (write && subagent_patch_tool_allowed(&spec.name))
         })
         .collect()
 }
@@ -257,7 +256,10 @@ pub(crate) fn subagent_child_answer(
 ) -> (String, String) {
     let description = subagent_description(input_json);
     let input = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
-    let detail = input.get("prompt").and_then(|value| value.as_str()).unwrap_or("");
+    let detail = input
+        .get("prompt")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     let child_prompt = agent_runtime::build_subagent_task_prompt(&description, detail);
     let system_prompt = if write.is_some() {
         subagent_write_system_prompt()
@@ -298,11 +300,8 @@ pub(crate) fn subagent_child_answer(
             metadata: Metadata::new(),
         };
         let mut should_cancel = || agent_run_should_stop(cancellation);
-        let response = actor_provider.complete_streaming_cancellable(
-            request,
-            &mut |_| {},
-            &mut should_cancel,
-        );
+        let response =
+            actor_provider.complete_streaming_cancellable(request, &mut |_| {}, &mut should_cancel);
         cancellation.finish_model_call();
         let response = match response {
             Ok(response) => response,
@@ -434,7 +433,10 @@ fn request_subagent_patch_approval(
     request.id = PermissionRequestId(crate::runtime_values::unique_id("agent-perm"));
     let request_id = request.id.clone();
     store
-        .save_permission_request(request.clone(), crate::runtime_values::current_time_millis())
+        .save_permission_request(
+            request.clone(),
+            crate::runtime_values::current_time_millis(),
+        )
         .map_err(|error| error.to_string())?;
     let mut permission_metadata = [
         ("permission_id".to_string(), request_id.0.clone()),
@@ -458,10 +460,7 @@ fn request_subagent_patch_approval(
         task_id,
         agent_core::EventKind::PermissionRequested,
         format!("Agent permission requested for {}", request.action),
-        crate::project_session_persistence::metadata_with_context(
-            permission_metadata,
-            run_context,
-        ),
+        crate::project_session_persistence::metadata_with_context(permission_metadata, run_context),
     )
     .map_err(|error| error.to_string())?;
     Ok(request_id)
@@ -729,10 +728,7 @@ fn subagent_step_limit_answer(partial: &str) -> String {
 /// Remove a delegated `task` call id from the latest assistant message so the
 /// transcript has no dangling tool call (the answer is returned as an internal
 /// instruction instead of a tool observation).
-pub(crate) fn strip_subagent_call_id(
-    runtime: &mut agent_runtime::AgentLoopState,
-    call_id: &str,
-) {
+pub(crate) fn strip_subagent_call_id(runtime: &mut agent_runtime::AgentLoopState, call_id: &str) {
     let Some(message) = runtime
         .messages
         .iter_mut()

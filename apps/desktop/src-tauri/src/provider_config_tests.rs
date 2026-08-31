@@ -108,9 +108,8 @@ fn plan_first_enabled_config_round_trip_defaults_off() {
     assert!(!legacy.plan_first_enabled);
     assert!(provider_config_text(&legacy).contains("plan_first_enabled=false"));
 
-    let enabled = provider_config_from_text(
-        "base_url=https://example.test/v1\nplan_first_enabled=true\n",
-    );
+    let enabled =
+        provider_config_from_text("base_url=https://example.test/v1\nplan_first_enabled=true\n");
     assert!(enabled.plan_first_enabled);
     let reloaded = provider_config_from_text(&provider_config_text(&enabled));
     assert!(reloaded.plan_first_enabled);

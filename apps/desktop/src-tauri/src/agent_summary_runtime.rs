@@ -32,7 +32,10 @@ fn transcript_fingerprint(messages: &[Message]) -> u64 {
         total_chars = total_chars.saturating_add(message.content.chars().count());
     }
     total_chars.hash(&mut hasher);
-    if let Some(first_user) = messages.iter().find(|message| message.role == MessageRole::User) {
+    if let Some(first_user) = messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+    {
         first_user.content.trim().hash(&mut hasher);
     }
     if let Some(last) = messages.last() {
@@ -139,7 +142,10 @@ pub(crate) fn rolling_summary_for_run(
     agent_runtime::extractive_rolling_summary(messages, 1200)
 }
 
-fn context_pressure_warrants_model_summary(messages: &[Message], context_window_tokens: u64) -> bool {
+fn context_pressure_warrants_model_summary(
+    messages: &[Message],
+    context_window_tokens: u64,
+) -> bool {
     if context_window_tokens == 0 {
         return false;
     }
@@ -185,9 +191,14 @@ mod tests {
         assert_eq!(request.messages.len(), 2);
         assert!(matches!(request.messages[0].role, MessageRole::System));
         assert!(request.messages[0].content.contains("## Goal"));
-        assert!(request.messages[1].content.contains("[user] turn 0 content"));
+        assert!(request.messages[1]
+            .content
+            .contains("[user] turn 0 content"));
         assert_eq!(
-            request.metadata.get(GENERATION_TEMPERATURE_KEY).map(String::as_str),
+            request
+                .metadata
+                .get(GENERATION_TEMPERATURE_KEY)
+                .map(String::as_str),
             Some("0.2")
         );
     }
@@ -199,7 +210,12 @@ mod tests {
         assert!(!context_pressure_warrants_model_summary(&small, 0));
 
         let heavy: Vec<Message> = (0..40)
-            .map(|index| message(MessageRole::User, &format!("bulk {index} {}", "x".repeat(400))))
+            .map(|index| {
+                message(
+                    MessageRole::User,
+                    &format!("bulk {index} {}", "x".repeat(400)),
+                )
+            })
             .collect();
         assert!(context_pressure_warrants_model_summary(&heavy, 100));
     }
@@ -211,6 +227,9 @@ mod tests {
         assert_eq!(transcript_fingerprint(&base), transcript_fingerprint(&same));
         let mut changed = long_transcript(20);
         changed.push(message(MessageRole::Assistant, "an extra turn"));
-        assert_ne!(transcript_fingerprint(&base), transcript_fingerprint(&changed));
+        assert_ne!(
+            transcript_fingerprint(&base),
+            transcript_fingerprint(&changed)
+        );
     }
 }

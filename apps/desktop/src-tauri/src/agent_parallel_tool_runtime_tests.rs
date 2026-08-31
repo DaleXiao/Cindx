@@ -264,8 +264,7 @@ fn batch_read_only_certification_rejects_permissioned_serial_and_unknown_members
         prepared_call("call-read-two", "test.read-two"),
     ];
     assert!(parallel_batch_is_permissionless_read_only(
-        &registry,
-        &read_only
+        &registry, &read_only
     ));
 
     for rejected_tool in ["test.permissioned", "test.unknown"] {

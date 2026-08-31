@@ -114,7 +114,8 @@ fn schedule_execution_sessions_stay_out_of_the_task_sidebar() {
         detail: SCHEDULE_EXECUTION_SESSION_DETAIL.to_string(),
         effort: "auto".to_string(),
 
-        agent_model: String::new(),        title_state: SessionTitleState::Manual,
+        agent_model: String::new(),
+        title_state: SessionTitleState::Manual,
         seen_event_sequence: 0,
         created_at_ms: 2,
         updated_at_ms: 2,

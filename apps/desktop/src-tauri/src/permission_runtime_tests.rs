@@ -230,7 +230,8 @@ fn session_prefix_grant_reuses_commands_under_the_prefix() {
         Some("session-a"),
     )
     .expect("other prefix should load"));
-    next.metadata.insert("command".to_string(), "cargo".to_string());
+    next.metadata
+        .insert("command".to_string(), "cargo".to_string());
     assert!(!agent_session_permission_granted(
         &store,
         &phase16_task_id(),

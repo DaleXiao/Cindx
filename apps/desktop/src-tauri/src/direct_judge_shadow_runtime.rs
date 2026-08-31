@@ -100,7 +100,6 @@ fn read_direct_judge_shadow_journal_lines(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-
 /// Reads the shadow journal back. Test-only: production records the journal but
 /// never reads it (inert measurement plumbing).
 #[cfg(test)]

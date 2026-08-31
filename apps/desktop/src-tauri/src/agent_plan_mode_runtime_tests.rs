@@ -143,7 +143,10 @@ fn resolved_event(sequence: u64, plan_markdown: &str, decision: PlanConfirmation
 
 #[test]
 fn plan_resolution_source_is_parsed_fail_closed_and_audited() {
-    assert_eq!(parse_plan_resolved_by("local-user").unwrap(), PLAN_RESOLVED_BY_USER);
+    assert_eq!(
+        parse_plan_resolved_by("local-user").unwrap(),
+        PLAN_RESOLVED_BY_USER
+    );
     assert_eq!(parse_plan_resolved_by("").unwrap(), PLAN_RESOLVED_BY_USER);
     assert_eq!(
         parse_plan_resolved_by("auto-timeout").unwrap(),
@@ -283,7 +286,15 @@ fn plan_mode_contract_model_calls_charge_the_worker_stage_budget() {
 
     let provider = ScriptedProvider::new(vec![final_answer(plan_text())]);
     let tools = plan_phase_tool_specs(&registry);
-    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _, _| {});
+    let outcome = run_plan_phase(
+        &provider,
+        "plan it",
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        &mut |_, _, _| {},
+    );
 
     assert!(matches!(
         outcome,
@@ -300,7 +311,15 @@ fn plan_mode_contract_loop_aborts_before_any_model_call_when_cancelled() {
     control.request_cancel();
     let tools = plan_phase_tool_specs(&registry);
 
-    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _, _| {});
+    let outcome = run_plan_phase(
+        &provider,
+        "plan it",
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        &mut |_, _, _| {},
+    );
 
     assert_eq!(outcome, PlanPhaseOutcome::Stopped);
     assert_eq!(provider.served(), 0);
@@ -317,7 +336,15 @@ fn plan_mode_contract_loop_is_bounded_by_step_limit() {
     let control = Arc::new(AgentRunControl::new("high"));
     let tools = plan_phase_tool_specs(&registry);
 
-    let outcome = run_plan_phase(&provider, "plan it", &control, &registry, &tools, &task_id, &mut |_, _, _| {});
+    let outcome = run_plan_phase(
+        &provider,
+        "plan it",
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        &mut |_, _, _| {},
+    );
 
     assert!(matches!(
         outcome,
@@ -579,13 +606,22 @@ fn adaptive_plan_gate_keeps_engineering_work_planned() {
         // Long prompts are treated as real tasks regardless of vocabulary.
         &"explain then improve the onboarding flow ".repeat(6),
     ] {
-        assert!(plan_first_warranted(prompt), "{prompt:?} should keep the plan phase");
+        assert!(
+            plan_first_warranted(prompt),
+            "{prompt:?} should keep the plan phase"
+        );
     }
 }
 
 #[test]
 fn an_explicit_plan_request_always_wins_over_triviality() {
-    for prompt in ["plan", "give me a plan", "先给我一个计划", "做个规划再动手", "plan first please"] {
+    for prompt in [
+        "plan",
+        "give me a plan",
+        "先给我一个计划",
+        "做个规划再动手",
+        "plan first please",
+    ] {
         assert!(
             plan_first_warranted(prompt),
             "{prompt:?} explicitly asks for a plan"

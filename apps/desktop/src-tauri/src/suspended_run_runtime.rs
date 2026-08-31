@@ -6,11 +6,11 @@ use crate::{
     runtime_values::current_time_millis,
     tool_execution::append_visual_reference_message,
 };
+use agent_core::AgentPolicy;
 use agent_core::{MessageRole, Metadata};
 use agent_runtime::{
     run_context_steer_epoch, AgentGoalDelta, AgentKernel, AgentRunControl, RunControlSnapshot,
 };
-use agent_core::AgentPolicy;
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
 
 const SUSPENDED_AGENT_RUN_LIMIT: usize = 16;

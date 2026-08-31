@@ -3,12 +3,12 @@ use crate::agent_read_model::{
 };
 use crate::{app_state::AgentRecoveryEnvelope, runtime_constants::AGENT_RECOVERY_SCHEMA};
 use agent_application::{AgentRecoveryIdentity, ResolvedAgentRecovery};
+use agent_core::sha256_hex;
 use agent_core::{
     agent_run_id, AgentRunIdentity, AgentRunLineage, Event, Metadata,
     AGENT_RUN_IDENTITY_SCHEMA_METADATA_KEY, AGENT_RUN_IDENTITY_V1_SCHEMA,
     AGENT_RUN_ID_METADATA_KEY, LOGICAL_AGENT_RUN_ID_METADATA_KEY,
 };
-use agent_core::sha256_hex;
 
 pub(super) fn resolve_agent_recovery_identity(
     events: &[Event],

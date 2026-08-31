@@ -215,17 +215,19 @@ pub(crate) fn resolve_agent_permission_blocking_inner(
 
     // A doom-loop confirmation is not a tool permission: allow resumes the
     // suspended run exactly once, deny terminates the run as cancelled.
-    if let Some(outcome) = crate::agent_doom_loop_runtime::resolve_doom_loop_confirmation_if_pending(
-        app,
-        state.clone(),
-        &request,
-        &decision,
-        session_id.unwrap_or_default(),
-        effort,
-        cancellation,
-        &run_context,
-        &config,
-    )? {
+    if let Some(outcome) =
+        crate::agent_doom_loop_runtime::resolve_doom_loop_confirmation_if_pending(
+            app,
+            state.clone(),
+            &request,
+            &decision,
+            session_id.unwrap_or_default(),
+            effort,
+            cancellation,
+            &run_context,
+            &config,
+        )?
+    {
         return Ok(outcome);
     }
 

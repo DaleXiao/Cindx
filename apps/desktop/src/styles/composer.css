@@ -1246,7 +1246,7 @@ textarea::placeholder {
 
 .plan-confirmation-countdown {
   margin-left: auto;
-  color: #8a8a8a;
+  color: var(--text-dim);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }

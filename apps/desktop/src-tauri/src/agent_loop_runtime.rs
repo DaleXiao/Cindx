@@ -203,7 +203,15 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             }
             AgentSteerApplication::NoPending => {}
         }
-        if let Some(paused) = crate::agent_doom_loop_runtime::agent_loop_observer_checkpoint(state, workspace_root, &mut runtime, &prompt, &run_context, active_collaboration, cancellation)? {
+        if let Some(paused) = crate::agent_doom_loop_runtime::agent_loop_observer_checkpoint(
+            state,
+            workspace_root,
+            &mut runtime,
+            &prompt,
+            &run_context,
+            active_collaboration,
+            cancellation,
+        )? {
             return Ok(AgentLoopExecutionOutcome::Finished(paused));
         }
         let max_output_tokens =
@@ -262,15 +270,12 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             }
         }
         if !runtime.loop_observers.overflow_compact_used() {
-            let request_tokens =
-                agent_runtime::estimate_request_tokens(&runtime.messages, &tools);
-            let overflow_budget = max_output_tokens
-                .saturating_add(agent_runtime::context_prompt_reserve(
-                    config.context_window_tokens,
-                ));
+            let request_tokens = agent_runtime::estimate_request_tokens(&runtime.messages, &tools);
+            let overflow_budget = max_output_tokens.saturating_add(
+                agent_runtime::context_prompt_reserve(config.context_window_tokens),
+            );
             if config.context_window_tokens > overflow_budget
-                && request_tokens
-                    > config.context_window_tokens.saturating_sub(overflow_budget)
+                && request_tokens > config.context_window_tokens.saturating_sub(overflow_budget)
             {
                 if let Some(compacted) = agent_runtime::compact_messages_for_overflow(
                     &runtime.messages,
@@ -557,7 +562,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 }
             }
             AgentAdvance::ToolCalls { calls } => {
-let normal_calls = crate::agent_subagent_runtime::execute_subagent_delegations(
+                let normal_calls = crate::agent_subagent_runtime::execute_subagent_delegations(
                     &mut runtime,
                     actor_provider,
                     state,

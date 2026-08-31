@@ -4,6 +4,7 @@ set -eu
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 
 cargo fmt --all -- --check
+cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 
 # Keep routine lint feedback independent of generated frontend resources and

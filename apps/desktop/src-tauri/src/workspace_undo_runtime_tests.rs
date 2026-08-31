@@ -548,7 +548,10 @@ fn undo_batch_restores_the_whole_group() {
     let state = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
         .expect("group undo should succeed");
 
-    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"a-original");
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-original"
+    );
     assert_eq!(
         fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
         b"b-original"
@@ -579,14 +582,20 @@ fn batch_undo_is_blocked_when_any_group_file_changed_externally() {
             },
         ],
     );
-    write_file(&fixture.workspace.join("dir/b.txt"), b"edited outside cindx");
+    write_file(
+        &fixture.workspace.join("dir/b.txt"),
+        b"edited outside cindx",
+    );
 
     let error = change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
         .expect_err("group undo should be blocked");
 
     assert!(error.contains("changed outside this run"));
     // The failed group undo restores nothing, not even the untouched file.
-    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"a-patched");
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-patched"
+    );
     assert_eq!(
         fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
         b"edited outside cindx"
@@ -620,7 +629,10 @@ fn redo_reapplies_the_whole_batch_group() {
     let state = change_undo_stack(&mut store, &fixture.workspace, SESSION, true)
         .expect("group redo should succeed");
 
-    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"a-patched");
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-patched"
+    );
     assert_eq!(
         fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
         b"b-patched"
@@ -662,8 +674,7 @@ fn undo_registry_survives_store_reopen() {
 
 #[test]
 fn projection_carries_the_run_attribution_for_thread_attachment() {
-    let mut first =
-        tool_finished_event(1, "call-a", "file.write", "a.txt", "created", None, None);
+    let mut first = tool_finished_event(1, "call-a", "file.write", "a.txt", "created", None, None);
     first
         .metadata
         .insert("agent_run_id".to_string(), "run-a".to_string());

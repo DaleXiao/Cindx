@@ -405,11 +405,15 @@ pub(crate) fn index_workspace_with_cloud_fallback_cancellable(
     configured_model: &str,
     mut should_cancel: impl FnMut() -> bool,
 ) -> Result<(RagIndex, String, String, Option<String>), String> {
-    let mut index = index_workspace_reusing_cancellable(root, options, previous, &mut should_cancel)
-        .map_err(rag_index_error_for_agent)?
-        .index;
-    match apply_embeddings_to_placeholder_chunks_cancellable(&mut index, embedder, &mut should_cancel)
-    {
+    let mut index =
+        index_workspace_reusing_cancellable(root, options, previous, &mut should_cancel)
+            .map_err(rag_index_error_for_agent)?
+            .index;
+    match apply_embeddings_to_placeholder_chunks_cancellable(
+        &mut index,
+        embedder,
+        &mut should_cancel,
+    ) {
         Ok(_) => {
             let model = index
                 .chunks

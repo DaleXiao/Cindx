@@ -4,9 +4,7 @@ use crate::collaboration_stage_runtime::CollaborationStageError;
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
 use agent_application::{insert_run_objectives, AgentStrategyDecisionReceipt};
-use agent_core::{
-    decode_event_type, DecodedEventType, EventKind, EventTypeV1, Metadata, TaskId,
-};
+use agent_core::{decode_event_type, DecodedEventType, EventKind, EventTypeV1, Metadata, TaskId};
 use agent_runtime::{AgentRunControl, RunPreparationCheckpoint};
 
 /// Commits the effort-tier plan as the run's selected decision: one typed
@@ -35,10 +33,7 @@ pub(crate) fn record_effort_plan_decision(
             "effort_tier_planner".to_string(),
         ),
         ("decision_attempts".to_string(), "0".to_string()),
-        (
-            "execution_plan_semantic_sha256".to_string(),
-            plan_sha256,
-        ),
+        ("execution_plan_semantic_sha256".to_string(), plan_sha256),
     ]
     .into_iter()
     .collect::<Metadata>();

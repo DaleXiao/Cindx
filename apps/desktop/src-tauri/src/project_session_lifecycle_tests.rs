@@ -46,7 +46,8 @@ fn session_effort_updates_only_the_selected_session() {
         detail: "timeline + chat".to_string(),
         effort: default_agent_effort(),
 
-        agent_model: String::new(),        title_state: SessionTitleState::Manual,
+        agent_model: String::new(),
+        title_state: SessionTitleState::Manual,
         seen_event_sequence: 0,
         created_at_ms: 2,
         updated_at_ms: 2,
@@ -83,7 +84,8 @@ fn deleting_a_project_removes_its_sessions_and_selects_a_neighbor() {
         detail: "timeline + chat".to_string(),
         effort: "pro".to_string(),
 
-        agent_model: String::new(),        title_state: SessionTitleState::Manual,
+        agent_model: String::new(),
+        title_state: SessionTitleState::Manual,
         seen_event_sequence: 0,
         created_at_ms: 2,
         updated_at_ms: 2,
@@ -193,7 +195,8 @@ fn fork_names_are_unique_within_a_project() {
         detail: "fork".to_string(),
         effort: default_agent_effort(),
 
-        agent_model: String::new(),        title_state: SessionTitleState::Manual,
+        agent_model: String::new(),
+        title_state: SessionTitleState::Manual,
         seen_event_sequence: 0,
         created_at_ms: 1,
         updated_at_ms: 1,

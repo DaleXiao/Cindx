@@ -96,10 +96,7 @@ pub(crate) fn plan_effort_run(
 /// workspace retrieval; default recalls relevant durable memory keyed on the
 /// bounded run prompt and retrieves workspace context; high and xhigh widen to
 /// comprehensive recall and a larger workspace retrieval cap.
-pub(crate) fn knowledge_decision_for_effort(
-    effort_label: &str,
-    prompt: &str,
-) -> KnowledgeDecision {
+pub(crate) fn knowledge_decision_for_effort(effort_label: &str, prompt: &str) -> KnowledgeDecision {
     let (memory_policy, workspace_max_results) = match normalize_effort_label(effort_label).as_str()
     {
         "fast" => return KnowledgeDecision::none(),
@@ -290,12 +287,18 @@ mod tests {
             run_context.get("agent_model").map(String::as_str),
             Some("qwen3.7-max")
         );
-        assert_eq!(run_context.get("agent_effort").map(String::as_str), Some("high"));
+        assert_eq!(
+            run_context.get("agent_effort").map(String::as_str),
+            Some("high")
+        );
         assert_eq!(
             run_context.get("collaboration_policy").map(String::as_str),
             Some("single")
         );
-        assert_eq!(run_context.get("task_class").map(String::as_str), Some("general"));
+        assert_eq!(
+            run_context.get("task_class").map(String::as_str),
+            Some("general")
+        );
         assert_eq!(
             run_context.get("tool_requirement").map(String::as_str),
             Some("none")
@@ -371,7 +374,10 @@ mod tests {
     fn memory_query_stays_inside_the_recall_budget() {
         let long_prompt = "x".repeat(MAX_RUN_DECISION_QUERY_CHARS + 500);
         let decision = knowledge_decision_for_effort("default", &long_prompt);
-        assert_eq!(decision.memory_query.chars().count(), MAX_RUN_DECISION_QUERY_CHARS);
+        assert_eq!(
+            decision.memory_query.chars().count(),
+            MAX_RUN_DECISION_QUERY_CHARS
+        );
     }
 
     #[test]

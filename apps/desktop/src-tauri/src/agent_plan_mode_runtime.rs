@@ -133,29 +133,64 @@ fn contains_path_or_file_reference(prompt: &str) -> bool {
         ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".md", ".json", ".toml", ".yaml", ".yml",
         ".css", ".html", ".sh", ".mjs", ".cjs", ".go", ".swift", ".kt",
     ];
-    if FILE_EXTENSIONS.iter().any(|extension| prompt.contains(extension)) {
+    if FILE_EXTENSIONS
+        .iter()
+        .any(|extension| prompt.contains(extension))
+    {
         return true;
     }
     // A slash between word characters reads as a path (src/foo, apps/desktop).
-    prompt
-        .as_bytes()
-        .windows(3)
-        .any(|window| window[1] == b'/' && window[0].is_ascii_alphanumeric() && window[2].is_ascii_alphanumeric())
+    prompt.as_bytes().windows(3).any(|window| {
+        window[1] == b'/' && window[0].is_ascii_alphanumeric() && window[2].is_ascii_alphanumeric()
+    })
 }
 
 fn contains_action_verb(prompt: &str) -> bool {
     const ENGLISH_VERBS: &[&str] = &[
-        "add ", "adds ", "create ", "creates ", "build ", "builds ", "implement ",
-        "implements ", "refactor", "fix ", "fixes ", "write ", "writes ", "update ",
-        "updates ", "change ", "changes ", "delete ", "removes ", "remove ", "rename",
-        "move ", "moves ", "migrate", "integrate", "set up", "setup", "deploy",
-        "configure", "optimize", "improve", "generate", "make ", "install ", "upgrade",
-        "replace", "extract", "split", "merge ",
+        "add ",
+        "adds ",
+        "create ",
+        "creates ",
+        "build ",
+        "builds ",
+        "implement ",
+        "implements ",
+        "refactor",
+        "fix ",
+        "fixes ",
+        "write ",
+        "writes ",
+        "update ",
+        "updates ",
+        "change ",
+        "changes ",
+        "delete ",
+        "removes ",
+        "remove ",
+        "rename",
+        "move ",
+        "moves ",
+        "migrate",
+        "integrate",
+        "set up",
+        "setup",
+        "deploy",
+        "configure",
+        "optimize",
+        "improve",
+        "generate",
+        "make ",
+        "install ",
+        "upgrade",
+        "replace",
+        "extract",
+        "split",
+        "merge ",
     ];
     const CHINESE_VERBS: &[&str] = &[
-        "加", "写", "改", "修", "建", "删", "重构", "实现", "添加", "创建", "修复", "更新",
-        "删除", "移动", "迁移", "配置", "优化", "生成", "搭建", "接入", "替换", "拆分", "合并",
-        "统一", "调整", "支持", "增加", "做一", "处理",
+        "加", "写", "改", "修", "建", "删", "重构", "实现", "添加", "创建", "修复", "更新", "删除",
+        "移动", "迁移", "配置", "优化", "生成", "搭建", "接入", "替换", "拆分", "合并", "统一",
+        "调整", "支持", "增加", "做一", "处理",
     ];
     let lower = prompt.to_lowercase();
     ENGLISH_VERBS.iter().any(|verb| lower.contains(verb))

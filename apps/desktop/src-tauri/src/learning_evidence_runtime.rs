@@ -165,9 +165,7 @@ pub(crate) fn routing_learning_evidence(
     else {
         return censored();
     };
-    if terminal_outcome_ledger_has_blocking_denial(
-        terminal,
-    ) {
+    if terminal_outcome_ledger_has_blocking_denial(terminal) {
         return censored();
     }
     if usage == LearningUsageCompleteness::Missing || termination != LearningTermination::Completed

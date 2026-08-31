@@ -4,14 +4,14 @@ pub(crate) use agent_application::{
     artifact_manifest_message, AgentOutputArtifact as AgentOutputArtifactView,
     AgentRecoveryIdentity, AgentRecoveryReason, AgentRecoveryState, SessionTitleState,
 };
+#[cfg(test)]
+pub(crate) use agent_core::EventId;
 pub(crate) use agent_core::{
     AgentActor, AgentEffectAuthority, AgentModelAttribution, AgentModelProfile, AgentStage, Event,
     EventKind, Message, MessageRole, Metadata, ModelRole, PermissionDecision, PermissionRequest,
     PermissionRequestId, PermissionResolution, PermissionRisk, TaskId, ToolArtifact, ToolContent,
     ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
 };
-#[cfg(test)]
-pub(crate) use agent_core::EventId;
 pub(crate) use agent_graph::{
     extract_graph_from_chunk, graph_direct_recall, graph_walk_recall, FileGraphStore,
 };
@@ -55,6 +55,15 @@ pub(crate) use agent_runtime::{
 pub(crate) use agent_skills::{
     SkillCatalog, SkillRecord,
 };
+#[cfg(test)]
+pub(crate) use agent_core::RoutingOutcome;
+#[cfg(test)]
+pub(crate) use agent_core::TaskClass;
+pub(crate) use agent_core::{
+    parse_policy, role_label, sha256_hex, AgentPolicy, OrchestrationPolicy,
+    WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
+};
+pub(crate) use agent_core::{ConductorExecutionContract, MemoryRecallPolicy};
 pub(crate) use agent_storage::{
     EventStore, PermissionAuditRecord, PermissionStore, SqliteStore, StorageError,
 };
@@ -68,15 +77,6 @@ pub(crate) use model_provider::{
 };
 #[cfg(target_os = "macos")]
 pub(crate) use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowButton};
-pub(crate) use agent_core::{ConductorExecutionContract, MemoryRecallPolicy};
-pub(crate) use agent_core::{
-    parse_policy, role_label, sha256_hex, AgentPolicy, OrchestrationPolicy,
-    WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,
-};
-#[cfg(test)]
-pub(crate) use agent_core::RoutingOutcome;
-#[cfg(test)]
-pub(crate) use agent_core::TaskClass;
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use std::ffi::OsStr;

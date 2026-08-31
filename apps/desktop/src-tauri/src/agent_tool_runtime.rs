@@ -95,7 +95,11 @@ pub(super) fn approval_policy_allows_auto_grant(
 /// policies; absent metadata keeps the historical behavior for every other
 /// tool and for requests persisted before this gate existed.
 pub(super) fn request_auto_grant_eligible(request: &PermissionRequest) -> bool {
-    request.metadata.get("auto_grant_eligible").map(String::as_str) != Some("false")
+    request
+        .metadata
+        .get("auto_grant_eligible")
+        .map(String::as_str)
+        != Some("false")
 }
 
 pub(super) fn evaluate_agent_tool_permission(

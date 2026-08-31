@@ -1112,8 +1112,13 @@ fn completed_delivery_records_observed_use_exactly_once_for_recalled_memories() 
             metadata: Metadata::new(),
         },
     };
-    commit_prepared_memory_recall(&mut store, &phase16_task_id(), &run_context, Some(&prepared))
-        .expect("prepared recall should commit");
+    commit_prepared_memory_recall(
+        &mut store,
+        &phase16_task_id(),
+        &run_context,
+        Some(&prepared),
+    )
+    .expect("prepared recall should commit");
     let delivered = "Observed-use recording stays inside the terminal commit.";
 
     let committed = crate::agent_terminal_commit_runtime::persist_agent_terminal_once(
@@ -1214,10 +1219,7 @@ fn observed_use_recording_is_a_no_op_without_recalled_memories() {
             "session_id".to_string(),
             "session-memory-unused".to_string(),
         ),
-        (
-            "agent_run_id".to_string(),
-            "run-memory-unused".to_string(),
-        ),
+        ("agent_run_id".to_string(), "run-memory-unused".to_string()),
     ]
     .into_iter()
     .collect::<Metadata>();
@@ -1231,15 +1233,11 @@ fn observed_use_recording_is_a_no_op_without_recalled_memories() {
         .expect("missing recall context should no-op"),
         0
     );
-    assert!(
-        store
-            .list_by_task(&phase16_task_id())
-            .expect("events should load")
-            .iter()
-            .all(|event| {
-                event.metadata.get("action").map(String::as_str) != Some("memory_use")
-            })
-    );
+    assert!(store
+        .list_by_task(&phase16_task_id())
+        .expect("events should load")
+        .iter()
+        .all(|event| { event.metadata.get("action").map(String::as_str) != Some("memory_use") }));
 }
 
 #[test]

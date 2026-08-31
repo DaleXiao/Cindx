@@ -58,7 +58,9 @@ pub(super) fn resolve_subagent_permission_if_pending(
             .get_permission_request(&PermissionRequestId(request_id.to_string()))
             .map_err(|error| error.to_string())?
     };
-    let Some(request) = request else { return Ok(None) };
+    let Some(request) = request else {
+        return Ok(None);
+    };
     if request
         .metadata
         .get(crate::agent_subagent_runtime::SUBAGENT_PERMISSION_ORIGIN_KEY)
@@ -107,8 +109,8 @@ pub(super) fn resolve_subagent_permission_in_store(
         )
         .map_err(|error| error.to_string());
     }
-    let current =
-        agent_state_for_session(store, None, Some(session_id)).map_err(|error| error.to_string())?;
+    let current = agent_state_for_session(store, None, Some(session_id))
+        .map_err(|error| error.to_string())?;
     if !current
         .pending_approvals
         .iter()

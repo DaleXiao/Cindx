@@ -15,6 +15,7 @@ import {
   type PlanResolvedBy
 } from "../planModeModel";
 import { parsePlanDocument } from "../planConfirmationModel";
+import { useDialogFocus } from "../useDialogFocus";
 import { AgentMarkdown } from "./AgentMarkdown";
 
 type PlanConfirmationCardProps = {
@@ -120,6 +121,7 @@ export function PlanConfirmationCard({
     () => parsePlanDocument(confirmation.planMarkdown),
     [confirmation.planMarkdown]
   );
+  const dialogRef = useDialogFocus<HTMLElement>(!dismissed);
 
   if (dismissed) return null;
 
@@ -138,6 +140,7 @@ export function PlanConfirmationCard({
 
   return (
     <section
+      ref={dialogRef}
       className="plan-confirmation"
       role="alertdialog"
       aria-labelledby="plan-confirmation-title"

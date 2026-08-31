@@ -3,10 +3,10 @@ use crate::agent_effort_planner::{apply_effort_plan_keys, plan_effort_run};
 use crate::agent_failure_terminal_runtime::{
     commit_agent_preparation_failure_terminal, AgentPreparationFailureTerminalOutcome,
 };
+use crate::agent_model_candidates::effort_model_candidates;
 use crate::agent_query_commands::{agent_run_should_stop, append_agent_progress_event};
 use crate::agent_run_engine::{
-    effort_tier_model, runtime_preparation_error, AgentRunPreparationError,
-    PreparedAgentExecution,
+    effort_tier_model, runtime_preparation_error, AgentRunPreparationError, PreparedAgentExecution,
 };
 use crate::agent_steer_runtime::{apply_pending_agent_steers, AgentSteerApplication};
 use crate::app_state::AppState;
@@ -21,7 +21,6 @@ use crate::memory_runtime::{
 use crate::project_instructions_runtime::append_project_instructions_context_for_run;
 use crate::runtime_values::{add_image_generation_run_context, truncate_for_collaboration};
 use crate::session_context_service::prepare_session_history_context;
-use crate::agent_model_candidates::effort_model_candidates;
 use agent_core::run_decision_enums::AgentEffectAuthority;
 use agent_core::{
     AgentPolicy, AgentRouteRequirements, AgentToolRequirement, EventKind, Message, MessageRole,
@@ -362,11 +361,7 @@ pub(crate) fn prepare_agent_execution_replay(
             Some(model) => model.to_string(),
             None => effort_tier_model(config, effort.label()),
         };
-        let mut effort_plan = plan_effort_run(
-            effort.label(),
-            primary_model,
-            &planning_objective,
-        );
+        let mut effort_plan = plan_effort_run(effort.label(), primary_model, &planning_objective);
         preparation_try!(effort_plan
             .apply_route_requirements(route_requirements)
             .map_err(|error| runtime_preparation_error(&run_context, error)));
@@ -383,10 +378,8 @@ pub(crate) fn prepare_agent_execution_replay(
                     format!("effort-tier model cannot satisfy runtime route requirements: {error}"),
                 )
             }));
-        preparation_try!(
-            apply_effort_plan_keys(&effort_plan, &mut run_context)
-                .map_err(|error| runtime_preparation_error(&run_context, error))
-        );
+        preparation_try!(apply_effort_plan_keys(&effort_plan, &mut run_context)
+            .map_err(|error| runtime_preparation_error(&run_context, error)));
         if cancellation.has_pending_steer() {
             prompt = preparation_try!(apply_preparation_steer(
                 state,

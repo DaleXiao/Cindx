@@ -2,10 +2,10 @@ use super::*;
 use crate::agent_read_model::{
     active_agent_events_for_session, agent_events_for_session, agent_state_for_session,
 };
+use crate::agent_run_engine::PreparedAgentExecution;
 use crate::agent_runtime_snapshot::{
     capture_persistable_agent_task_state, delete_persisted_agent_runtime_snapshot,
 };
-use crate::agent_run_engine::PreparedAgentExecution;
 use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
 use crate::suspended_run_runtime::{
     clear_suspended_agent_run, remember_suspended_agent_run, take_suspended_agent_run,
@@ -46,10 +46,7 @@ pub(crate) fn doom_loop_confirmation_request(
 /// True when a permission request is a doom-loop confirmation rather than a
 /// tool permission.
 pub(crate) fn is_doom_loop_confirmation_request(request: &PermissionRequest) -> bool {
-    request
-        .metadata
-        .get("kind")
-        .map(String::as_str)
+    request.metadata.get("kind").map(String::as_str)
         == Some(agent_runtime::DOOM_LOOP_CONFIRMATION_KIND)
 }
 
@@ -127,10 +124,13 @@ pub(crate) fn persist_doom_loop_confirmation_cancel(
                 EventKind::TaskStatusChanged,
                 "Agent task cancelled",
                 metadata_with_context(
-                    [("reason".to_string(), "doom_loop_confirmation_cancelled".to_string())]
-                        .into_iter()
-                        .chain(identity.metadata())
-                        .collect(),
+                    [(
+                        "reason".to_string(),
+                        "doom_loop_confirmation_cancelled".to_string(),
+                    )]
+                    .into_iter()
+                    .chain(identity.metadata())
+                    .collect(),
                     run_context,
                 ),
             )?;
@@ -159,7 +159,9 @@ pub(crate) fn agent_loop_observer_checkpoint(
 ) -> Result<Option<AgentState>, String> {
     let progress = cancellation.progress();
     runtime.loop_observers.publish_model_call_budget(
-        progress.model_call_limit.saturating_sub(progress.model_calls),
+        progress
+            .model_call_limit
+            .saturating_sub(progress.model_calls),
         cancellation.budget().terminal_model_call_reserve,
     );
     let Some(tool) = runtime
@@ -267,7 +269,10 @@ pub(crate) fn resolve_doom_loop_confirmation_if_pending(
         store
             .with_immediate_transaction(|store| {
                 crate::agent_commands::persist_permission_resolution_rows(
-                    store, request, &resolution, run_context,
+                    store,
+                    request,
+                    &resolution,
+                    run_context,
                 )
             })
             .map_err(|error| error.to_string())?;
@@ -281,8 +286,13 @@ pub(crate) fn resolve_doom_loop_confirmation_if_pending(
             .store
             .lock()
             .map_err(|error| format!("store lock poisoned: {error}"))?;
-        return persist_doom_loop_confirmation_cancel(&mut store, session_id, run_context, steer_epoch)
-            .map(Some);
+        return persist_doom_loop_confirmation_cancel(
+            &mut store,
+            session_id,
+            run_context,
+            steer_epoch,
+        )
+        .map(Some);
     }
 
     let Some(mut suspended) = take_suspended_agent_run(&state, session_id)? else {
@@ -368,7 +378,10 @@ mod tests {
         assert_eq!(request.action, DOOM_LOOP_CONFIRMATION_ACTION);
         assert_eq!(request.risk, PermissionRisk::Read);
         assert_eq!(request.scope, "web.fetch");
-        assert_eq!(request.reason, "Agent appears stuck on web.fetch; continue?");
+        assert_eq!(
+            request.reason,
+            "Agent appears stuck on web.fetch; continue?"
+        );
         assert!(is_doom_loop_confirmation_request(&request));
         assert_eq!(
             request.metadata.get("session_reusable").map(String::as_str),
@@ -429,9 +442,9 @@ mod tests {
                 .any(|event| event.summary == "Agent task waiting for permission"),
             "the pause records a user-visible blocked checkpoint"
         );
-        assert!(events.iter().any(|event| event
-            .summary
-            .contains("Agent appears stuck on web.fetch")));
+        assert!(events
+            .iter()
+            .any(|event| event.summary.contains("Agent appears stuck on web.fetch")));
     }
 
     #[test]
@@ -440,13 +453,9 @@ mod tests {
         let run_context = doom_run_context();
         seed_doom_run_start(&mut store, &run_context);
 
-        let state = persist_doom_loop_confirmation_cancel(
-            &mut store,
-            "session-doom",
-            &run_context,
-            0,
-        )
-        .expect("the doom-loop cancel should persist a terminal");
+        let state =
+            persist_doom_loop_confirmation_cancel(&mut store, "session-doom", &run_context, 0)
+                .expect("the doom-loop cancel should persist a terminal");
         assert_eq!(state.status, "cancelled");
 
         let events = store
@@ -462,13 +471,9 @@ mod tests {
         );
 
         // A replayed cancel returns the same terminal without re-inserting.
-        let replay = persist_doom_loop_confirmation_cancel(
-            &mut store,
-            "session-doom",
-            &run_context,
-            0,
-        )
-        .expect("replayed cancel loads the existing terminal");
+        let replay =
+            persist_doom_loop_confirmation_cancel(&mut store, "session-doom", &run_context, 0)
+                .expect("replayed cancel loads the existing terminal");
         assert_eq!(replay.status, "cancelled");
         let events = store
             .list_by_task_and_metadata(&phase16_task_id(), "session_id", "session-doom")
@@ -505,6 +510,9 @@ mod tests {
 
         agent_runtime::clear_doom_loop_confirmation(&mut runtime);
         assert_eq!(runtime.repetition_advisory.streak(), 0);
-        assert!(runtime.loop_observers.pending_doom_loop_confirmation().is_none());
+        assert!(runtime
+            .loop_observers
+            .pending_doom_loop_confirmation()
+            .is_none());
     }
 }

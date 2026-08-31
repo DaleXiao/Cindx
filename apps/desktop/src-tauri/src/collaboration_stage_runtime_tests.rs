@@ -238,10 +238,7 @@ fn collaboration_stages_have_visible_timeline_labels() {
     };
 
     assert_eq!(timeline_event_label(&event), "Approach 2");
-    assert_eq!(
-        collaboration_stage_display_label("coordinator"),
-        "Planning"
-    );
+    assert_eq!(collaboration_stage_display_label("coordinator"), "Planning");
     assert_eq!(
         collaboration_stage_display_label("conductor_plan"),
         "Planning"

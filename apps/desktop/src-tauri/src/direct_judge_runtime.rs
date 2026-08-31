@@ -19,7 +19,10 @@ pub(crate) struct DirectJudgePlan {
 /// "verification failed + findings" message instead of delivering.
 pub(crate) enum DirectJudgeGateOutcome {
     Delivered(GroundedFinalizerCandidate, String),
-    Blocked { disposition: String, message: String },
+    Blocked {
+        disposition: String,
+        message: String,
+    },
 }
 
 /// Fail-closed delivery decision for the judge gate. Only a judged quality
@@ -295,7 +298,10 @@ pub(crate) fn apply_direct_judge_gate(
         }
     };
     if repaired_output.trim().is_empty() {
-        return DirectJudgeGateOutcome::Delivered(candidate, "direct_judge_repair_empty".to_string());
+        return DirectJudgeGateOutcome::Delivered(
+            candidate,
+            "direct_judge_repair_empty".to_string(),
+        );
     }
     let Some(repaired_receipt) = ground_repaired_answer(
         runtime,
