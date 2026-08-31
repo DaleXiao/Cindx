@@ -126,13 +126,15 @@ The desktop app currently includes:
 - Workspace file changes made by `file.write`, `file.patch`, and
   `file.patch_batch` preserve their prior content best-effort for recovery. A
   session can undo and redo its most recent file change through the
-  file-changes panel above the Composer, which lists every changed file
-  (action, tool, undone state) under the File changes summary and Undo/Redo
-  actions, refreshing as runs finish; the controls are guarded by content-hash
-  conflict checks. A `file.patch_batch` call is one undo entry, so undoing it
-  restores every file in the batch together and any externally edited member
-  blocks the whole group restore. Shell, browser, computer, and process
-  effects remain irreversible.
+  file-changes panel the thread renders after the turn that produced the
+  changes (entries carry their run attribution): the latest finished run's
+  panel is expanded and owns the session-level Undo/Redo actions, and when the
+  next turn starts that panel collapses and stays reviewable in the history.
+  The controls are guarded by content-hash conflict checks. A
+  `file.patch_batch` call is one undo entry, so undoing it restores every file
+  in the batch together and any externally edited member blocks the whole
+  group restore. Shell, browser, computer, and process effects remain
+  irreversible.
 - Project instruction files: `AGENTS.md` discovered from the workspace root up
   to the Git root, plus `.cindx/instructions/*.md` files, are loaded under
   bounded byte caps and injected into every run as untrusted project guidance

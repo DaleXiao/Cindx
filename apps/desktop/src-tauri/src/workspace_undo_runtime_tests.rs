@@ -659,3 +659,30 @@ fn undo_registry_survives_store_reopen() {
     assert_eq!(state.entries.len(), 1);
     assert!(state.entries[0].undone);
 }
+
+#[test]
+fn projection_carries_the_run_attribution_for_thread_attachment() {
+    let mut first =
+        tool_finished_event(1, "call-a", "file.write", "a.txt", "created", None, None);
+    first
+        .metadata
+        .insert("agent_run_id".to_string(), "run-a".to_string());
+    let second = tool_finished_event(
+        2,
+        "call-b",
+        "file.patch",
+        "b.txt",
+        "patched",
+        Some("u/b.txt"),
+        None,
+    );
+
+    let entries = project_workspace_undo_entries(&[first, second]);
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].run_id.as_deref(), Some("run-a"));
+    assert_eq!(
+        entries[1].run_id, None,
+        "legacy events without attribution stay unattributed"
+    );
+}

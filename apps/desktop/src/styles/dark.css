@@ -706,11 +706,14 @@
 }
 
 :root[data-theme="dark"] .file-changes-header {
-  border-bottom-color: var(--border);
   color: var(--text-dim);
 }
 
-:root[data-theme="dark"] .file-changes-header > svg,
+:root[data-theme="dark"] .file-changes-panel[data-expanded] .file-changes-header {
+  border-bottom-color: var(--border);
+}
+
+:root[data-theme="dark"] .file-changes-toggle > svg,
 :root[data-theme="dark"] .file-changes-row > svg,
 :root[data-theme="dark"] .file-changes-tool {
   color: var(--muted);

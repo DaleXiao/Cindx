@@ -1008,12 +1008,26 @@ textarea::placeholder {
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   color: #5c5c5c;
 }
 
-.file-changes-header > svg {
-  flex: 0 0 auto;
+.file-changes-panel[data-expanded] .file-changes-header {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.file-changes-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.file-changes-toggle > svg {
   color: #8a8a8a;
 }
 

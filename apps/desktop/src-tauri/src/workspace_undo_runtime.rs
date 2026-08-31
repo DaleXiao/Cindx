@@ -29,6 +29,11 @@ pub(crate) struct WorkspaceUndoEntry {
     pub(crate) action: String,
     pub(crate) undo_before_path: Option<String>,
     pub(crate) after_artifact_path: Option<String>,
+    /// The agent run that produced the change, so the thread can attach the
+    /// change list to the turn that made it. `None` for entries persisted
+    /// before run attribution existed.
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
     /// A `file.patch_batch` call is one atomic group: every file shares the
     /// single entry so one undo restores the whole batch. Empty for
     /// single-file tools, which use the flat fields above.
@@ -90,6 +95,7 @@ pub(crate) fn project_workspace_undo_entries(events: &[Event]) -> Vec<WorkspaceU
                 action,
                 undo_before_path: metadata.get("result_undo_before_path").cloned(),
                 after_artifact_path: metadata.get("result_artifact_path").cloned(),
+                run_id: metadata.get("agent_run_id").cloned(),
                 files: Vec::new(),
             })
         })
@@ -128,6 +134,7 @@ fn project_batch_entry(
         action,
         undo_before_path: None,
         after_artifact_path: None,
+        run_id: metadata.get("agent_run_id").cloned(),
         files,
     })
 }
@@ -387,6 +394,7 @@ pub(crate) struct WorkspaceUndoEntryView {
     pub(crate) action: String,
     pub(crate) undone: bool,
     pub(crate) undoable: bool,
+    pub(crate) run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -414,6 +422,7 @@ fn build_state(
             action: entry.action.clone(),
             undone: undone.iter().any(|id| id == &entry.tool_call_id),
             undoable: entry_is_undoable(workspace_root, entry),
+            run_id: entry.run_id.clone(),
         })
         .collect();
     let latest_applied = entries

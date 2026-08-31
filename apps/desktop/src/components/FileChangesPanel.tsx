@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { FileDiff, FilePlus2, History, Redo2, Undo2 } from "lucide-react";
-import type { WorkspaceUndoEntryView, WorkspaceUndoState } from "../tauriTypes";
-import {
-  getWorkspaceUndoState,
-  redoWorkspaceChange,
-  undoWorkspaceChange
-} from "../tauri";
+import { useEffect, useState } from "react";
+import { ChevronDown, ChevronUp, FileDiff, FilePlus2, History, Redo2, Undo2 } from "lucide-react";
+import type { WorkspaceUndoEntryView } from "../tauriTypes";
+import { redoWorkspaceChange, undoWorkspaceChange } from "../tauri";
 
 type FileChangesPanelProps = {
   sessionId: string | null;
-  /** Agent run status; a transition (e.g. running → completed) refetches the list. */
-  status: string;
+  /** The file changes produced by this panel's run, in projection order. */
+  entries: WorkspaceUndoEntryView[];
+  canUndo: boolean;
+  canRedo: boolean;
+  /** The most recent finished run: expanded by default and owns Undo/Redo. */
+  isLatest: boolean;
   working?: boolean;
+  onStateChanged: () => void;
 };
 
 function actionIcon(entry: WorkspaceUndoEntryView) {
@@ -23,125 +24,125 @@ function actionIcon(entry: WorkspaceUndoEntryView) {
 }
 
 /**
- * Session file-change history shown above the Composer once the agent has
- * touched workspace files: the File changes summary and Undo/Redo actions sit
- * on the header row, and every changed file is listed below (newest first)
- * with its action, tool, and undone state.
+ * One run's file-change list, rendered in the thread right after the turn
+ * that produced it. The latest run's panel is expanded and carries the
+ * session-level Undo/Redo actions (undo is a session LIFO, so older panels
+ * stay list-only); when the next turn starts the panel demotes and collapses,
+ * remaining reviewable in the history.
  */
-export function FileChangesPanel({ sessionId, status, working }: FileChangesPanelProps) {
-  const [state, setState] = useState<WorkspaceUndoState | null>(null);
+export function FileChangesPanel({
+  sessionId,
+  entries,
+  canUndo,
+  canRedo,
+  isLatest,
+  working,
+  onStateChanged
+}: FileChangesPanelProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const activeSessionRef = useRef(sessionId);
+  const [expanded, setExpanded] = useState(isLatest);
 
-  const refresh = useCallback(async () => {
-    if (!sessionId) {
-      setState(null);
-      return;
-    }
-    try {
-      const next = await getWorkspaceUndoState(sessionId);
-      activeSessionRef.current = sessionId;
-      setState(next);
-      setError(null);
-    } catch (refreshError) {
-      setError(String(refreshError));
-    }
-  }, [sessionId]);
-
+  // A new turn starting demotes this panel: collapse it automatically.
   useEffect(() => {
-    activeSessionRef.current = sessionId;
-    void refresh();
-  }, [sessionId, status, refresh]);
+    if (!isLatest) setExpanded(false);
+    else setExpanded(true);
+  }, [isLatest]);
 
-  if (!sessionId || !state || state.entries.length === 0) {
-    return null;
-  }
+  if (entries.length === 0) return null;
 
   const applyChange = async (action: "undo" | "redo") => {
     if (busy || working || !sessionId) return;
     setBusy(true);
     setError(null);
     try {
-      const next =
-        action === "undo"
-          ? await undoWorkspaceChange(sessionId)
-          : await redoWorkspaceChange(sessionId);
-      if (activeSessionRef.current === sessionId) {
-        setState(next);
-      }
+      await (action === "undo"
+        ? undoWorkspaceChange(sessionId)
+        : redoWorkspaceChange(sessionId));
+      onStateChanged();
     } catch (actionError) {
       setError(String(actionError));
-      await refresh();
     } finally {
       setBusy(false);
     }
   };
 
-  const latestEntry = [...state.entries].reverse().find((entry) => !entry.undone);
-  const undoneEntries = state.entries.filter((entry) => entry.undone);
-  const redoEntry = undoneEntries[undoneEntries.length - 1];
-  const changeCount = state.entries.length;
-  const rows = [...state.entries].reverse();
+  const latestEntry = [...entries].reverse().find((entry) => !entry.undone);
+  const rows = [...entries].reverse();
+  const changeCount = entries.length;
 
   return (
-    <section className="file-changes-panel" role="group" aria-label="Agent file change history">
+    <section
+      className="file-changes-panel"
+      role="group"
+      aria-label="Agent file change history"
+      data-expanded={expanded || undefined}
+    >
       <div className="file-changes-header">
-        <History size={13} aria-hidden="true" />
-        <strong>File changes ({changeCount})</strong>
+        <button
+          type="button"
+          className="file-changes-toggle"
+          onClick={() => setExpanded((current) => !current)}
+          aria-expanded={expanded}
+          title={expanded ? "Collapse this run's file changes" : "Expand this run's file changes"}
+        >
+          <History size={13} aria-hidden="true" />
+          <strong>File changes ({changeCount})</strong>
+          {expanded ? <ChevronUp size={13} aria-hidden="true" /> : <ChevronDown size={13} aria-hidden="true" />}
+        </button>
         {error ? (
           <span className="file-changes-error" role="alert">
             {error}
           </span>
         ) : null}
-        <span className="file-changes-actions">
-          <button
-            type="button"
-            className="file-changes-button"
-            disabled={busy || working || !state.canUndo}
-            onClick={() => void applyChange("undo")}
-            title={
-              latestEntry
-                ? `Undo the agent's change to ${latestEntry.path}`
-                : "Undo the agent's last file change"
-            }
-          >
-            <Undo2 size={13} aria-hidden="true" />
-            <span>Undo</span>
-          </button>
-          <button
-            type="button"
-            className="file-changes-button"
-            disabled={busy || working || !state.canRedo}
-            onClick={() => void applyChange("redo")}
-            title={
-              redoEntry
-                ? `Restore the undone change to ${redoEntry.path}`
-                : "Restore the last undone file change"
-            }
-          >
-            <Redo2 size={13} aria-hidden="true" />
-            <span>Redo</span>
-          </button>
-        </span>
+        {isLatest && (
+          <span className="file-changes-actions">
+            <button
+              type="button"
+              className="file-changes-button"
+              disabled={busy || working || !canUndo}
+              onClick={() => void applyChange("undo")}
+              title={
+                latestEntry
+                  ? `Undo the agent's change to ${latestEntry.path}`
+                  : "Undo the agent's last file change"
+              }
+            >
+              <Undo2 size={13} aria-hidden="true" />
+              <span>Undo</span>
+            </button>
+            <button
+              type="button"
+              className="file-changes-button"
+              disabled={busy || working || !canRedo}
+              onClick={() => void applyChange("redo")}
+              title="Restore the last undone file change"
+            >
+              <Redo2 size={13} aria-hidden="true" />
+              <span>Redo</span>
+            </button>
+          </span>
+        )}
       </div>
-      <ol className="file-changes-list">
-        {rows.map((entry) => (
-          <li
-            key={`${entry.toolCallId}-${entry.sequence}`}
-            className="file-changes-row"
-            data-undone={entry.undone || undefined}
-          >
-            {actionIcon(entry)}
-            <code className="file-changes-path" title={entry.path}>
-              {entry.path}
-            </code>
-            <span className="file-changes-action">{entry.action}</span>
-            <span className="file-changes-tool">{entry.tool}</span>
-            {entry.undone && <span className="file-changes-undone">undone</span>}
-          </li>
-        ))}
-      </ol>
+      {expanded && (
+        <ol className="file-changes-list">
+          {rows.map((entry) => (
+            <li
+              key={`${entry.toolCallId}-${entry.sequence}`}
+              className="file-changes-row"
+              data-undone={entry.undone || undefined}
+            >
+              {actionIcon(entry)}
+              <code className="file-changes-path" title={entry.path}>
+                {entry.path}
+              </code>
+              <span className="file-changes-action">{entry.action}</span>
+              <span className="file-changes-tool">{entry.tool}</span>
+              {entry.undone && <span className="file-changes-undone">undone</span>}
+            </li>
+          ))}
+        </ol>
+      )}
     </section>
   );
 }

@@ -26,6 +26,7 @@ import type {
   TimelineEntry
 } from "../tauri";
 import { readSessionState, rememberSessionState } from "../sessionRuntimeModel";
+import { useSessionFileChanges } from "../controllers/useSessionFileChanges";
 import { AgentMarkdown } from "./AgentMarkdown";
 import { DisclosureTriangle } from "./DisclosureTriangle";
 import { ThreadOutputArtifacts, UserMessageAttachments } from "./SessionThreadArtifacts";
@@ -259,6 +260,15 @@ export const SessionThread = memo(function SessionThread({
       : sessionId
         ? viewCache.artifactsFor(sessionId) ?? EMPTY_OUTPUT_ARTIFACTS
         : EMPTY_OUTPUT_ARTIFACTS;
+
+  // Session file-change history, refetched as runs finish so each turn's
+  // panel reflects its own changes once the run completes.
+  const { renderFileChangesPanel } = useSessionFileChanges(
+    sessionId,
+    status,
+    messages,
+    threadMessageId
+  );
 
   const projection = useMemo(() => {
     const previous = sessionId
@@ -916,6 +926,7 @@ export const SessionThread = memo(function SessionThread({
             );
           }
           return (
+            <>
             <article
               className={`thread-message thread-message-${item.message.role} ${
                 selectedId === item.id ? "selected" : ""
@@ -1014,6 +1025,8 @@ export const SessionThread = memo(function SessionThread({
                 </footer>
               )}
             </article>
+            {renderFileChangesPanel(item)}
+            </>
           );
             })()}
             </div>
