@@ -1017,7 +1017,10 @@ const toolsModuleBudgets = new Map([
   // Classification policy split out of shell.rs.
   // 580 -> 620: added network-egress and sensitive-read classification so
   // confidentiality/exfiltration are their own auto-grant axis (audit P1-03).
-  ["shell_classification.rs", 620],
+  // 620 -> 660: added the remote/control-plane destructive verb table
+  // (kubectl delete, npm publish, terraform destroy, ...) so remote
+  // destruction never auto-grants (codex audit E1/6.1).
+  ["shell_classification.rs", 660],
   ["shell_postcondition.rs", 200],
   ["stream_capture.rs", 60],
   ["tool_contract_v2.rs", 650],

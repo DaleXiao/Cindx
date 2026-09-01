@@ -1182,6 +1182,50 @@ mod tests {
     }
 
     #[test]
+    fn remote_control_plane_destructive_verbs_never_auto_grant() {
+        for command in [
+            "kubectl delete pod api-server",
+            "kubectl drain node-1",
+            "helm uninstall my-release",
+            "npm publish",
+            "gh issue delete 42",
+            "gh repo delete example",
+            "brew uninstall jq",
+            "docker rm container-1",
+            "docker system prune",
+            "docker push registry.example/team/image",
+            "terraform destroy",
+            "terraform apply",
+            "security delete-keychain login.keychain",
+        ] {
+            let classification = classify_shell_permission(command);
+            assert_eq!(
+                classification.risk,
+                PermissionRisk::Destructive,
+                "{command} must be one-shot and prompt-gated"
+            );
+            assert!(!classification.auto_grant_eligible);
+            assert!(!classification.session_reusable);
+        }
+        // Read-only and non-verb uses of the same CLIs keep Execute behavior.
+        for command in [
+            "kubectl get pods",
+            "npm install",
+            "brew list",
+            "docker ps",
+            "gh pr list",
+            "terraform plan",
+        ] {
+            let classification = classify_shell_permission(command);
+            assert_eq!(
+                classification.risk,
+                PermissionRisk::Execute,
+                "{command} must stay Execute-risk"
+            );
+        }
+    }
+
+    #[test]
     fn network_egress_and_sensitive_reads_never_auto_grant() {
         for command in [
             "curl -s https://example.com/api",

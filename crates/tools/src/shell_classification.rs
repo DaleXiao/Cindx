@@ -223,6 +223,8 @@ const KNOWN_SHELL_EXECUTABLES: &[&str] = &[
     "go",
     "docker",
     "kubectl",
+    "helm",
+    "terraform",
     "pod",
     "brew",
     "gh",
@@ -348,6 +350,11 @@ pub(crate) fn classify_shell_permission(command: &str) -> ShellCommandClassifica
         let Some(executable) = executable else {
             continue;
         };
+        if segment_runs_destructive_cli_verbs(segment, &executable) {
+            return ShellCommandClassification::destructive(
+                "remote or control-plane destructive verb",
+            );
+        }
         if !KNOWN_SHELL_EXECUTABLES.contains(&executable.as_str()) {
             recognized = false;
         }
@@ -385,6 +392,36 @@ fn command_performs_network_egress(executables: &[String]) -> bool {
     })
 }
 
+/// Verbs on known remote/control-plane CLIs that are destructive even though
+/// the command text never touches local files (audit E1/6.1). A matching
+/// segment approves one-shot under the Destructive risk; false positives only
+/// cost a manual approval, false negatives would auto-approve a remote
+/// deletion or a publication.
+fn segment_runs_destructive_cli_verbs(segment: &[String], executable: &str) -> bool {
+    let verbs: &[&str] = match executable {
+        "kubectl" => &["delete", "drain", "cordon", "taint"],
+        "helm" => &["uninstall"],
+        "npm" | "pnpm" | "yarn" => &["publish", "unpublish", "deprecate"],
+        "gh" => &["delete"],
+        "brew" => &["uninstall", "remove"],
+        "docker" => &["rm", "rmi", "prune", "push"],
+        "terraform" => &["destroy", "apply"],
+        "security" => &[
+            "delete-keychain",
+            "delete-generic-password",
+            "delete-internet-password",
+        ],
+        _ => return false,
+    };
+    // The verb sits within the first few tokens after the executable; tokens
+    // further out are typically values, so they are not matched.
+    segment
+        .iter()
+        .skip(1)
+        .take(3)
+        .any(|token| verbs.contains(&token.as_str()))
+}
+
 /// Well-known sensitive locations and secret-store CLIs. Matching is
 /// deliberately conservative (substring over the lowercased command): false
 /// positives only cost a manual approval, false negatives would auto-grant a
@@ -404,6 +441,8 @@ fn command_reads_sensitive_location(command: &str) -> bool {
         "credentials",
         "security find-generic-password",
         "security find-internet-password",
+        "security dump-keychain",
+        "security export",
     ];
     let lower = command.to_lowercase();
     PATTERNS.iter().any(|pattern| lower.contains(pattern))
