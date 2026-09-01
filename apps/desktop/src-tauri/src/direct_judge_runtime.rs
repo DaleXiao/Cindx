@@ -94,8 +94,10 @@ pub(crate) fn resolve_direct_judge_output(
 pub(crate) fn effort_from_run_context(run_context: &Metadata) -> String {
     run_context
         .get("agent_effort")
-        .cloned()
-        .unwrap_or_else(|| "auto".to_string())
+        .map(String::as_str)
+        .and_then(agent_core::AgentPolicy::parse_persisted)
+        .map(|policy| policy.label().to_string())
+        .unwrap_or_else(|| "default".to_string())
 }
 
 fn verification_required_from_run_context(run_context: &Metadata) -> bool {
@@ -431,11 +433,15 @@ mod tests {
             "conductor_contract".to_string(),
             "{\"verification_required\":true}".to_string(),
         );
-        assert_eq!(effort_from_run_context(&context), "auto");
+        assert_eq!(effort_from_run_context(&context), "default");
         assert!(verification_required_from_run_context(&context));
 
+        let mut canonical = Metadata::new();
+        canonical.insert("agent_effort".to_string(), "xhigh".to_string());
+        assert_eq!(effort_from_run_context(&canonical), "xhigh");
+
         let empty = Metadata::new();
-        assert_eq!(effort_from_run_context(&empty), "auto");
+        assert_eq!(effort_from_run_context(&empty), "default");
         assert!(!verification_required_from_run_context(&empty));
 
         let mut fast = Metadata::new();

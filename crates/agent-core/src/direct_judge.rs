@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::AgentPolicy;
+
 pub const DIRECT_JUDGE_RECEIPT_SCHEMA: &str = "cindx.direct-judge.v1";
 pub const DIRECT_JUDGE_MAX_REPAIR_ROUNDS: usize = 1;
 
@@ -57,7 +59,9 @@ pub fn direct_judge_model<'a>(
 }
 
 pub fn direct_judge_eligible(effort: &str, verification_required: bool) -> bool {
-    verification_required && matches!(effort.trim().to_ascii_lowercase().as_str(), "auto" | "pro")
+    verification_required
+        && crate::AgentPolicy::parse_persisted(effort.trim())
+            .is_some_and(|policy| !matches!(policy, AgentPolicy::Fast))
 }
 
 pub fn direct_judge_prompt(objective: &str, candidate_answer: &str) -> String {
@@ -145,11 +149,17 @@ mod tests {
 
     #[test]
     fn direct_judge_eligibility_never_opens_for_fast() {
+        // Every tier above fast triggers the judge; legacy labels migrate at
+        // ingress, and unparseable effort fails closed.
+        assert!(direct_judge_eligible("default", true));
+        assert!(direct_judge_eligible("high", true));
+        assert!(direct_judge_eligible("xhigh", true));
         assert!(direct_judge_eligible("auto", true));
         assert!(direct_judge_eligible("pro", true));
         assert!(!direct_judge_eligible("fast", true));
-        assert!(!direct_judge_eligible("auto", false));
+        assert!(!direct_judge_eligible("default", false));
         assert!(!direct_judge_eligible("", true));
+        assert!(!direct_judge_eligible("future", true));
     }
 
     #[test]

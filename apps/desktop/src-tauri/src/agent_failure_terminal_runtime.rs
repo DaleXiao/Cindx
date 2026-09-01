@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn agent_strategy_lifecycle_contract_preparation_failure_persists_only_for_the_winning_epoch() {
-        let failure = AgentRunControl::new("auto");
+        let failure = AgentRunControl::new("default");
         assert!(failure.begin_preparation());
         let mut writes = 0usize;
         assert_eq!(
@@ -243,7 +243,7 @@ mod tests {
         );
         assert_eq!(writes, 1);
 
-        let steered = AgentRunControl::new("auto");
+        let steered = AgentRunControl::new("default");
         assert!(steered.begin_preparation());
         assert_eq!(steered.request_steer("new-objective"), Ok(true));
         let mut steer_writer_ran = false;
@@ -257,7 +257,7 @@ mod tests {
         );
         assert!(!steer_writer_ran);
 
-        let cancelled = AgentRunControl::new("auto");
+        let cancelled = AgentRunControl::new("default");
         assert!(cancelled.begin_preparation());
         assert!(cancelled.request_cancel());
         let mut cancel_writer_ran = false;
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn stale_failure_epoch_never_runs_the_terminal_writer() {
-        let control = AgentRunControl::new("auto");
+        let control = AgentRunControl::new("default");
         let stale_lease = match control.execution_epoch_lease() {
             agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
             outcome => panic!("initial execution lease unavailable: {outcome:?}"),

@@ -366,7 +366,7 @@ mod tests {
         let payload = serde_json::json!({
             "prompt": "Use the revised objective",
             "attachments": [],
-            "effort": "auto",
+            "effort": "default",
             "currentTime": "test time"
         });
         let metadata = metadata_with_context(
@@ -587,7 +587,7 @@ mod tests {
         );
         append_queue_action(&mut store, &run_context, "delete", "queue-preparation-noop");
 
-        let control = AgentRunControl::new("pro");
+        let control = AgentRunControl::new("high");
         assert_eq!(control.request_steer("queue-preparation-noop"), Ok(true));
         let mut runtime = start_agent_loop(
             phase16_task_id(),
@@ -744,7 +744,7 @@ mod tests {
         let mut store = SqliteStore::in_memory().expect("store should open");
         let run_context = test_run_context();
         append_queue_action(&mut store, &run_context, "enqueue", "queue-retry");
-        let control = AgentRunControl::new("pro");
+        let control = AgentRunControl::new("high");
         assert_eq!(control.request_steer("queue-retry"), Ok(true));
         let pending_before = control.pending_steers_snapshot();
         let mut runtime = start_agent_loop(

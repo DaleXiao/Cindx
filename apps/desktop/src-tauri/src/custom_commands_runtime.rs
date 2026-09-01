@@ -39,7 +39,8 @@ pub(crate) fn parse_custom_command_file(name: &str, scope: &str, text: &str) -> 
             .as_deref()
             .map(str::trim)
             .map(str::to_lowercase)
-            .filter(|value| matches!(value.as_str(), "fast" | "auto" | "pro")),
+            .and_then(|value| agent_core::AgentPolicy::parse_persisted(&value))
+            .map(|policy| policy.label().to_string()),
         template,
         scope: scope.to_string(),
     }

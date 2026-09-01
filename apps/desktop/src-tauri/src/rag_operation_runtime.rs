@@ -95,7 +95,7 @@ impl RagOperationControl {
 
 fn rag_operation_budget() -> RunBudget {
     let practical_limit = usize::MAX / 4;
-    let mut budget = RunBudget::for_effort("auto");
+    let mut budget = RunBudget::for_effort("default");
     budget.max_duration = RAG_OPERATION_MAX_DURATION;
     budget.model_call_timeout = RAG_PROVIDER_TIMEOUT;
     budget.tool_call_timeout = RAG_PROVIDER_TIMEOUT;

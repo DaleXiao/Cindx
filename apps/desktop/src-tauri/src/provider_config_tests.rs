@@ -242,13 +242,18 @@ fn effort_default_models_parse_and_anchor_per_tier() {
     assert_eq!(config.fast_model, "fast-model");
     assert_eq!(config.auto_model, "auto-model");
     assert_eq!(config.pro_model, "pro-model");
+    // Canonical tier chain: fast/default/high/xhigh.
     assert_eq!(config.effort_default_model("fast"), "fast-model");
+    assert_eq!(config.effort_default_model("default"), "auto-model");
+    assert_eq!(config.effort_default_model("high"), "pro-model");
+    assert_eq!(config.effort_default_model("xhigh"), "pro-model");
+    // Legacy labels migrate at the ingress boundary only.
     assert_eq!(config.effort_default_model("auto"), "auto-model");
     assert_eq!(config.effort_default_model("pro"), "pro-model");
     assert_eq!(config.effort_default_model("other"), "");
 
     let empty = provider_config_from_text("base_url=https://example.test/v1\nmodel=base-model\n");
-    assert_eq!(empty.effort_default_model("auto"), "");
+    assert_eq!(empty.effort_default_model("default"), "");
     assert_eq!(empty.model, "base-model");
 
     let dashscope = provider_config_from_text(
@@ -256,6 +261,9 @@ fn effort_default_models_parse_and_anchor_per_tier() {
     );
     assert_eq!(dashscope.provider_id, PROVIDER_ALIBABA_CN);
     assert_eq!(dashscope.effort_default_model("fast"), "qwen3.7-flash");
+    assert_eq!(dashscope.effort_default_model("default"), "qwen3.7-plus");
+    assert_eq!(dashscope.effort_default_model("high"), "qwen3.7-max");
+    assert_eq!(dashscope.effort_default_model("xhigh"), "qwen3.7-max");
     assert_eq!(dashscope.effort_default_model("auto"), "qwen3.7-plus");
     assert_eq!(dashscope.effort_default_model("pro"), "qwen3.7-max");
     assert_eq!(dashscope.effort_default_model("other"), "");
@@ -263,8 +271,9 @@ fn effort_default_models_parse_and_anchor_per_tier() {
     let openai = provider_config_from_text("base_url=https://api.openai.com/v1\napi_key=secret\n");
     assert_eq!(openai.provider_id, PROVIDER_OPENAI);
     assert_eq!(openai.effort_default_model("fast"), "gpt-4.1-mini");
-    assert_eq!(openai.effort_default_model("auto"), "gpt-4.1");
-    assert_eq!(openai.effort_default_model("pro"), "gpt-4.1");
+    assert_eq!(openai.effort_default_model("default"), "gpt-4.1");
+    assert_eq!(openai.effort_default_model("high"), "gpt-4.1");
+    assert_eq!(openai.effort_default_model("xhigh"), "gpt-4.1");
 
     let pinned = effort_model_candidates(&config, "auto");
     assert!(pinned

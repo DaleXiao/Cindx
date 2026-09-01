@@ -94,7 +94,7 @@
         "conductor": "gpt-4.1",
         "planner": "gpt-4.1",
         "executor": "gpt-4.1",
-        "reviewer": "gpt-4.1",
+        "reviewer": "gpt-4.1-mini",
         "summarizer": "gpt-4.1-mini",
         "fast": "gpt-4.1-mini",
         "auto": "gpt-4.1",

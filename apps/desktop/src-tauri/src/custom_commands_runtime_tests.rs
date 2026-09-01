@@ -134,3 +134,29 @@ fn custom_commands_contract_missing_directories_yield_no_commands() {
 
     assert!(commands.is_empty());
 }
+
+#[test]
+fn custom_commands_contract_effort_uses_canonical_tiers_and_migrates_legacy() {
+    for (frontmatter, expected) in [
+        ("fast", Some("fast")),
+        ("default", Some("default")),
+        ("high", Some("high")),
+        ("xhigh", Some("xhigh")),
+        // Legacy labels migrate at the parse boundary; the stored view is
+        // canonical so the frontend tier switch always recognizes it.
+        ("auto", Some("default")),
+        ("pro", Some("high")),
+        ("turbo", None),
+    ] {
+        let command = parse_custom_command_file(
+            "tier-probe",
+            "project",
+            &format!("---\neffort: {frontmatter}\n---\nBody."),
+        );
+        assert_eq!(
+            command.effort.as_deref(),
+            expected,
+            "effort '{frontmatter}' must normalize to {expected:?}"
+        );
+    }
+}

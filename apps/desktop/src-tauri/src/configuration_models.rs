@@ -219,16 +219,21 @@ impl ProviderConfig {
     }
 
     pub(crate) fn effort_default_model(&self, effort_label: &str) -> String {
-        let pinned = match effort_label {
+        // Canonical tiers only downstream; legacy persisted labels (auto/pro)
+        // migrate once at this ingress boundary.
+        let Some(policy) = agent_core::AgentPolicy::parse_persisted(effort_label.trim()) else {
+            return String::new();
+        };
+        let canonical = policy.label();
+        let pinned = match canonical {
             "fast" => self.fast_model.trim(),
-            "auto" => self.auto_model.trim(),
-            "pro" => self.pro_model.trim(),
-            _ => return String::new(),
+            "default" => self.auto_model.trim(),
+            _ => self.pro_model.trim(), // high | xhigh
         };
         if !pinned.is_empty() {
             return pinned.to_string();
         }
-        provider_effort_default_model(&self.provider_id, effort_label).to_string()
+        provider_effort_default_model(&self.provider_id, canonical).to_string()
     }
 
     pub(crate) fn model_for_role(&self, role: &ModelRole) -> String {
