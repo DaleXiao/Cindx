@@ -33,6 +33,7 @@ import {
   type ProviderReadiness
 } from "../providerReadinessModel";
 import { applyCustomCommandTemplate } from "../customCommandsModel";
+import { presentFailure } from "../failurePresentation";
 import { composerTextareaSizing } from "../composerSizingModel";
 import type { CustomCommandView, SessionSandboxMode } from "../tauriTypes";
 import { permissionFocusTarget } from "./accessibilityFocusModel";
@@ -764,7 +765,13 @@ export function Composer({
       </div>
       {error && (
         <div className="composer-error" role="alert" aria-live="assertive" aria-atomic="true">
-          <span>{error}</span>
+          <span>{presentFailure(error).summary}</span>
+          {presentFailure(error).detail && (
+            <details className="composer-error-detail">
+              <summary>Details</summary>
+              <code>{presentFailure(error).detail}</code>
+            </details>
+          )}
           <div className="composer-error-actions">
             {canRetryError && (
               <button type="button" onClick={onRetry}>

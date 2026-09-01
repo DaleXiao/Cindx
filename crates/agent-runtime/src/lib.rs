@@ -866,6 +866,7 @@ fn close_unmatched_tool_calls_for_steer(state: &mut AgentLoopState) -> usize {
     if call_ids.is_empty() {
         return 0;
     }
+    let call_names = assistant_tool_call_names(assistant);
     let observed = state.messages[assistant_index + 1..]
         .iter()
         .filter(|message| matches!(message.role, MessageRole::Tool))
@@ -875,6 +876,18 @@ fn close_unmatched_tool_calls_for_steer(state: &mut AgentLoopState) -> usize {
         .into_iter()
         .filter(|call_id| !observed.contains(call_id))
         .collect::<Vec<_>>();
+
+    // A steer that supersedes an unobserved tool-call round is the user
+    // cancelling those steps; release their prompt-derived obligations so the
+    // run can finish without reporting the cancelled step as a contract
+    // failure.
+    for call_id in &unmatched {
+        if let Some(tool_name) = call_names.get(call_id) {
+            state
+                .task_contract
+                .release_prompt_tool_obligation(tool_name);
+        }
+    }
 
     for call_id in &unmatched {
         state.messages.push(Message {
@@ -932,6 +945,41 @@ fn assistant_tool_call_ids(message: &Message) -> Vec<String> {
         })
         .filter(|call_id| seen.insert(call_id.clone()))
         .collect()
+}
+
+/// Maps each proposed tool-call id in an assistant message to its tool name,
+/// reading the provider raw calls (`name` or `function.name`). Used to release
+/// prompt-derived obligations when a steer cancels an unobserved tool round.
+fn assistant_tool_call_names(message: &Message) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    if !matches!(message.role, MessageRole::Assistant) {
+        return names;
+    }
+    if let Some(raw_calls) = message.metadata.get("raw_tool_calls_json") {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_calls) {
+            if let Some(array) = value.as_array() {
+                for call in array {
+                    let Some(call_id) = call.get("id").and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    let name = call
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            call.get("function")
+                                .and_then(|function| function.get("name"))
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty());
+                    if let Some(name) = name {
+                        names.insert(call_id.to_string(), name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
 }
 
 pub fn append_observation(state: &mut AgentLoopState, observation: &str) {

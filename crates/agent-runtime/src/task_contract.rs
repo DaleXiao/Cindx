@@ -198,6 +198,8 @@ pub struct AgentTaskContract {
     #[serde(default)]
     prompt_successful_tools: BTreeSet<String>,
     #[serde(default)]
+    released_prompt_tools: BTreeSet<String>,
+    #[serde(default)]
     prompt_evidence_epoch: u64,
     #[serde(default)]
     prompt_evidence_requirements: BTreeMap<String, PromptEvidenceRequirement>,
@@ -271,6 +273,7 @@ impl AgentTaskContract {
         if epoch_changed {
             self.prompt_requirement_epoch = epoch;
             self.prompt_successful_tools.clear();
+            self.released_prompt_tools.clear();
         }
         if epoch_changed || requirements_changed {
             self.gate_attempts
@@ -305,12 +308,36 @@ impl AgentTaskContract {
         if epoch_changed {
             self.prompt_requirement_epoch = epoch;
             self.prompt_successful_tools.clear();
+            self.released_prompt_tools.clear();
         }
         if epoch_changed || requirements_changed {
             self.gate_attempts
                 .retain(|key, _| !key.starts_with("prompt_any_tool:"));
         }
         self.prompt_required_any_tool_successes = requirements;
+    }
+
+    /// Releases a prompt-derived tool obligation for the current steer epoch
+    /// when the user has explicitly cancelled that step (a steer that
+    /// supersedes the tool-call round, or a denial). A released obligation no
+    /// longer blocks completion and no longer drives repair instructions, so a
+    /// user-cancelled step is never reported back to the user as a contract
+    /// failure. Releases are scoped to the current epoch and cleared when
+    /// steering advances. This does not mark the tool as successful.
+    pub fn release_prompt_tool_obligation(&mut self, tool_name: &str) {
+        let tool_name = tool_name.trim();
+        if tool_name.is_empty() || !self.prompt_required_tool_successes.contains(tool_name) {
+            return;
+        }
+        self.released_prompt_tools.insert(tool_name.to_string());
+        self.gate_attempts.remove(&format!(
+            "prompt_tool:{}:{tool_name}",
+            self.prompt_requirement_epoch
+        ));
+    }
+
+    fn prompt_tool_released(&self, tool_name: &str) -> bool {
+        self.released_prompt_tools.contains(tool_name)
     }
 
     /// Replaces the substantive evidence obligation derived from the active prompt.
@@ -735,6 +762,7 @@ impl AgentTaskContract {
                     .iter()
                     .filter(|tool_name| {
                         !self.prompt_successful_tools.contains(*tool_name)
+                            && !self.prompt_tool_released(tool_name)
                             && self.action_denial_for_tools([tool_name.as_str()]).is_none()
                     })
                     .cloned(),
@@ -1074,6 +1102,7 @@ impl AgentTaskContract {
             .iter()
             .find(|tool_name| {
                 !self.prompt_successful_tools.contains(*tool_name)
+                    && !self.prompt_tool_released(tool_name)
                     && self.action_denial_for_tools([tool_name.as_str()]).is_none()
             })
             .cloned()
@@ -1482,6 +1511,36 @@ mod tests {
             Some(&ToolRisk::UsesNetwork),
         );
         assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+    }
+
+    #[test]
+    fn user_cancelled_prompt_tool_is_released_not_a_completion_failure() {
+        let mut contract = AgentTaskContract::default();
+        let tools = vec![tool("image.generate", ToolRisk::UsesNetwork)];
+        contract.replace_prompt_required_tool_successes(1, ["image.generate"]);
+
+        // Before the cancel the obligation gates completion.
+        assert!(contract
+            .completion_instruction_for_task(&tools)
+            .unwrap()
+            .unwrap()
+            .contains("image.generate"));
+
+        // The user steers and cancels the step; the obligation is released for
+        // this epoch, so completion no longer demands it and no repair loop
+        // can fail the run.
+        contract.release_prompt_tool_obligation("image.generate");
+        assert_eq!(contract.completion_instruction_for_task(&tools), Ok(None));
+        // A release is not a success: the tool is still not recorded as run.
+        assert!(!contract.required_tool_satisfied("image.generate"));
+
+        // A fresh steer epoch clears the release set (scoped to the epoch).
+        contract.replace_prompt_required_tool_successes(2, ["image.generate"]);
+        assert!(contract
+            .completion_instruction_for_task(&tools)
+            .unwrap()
+            .unwrap()
+            .contains("image.generate"));
     }
 
     #[test]

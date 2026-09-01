@@ -1097,6 +1097,61 @@ fn steering_closes_every_unobserved_call_in_the_latest_tool_round() {
 }
 
 #[test]
+fn steering_that_cancels_a_required_tool_releases_its_contract_obligation() {
+    let mut state = start_agent_loop(
+        TaskId("task-steer-release".to_string()),
+        "draw a cartoon of the city",
+        AgentRuntimeConfig::default(),
+    );
+    state
+        .task_contract
+        .replace_prompt_required_tool_successes(1, ["image.generate"]);
+    state
+        .task_contract
+        .merge_workspace_verification_policy(WorkspaceVerificationPolicy::NotRequired);
+    let tools = vec![ToolSpec::builtin(
+        "image.generate",
+        "test",
+        "test",
+        ToolRisk::UsesNetwork,
+        r#"{"type":"object"}"#,
+    )];
+    // The un-cancelled obligation gates completion.
+    assert!(state
+        .task_contract
+        .completion_instruction_for_task(&tools)
+        .unwrap()
+        .unwrap()
+        .contains("image.generate"));
+
+    state.messages.push(Message {
+        role: MessageRole::Assistant,
+        content: String::new(),
+        metadata: [(
+            "raw_tool_calls_json".to_string(),
+            r#"[{"id":"call-1","name":"image.generate"}]"#.to_string(),
+        )]
+        .into_iter()
+        .collect(),
+    });
+
+    // The user steers, cancelling the in-flight image.generate round.
+    let closed =
+        append_steering_instruction(&mut state, "why you generate again?", Metadata::new());
+    assert_eq!(closed, 1);
+
+    // The cancelled step's obligation is released: completion no longer
+    // demands it and the run can finish instead of failing the contract.
+    assert_eq!(
+        state.task_contract.completion_instruction_for_task(&tools),
+        Ok(None)
+    );
+    assert!(!state
+        .task_contract
+        .required_tool_satisfied("image.generate"));
+}
+
+#[test]
 fn steering_falls_back_to_raw_tool_calls_when_ids_metadata_is_absent() {
     let mut state = start_agent_loop(
         TaskId("task-steer-raw-tools".to_string()),

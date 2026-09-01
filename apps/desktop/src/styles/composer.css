@@ -917,6 +917,25 @@ textarea::placeholder {
   font-size: 12px;
 }
 
+.composer-error-detail {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.composer-error-detail summary {
+  cursor: pointer;
+  color: #707070;
+  user-select: none;
+}
+
+.composer-error-detail code {
+  display: block;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #707070;
+}
+
 .composer-error button {
   display: inline-flex;
   min-height: 24px;
