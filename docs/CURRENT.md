@@ -299,7 +299,9 @@ as absent-target evidence, so a task whose requested workspace file does not
  cannot trigger an unsatisfiable repair loop.
 
 Current Agent model events also carry an additive typed attribution projection:
-the acting subject is Owner, Specialist, or Independent Verifier; the stage is
+the acting subject is recorded in the historical actor vocabulary (Owner,
+Specialist, or Independent Verifier), though single-model effort-tier runs act
+exclusively as Owner now that workflow collaboration is retired; the stage is
 plan, evidence, act, verify, or finalize; and the model profile is Primary,
 Reasoning, Verifier, or Utility. Background learning
 utilities are recorded as services, not Actors; effort-tier planning is
@@ -345,10 +347,9 @@ keep their provider defaults. There is no runtime or per-effort toggle yet.
    and are prepared separately.
    Semantic search, file search, graph-direct lookup, and graph walk may run in
    parallel and retain source provenance.
-8. A validated workflow may execute one read-only Specialist and, when planned,
-   one tool-free Independent Verifier. The runtime materializes their checked
-   checkpoint as a deterministic handoff; the foreground Owner independently
-   decides and performs any effects and final delivery.
+8. Workflow collaboration is retired: no read-only Specialist or tool-free
+   Independent Verifier lane executes. Every step runs as single-model Owner
+   execution; a residual workflow decision fails closed rather than executing.
 9. `agent-application` drives prepared epochs through `AgentKernel`, including
    model turns, tool batches, typed observations, permission suspension, steer,
    recovery, and completion checks.
@@ -551,11 +552,13 @@ only: it is not production `LearningEvidenceV1`, does not enter routing, prompt
 evolution, memory, canary, or serving, and does not establish an intelligence
 gain.
 
-The source also defines bounded offline collaboration learning. The initial
-matched Direct/Workflow gate decides whether one read-only Specialist is
-useful. A later candidate keeps that topology fixed and changes exactly one of
-two context allocations, independent verification, or one same-lane repair;
-stopping is derived from the required-lane result.
+The source formerly defined bounded offline collaboration learning: an initial
+matched Direct/Workflow gate decided whether one read-only Specialist was
+useful, a later candidate kept that topology fixed and changed exactly one of
+two context allocations, independent verification, or one same-lane repair,
+and stopping derived from the required-lane result. This collaboration
+machinery is retired and physically removed (see the phase-3 note below); the
+paragraph is retained as a historical record only.
 
 **Removed in the phase-3 effort-tier rebuild.** The `realworld-eval` runtime
 adapter, the successor matched runner, the prompt-genome / prompt-profile

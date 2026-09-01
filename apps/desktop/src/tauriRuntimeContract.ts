@@ -56,6 +56,7 @@ function runBudgets(value: unknown): NativeAgentRunBudgetsView {
 export function decodeNativeRuntimeStatus(value: unknown): NativeRuntimeStatus {
   const source = record(value, "RuntimeStatus");
   string(source.appVersion, "RuntimeStatus.appVersion");
+  string(source.sourceRevision, "RuntimeStatus.sourceRevision");
   string(source.kernelStatus, "RuntimeStatus.kernelStatus");
   boolean(source.providerReady, "RuntimeStatus.providerReady");
   string(source.workspaceRoot, "RuntimeStatus.workspaceRoot");

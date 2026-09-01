@@ -140,6 +140,7 @@ export async function setSidebarMaterialWidth(width: number): Promise<void> {
 function browserRuntimeStatus(workspaceRoot: string): RuntimeStatus {
   return {
     appVersion: DESKTOP_VERSION,
+    sourceRevision: "unknown",
     kernelStatus: "browser preview",
     providerReady: browserPhase4State.provider.ready,
     workspaceRoot,

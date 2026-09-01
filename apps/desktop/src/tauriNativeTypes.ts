@@ -12,6 +12,7 @@ export type NativeAgentRunBudgetsView = AgentRunBudgets;
 
 export type NativeRuntimeStatus = {
   appVersion: string;
+  sourceRevision: string;
   kernelStatus: string;
   providerReady: boolean;
   workspaceRoot: string;

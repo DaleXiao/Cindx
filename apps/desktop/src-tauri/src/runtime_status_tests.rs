@@ -5,6 +5,10 @@ fn runtime_status_exposes_expected_modes() {
     let status = runtime_status_for_root(workspace_root());
 
     assert_eq!(status.app_version, env!("CARGO_PKG_VERSION"));
+    assert!(
+        !status.source_revision.is_empty(),
+        "runtime status must expose the embedded source revision"
+    );
     assert!(!status.provider_ready);
     assert!(status
         .orchestration_modes

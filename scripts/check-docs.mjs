@@ -122,6 +122,32 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
+// Semantic gate: capabilities retired by the phase-3 rebuild must not be
+// described as executing in the present tense, and HANDOFF must keep exactly
+// one Blocking Fact (duplicate continuation narratives belong in git
+// history) — audit E3.
+const currentSource = fs.readFileSync(path.join(root, "docs/CURRENT.md"), "utf8");
+const architectureSource = fs.readFileSync(path.join(root, "docs/ARCHITECTURE.md"), "utf8");
+const handoffSource = fs.readFileSync(path.join(root, "docs/HANDOFF.md"), "utf8");
+if (currentSource.includes("may execute one read-only Specialist")) {
+  failures.push("CURRENT.md describes retired workflow lanes in the present tense");
+}
+if (currentSource.includes("The source also defines bounded offline collaboration learning")) {
+  failures.push("CURRENT.md describes removed collaboration learning in the present tense");
+}
+if (!architectureSource.includes("single-model effort-tier runs act exclusively as Owner")) {
+  failures.push("ARCHITECTURE.md must state the Owner-only actor reality");
+}
+const blockingFactCount = (handoffSource.match(/^## Blocking Fact$/gm) ?? []).length;
+if (blockingFactCount !== 1) {
+  failures.push(`HANDOFF.md must keep exactly one Blocking Fact section, found ${blockingFactCount}`);
+}
+
+if (failures.length > 0) {
+  process.stderr.write(`Documentation check failed:\n- ${failures.join("\n- ")}\n`);
+  process.exit(1);
+}
+
 process.stdout.write(
   `Documentation baseline ${expectedVersion} is consistent (${maintained.length} maintained files).\n`
 );

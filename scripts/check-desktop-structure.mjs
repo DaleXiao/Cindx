@@ -1342,7 +1342,7 @@ const ciDirectTauriBuildSteps = ciWorkflow
   .filter((step) => step.includes("npm exec tauri build"));
 const releaseDirectTauriBuildSteps = releaseWorkflow
   .split(/\n(?=      - name: )/)
-  .filter((step) => step.includes("uses: tauri-apps/tauri-action@v1"));
+  .filter((step) => step.includes("uses: tauri-apps/tauri-action@"));
 assert(
   ciDirectTauriBuildSteps.length === 1 &&
     ciDirectTauriBuildSteps.every((step) => step.includes(githubSourceRevisionStamp)) &&

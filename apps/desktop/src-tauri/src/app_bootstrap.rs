@@ -103,7 +103,10 @@ pub fn run() -> Result<(), String> {
         }
     }
     if startup_probe_requested() {
-        append_startup_log("startup probe completed");
+        append_startup_log(&format!(
+            "startup probe completed (source revision: {})",
+            option_env!("CINDX_SOURCE_REVISION").unwrap_or("unknown")
+        ));
         return Ok(());
     }
 

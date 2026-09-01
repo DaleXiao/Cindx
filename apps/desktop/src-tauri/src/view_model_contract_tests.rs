@@ -382,6 +382,7 @@ fn output_contract_values() -> BTreeMap<&'static str, Vec<Value>> {
             "RuntimeStatus",
             vec![serialized(RuntimeStatus {
                 app_version: "0.1.contract".to_string(),
+                source_revision: "0".repeat(40),
                 kernel_status: "online".to_string(),
                 provider_ready: true,
                 workspace_root: "/contract/workspace".to_string(),

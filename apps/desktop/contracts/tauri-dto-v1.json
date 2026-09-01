@@ -9,6 +9,7 @@
       "values": [
         {
           "appVersion": "0.1.contract",
+          "sourceRevision": "0000000000000000000000000000000000000000",
           "kernelStatus": "online",
           "providerReady": true,
           "workspaceRoot": "/contract/workspace",

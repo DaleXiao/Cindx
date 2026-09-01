@@ -1141,6 +1141,9 @@ pub(crate) fn runtime_status(state: &tauri::State<'_, AppState>) -> Result<Runti
 pub(crate) fn runtime_status_for_root(root: PathBuf) -> RuntimeStatus {
     RuntimeStatus {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
+        source_revision: option_env!("CINDX_SOURCE_REVISION")
+            .unwrap_or("unknown")
+            .to_string(),
         kernel_status: "kernel bridge online".to_string(),
         provider_ready: false,
         workspace_root: root.display().to_string(),

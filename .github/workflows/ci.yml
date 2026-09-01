@@ -68,8 +68,9 @@ jobs:
         run: node scripts/check-gates-manifest.mjs
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin
 
       - name: Check Rust formatting and lints
@@ -165,6 +166,9 @@ jobs:
           HOME="$PROBE_HOME" CINDX_DATA_DIR="$PROBE_HOME/data" CINDX_STARTUP_PROBE=1 "$APP_PATH/Contents/MacOS/cindx-desktop"
           test -f "$PROBE_HOME/data/state.sqlite3"
           grep -q "startup probe completed" "$PROBE_HOME/data/startup.log"
+          # Provenance: the revision embedded at compile time must match the
+          # exact commit CI built from (audit E3).
+          grep -q "startup probe completed (source revision: ${{ github.sha }})" "$PROBE_HOME/data/startup.log"
 
           # Probe persistent-state failure: the packaged app must refuse an unsafe in-memory start.
           FAILURE_DATA="$PROBE_HOME/failure-data"
@@ -206,7 +210,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
 
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit

@@ -26,18 +26,20 @@ recovery, retrieval, memory, and the delivered result.
 Current Agent execution uses separate dimensions instead of treating legacy
 role names as one ontology:
 
-- **Actor:** Owner, Specialist, or Independent Verifier.
+- **Actor:** historical vocabulary of Owner, Specialist, or Independent
+  Verifier; single-model effort-tier runs act exclusively as Owner.
 - **Stage:** plan, evidence, act, verify, or finalize.
 - **Model profile:** Primary, Reasoning, Verifier, or Utility.
 - **Service:** Background learning utilities are services and are never recorded
   as Actors. Effort-tier planning is deterministic and makes no model call, so
   it is not a stage participant at all.
 
-The Owner alone owns permission-gated effects and final user delivery.
-Specialists contribute bounded internal plans or evidence. Independent
-Verifiers evaluate an artifact without effect authority. Utility-profile model
-calls support bounded background preparation but do not participate in the
-production Workflow decision or own final delivery.
+The Owner alone owns permission-gated effects and final user delivery. The
+retired workflow lanes used Specialists for bounded internal plans or evidence
+and Independent Verifiers for effect-free artifact evaluation; those lanes no
+longer execute. Utility-profile model calls support bounded background
+preparation but do not participate in any production decision or own final
+delivery.
 Background prompt mutation is recorded as a learning utility service, not a
 production Specialist.
 

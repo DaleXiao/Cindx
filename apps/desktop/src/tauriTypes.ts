@@ -4,6 +4,7 @@ export type { ProviderId } from "./providerProfiles";
 
 export type RuntimeStatus = {
   appVersion: string;
+  sourceRevision: string;
   kernelStatus: string;
   providerReady: boolean;
   workspaceRoot: string;

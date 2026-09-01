@@ -41,8 +41,9 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
 
       - name: Set up Rust targets
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Check Rust formatting and lints
@@ -130,7 +131,7 @@ jobs:
 
       - name: Build and publish signed and notarized Universal app
         if: steps.apple-signing.outputs.certificate_configured == 'true' && steps.apple-signing.outputs.notarization_configured == 'true'
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CINDX_SOURCE_REVISION: ${{ github.sha }}
@@ -155,7 +156,7 @@ jobs:
 
       - name: Build and publish signed Universal app
         if: steps.apple-signing.outputs.certificate_configured == 'true' && steps.apple-signing.outputs.notarization_configured != 'true'
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CINDX_SOURCE_REVISION: ${{ github.sha }}
@@ -177,7 +178,7 @@ jobs:
 
       - name: Build and publish unsigned Universal app
         if: steps.apple-signing.outputs.certificate_configured != 'true'
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CINDX_SOURCE_REVISION: ${{ github.sha }}

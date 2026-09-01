@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RuntimeStatus {
     pub(crate) app_version: String,
+    /// The exact source revision the binary was built from
+    /// (`CINDX_SOURCE_REVISION` at compile time); "unknown" when the build
+    /// did not stamp it. Lets release receipts tie the installed bundle to a
+    /// tag mechanically (audit E3).
+    pub(crate) source_revision: String,
     pub(crate) kernel_status: String,
     pub(crate) provider_ready: bool,
     pub(crate) workspace_root: String,
