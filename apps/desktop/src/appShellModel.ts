@@ -46,6 +46,47 @@ export function normalizedSessionEffort(effort: string | undefined): AgentEffort
   return "default";
 }
 
+export const SIDEBAR_MIN_WIDTH = 200;
+export const SIDEBAR_MAX_WIDTH = 320;
+export const INSPECTOR_MIN_WIDTH = 280;
+export const INSPECTOR_MAX_WIDTH = 420;
+/**
+ * The thread column must stay usable at the minimum window width even when
+ * both panels are open at their user-chosen widths.
+ */
+export const MIN_THREAD_WIDTH = 240;
+
 export function clampSidebarWidth(width: number) {
-  return Math.min(320, Math.max(200, width));
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
+}
+
+export function clampInspectorWidth(width: number) {
+  return Math.min(INSPECTOR_MAX_WIDTH, Math.max(INSPECTOR_MIN_WIDTH, width));
+}
+
+/**
+ * Window-aware panel constraint: the thread column keeps at least
+ * MIN_THREAD_WIDTH. When the open panels plus the floor exceed the window,
+ * the sidebar shrinks toward its minimum first, then the inspector; user
+ * widths above the floor are never touched on wide windows.
+ */
+export function constrainPanelWidths(input: {
+  windowWidth: number;
+  sidebarOpen: boolean;
+  sidebarWidth: number;
+  inspectorOpen: boolean;
+  inspectorWidth: number;
+}): { sidebarWidth: number; inspectorWidth: number } {
+  const sidebar = input.sidebarOpen ? clampSidebarWidth(input.sidebarWidth) : 0;
+  const inspector = input.inspectorOpen ? clampInspectorWidth(input.inspectorWidth) : 0;
+  let overflow = sidebar + inspector + MIN_THREAD_WIDTH - input.windowWidth;
+  if (overflow <= 0) return { sidebarWidth: sidebar, inspectorWidth: inspector };
+  const sidebarCut = Math.max(0, Math.min(overflow, sidebar - SIDEBAR_MIN_WIDTH));
+  const constrainedSidebar = sidebar - sidebarCut;
+  overflow -= sidebarCut;
+  const inspectorCut = Math.max(0, Math.min(overflow, inspector - INSPECTOR_MIN_WIDTH));
+  return {
+    sidebarWidth: constrainedSidebar,
+    inspectorWidth: inspector - inspectorCut
+  };
 }

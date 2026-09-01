@@ -114,6 +114,7 @@
       "version-contract",
       "desktop-layout",
       "desktop-structure",
+      "desktop-dependency-policy",
       "desktop-dto-contract",
       "performance-comparator-contract",
       "paired-performance-contract",
@@ -826,6 +827,12 @@
         "test result: ok. 1 passed; 0 failed",
         "cindx.rag-index-profile.v1"
       ]
+    },
+    {
+      "id": "desktop-dependency-policy",
+      "category": "architecture",
+      "command": ["node", "scripts/check-desktop-dependency-policy.mjs"],
+      "required_output": ["Desktop dependency policy passed"]
     },
     {
       "id": "plan-mode-contract",

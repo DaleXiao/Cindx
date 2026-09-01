@@ -722,7 +722,9 @@ const settingsPageLineCount = settingsPageFileSource.split("\n").length;
 const sessionThreadLineCount = sessionThreadFileSource.split("\n").length;
 const inspectorLineCount = inspectorSource.split("\n").length;
 const extractedDesktopBoundaryBudgets = [
-  ["appShellModel.ts", appShellModelSource, 80],
+  // 80 -> 100: appShellModel owns the shared panel-width constants and the
+  // window-aware constrainPanelWidths contract (narrow-window floor, audit D3).
+  ["appShellModel.ts", appShellModelSource, 100],
   ["appShellStateModel.ts", appShellStateModelSource, 160],
   ["useAppShellController.ts", appShellControllerSource, 100],
   ["useAppWorkspaceProjection.ts", appWorkspaceProjectionSource, 200],
@@ -2071,7 +2073,8 @@ assert(
     /\.inspector\[data-open="false"\] \{[^}]*opacity: 1;[^}]*visibility: hidden;[^}]*visibility 0s 180ms;/.test(styles) &&
     /\.app-shell\[data-sidebar-open="false"\] \.window-toolbar-panel-left,\s*\.app-shell\[data-inspector-open="false"\] \.window-toolbar-panel-right \{[^}]*width: 0;/.test(styles) &&
     styles.includes('.app-shell[data-sidebar-resizing="true"] .window-toolbar-panel-left') &&
-    inspectorSource.includes("const INSPECTOR_MAX_WIDTH = 420") &&
+    appShellModelSource.includes("INSPECTOR_MAX_WIDTH = 420") &&
+    inspectorSource.includes("clampInspectorWidth") &&
     /:root\[data-theme="dark"\] \.inspector-debug \{[^}]*background: var\(--panel\);/.test(styles),
   "Pane close animations must keep opaque coverage, bound the inspector, and seal the dark debug edge"
 );
@@ -3378,7 +3381,9 @@ assert(
     rustLib.includes("MACOS_SIDEBAR_MATERIAL_TAG") &&
     rustLib.includes("set_sidebar_material_width") &&
     tauriBridge.includes('invoke<void>("set_sidebar_material_width"') &&
-    appSource.includes('activeView === "settings" || !sidebarOpen ? 0 : sidebarWidth') &&
+    appSource.includes("sidebarOpen: sidebarOpen && activeView !== \"settings\"") &&
+    appSource.includes("constrainPanelWidths(") &&
+    appSource.includes("panelLayout.sidebarWidth") &&
     styles.includes("--project-selection: rgba(210, 211, 214, 0.78)") &&
     styles.includes("--session-selection: rgba(220, 221, 224, 0.82)") &&
     !/\.project-row\.active \{[^}]*box-shadow:/.test(styles) &&

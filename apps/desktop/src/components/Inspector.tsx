@@ -45,6 +45,11 @@ import {
 } from "../tauri";
 import { useArtifactImagePreview } from "../controllers/useArtifactImagePreview";
 import { useDialogFocus } from "../useDialogFocus";
+import {
+  clampInspectorWidth,
+  INSPECTOR_MAX_WIDTH,
+  INSPECTOR_MIN_WIDTH
+} from "../appShellModel";
 import type {
   AgentOutputArtifactView,
   AgentState,
@@ -116,12 +121,7 @@ function formatDuration(durationMs: number | null) {
   return `${(durationMs / 1000).toFixed(1)} s`;
 }
 
-const INSPECTOR_MIN_WIDTH = 280;
-const INSPECTOR_MAX_WIDTH = 420;
 
-function clampWidth(width: number) {
-  return Math.min(INSPECTOR_MAX_WIDTH, Math.max(INSPECTOR_MIN_WIDTH, width));
-}
 
 type OutputArtifact = AgentOutputArtifactView & {
   versionCount: number;
@@ -678,7 +678,7 @@ export function Inspector({
     document.body.style.userSelect = "none";
 
     const handleMove = (moveEvent: PointerEvent) => {
-      onWidthChange(clampWidth(startWidth + startX - moveEvent.clientX));
+      onWidthChange(clampInspectorWidth(startWidth + startX - moveEvent.clientX));
     };
     const handleUp = () => {
       window.removeEventListener("pointermove", handleMove);
@@ -774,8 +774,8 @@ export function Inspector({
         tabIndex={0}
         onPointerDown={beginResize}
         onKeyDown={(event) => {
-          if (event.key === "ArrowLeft") onWidthChange(clampWidth(width + 16));
-          if (event.key === "ArrowRight") onWidthChange(clampWidth(width - 16));
+          if (event.key === "ArrowLeft") onWidthChange(clampInspectorWidth(width + 16));
+          if (event.key === "ArrowRight") onWidthChange(clampInspectorWidth(width - 16));
         }}
       />
 

@@ -153,7 +153,7 @@ export function PlanConfirmationCard({
         <ListChecks aria-hidden="true" />
         <strong id="plan-confirmation-title">Plan ready for review</strong>
         {!engaged && autoApprovalAllowed && (
-          <span className="plan-confirmation-countdown">auto-approve in {countdownSeconds}s</span>
+          <span className="plan-confirmation-countdown" role="timer" aria-live="off">auto-approve in {countdownSeconds}s</span>
         )}
       </div>
       <p id="plan-confirmation-description">

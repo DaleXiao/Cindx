@@ -16,6 +16,7 @@ import { QueuedMessages } from "./components/QueuedMessages";
 import { Sidebar } from "./components/Sidebar";
 import { WorkspaceChrome } from "./components/WorkspaceChrome";
 import { providerReadinessMessage, providerStatusText } from "./providerReadinessModel";
+import { constrainPanelWidths } from "./appShellModel";
 import { useAgentRunController } from "./controllers/useAgentRunController";
 import { useAppWorkspaceProjection } from "./controllers/useAppWorkspaceProjection";
 import { useAppShellController } from "./controllers/useAppShellController";
@@ -31,6 +32,7 @@ import { useProjectSessionController } from "./controllers/useProjectSessionCont
 import { useSessionRuntimeController } from "./controllers/useSessionRuntimeController";
 import { useSessionRuntimeSync } from "./controllers/useSessionRuntimeSync";
 import { useSidebarResize } from "./controllers/useSidebarResize";
+import { useWindowWidth } from "./controllers/useWindowWidth";
 import { LiveSessionThread } from "./components/SessionThread";
 import {
   getAgentState,
@@ -103,6 +105,14 @@ export function App() {
     resizing: sidebarResizing,
     width: sidebarWidth
   } = useSidebarResize();
+  const windowWidth = useWindowWidth();
+  const panelLayout = constrainPanelWidths({
+    windowWidth,
+    sidebarOpen: sidebarOpen && activeView !== "settings",
+    sidebarWidth,
+    inspectorOpen: inspectorOpen && activeView === "timeline",
+    inspectorWidth
+  });
   const {
     appearanceMode,
     flushPersonalization,
@@ -455,7 +465,7 @@ export function App() {
   useEffect(() => {
     let frame: number | null = null;
     let timer: number | null = null;
-    const width = activeView === "settings" || !sidebarOpen ? 0 : sidebarWidth;
+    const width = panelLayout.sidebarWidth;
     const updateMaterial = () => {
       frame = window.requestAnimationFrame(() => {
         void setSidebarMaterialWidth(width).catch(() => {});
@@ -472,7 +482,7 @@ export function App() {
       if (timer !== null) window.clearTimeout(timer);
       if (frame !== null) window.cancelAnimationFrame(frame);
     };
-  }, [activeView, sidebarOpen, sidebarWidth]);
+  }, [panelLayout.sidebarWidth]);
 
   useEffect(() => {
     let disposed = false;
@@ -554,8 +564,8 @@ export function App() {
       data-inspector-resizing={inspectorResizing}
       style={
         {
-          "--sidebar-width": `${sidebarWidth}px`,
-          "--inspector-width": `${inspectorWidth}px`
+          "--sidebar-width": `${panelLayout.sidebarWidth}px`,
+          "--inspector-width": `${panelLayout.inspectorWidth}px`
         } as CSSProperties
       }
     >
@@ -853,7 +863,7 @@ export function App() {
       <Inspector
         open={activeView === "timeline" && inspectorOpen}
         showDebug={debugAlwaysVisible}
-        width={inspectorWidth}
+        width={panelLayout.inspectorWidth}
         tab={inspectorTab}
         sessionId={activeSession?.id ?? null}
         outputRequest={inspectorOutputRequest}

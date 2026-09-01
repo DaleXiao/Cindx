@@ -26,7 +26,9 @@ The desktop app currently includes:
   likewise hidden while the run's live assistant message is already rendered, so
   an in-progress answer is never shown twice.
 - A right output pane with file lists and previews, plus a collapsible debug
-  drawer for trace, context, and artifacts.
+  drawer for trace, context, and artifacts. At narrow window widths the thread
+  column keeps a minimum usable width: the sidebar yields toward its minimum
+  first, then the inspector, before the thread gives up any floor space.
 - Schedules, model/provider settings, tools, MCP, skills, permissions, knowledge,
   personalization, appearance, and runtime diagnostics.
 - Browser and computer sidecars, image generation, speech input, and managed
