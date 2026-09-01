@@ -1021,9 +1021,17 @@ const toolsModuleBudgets = new Map([
   ["shell_postcondition.rs", 200],
   ["stream_capture.rs", 60],
   ["tool_contract_v2.rs", 650],
-  ["tool_support.rs", 360],
-  ["web_fetch.rs", 180],
+  // 360 -> 370: private artifact helpers (0700/0600 enforcement) for the
+  // shell stream-capture directory (audit E1).
+  ["tool_support.rs", 370],
+  // 180 -> 240: audited-per-hop public-web fetch (SSRF gate, IP pinning,
+  // manual redirect loop, status/Location parsing) replaced the `-L` curl
+  // shortcut (audit E1/P0).
+  ["web_fetch.rs", 240],
   ["web_search.rs", 420],
+  // Public-web URL policy (SSRF audit, IP pinning, redirect resolution) —
+  // new module for the audited fetch contract (audit E1/P0).
+  ["web_url_policy.rs", 340],
   ["workspace_file.rs", 380],
 ]);
 const toolsModules = listRustSourceFiles(

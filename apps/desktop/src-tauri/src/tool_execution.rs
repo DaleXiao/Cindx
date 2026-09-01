@@ -458,7 +458,7 @@ pub(crate) fn materialize_tool_result_artifacts(
         let ToolContent::Image { mime_type, data } = content else {
             continue;
         };
-        fs::create_dir_all(&output_dir)
+        crate::private_files::private_dir_ensure(&output_dir)
             .map_err(|error| format!("failed to create tool artifact directory: {error}"))?;
         let extension = match mime_type.as_str() {
             "image/jpeg" => "jpg",
@@ -471,7 +471,7 @@ pub(crate) fn materialize_tool_result_artifacts(
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(data.as_bytes())
             .map_err(|error| format!("invalid tool image data: {error}"))?;
-        fs::write(&path, bytes)
+        crate::private_files::private_file_write(&path, &bytes)
             .map_err(|error| format!("failed to write tool image artifact: {error}"))?;
         result.artifacts.push(ToolArtifact {
             path: path.display().to_string(),
@@ -528,7 +528,7 @@ pub(crate) fn materialize_tool_result_artifacts(
     }
     if let Some(structured) = result.structured_output_json.take() {
         if structured.len() > MAX_INLINE_STRUCTURED_OUTPUT_BYTES {
-            fs::create_dir_all(&output_dir)
+            crate::private_files::private_dir_ensure(&output_dir)
                 .map_err(|error| format!("failed to create tool artifact directory: {error}"))?;
             let path = output_dir.join(format!("{artifact_stem}-structured.json"));
             write_private_file_atomically(
@@ -633,11 +633,13 @@ fn preserve_primary_tool_artifact_version(
         .join(relative_source);
     let snapshot = workspace_root.join(&snapshot_relative);
     if let Some(parent) = snapshot.parent() {
-        fs::create_dir_all(parent)
+        crate::private_files::private_dir_ensure(parent)
             .map_err(|error| format!("failed to create output history directory: {error}"))?;
     }
     fs::copy(&source, &snapshot)
         .map_err(|error| format!("failed to preserve tool output version: {error}"))?;
+    crate::private_files::private_file_secure(&snapshot)
+        .map_err(|error| format!("failed to secure tool output version: {error}"))?;
     result.metadata.insert(
         "source_path".to_string(),
         relative_source.display().to_string(),

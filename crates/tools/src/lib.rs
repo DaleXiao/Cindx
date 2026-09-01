@@ -46,6 +46,7 @@ mod tool_contract_v2;
 mod tool_support;
 mod web_fetch;
 mod web_search;
+mod web_url_policy;
 mod workspace_file;
 
 pub use browser_session_retirement::retire_browser_session;
@@ -82,8 +83,9 @@ use meta_invoke::ToolInvokeMeta;
 use meta_tools::{ToolInspectMeta, ToolSearchMeta};
 pub(crate) use tool_support::{
     bounded_model_text, builtin_tool_spec, current_time_millis, input_value_is_true, json_field,
-    model_observation, parse_bounded_usize_input, permission_request, required_input, required_url,
-    resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result,
+    model_observation, parse_bounded_usize_input, permission_request, private_dir_ensure,
+    private_file_create, required_input, required_url, resolve_workspace_path,
+    resolve_workspace_read_path, stable_hash, tool_result,
 };
 
 #[cfg(test)]

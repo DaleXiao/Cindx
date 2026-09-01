@@ -75,6 +75,7 @@ mod persistence_runtime;
 mod personalization_persistence;
 mod platform_runtime;
 mod prepared_task_state_metadata;
+mod private_files;
 mod project_commands;
 mod project_config_persistence;
 mod project_instructions_runtime;

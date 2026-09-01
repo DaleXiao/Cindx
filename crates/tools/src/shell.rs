@@ -21,8 +21,9 @@ use crate::tool_contract_v2::{
     ShellContractInput, ShellResultMetadataInput,
 };
 use crate::{
-    parse_input, permission_request, required_input, resolve_workspace_path,
-    resolve_workspace_read_path, stable_hash, tool_result, Tool, ToolError, ToolExecutionControl,
+    parse_input, permission_request, private_dir_ensure, private_file_create, required_input,
+    resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result, Tool, ToolError,
+    ToolExecutionControl,
 };
 
 pub struct ShellRunTool {
@@ -271,7 +272,7 @@ fn run_shell_command(
     control: &ToolExecutionControl,
     artifact_dir: &Path,
 ) -> Result<ShellCommandOutput, ToolError> {
-    fs::create_dir_all(artifact_dir).map_err(|error| {
+    private_dir_ensure(artifact_dir).map_err(|error| {
         ToolError::new(format!("failed to create shell output directory: {error}"))
     })?;
     let mut process = Command::new(&argv[0]);
@@ -436,7 +437,7 @@ pub(crate) fn shell_permission_request(
 }
 
 fn capture_process_stream(mut stream: impl Read, artifact_path: PathBuf) -> BoundedStreamCapture {
-    let mut artifact = fs::File::create(&artifact_path).ok();
+    let mut artifact = private_file_create(&artifact_path).ok();
     let mut artifact_error = artifact
         .is_none()
         .then(|| format!("failed to create {}", artifact_path.display()));

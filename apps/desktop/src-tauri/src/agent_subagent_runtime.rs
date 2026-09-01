@@ -1,5 +1,6 @@
 use crate::agent_query_commands::{agent_run_should_stop, append_agent_progress_event};
 use crate::app_state::AppState;
+use crate::runtime_values::phase16_task_id;
 use agent_application::{insert_run_objectives, merge_persistable_run_context};
 use agent_core::{
     Message, MessageRole, Metadata, ModelRole, PermissionDecision, PermissionRequest,
@@ -17,7 +18,7 @@ use model_provider::{ModelCallMode, ModelRequest, StreamingModelProvider};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tools::ToolRegistry;
+use tools::{Tool, ToolRegistry};
 
 /// Metadata marker on a permission request created by a write subagent's
 /// patch call. The permission resolver uses it to resolve the request in
@@ -111,6 +112,7 @@ pub(crate) fn execute_subagent_delegations(
                         tools,
                         &task_id,
                         write_context,
+                        Some(SubagentNetworkContext { state, run_context }),
                         &context_prefix,
                     )
                 }))
@@ -229,6 +231,18 @@ pub(crate) struct SubagentWriteContext<'a> {
     pub(crate) parent_call_id: &'a str,
 }
 
+/// Everything a child needs to mediate a read-semantics network call
+/// (web.search/web.fetch) through the parent run's permission path. An
+/// existing `allow_for_session` capability resolved under the parent session
+/// lets the call run directly; otherwise a one-shot auditable approval
+/// request is raised under the parent run identity, and an AllowForSession
+/// decision becomes the inherited capability for later calls. Without this
+/// context, network tools fail closed.
+pub(crate) struct SubagentNetworkContext<'a> {
+    pub(crate) state: &'a tauri::State<'a, AppState>,
+    pub(crate) run_context: &'a Metadata,
+}
+
 /// Run a bounded, isolated child run for a `task` delegation and return
 /// (description, answer). The child is seeded with `parent_context` — the
 /// parent run's balanced completed-round prefix (bounded, in-flight rounds
@@ -252,6 +266,7 @@ pub(crate) fn subagent_child_answer(
     subagent_tools: &[ToolSpec],
     task_id: &TaskId,
     write: Option<SubagentWriteContext<'_>>,
+    network: Option<SubagentNetworkContext<'_>>,
     parent_context: &[Message],
 ) -> (String, String) {
     let description = subagent_description(input_json);
@@ -352,7 +367,13 @@ pub(crate) fn subagent_child_answer(
                         &description,
                     )
                 }
-                _ => execute_subagent_tool_call(registry, task_id, call),
+                _ => execute_subagent_tool_call(
+                    registry,
+                    task_id,
+                    call,
+                    network.as_ref(),
+                    cancellation,
+                ),
             };
             messages.push(Message {
                 role: MessageRole::Tool,
@@ -389,17 +410,66 @@ fn request_subagent_patch_approval(
     task_id: &TaskId,
     run_context: &Metadata,
     invocation: &ToolInvocation,
-    mut request: PermissionRequest,
+    request: PermissionRequest,
     description: &str,
 ) -> Result<PermissionRequestId, String> {
     let bounded_description: String = description
         .chars()
         .take(SUBAGENT_DESCRIPTION_MAX_CHARS)
         .collect();
-    request.reason = format!(
-        "Write subagent \"{bounded_description}\" requests approval: {}",
-        request.reason
+    let mut request = request;
+    request.metadata.insert(
+        "subagent_description".to_string(),
+        bounded_description.clone(),
     );
+    // Patch calls are one-shot: session grants never apply to them.
+    request_subagent_mediated_approval(
+        store,
+        task_id,
+        run_context,
+        invocation,
+        request,
+        format!("Write subagent \"{bounded_description}\" requests approval"),
+        false,
+    )
+}
+
+/// Raise the auditable approval request for one subagent network call. The
+/// request is session-reusable so an AllowForSession decision persists as the
+/// inherited capability that later subagent network calls check first.
+fn request_subagent_network_approval(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    invocation: &ToolInvocation,
+    request: PermissionRequest,
+) -> Result<PermissionRequestId, String> {
+    request_subagent_mediated_approval(
+        store,
+        task_id,
+        run_context,
+        invocation,
+        request,
+        "Subagent requests public-web network access".to_string(),
+        true,
+    )
+}
+
+/// Shared durable core of the subagent-mediated approval path: persist the
+/// permission request under the parent run identity (subagent origin marker,
+/// run context, objectives) and append the PermissionRequested event. The
+/// caller chooses the reason prefix and whether the decision may become a
+/// reusable session capability.
+fn request_subagent_mediated_approval(
+    store: &mut SqliteStore,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    invocation: &ToolInvocation,
+    mut request: PermissionRequest,
+    reason_prefix: String,
+    session_reusable: bool,
+) -> Result<PermissionRequestId, String> {
+    request.reason = format!("{reason_prefix}: {}", request.reason);
     request
         .metadata
         .insert("phase".to_string(), "16".to_string());
@@ -420,14 +490,11 @@ fn request_subagent_patch_approval(
     );
     request
         .metadata
-        .insert("session_reusable".to_string(), "false".to_string());
+        .insert("session_reusable".to_string(), session_reusable.to_string());
     request.metadata.insert(
         SUBAGENT_PERMISSION_ORIGIN_KEY.to_string(),
         SUBAGENT_PERMISSION_ORIGIN_VALUE.to_string(),
     );
-    request
-        .metadata
-        .insert("subagent_description".to_string(), bounded_description);
     request.metadata = merge_persistable_run_context(request.metadata, run_context);
     insert_run_objectives(&mut request.metadata, run_context);
     request.id = PermissionRequestId(crate::runtime_values::unique_id("agent-perm"));
@@ -664,12 +731,19 @@ fn execute_write_subagent_tool_call(
 /// Execute one whitelisted read-only subagent tool call and format its
 /// observation. The whitelist and the registry's read-only/permissionless guard
 /// are both enforced, so a disallowed or effectful call becomes an observation
-/// rather than an execution. Also used by the plan-mode drafting loop, which
-/// shares the same read-only whitelist.
+/// rather than an execution. Network reads (web.search/web.fetch) are a
+/// separate named capability: they run only when the parent session already
+/// holds an `allow_for_session` network grant, or after a one-shot auditable
+/// approval raised under the parent run identity. Without a
+/// `SubagentNetworkContext` (for example the plan-drafting loop) network
+/// tools fail closed. Also used by the plan-mode drafting loop, which shares
+/// the same read-only whitelist.
 pub(crate) fn execute_subagent_tool_call(
     registry: &ToolRegistry,
     task_id: &TaskId,
     call: &agent_core::ModelToolCall,
+    network: Option<&SubagentNetworkContext>,
+    cancellation: &Arc<AgentRunControl>,
 ) -> String {
     let request = AgentToolRequest {
         call_id: agent_core::ToolCallId(call.id.clone()),
@@ -685,19 +759,27 @@ pub(crate) fn execute_subagent_tool_call(
     }
     let invocation = tool_invocation_from_request(task_id, &request);
     // Read-only discovery gate first; the controlled network capability
-    // (web.search/web.fetch) is a separate named-allowlist gate, so a denial
-    // from the pure-read gate is not a denial of read-semantics network
-    // reads the subagent surface promises.
-    let result = match registry
-        .permissionless_read_tool(&invocation)
-        .or_else(|_| registry.worker_network_read_tool(&invocation))
-    {
+    // (web.search/web.fetch) is a separate named-allowlist gate wrapped in
+    // the parent-run permission path, so a denial from the pure-read gate is
+    // not a denial of the network reads the subagent surface promises.
+    let result = match registry.permissionless_read_tool(&invocation) {
         Ok(tool) => tool.execute(invocation).unwrap_or_else(|error| {
             agent_core::ToolResult::failed(agent_core::ToolCallId(call.id.clone()), error.message)
         }),
-        Err(error) => {
-            agent_core::ToolResult::failed(agent_core::ToolCallId(call.id.clone()), error.message)
-        }
+        Err(_) => match registry.worker_network_read_tool(&invocation) {
+            Ok(tool) => execute_worker_network_tool(
+                tool,
+                invocation,
+                &call.id,
+                task_id,
+                network,
+                cancellation,
+            ),
+            Err(error) => agent_core::ToolResult::failed(
+                agent_core::ToolCallId(call.id.clone()),
+                error.message,
+            ),
+        },
     };
     let status = match result.status {
         ToolOutcomeStatus::Succeeded => "succeeded",
@@ -706,6 +788,104 @@ pub(crate) fn execute_subagent_tool_call(
         ToolOutcomeStatus::Denied => "denied",
     };
     observation_from_tool_result(&call.name, status, &result.output)
+}
+
+/// Mediate one read-semantics network call through the parent run's
+/// permission path. An inherited `allow_for_session` capability executes the
+/// call directly; otherwise a one-shot auditable approval request is raised
+/// under the parent run identity and the call parks on the user's decision
+/// (AllowForSession becomes the inherited capability for later calls). Every
+/// path that cannot prove an explicit grant fails closed.
+fn execute_worker_network_tool(
+    tool: &dyn Tool,
+    invocation: ToolInvocation,
+    call_id: &str,
+    task_id: &TaskId,
+    network: Option<&SubagentNetworkContext>,
+    cancellation: &Arc<AgentRunControl>,
+) -> agent_core::ToolResult {
+    let fail = |message: String| {
+        agent_core::ToolResult::failed(agent_core::ToolCallId(call_id.to_string()), message)
+    };
+    let Some(context) = network else {
+        return fail(
+            "network tools are not available in this isolated context; ask the parent run to fetch the page instead".to_string(),
+        );
+    };
+    let Some(request) = tool.permission_request(&invocation) else {
+        return fail("network tool produced no permission request".to_string());
+    };
+    // Inherited capability: an allow_for_session decision already resolved
+    // under the parent session covers this exact tool action.
+    let granted = {
+        let store = match context.state.store.lock() {
+            Ok(store) => store,
+            Err(error) => return fail(format!("store lock poisoned: {error}")),
+        };
+        let session_id = context.run_context.get("session_id").map(String::as_str);
+        match crate::permission_service::agent_session_permission_granted(
+            &store,
+            &phase16_task_id(),
+            &request,
+            session_id,
+        ) {
+            Ok(granted) => granted,
+            Err(error) => return fail(format!("session capability check failed: {error}")),
+        }
+    };
+    if !granted {
+        let request_id = {
+            let mut store = match context.state.store.lock() {
+                Ok(store) => store,
+                Err(error) => return fail(format!("store lock poisoned: {error}")),
+            };
+            if let Err(error) = crate::tool_execution::append_tool_proposed_event(
+                &mut store,
+                &invocation,
+                Some(context.run_context),
+            )
+            .map_err(|error| error.to_string())
+            {
+                return fail(error);
+            }
+            match request_subagent_network_approval(
+                &mut store,
+                task_id,
+                context.run_context,
+                &invocation,
+                request,
+            ) {
+                Ok(request_id) => request_id,
+                Err(error) => return fail(error),
+            }
+        };
+        match wait_for_subagent_permission(
+            &context.state.store,
+            task_id,
+            context.run_context,
+            &request_id,
+            cancellation,
+        ) {
+            Ok(SubagentPermissionOutcome::Approved) => {}
+            Ok(SubagentPermissionOutcome::Denied) => {
+                return agent_core::ToolResult::text(
+                    agent_core::ToolCallId(call_id.to_string()),
+                    ToolOutcomeStatus::Denied,
+                    "The user denied this network request.",
+                    Metadata::new(),
+                );
+            }
+            Ok(SubagentPermissionOutcome::Cancelled) => {
+                return fail(
+                    "subagent stopped before the network request was approved".to_string(),
+                );
+            }
+            Err(error) => return fail(error),
+        }
+    }
+    tool.execute(invocation).unwrap_or_else(|error| {
+        agent_core::ToolResult::failed(agent_core::ToolCallId(call_id.to_string()), error.message)
+    })
 }
 
 fn subagent_stopped_answer(partial: &str) -> String {

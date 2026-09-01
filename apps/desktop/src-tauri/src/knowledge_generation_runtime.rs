@@ -475,8 +475,24 @@ impl Drop for PendingKnowledgeGeneration {
 }
 
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut file = fs::File::create(path)
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
         .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+    // A pre-existing file keeps its old mode through an open; force the
+    // owner-only permission so regenerated evidence never stays 0644.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("failed to secure {}: {error}", path.display()))?;
+    }
     file.write_all(bytes)
         .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     file.sync_all()

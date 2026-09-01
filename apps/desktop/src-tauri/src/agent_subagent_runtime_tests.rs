@@ -138,6 +138,7 @@ fn subagent_runs_read_only_loop_to_a_final_answer() {
         &tools,
         &task_id,
         None,
+        None,
         &[],
     );
 
@@ -162,6 +163,7 @@ fn subagent_child_requests_streaming_mode() {
         &registry,
         &tools,
         &task_id,
+        None,
         None,
         &[],
     );
@@ -194,6 +196,7 @@ fn subagent_loop_is_bounded_by_step_limit() {
         &tools,
         &task_id,
         None,
+        None,
         &[],
     );
 
@@ -206,8 +209,13 @@ fn subagent_loop_is_bounded_by_step_limit() {
 #[test]
 fn subagent_read_tool_executes_and_returns_line_addressable_content() {
     let (_workspace, registry, task_id) = fixture();
-    let observation =
-        execute_subagent_tool_call(&registry, &task_id, &read_call("r1", "README.md"));
+    let observation = execute_subagent_tool_call(
+        &registry,
+        &task_id,
+        &read_call("r1", "README.md"),
+        None,
+        &Arc::new(AgentRunControl::new("fast")),
+    );
     assert!(observation.contains("tool=file.read"));
     assert!(observation.contains("status=succeeded"));
     assert!(observation.contains("line one"));
@@ -221,7 +229,13 @@ fn subagent_denies_effectful_tool() {
         name: "file.write".to_string(),
         arguments_json: r#"{"path":"evil.txt","content":"x"}"#.to_string(),
     };
-    let observation = execute_subagent_tool_call(&registry, &task_id, &write_call);
+    let observation = execute_subagent_tool_call(
+        &registry,
+        &task_id,
+        &write_call,
+        None,
+        &Arc::new(AgentRunControl::new("fast")),
+    );
     assert!(observation.contains("status=denied"));
     // The effectful tool never ran.
     assert!(!_workspace.path().join("evil.txt").exists());
@@ -242,6 +256,7 @@ fn subagent_aborts_before_any_model_call_when_cancelled() {
         &registry,
         &tools,
         &task_id,
+        None,
         None,
         &[],
     );
@@ -277,6 +292,7 @@ fn subagent_model_calls_draw_from_the_shared_worker_stage_budget() {
         &registry,
         &tools,
         &task_id,
+        None,
         None,
         &[],
     );
@@ -368,6 +384,7 @@ fn subagent_fork_seeds_the_balanced_parent_prefix_before_the_contract() {
         &tools,
         &task_id,
         None,
+        None,
         &prefix,
     );
 
@@ -414,6 +431,7 @@ fn subagent_fork_excludes_an_in_flight_parent_round() {
         &registry,
         &tools,
         &task_id,
+        None,
         None,
         &prefix,
     );
@@ -464,6 +482,7 @@ fn subagent_fork_without_parent_history_keeps_the_isolated_shape() {
         &registry,
         &tools,
         &task_id,
+        None,
         None,
         &prefix,
     );
@@ -920,4 +939,34 @@ fn every_subagent_allowlisted_tool_is_executable_through_a_worker_gate() {
             "{name} is advertised to subagents but no worker gate can execute it"
         );
     }
+}
+
+#[test]
+fn subagent_network_tool_fails_closed_without_a_capability_context() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let registry = ToolRegistry::with_workspace_tools_and_web_search(
+        workspace.path(),
+        tools::WebSearchConfig::default(),
+    );
+    let task_id = TaskId("subagent-network-test".to_string());
+    let web_call = ModelToolCall {
+        id: "n1".to_string(),
+        name: "web.fetch".to_string(),
+        arguments_json: r#"{"url":"https://example.com/"}"#.to_string(),
+    };
+    let observation = execute_subagent_tool_call(
+        &registry,
+        &task_id,
+        &web_call,
+        None,
+        &Arc::new(AgentRunControl::new("fast")),
+    );
+    assert!(
+        observation.contains("status=failed") || observation.contains("status=denied"),
+        "a network call without a capability context must never execute: {observation}"
+    );
+    assert!(
+        observation.contains("network tools are not available"),
+        "the observation must state the capability gap: {observation}"
+    );
 }

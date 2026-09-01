@@ -358,8 +358,15 @@ pub(crate) fn run_plan_phase(
             metadata: assistant_metadata,
         });
         for call in &response.tool_calls {
-            let observation =
-                crate::agent_subagent_runtime::execute_subagent_tool_call(registry, task_id, call);
+            let observation = crate::agent_subagent_runtime::execute_subagent_tool_call(
+                registry,
+                task_id,
+                call,
+                // Plan drafting holds no network capability context: web
+                // tools fail closed here (audit E1).
+                None,
+                cancellation,
+            );
             on_tool_call(&call.name, &call.id, &observation);
             messages.push(Message {
                 role: MessageRole::Tool,
