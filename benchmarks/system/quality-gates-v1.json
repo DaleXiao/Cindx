@@ -91,7 +91,8 @@
       "model-transport-prepare-scaling",
       "frontend-streaming-markdown-scaling",
       "context-governor-scaling",
-      "rag-search-scaling"
+      "rag-search-scaling",
+      "rag-index-profiling-receipt"
     ],
     "paired-performance": [
       "session-projection-scaling",
@@ -804,6 +805,26 @@
       "required_output": [
         "test result: ok. 1 passed; 0 failed",
         "cindx.rag-search-diagnostic.v1"
+      ]
+    },
+    {
+      "id": "rag-index-profiling-receipt",
+      "category": "performance",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "agent-rag",
+        "tests::rag_index_phase_profiling_receipt",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 1 passed; 0 failed",
+        "cindx.rag-index-profile.v1"
       ]
     },
     {

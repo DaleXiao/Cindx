@@ -3804,6 +3804,23 @@ mod tests {
         assert!(prompt.contains("What matters?"));
     }
 
+    /// Zero-dependency peak RSS probe: ru_maxrss via getrusage(RUSAGE_SELF).
+    /// The kernel writes the full `struct rusage` into a generously sized
+    /// raw buffer, so no layout declaration is needed; on macOS/BSD the
+    /// third field (offset 32 on 64-bit: two 16-byte timevals) is ru_maxrss
+    /// in bytes. Returns 0 when the probe is unavailable.
+    fn peak_rss_bytes() -> u64 {
+        extern "C" {
+            fn getrusage(who: i32, usage: *mut u8) -> i32;
+        }
+        let mut buffer = [0u8; 512];
+        let status = unsafe { getrusage(0, buffer.as_mut_ptr()) };
+        if status != 0 {
+            return 0;
+        }
+        u64::from_ne_bytes(buffer[32..40].try_into().unwrap_or([0u8; 8]))
+    }
+
     #[test]
     #[ignore = "performance diagnostic; run through the quality-gate performance profile"]
     fn synthetic_rag_search_scaling_diagnostic() {
@@ -3863,8 +3880,111 @@ mod tests {
         let semantic_p95_micros = percentile(&semantic_samples, 95);
         let literal_micros = percentile(&literal_samples, 50);
         let literal_p95_micros = percentile(&literal_samples, 95);
-        println!(
-            "{{\"schema\":\"cindx.rag-search-diagnostic.v1\",\"chunks\":{chunk_count},\"dimensions\":{EMBEDDING_DIMS},\"estimated_payload_bytes\":{estimated_payload_bytes},\"sample_count\":{sample_count},\"semantic_micros\":{semantic_micros},\"semantic_p95_micros\":{semantic_p95_micros},\"literal_micros\":{literal_micros},\"literal_p95_micros\":{literal_p95_micros}}}"
+        let peak_rss = peak_rss_bytes();
+        assert!(
+            peak_rss > 0,
+            "the peak RSS probe must report on this platform"
         );
+        println!(
+            "{{\"schema\":\"cindx.rag-search-diagnostic.v1\",\"chunks\":{chunk_count},\"dimensions\":{EMBEDDING_DIMS},\"estimated_payload_bytes\":{estimated_payload_bytes},\"sample_count\":{sample_count},\"semantic_micros\":{semantic_micros},\"semantic_p95_micros\":{semantic_p95_micros},\"literal_micros\":{literal_micros},\"literal_p95_micros\":{literal_p95_micros},\"peak_rss_bytes\":{peak_rss}}}"
+        );
+    }
+
+    /// Deterministic indexing-phase profile over a seeded synthetic workspace:
+    /// full index, one-file-change incremental re-index, and the resulting
+    /// chunk counts, plus the process peak RSS at measurement time. Receipt
+    /// values are machine-dependent by design; the gate pins the receipt
+    /// schema, not the numbers (audit D2).
+    #[test]
+    #[ignore = "performance diagnostic; run through the quality-gate performance profile"]
+    fn rag_index_phase_profiling_receipt() {
+        let root = temp_workspace();
+        let vocabulary = [
+            "workspace",
+            "retrieval",
+            "memory",
+            "evidence",
+            "gateway",
+            "contract",
+            "session",
+            "runtime",
+            "provider",
+            "budget",
+            "fusion",
+            "chunking",
+            "embedding",
+            "index",
+            "policy",
+            "guardian",
+            "receipt",
+            "deterministic",
+        ];
+        let mut rng_state: u64 = 0x5EED_D2A1_0000_0001;
+        for file_index in 0..48usize {
+            let mut lines = Vec::with_capacity(180);
+            for line_index in 0..180usize {
+                rng_state = rng_state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let first = vocabulary[(rng_state >> 33) as usize % vocabulary.len()];
+                rng_state = rng_state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let second = vocabulary[(rng_state >> 33) as usize % vocabulary.len()];
+                lines.push(format!(
+                    "{first} {second} evidence line {line_index} for module {file_index}"
+                ));
+            }
+            fs::write(
+                root.join(format!("module-{file_index}.md")),
+                lines.join("\n"),
+            )
+            .expect("corpus file should write");
+        }
+
+        let mut embedder = HashEmbedder;
+        let full_started_at = std::time::Instant::now();
+        let base = index_workspace_with_embedder(&root, IndexOptions::default(), &mut embedder)
+            .expect("full index should build");
+        let full_index_ms = full_started_at.elapsed().as_millis() as u64;
+        let base_chunks = base.chunks.len();
+
+        fs::write(root.join("module-7.md"), "changed evidence line\n")
+            .expect("corpus mutation should write");
+        let incremental_started_at = std::time::Instant::now();
+        let incremental = index_workspace_reusing(&root, IndexOptions::default(), &base)
+            .expect("incremental index should build");
+        let incremental_index_ms = incremental_started_at.elapsed().as_millis() as u64;
+
+        let peak_rss = peak_rss_bytes();
+        assert!(base_chunks > 0, "the seeded corpus must produce chunks");
+        assert!(
+            peak_rss > 0,
+            "the peak RSS probe must report on this platform"
+        );
+        assert!(
+            incremental.reuse.files_reused >= 40,
+            "a one-file change must reuse the unchanged majority of the corpus"
+        );
+        println!(
+            "{{\"schema\":\"cindx.rag-index-profile.v1\",\"corpus_files\":48,\"corpus_lines\":{},\"chunks\":{base_chunks},\"full_index_ms\":{full_index_ms},\"incremental_index_ms\":{incremental_index_ms},\"files_reused\":{},\"files_reindexed\":{},\"peak_rss_bytes\":{peak_rss}}}",
+            48 * 180,
+            incremental.reuse.files_reused,
+            incremental.reuse.files_reindexed
+        );
+    }
+
+    /// Deterministic hash embedder for profiling: the same text always maps
+    /// to the same vector, so indexed results are reproducible run to run.
+    struct HashEmbedder;
+
+    impl RagEmbedder for HashEmbedder {
+        fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+            Ok(EmbeddingBatch {
+                provider: "profile-local".to_string(),
+                model: format!("profile-hash-{EMBEDDING_DIMS}"),
+                vectors: texts.iter().map(|text| embed_text(text)).collect(),
+            })
+        }
     }
 }
