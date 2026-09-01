@@ -74,6 +74,10 @@ pub use tool_support::{encode_input, parse_input};
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 
+/// The only tool names an isolated worker may execute with network egress.
+/// Read-semantics network discovery only; the name list is the whole grant.
+pub const WORKER_NETWORK_READ_TOOLS: &[&str] = &["web.search", "web.fetch"];
+
 use meta_invoke::ToolInvokeMeta;
 use meta_tools::{ToolInspectMeta, ToolSearchMeta};
 pub(crate) use tool_support::{
@@ -365,6 +369,37 @@ impl ToolRegistry {
         if tool.permission_request(invocation).is_some() {
             return Err(ToolError::new(
                 "isolated workers cannot execute tools that require user permission",
+            ));
+        }
+        Ok(tool)
+    }
+
+    /// Controlled network capability for isolated workers: a strict name
+    /// allowlist of read-semantics network tools (web.search/web.fetch). The
+    /// list is the whole grant — there is no blanket "network allowed" path,
+    /// and a listed tool still fails closed if its effect spec ever drifts
+    /// away from read-only network semantics. Interactive agent runs keep
+    /// their normal permission prompt for these tools; this gate only widens
+    /// the isolated-worker surface.
+    pub fn worker_network_read_tool(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<&dyn Tool, ToolError> {
+        if !WORKER_NETWORK_READ_TOOLS.contains(&invocation.tool_name.as_str()) {
+            return Err(ToolError::new(format!(
+                "isolated workers may not use {} for network access",
+                invocation.tool_name
+            )));
+        }
+        let tool = self
+            .get(&invocation.tool_name)
+            .ok_or_else(|| ToolError::new(format!("unknown tool: {}", invocation.tool_name)))?;
+        let effect = tool.effect_spec(invocation);
+        if !matches!(effect.risk, ToolRisk::UsesNetwork)
+            || !matches!(effect.effect_semantics, ToolEffectSemantics::ReadOnly)
+        {
+            return Err(ToolError::new(
+                "worker network tools must stay read-only network reads",
             ));
         }
         Ok(tool)
@@ -1018,6 +1053,39 @@ mod tests {
         let invocation = invocation("file.glob", encode_input(&[("pattern", "src/**/*.rs")]));
 
         assert!(registry.permissionless_read_tool(&invocation).is_ok());
+    }
+
+    #[test]
+    fn worker_network_gate_accepts_the_named_read_semantics_web_tools() {
+        let registry = ToolRegistry::with_workspace_tools_and_web_search(
+            temp_workspace(),
+            WebSearchConfig::default(),
+        );
+        for name in WORKER_NETWORK_READ_TOOLS {
+            let invocation = invocation(name, "{}".to_string());
+            assert!(
+                registry.worker_network_read_tool(&invocation).is_ok(),
+                "{name} is part of the controlled worker network capability"
+            );
+            // The pure-read gate must stay stricter: network egress is never
+            // a permissionless read, it is its own named grant.
+            assert!(registry.permissionless_read_tool(&invocation).is_err());
+        }
+    }
+
+    #[test]
+    fn worker_network_gate_rejects_tools_outside_the_named_allowlist() {
+        let registry = ToolRegistry::with_workspace_tools_and_web_search(
+            temp_workspace(),
+            WebSearchConfig::default(),
+        );
+        for name in ["file.write", "file.read", "subagent.task", "unknown.tool"] {
+            let invocation = invocation(name, "{}".to_string());
+            assert!(
+                registry.worker_network_read_tool(&invocation).is_err(),
+                "{name} must never gain network capability through the worker gate"
+            );
+        }
     }
 
     #[test]

@@ -893,3 +893,31 @@ fn write_subagent_denial_never_executes_the_patch() {
         std::fs::read_to_string(workspace.path().join("README.md")).expect("README should exist");
     assert_eq!(content, "line one\nline two\n");
 }
+
+#[test]
+fn every_subagent_allowlisted_tool_is_executable_through_a_worker_gate() {
+    // Whitelist/capability drift guard (audit P2-01): the subagent surface
+    // advertised web.search/web.fetch while the execution gate denied them.
+    // Every name the surface advertises must pass one of the two worker
+    // gates against a production-shaped registry, or the advertisement is a
+    // lie and this test fails.
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let registry = ToolRegistry::with_workspace_tools_and_web_search(
+        workspace.path(),
+        tools::WebSearchConfig::default(),
+    );
+    let task_id = TaskId("subagent-allowlist".to_string());
+    for name in agent_runtime::SUBAGENT_ALLOWED_TOOLS {
+        let request = AgentToolRequest {
+            call_id: agent_core::ToolCallId(format!("allowlist-{name}")),
+            tool_name: (*name).to_string(),
+            input: "{}".to_string(),
+        };
+        let invocation = tool_invocation_from_request(&task_id, &request);
+        assert!(
+            registry.permissionless_read_tool(&invocation).is_ok()
+                || registry.worker_network_read_tool(&invocation).is_ok(),
+            "{name} is advertised to subagents but no worker gate can execute it"
+        );
+    }
+}

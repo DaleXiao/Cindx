@@ -14,11 +14,13 @@ pub const SUBAGENT_MAX_STEPS: usize = 12;
 // Raised from 32 so a forked subagent inherits more of the parent's context.
 pub const SUBAGENT_CONTEXT_FORK_MAX_MESSAGES: usize = 48;
 
-/// Tools a subagent may use: read-only discovery. Effectful, delegation, and
+/// Tools a subagent may use: read-only discovery plus the controlled network
+/// capability (web.search/web.fetch, gated by
+/// `ToolRegistry::worker_network_read_tool`). Effectful, delegation, and
 /// working-memory tools are denied (mirrors opencode deriveSubagentSessionPermission).
 pub const SUBAGENT_ALLOWED_TOOLS: &[&str] = &[
     "file.read",
-    "file.reads",
+    "file.read_many",
     "file.list",
     "file.search",
     "file.glob",

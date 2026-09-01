@@ -9,8 +9,8 @@ mod file_batch_tests;
 use std::path::PathBuf;
 
 use agent_core::{
-    PermissionRequest, PostconditionVerifierKind, ToolExecutionConcurrency, ToolInvocation,
-    ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
+    PermissionRequest, PostconditionVerifierKind, ToolEffectSemantics, ToolExecutionConcurrency,
+    ToolInvocation, ToolOutcomeStatus, ToolPostconditionEvidence, ToolResult, ToolRisk, ToolSpec,
 };
 
 use super::{ReadFileTool, Tool, ToolError, ToolExecutionControl};
@@ -136,6 +136,7 @@ impl Tool for ReadFilesTool {
             .to_string(),
         )
         .with_postcondition_verifier(PostconditionVerifierKind::WorkspaceExactReadbackV1)
+        .with_effect_semantics(ToolEffectSemantics::ReadOnly)
         .with_execution_concurrency(ToolExecutionConcurrency::IndependentRead)
     }
 

@@ -684,7 +684,14 @@ pub(crate) fn execute_subagent_tool_call(
         );
     }
     let invocation = tool_invocation_from_request(task_id, &request);
-    let result = match registry.permissionless_read_tool(&invocation) {
+    // Read-only discovery gate first; the controlled network capability
+    // (web.search/web.fetch) is a separate named-allowlist gate, so a denial
+    // from the pure-read gate is not a denial of read-semantics network
+    // reads the subagent surface promises.
+    let result = match registry
+        .permissionless_read_tool(&invocation)
+        .or_else(|_| registry.worker_network_read_tool(&invocation))
+    {
         Ok(tool) => tool.execute(invocation).unwrap_or_else(|error| {
             agent_core::ToolResult::failed(agent_core::ToolCallId(call.id.clone()), error.message)
         }),
