@@ -311,6 +311,7 @@ const microphoneInfoPlist = read("apps/desktop/src-tauri/Info.plist");
 const queuedMessagesSource = read("apps/desktop/src/components/QueuedMessages.tsx");
 const scheduleViewSource = read("apps/desktop/src/components/ScheduleView.tsx");
 const inspectorSource = read("apps/desktop/src/components/Inspector.tsx");
+const outputPreviewSource = read("apps/desktop/src/components/InspectorOutputPreview.tsx");
 const sidebarSource = read("apps/desktop/src/components/Sidebar.tsx");
 const disclosureTriangleSource = read(
   "apps/desktop/src/components/DisclosureTriangle.tsx"
@@ -1182,7 +1183,9 @@ assert(
     // into the Agent section (user-requested), adding ~24 lines here.
     settingsPageLineCount <= 1_415 &&
     sessionThreadLineCount <= 1_150 &&
-    inspectorLineCount <= 1_350 &&
+    // 1350 -> 1245: the output preview panel (detail header, actions, artifact
+    // renderers, fullscreen dialog) moved to InspectorOutputPreview.tsx.
+    inspectorLineCount <= 1_245 &&
     oversizedExtractedDesktopBoundaries.length === 0 &&
     tauriBridgeImplementationLineCount <= 2_620 &&
     tauriTypesLineCount <= 800 &&
@@ -2973,18 +2976,19 @@ assert(!styles.includes("artifact-sidebar"), "Legacy artifact sidebar styles mus
 assert(
   inspectorSource.includes("inspector-outputs") &&
     inspectorSource.includes("inspector-debug") &&
-    inspectorSource.includes("readArtifactPreview") &&
-    inspectorSource.includes('sandbox=""') &&
+    outputPreviewSource.includes("readArtifactPreview") &&
+    outputPreviewSource.includes('sandbox=""') &&
     inspectorSource.includes("useState(false)") &&
     !inspectorSource.includes("outputArtifacts[0]?.path") &&
     inspectorSource.includes("selectOutput(artifact.path)") &&
-    inspectorSource.includes('aria-label="Close preview"'),
+    outputPreviewSource.includes('aria-label="Close preview"'),
   "Inspector must default to an output file list, open previews on demand, and keep Debug collapsed"
 );
 assert(
-  inspectorSource.includes('aria-label={outputPreviewFullscreen ? "Exit full screen" : "Show full screen"}') &&
-    inspectorSource.includes('aria-label="Open with default app"') &&
-    inspectorSource.includes("createPortal(outputPreview, document.body)") &&
+  outputPreviewSource.includes('aria-label={fullscreen ? "Exit full screen" : "Show full screen"}') &&
+    outputPreviewSource.includes('aria-label="Open with default app"') &&
+    inspectorSource.includes("outputPreviewFullscreen && selectedOutput") &&
+    inspectorSource.includes("<InspectorOutputPreview") &&
     inspectorSource.includes("sessionArtifact(step") &&
     inspectorSource.includes("isInternalRuntimePath") &&
     inspectorSource.includes("step.metadata.result_artifact_path") &&
