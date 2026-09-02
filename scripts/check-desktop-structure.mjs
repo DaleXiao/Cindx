@@ -1014,11 +1014,18 @@ const toolsModuleBudgets = new Map([
   ["process_time.rs", 80],
   ["process_tests.rs", 740],
   ["process_tools.rs", 370],
+  // Symlink-safe managed-artifact filesystem primitives (codex audit P0-01):
+  // trusted-root component validation, O_NOFOLLOW mode setting, and atomic
+  // temp+rename publishes. The single audited home for `.cindx` writes.
+  ["safe_fs.rs", 220],
   // 950 -> 960: the http.server dev-server exemption + its test.
   // 960 -> 800: the classification policy (known-executable list, piped code
   // execution, script-file and unrecognized-executable gates) moved to
   // shell_classification.rs.
-  ["shell.rs", 800],
+  // 800 -> 806: thread the trusted workspace root into the shell-artifact
+  // capture path so stdout/stderr files are created through the symlink-safe
+  // safe_fs primitives (codex audit P0-01); root plumbing, no new logic.
+  ["shell.rs", 806],
   // Classification policy split out of shell.rs.
   // 580 -> 620: added network-egress and sensitive-read classification so
   // confidentiality/exfiltration are their own auto-grant axis (audit P1-03).

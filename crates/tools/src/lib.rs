@@ -36,6 +36,7 @@ mod process_supervisor;
 mod process_tests;
 mod process_time;
 mod process_tools;
+mod safe_fs;
 mod shell;
 mod shell_classification;
 mod shell_postcondition;
@@ -68,6 +69,9 @@ pub use process_runtime::ProcessManager;
 pub use process_tools::{
     ProcessInputTool, ProcessPollTool, ProcessStartTool, ProcessTerminateTool,
 };
+pub use safe_fs::{
+    create_private_file, ensure_private_dir, secure_private_file, write_private_file,
+};
 pub use shell::ShellRunTool;
 pub use subagent_tool::SubagentTaskTool;
 pub use todo_tool::TodoTool;
@@ -83,9 +87,8 @@ use meta_invoke::ToolInvokeMeta;
 use meta_tools::{ToolInspectMeta, ToolSearchMeta};
 pub(crate) use tool_support::{
     bounded_model_text, builtin_tool_spec, current_time_millis, input_value_is_true, json_field,
-    model_observation, parse_bounded_usize_input, permission_request, private_dir_ensure,
-    private_file_create, required_input, required_url, resolve_workspace_path,
-    resolve_workspace_read_path, stable_hash, tool_result,
+    model_observation, parse_bounded_usize_input, permission_request, required_input, required_url,
+    resolve_workspace_path, resolve_workspace_read_path, stable_hash, tool_result,
 };
 
 #[cfg(test)]

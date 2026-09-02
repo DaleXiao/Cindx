@@ -20,6 +20,24 @@ cd ../..
 Use `scripts/install-desktop-deps-ipv4.sh` only when ordinary npm resolution has
 an IPv6/DNS problem.
 
+`npm audit --audit-level=moderate` is a blocking CI and release step. Transitive
+build-tool advisories are pinned patched in `apps/desktop/package.json`
+`overrides` (for example `browserslist` for GHSA-c83g-rgw3-j3cx /
+GHSA-73wf-gq98-2v4g); bump the override and refresh `package-lock.json` rather
+than relaxing the audit level.
+
+Managed `.cindx` artifacts (tool-result images and large structured output,
+attachments, output-history snapshots, and shell stdout/stderr captures) are
+written through the symlink-safe primitives in `crates/tools/src/safe_fs.rs`.
+Every write validates each path component against the trusted workspace root,
+refuses any symbolic-link component or leaf, forces owner-only modes through
+`O_NOFOLLOW` descriptors, and publishes files by atomic temp-plus-rename, so a
+hostile workspace that pre-plants `.cindx/...` as a symlink cannot redirect a
+write or a recursive chmod outside the project. The online provider eval example
+(`crates/agent-eval/examples/real_provider.rs`) is likewise contained: case ids
+must be a single safe slug, each run uses an exclusive temp root, and the example
+refuses to run without `CINDX_EVAL_AUTHORIZE=yes`.
+
 ## Fast Checks
 
 Run documentation and static structure checks after every relevant change:

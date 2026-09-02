@@ -168,6 +168,17 @@ impl EvalModelProvider for CurlProvider {
 }
 
 fn main() {
+    // This example makes real provider calls and materializes per-case
+    // workspaces on disk. It refuses to run without explicit one-shot
+    // authorization so it can never be triggered accidentally (for example by a
+    // blanket `cargo run --examples`).
+    if std::env::var("CINDX_EVAL_AUTHORIZE").as_deref() != Ok("yes") {
+        eprintln!(
+            "refusing to run the online provider eval without authorization;\n\
+             set CINDX_EVAL_AUTHORIZE=yes (plus CINDX_EVAL_BASE_URL/API_KEY/MODEL) to run it explicitly"
+        );
+        std::process::exit(2);
+    }
     let suite_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "crates/agent-eval/suite/general_v1.json".to_string());
@@ -180,7 +191,16 @@ fn main() {
     };
     let suite_text = std::fs::read_to_string(&suite_path).expect("read suite");
     let cases = parse_suite(&suite_text).expect("parse suite");
-    let workspace_root = std::env::temp_dir().join("cindx-eval-real");
+    // Per-run exclusive root: never a fixed shared path, so concurrent runs and
+    // stale state cannot collide and any deletion is scoped to this run only.
+    let workspace_root = std::env::temp_dir().join(format!(
+        "cindx-eval-real-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
     let mut report = SuiteReport {
         cases: Vec::new(),
         passed_count: 0,
@@ -216,4 +236,6 @@ fn main() {
         }
     }
     println!("\n{}", report.summary());
+    // Best-effort cleanup of this run's exclusive root.
+    let _ = std::fs::remove_dir_all(&workspace_root);
 }

@@ -326,37 +326,3 @@ pub(crate) fn stable_hash(value: &str) -> u64 {
     }
     hash
 }
-
-/// Create the managed shell-artifact directory with owner-only access. The
-/// directory holds per-command stdout/stderr captures, which may contain
-/// secrets a command printed; world-readable defaults are unacceptable on a
-/// shared machine.
-pub(crate) fn private_dir_ensure(path: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-/// Create (or truncate) a shell-artifact file that only the owner may read
-/// or write. The permission force also covers pre-existing files, whose mode
-/// a plain create-open would leave untouched.
-pub(crate) fn private_file_create(path: &Path) -> std::io::Result<fs::File> {
-    let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(file)
-}

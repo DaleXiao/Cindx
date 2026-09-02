@@ -483,6 +483,50 @@ fn runner_rejects_fixture_paths_that_escape_the_case_workspace() {
 }
 
 #[test]
+fn runner_rejects_case_ids_that_escape_the_workspace_root() {
+    // An external directory with a sentinel that must never be deleted: an
+    // absolute or `..` case id would otherwise point `remove_dir_all` at it.
+    let external = temp_root("case-id-external");
+    let sentinel = external.join("keep.txt");
+    std::fs::write(&sentinel, "do-not-delete\n").expect("sentinel written");
+    let root = temp_root("case-id-escape");
+
+    let absolute_case = EvalCase {
+        id: external.to_string_lossy().to_string(),
+        category: CaseCategory::Output,
+        prompt: "answer".to_string(),
+        fixture: vec![],
+        allowed_tools: vec![],
+        postconditions: vec![],
+        budget: CaseBudget {
+            max_turns: 1,
+            max_tool_calls: 0,
+        },
+    };
+    let mut provider = ScriptedProvider::new(vec![ScriptedStep::Final("answer".to_string())]);
+    let report = run_case(&absolute_case, &mut provider, &root);
+    assert!(!report.passed);
+    let error = report.error.expect("absolute case id fails closed");
+    assert!(error.contains("case_id_escape"), "error: {error}");
+
+    let traversal_case = EvalCase {
+        id: "../../etc".to_string(),
+        ..absolute_case.clone()
+    };
+    let mut provider = ScriptedProvider::new(vec![ScriptedStep::Final("answer".to_string())]);
+    let report = run_case(&traversal_case, &mut provider, &root);
+    assert!(!report.passed);
+    assert!(report.error.unwrap_or_default().contains("case_id_escape"));
+
+    // Zero deletion: the external sentinel is byte-for-byte intact.
+    assert!(sentinel.exists(), "external directory must not be deleted");
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "do-not-delete\n"
+    );
+}
+
+#[test]
 fn cases_are_workspace_isolated_and_reruns_are_reset() {
     let root = temp_root("isolation");
     let alpha = EvalCase {

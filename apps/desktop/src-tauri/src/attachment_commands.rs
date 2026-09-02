@@ -139,12 +139,12 @@ pub(crate) fn stage_raw_agent_attachment(
         .join(".cindx")
         .join("attachments")
         .join(slug_label(&metadata.session_id));
-    crate::private_files::private_dir_ensure(&attachment_root)
+    crate::private_files::private_dir_ensure(root, &attachment_root)
         .map_err(|error| format!("failed to create attachment directory: {error}"))?;
     let name = safe_attachment_name(&metadata.name);
     let id = unique_id("attachment");
     let path = attachment_root.join(format!("{id}-{}-{name}", metadata.batch_index));
-    crate::private_files::private_file_write(&path, &bytes)
+    crate::private_files::private_file_write(root, &path, &bytes)
         .map_err(|error| format!("failed to stage attachment {name}: {error}"))?;
     Ok(AgentAttachmentView {
         id,

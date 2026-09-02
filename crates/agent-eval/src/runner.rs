@@ -16,7 +16,7 @@
 //! modes would make checks depend on the host OS sandbox).
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use agent_core::{
     Message, MessageRole, Metadata, ModelRequest, ModelResponse, ModelToolCall, TaskId,
@@ -168,17 +168,54 @@ struct PreparedCase {
     specs: Vec<ToolSpec>,
 }
 
+/// Resolve a case workspace root, rejecting any case id that could escape
+/// `workspace_root`. The id must be a single safe slug segment: absolute paths,
+/// `..`, root, and prefix components are refused so a malicious or malformed
+/// suite can never point `remove_dir_all` outside the eval-owned root.
+fn validated_case_root(workspace_root: &Path, case_id: &str) -> Result<PathBuf, EvalError> {
+    let candidate = Path::new(case_id);
+    let single_safe_slug = {
+        let mut components = candidate.components();
+        matches!(components.next(), Some(Component::Normal(_)))
+            && components.next().is_none()
+            && !case_id.starts_with('.')
+            && case_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            })
+    };
+    if candidate.is_absolute() || !single_safe_slug {
+        return Err(EvalError::new(
+            "case_id_escape",
+            format!("case id is not a single safe slug: {case_id}"),
+        ));
+    }
+    Ok(workspace_root.join(candidate))
+}
+
 /// Run one case to completion (or budget exhaustion) and judge it.
 ///
 /// The case gets a fresh workspace at `workspace_root/<case.id>` (any stale
 /// directory under that eval-owned name is reset first), so cases never share
-/// state.
+/// state. The case id is validated first; an unsafe id fails the case closed
+/// without touching the filesystem.
 pub fn run_case<P: EvalModelProvider>(
     case: &EvalCase,
     provider: &mut P,
     workspace_root: &Path,
 ) -> CaseReport {
-    let case_root = workspace_root.join(&case.id);
+    let case_root = match validated_case_root(workspace_root, &case.id) {
+        Ok(case_root) => case_root,
+        Err(error) => {
+            return CaseReport {
+                id: case.id.clone(),
+                passed: false,
+                checks: Vec::new(),
+                tool_calls: 0,
+                turns: 0,
+                error: Some(error.to_string()),
+            };
+        }
+    };
     let mut final_answer = String::new();
     let mut tool_call_count = 0usize;
     let mut turns = 0usize;
@@ -211,6 +248,17 @@ pub fn run_case<P: EvalModelProvider>(
 /// registry and the exposed specs (only `allowed_tools`).
 fn prepare_case_workspace(case: &EvalCase, case_root: &Path) -> Result<PreparedCase, EvalError> {
     if case_root.exists() {
+        // Never recurse through a planted symlink: only a real directory that is
+        // the eval-owned case root may be reset.
+        if std::fs::symlink_metadata(case_root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(EvalError::new(
+                "case_id_escape",
+                format!("case workspace is a symbolic link: {}", case_root.display()),
+            ));
+        }
         std::fs::remove_dir_all(case_root).map_err(|error| {
             EvalError::new(
                 "workspace_reset_failed",
