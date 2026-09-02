@@ -228,35 +228,34 @@ the three tier pins plus the legacy compatibility fallback slot; the legacy
 per-stage role slots (Primary/Reasoning/Verifier/Utility and the planning
 override) are no longer surfaced there. They remain persisted provider fields;
 the executor-role slot is the fallback when a tier is unpinned. A pinned model
-anchors the tier's primary model directly. When a tier is unpinned, the provider catalog's
-tier default applies instead — for the DashScope provider that is a flash-class
-model for Fast, a plus-class model for Auto, and a max-class model for Pro —
-and providers without catalog tier defaults keep the legacy role-slot behavior.
+anchors the tier's primary model directly. When a tier is unpinned, the provider
+catalog's tier default applies instead — for the DashScope provider that is a
+flash-class model for Fast and progressively more capable plus/max-class models
+for Default, High, and Extra High — and providers without catalog tier defaults
+keep the legacy role-slot behavior.
 
-Auto and Pro do not automatically run every configured model; one model
-executes the effort plan.
-**Multi-model workflow collaboration is retired and physically removed.**
-Natural workflow routing never triggered in production, every historical forced
-collaboration campaign closed no-go, invalid, or censored, and the owner
-decision is permanent retirement, not evidence-gated reconsideration. The
-workflow execution chain, the owner-execution graph validator (including the
-former read-only two-Specialist widening), the conductor planning runtime,
-and the GEPA campaign/evolution worker machinery have all been removed from
-the tree. A residual workflow decision fails closed. Conductor, Collaboration,
-Workflow, and GEPA semantics no longer appear in the product UI. Remaining
+Default, High, and Extra High do not automatically run every configured model;
+one model executes the effort plan.
+**Multi-model workflow collaboration is retired and physically removed** by
+permanent owner decision (not evidence-gated reconsideration): the workflow
+execution chain, the owner-execution graph validator, the conductor planning
+runtime, and the GEPA campaign/evolution-worker machinery are gone from the
+tree, and a residual workflow decision fails closed. Conductor, Collaboration,
+Workflow, and GEPA semantics no longer appear in the product UI. The remaining
 `Conductor*`/`collaboration_*` Rust identifiers are legacy internal naming for
-the execution contract, prompt profiles, and the bounded stage-call plumbing
-the delivery judge still uses — there is no separate conductor model and no
-collaboration lane.
+the execution contract, prompt profiles, and the bounded stage-call plumbing the
+delivery judge still uses — there is no separate conductor model and no
+collaboration lane. Retiring those residual identifiers is tracked as ontology
+debt; the historical retirement narrative lives in git history and the
+[EVALUATION.md](EVALUATION.md) ledger.
 
 All modes ultimately use the same kernel, run-control, tool-permission,
 persistence, and terminal-commit paths. Their budgets differ; their effect
 authority does not. There is no multi-model workflow lane. Memory recall and
-workspace retrieval scale by effort tier: Fast answers without either; Auto
-(`default`) recalls durable project memory with the `relevant` policy (keyed
-on the bounded run prompt) and retrieves up to 8 workspace results; `high`
-and `xhigh` recall with the `comprehensive` policy and retrieve up to 12 and
-16 workspace results.
+workspace retrieval scale by effort tier: Fast answers without either; Default
+recalls durable project memory with the `relevant` policy (keyed on the bounded
+run prompt) and retrieves up to 8 workspace results; High and Extra High recall
+with the `comprehensive` policy and retrieve up to 12 and 16 workspace results.
 
 The Finalizer role is retired: single-model sessions deliver through the
 actor, and a forced stop runs at most one toolless wrap-up turn of the same
@@ -269,13 +268,13 @@ notes and evidence-free runs are never delivered this way, and forced stops
 with grounded material skip the wrap-up call entirely. Plain text-only actor
 answers never needed a second call.
 
-Auto and Pro direct execution carry a contracted delivery judge at the
-shared completion point: a model-distinct Reviewer audits the final answer
-together with bounded execution facts (mutation count, mutation-verification
-state, verification policy, grounding evidence) and returns one typed
-single-line receipt (`pass` or `revise` with findings). A `revise` verdict permits at most one repair round
-and one recheck; Fast runs and collaboration workflow products are never
-judged. Judge unavailability, inconclusive receipts, empty or ungrounded
+Every tier above Fast (Default, High, and Extra High) carries a contracted
+delivery judge at the shared completion point: a model-distinct Reviewer audits
+the final answer together with bounded execution facts (mutation count,
+mutation-verification state, verification policy, grounding evidence) and
+returns one typed single-line receipt (`pass` or `revise` with findings). A
+`revise` verdict permits at most one repair round and one recheck; Fast runs are
+never judged. Judge unavailability, inconclusive receipts, empty or ungrounded
 repairs, and fallback candidates keep the original answer and record a
 `direct_judge_disposition` instead of blocking delivery. An opt-in
 `direct_judge_fail_closed` provider setting (default off, exposed as a
@@ -517,49 +516,32 @@ Tool visibility does not grant authority.
   reads the journal, and no routing, prompt, memory, permission, or serving
   path consumes it.
 
-## Prompt Evolution
+## Prompt Evolution (retired)
 
-Prompt evolution is retired and physically removed. The background workers that
-consumed redacted completed evidence, evaluated candidate profiles, and
-published stable/canary deployments have been removed from the tree, and the
-prompt-genome / prompt-profile serving machinery is gone with them: a run
-carries no prompt profile at all.
-
-The Settings evolution panel and its toggle are removed from the UI, and the
-`set_prompt_evolution_enabled` command is retired with them. The background
-evolution machinery (campaign runtime, mutation, pairwise evaluation, learning
-outbox, canary/rollout, and distillation), the genome schema, and the
-seed-profile serving path have all been physically removed from the tree; only
-the shadow judge-outcome measurement plumbing remains (an inert journal with no
-production consumer). Current checked-in provider evidence does not show that a
-learned workflow or finalizer profile improves production quality, and no
-profile from the historical experiments was promoted.
+Prompt evolution / GEPA is retired and physically removed: the background workers
+that consumed redacted completed evidence, evaluated candidate profiles, and
+published stable/canary deployments are gone, as are the prompt-genome /
+prompt-profile serving machinery (a run carries no prompt profile at all), the
+Settings evolution panel and toggle, and the `set_prompt_evolution_enabled`
+command. Only the inert shadow judge-outcome journal remains, with no production
+consumer. No profile from the historical experiments was ever promoted, and
+checked-in evidence does not show a learned workflow or finalizer profile
+improving production quality. The full removal record is in git history and
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Current Evidence Boundary
 
-The latest complete product-level provider baseline is Agent Real-World V5 on
-version `0.2.22`. It supports a narrow adaptive-direct improvement claim only.
-It did not exercise Workflow, learned profiles, or distillation, and Pro was not
-an iso-budget causal comparison.
-
-The latest route-causal attempt, V12 on source `ff8c238`, is
-`INVALID_EVIDENCE`: the Direct arm retained route evidence but failed terminal
-completion, while the Workflow arm stopped before its strategy event was
-persisted. It produced no matched pair and no GO/NO-GO result. Production Fast,
-Auto, Pro, and profile serving were unchanged by that attempt.
-
-The current source repairs that observability prerequisite and narrows the
-production Workflow graph with deterministic contracts. It does not
-retroactively validate V12, prove an intelligence or provider-cost gain, or
-authorize another provider run.
-
-The current evaluation projection can also derive one bounded, typed
-externally verified outcome for either Direct or Workflow from validated
-strategy and terminal lineage, actual Actor exposure, external postconditions,
-preservation checks, and complete resource receipts. This is shadow evidence
-only: it is not production `LearningEvidenceV1`, does not enter routing, prompt
-evolution, memory, canary, or serving, and does not establish an intelligence
-gain.
+There is no provider-backed product evaluation on the current revision. The
+checked-in evidence does not prove that Default, High, or Extra High generally
+outperform Fast, that any prompt-evolution or multi-model collaboration improves
+production quality, or that Cindx matches or approaches any external frontier
+agent. The retained provider results, their frozen revisions, consumed one-shot
+authorities, and explicit no-claim decisions are the decision ledger in
+[EVALUATION.md](EVALUATION.md); this document deliberately does not duplicate
+that per-run history. The only present measurement plumbing is the inert shadow
+direct-judge outcome journal (no production consumer). Any current capability
+claim requires a new, separately authorized, frozen provider protocol run on the
+exact shipping revision.
 
 The source formerly defined bounded offline collaboration learning: an initial
 matched Direct/Workflow gate decided whether one read-only Specialist was

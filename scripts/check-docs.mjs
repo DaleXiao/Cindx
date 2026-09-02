@@ -176,6 +176,31 @@ if (
     "EVALUATION.md describes the removed Fugu pilot harness as still present"
   );
 }
+// Removed GEPA/collaboration-learning/successor-protocol machinery must not be
+// described in the present tense, and the retired Workflow topology must not be
+// presented as a current constrained lane.
+if (evaluationSource.includes("The product contains causal assignment")) {
+  failures.push(
+    "EVALUATION.md describes the removed GEPA/canary/distillation machinery as a present product capability"
+  );
+}
+if (
+  architectureSource.includes("The same crate owns the portable collaboration-learning") ||
+  architectureSource.includes("successor evaluation control plane has one tracked protocol authority")
+) {
+  failures.push(
+    "ARCHITECTURE.md describes the removed collaboration-learning contracts / successor-protocol authority as present"
+  );
+}
+if (
+  handoffSource.includes("Workflow is constrained to one Specialist") ||
+  currentSource.includes("narrows the production Workflow graph") ||
+  currentSource.includes("plus-class model for Auto")
+) {
+  failures.push(
+    "HANDOFF/CURRENT describe the removed Workflow lane or deprecated Auto/Pro tier models as present"
+  );
+}
 
 if (failures.length > 0) {
   process.stderr.write(`Documentation check failed:\n- ${failures.join("\n- ")}\n`);

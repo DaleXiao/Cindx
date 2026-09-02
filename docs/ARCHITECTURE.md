@@ -184,9 +184,9 @@ budget scheduling keys.
 Model request generation follows the effort policy: chat requests and the
 credential probe disable provider-side thinking for model families whose
 builds enable it by default, and the executor loop pins deterministic sampling
-(`generation_temperature` `0`) for Fast and Auto while Pro keeps provider
-defaults. `agent-core` owns the metadata key; `model-provider` owns the wire
-emission; desktop owns the per-effort value.
+(`generation_temperature` `0`) for Fast and Default while High and Extra High
+keep provider defaults. `agent-core` owns the metadata key; `model-provider` owns
+the wire emission; desktop owns the per-effort value.
 
 ### 3. Retrieval and memory
 
@@ -290,11 +290,11 @@ model call entirely when such grounded material already exists and deliver it
 directly. The direct-finalizer phenotype policy module remains dormant pending
 physical removal with a prompt-genome schema migration.
 
-Auto and Pro direct deliveries pass an optional bounded judge gate at the
+Every tier above Fast passes an optional bounded judge gate at the
 shared completion chokepoint (both direct completion and terminal-finalizer
 routes): when the execution contract requires verification, the configured
 Reviewer model is distinct from the executor, and the candidate is not a
-fallback or a collaboration product, one tool-free Reviewer call audits the
+fallback, one tool-free Reviewer call audits the
 candidate against the objective and returns a typed single-line receipt. A `revise` verdict permits at most one Executor
 repair round over the recorded findings and one recheck; a repaired answer is
 re-grounded against the task contract before replacing the candidate. Judge
@@ -420,18 +420,13 @@ authorization paths, and output-root relocation fail closed. An actor with the
 same user identity who can delete or restore all private control-plane files is
 outside that local-filesystem threat boundary.
 
-The same crate owns the portable collaboration-learning contracts, separate
-from production prompt evolution. A structured policy keeps the Goal 2 graph
-and Owner authority fixed while bounding context, verification, and same-lane
-repair choices. Its companion exercise receipt is projected from lifecycle
-events rather than supplied by the candidate: it binds policy assignment,
-semantic plan, exact pre-dispatch request receipts, per-lane attempts, derived
-stop reason, and the externally verified outcome digest. The optional
-`collaboration-learning-offline` feature adds canonical bounded import and
-hash-chain replay into the same train/holdout evidence contract. Review may
-authorize only a narrow offline validation record; there is no conversion to
-production learning evidence, prompt genomes, snapshots, routing, canary, or
-serving.
+The portable collaboration-learning contracts and the `collaboration_learning_*`
+modules in `agent-application` were removed in the phase-3 effort-tier rebuild
+along with the `realworld-eval` adapter that produced them; multi-model
+collaboration is permanently retired, so there is no collaboration-learning
+policy, exercise receipt, offline-import feature, or train/holdout evidence
+contract in the tree. The recall-to-terminal attribution that survives is
+unrelated to collaboration learning.
 
 The desktop `realworld-eval` adapter was the only runtime producer; it was
 removed in the phase-3 effort-tier rebuild and the paragraph below is retained
@@ -445,38 +440,16 @@ adapter retained the run event slice outside the frozen report schema and derive
 the comparison binding from the actual pair plus a pre-frozen source/cohort
 authority.
 
-The successor evaluation control plane has one tracked protocol authority:
-`benchmarks/agent/collaboration-successor-protocol-v1.json`, bound to the
-tracked three-case suite by digest. The manifest fixes three pairs / six runs,
-the 5,000-to-7,500-bps context-only candidate, the existing conservative
-per-run budget, the six-run campaign aggregate, and terminal freeze rules. The
-desktop preflight validates that authority, materializes the exact cases, and
-binds a clean Git HEAD/tree plus redacted provider and complete model-catalog
-digests into a new private receipt outside the repository. It performs zero
-provider calls and cannot authorize execution. Goal 3E adds two separate,
-feature-gated control-plane binaries around that receipt. Authorization is a
-provider-free, 15-minute, private one-shot capability bound to the current
-preflight, clean source, provider/model configuration, exact execute binary,
-fixed cells and budgets, and a new external output root. Execution revalidates
-and atomically consumes it, then persists campaign, cell, and arm reservations
-before the corresponding provider action. The private lifecycle journal is the
-recovery authority; any ambiguous, interrupted, tampered, expired, or reused
-state terminates frozen/censored and cannot resume a started physical run.
-
-The fixed controller admits the baseline before the candidate and the
-candidate before holdout, then exposes only ready-for-independent-review,
-frozen, or censored terminal state. It has no production serving or promotion
-consumer. The Goal 3E instance consumed its one-shot authorization, reserved
-the first baseline Direct arm, and closed `CENSORED` before a valid observation
-after the product run terminated before selection with zero selected decisions.
-The terminal producer correctly persisted the explicit pre-decision
-`not_selected` state, with no treatment or Owner execution, but the
-selected-only external-outcome projector misclassified that legal state as a
-malformed receipt. This confirms the lifecycle stopped fail-closed; it is not a
-quality result and does not permit recovery or retry of that protocol.
-The current projector now distinguishes selected, explicit pre-decision
-not-selected, absent, and malformed receipt states before outcome construction;
-a legal not-selected terminal remains a censor and can never become an outcome.
+The successor evaluation control plane — the
+`benchmarks/agent/collaboration-successor-protocol-v1.json` authority, its
+desktop preflight, and the Goal 3E authorize/execute binaries — was removed in
+the phase-3 effort-tier rebuild; the protocol file is absent from the tree and
+the one-shot Goal 3E authority was consumed and closed `CENSORED` before any
+valid observation (see the [EVALUATION.md](EVALUATION.md) ledger). It cannot be
+rerun. The surviving outcome projector still distinguishes selected, explicit
+pre-decision not-selected, absent, and malformed receipt states before outcome
+construction, so a legal not-selected terminal remains a censor and can never
+become an outcome.
 
 ## Persistence and Background Work
 
