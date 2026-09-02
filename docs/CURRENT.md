@@ -2,7 +2,7 @@
 
 Current application version: `0.3.27`
 
-Last code-fact review: `2026-08-12`
+Last code-fact review: `2026-09-02`
 
 This document describes the current source tree. It is not a quality claim.
 
@@ -153,18 +153,25 @@ The desktop app currently includes:
 
 ## Execution Modes
 
-The three effort tiers form a compute ladder over one kernel and one
-quality spine; they differ by budget, iteration depth, and verification
-strength, not by permission authority:
+The four effort tiers form a compute ladder over one kernel and one
+quality spine; they differ by budget, iteration depth, knowledge defaults,
+and verification strength, not by permission authority. The canonical tiers
+are `fast`, `default`, `high`, and `xhigh` (shown in the UI as Fast, Default,
+High, and Extra High); the legacy `auto`/`pro` labels migrate to
+`default`/`high` at ingress and are deprecated:
 
 - **Fast** (quick direct answer): runs one direct model call with a small
   budget and no delivery judge.
-- **Auto** (verified answer, default): execution is adaptive direct work
+- **Default** (verified answer): execution is adaptive direct work
   followed by the independent delivery judge with one bounded repair round
   when eligible.
-- **Pro** (deep mission): the same single-model shape with a much larger
-  budget for deep, multi-iteration work, plus the most capable prompt
-  genome.
+- **High** (deep mission): the same single-model shape with a much larger
+  budget for deep, multi-iteration work and stronger retrieval.
+- **Extra High** (xhigh, deepest mission): the largest budget, iteration
+  depth, retrieval, and verification strength.
+
+Every tier above Fast runs the independent delivery judge when eligible; the
+tiers differ by compute and verification depth, never by a second model lane.
 
 Planning is deterministic for every tier: an effort-tier planner builds the
 run plan (effort label, tier-selected model, single-model scheduling facts,

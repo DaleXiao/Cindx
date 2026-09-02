@@ -474,20 +474,20 @@ a legal not-selected terminal remains a censor and can never become an outcome.
 ## Persistence and Background Work
 
 SQLite stores projects, sessions, events, permissions, checkpoints, schedules,
-memory, prompt evolution, and projections. Persistent-state failure aborts
-startup. Offline collaboration evidence deliberately does not add a production
-SQLite table: an explicitly selected evaluation harness uses private 0600,
-content-addressed genesis and entry files plus an atomic manifest. Recovery
-adopts only one valid successor; missing, tampered, or forked state fails
-closed, and an unfinished capture becomes a censor rather than a provider
-retry.
+memory, and inert measurement projections. Persistent-state failure aborts
+startup. Recovery adopts only one valid successor; missing, tampered, or forked
+state fails closed, and an unfinished capture becomes a censor rather than a
+provider retry.
 
 Background services are bounded and must not block the healthy foreground path:
 
 - Semantic memory curation and vector refresh.
-- Prompt evidence projection, mutation/evaluation, rollout, canary, transfer,
-  and distillation work.
 - Schedule dispatch and sidecar health work.
+
+The continuous prompt-evolution loop (prompt evidence projection,
+mutation/evaluation, rollout, canary, transfer, and distillation) and the
+offline collaboration-learning harness were retired and physically removed in
+the phase-3 effort-tier rebuild; they are not background services any longer.
 
 Canonical events remain authoritative. Derived serving snapshots and caches can
 be rebuilt; a cache publication failure cannot rewrite the scientific outcome.

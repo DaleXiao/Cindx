@@ -143,6 +143,40 @@ if (blockingFactCount !== 1) {
   failures.push(`HANDOFF.md must keep exactly one Blocking Fact section, found ${blockingFactCount}`);
 }
 
+// Tier-name truth (audit P2-08): the canonical effort tiers are
+// fast/default/high/xhigh. The deprecated auto/pro labels must not be presented
+// as the current product ladder.
+const readmeSource = fs.readFileSync(path.join(root, "README.md"), "utf8");
+if (
+  readmeSource.includes("Fast, Auto, and Pro") ||
+  currentSource.includes("The three effort tiers")
+) {
+  failures.push(
+    "README/CURRENT present the deprecated three-tier Fast/Auto/Pro ladder as current; the canonical tiers are fast/default/high/xhigh"
+  );
+}
+// Removed prompt-evolution machinery must not be described as present work.
+// The literal targets the old present-tense background-services bullet
+// ("... and distillation work."), not a removal note that names the loop.
+if (
+  architectureSource.includes("Prompt evidence projection, mutation/evaluation") ||
+  architectureSource.includes("and distillation work.")
+) {
+  failures.push(
+    "ARCHITECTURE.md describes the removed prompt-evolution/canary/distillation loop as present background work"
+  );
+}
+// The removed Fugu pilot harness must not be described as still existing.
+const evaluationSource = fs.readFileSync(path.join(root, "docs/EVALUATION.md"), "utf8");
+if (
+  evaluationSource.includes("remains the provider-backed harness surface") ||
+  evaluationSource.includes("is still `#[ignore]`-gated")
+) {
+  failures.push(
+    "EVALUATION.md describes the removed Fugu pilot harness as still present"
+  );
+}
+
 if (failures.length > 0) {
   process.stderr.write(`Documentation check failed:\n- ${failures.join("\n- ")}\n`);
   process.exit(1);

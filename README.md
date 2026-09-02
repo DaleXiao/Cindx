@@ -8,7 +8,7 @@ the audit trail.
 
 - Projects, sessions, streamed chat, attachments, artifacts, previews, search,
   schedules, queue/steer controls, and trace inspection.
-- Fast, Auto, and Pro execution modes on one shared agent kernel.
+- Fast, Default, High, and Extra High execution modes on one shared agent kernel.
 - Permission-gated file, shell, process, web, browser, computer, image, MCP,
   and skill tools.
 - Durable SQLite state, recoverable run identities, cancellation, retries, and
@@ -16,15 +16,15 @@ the audit trail.
 - Workspace retrieval across semantic, file, graph-direct, and graph-walk
   channels, plus a separate durable memory system.
 
-Fast, Auto, and Pro are effort tiers planned deterministically by the run
-preparation: a fixed single-model plan per tier with no planning model call.
-Fast is a quick direct answer; Auto and Pro add a bounded delivery judge and
-larger budgets. All modes use the same permission, tool, persistence, and
-completion paths.
+Fast, Default, High, and Extra High are effort tiers planned deterministically by
+the run preparation: a fixed single-model plan per tier with no planning model
+call. Fast is a quick direct answer; Default, High, and Extra High add a bounded
+delivery judge and progressively larger budgets. All modes use the same
+permission, tool, persistence, and completion paths.
 
-The checked-in evidence does **not** prove that Auto or Pro generally outperform
-Fast, or that any prompt-evolution or multi-model collaboration improves
-production quality. The exact boundary is documented in
+The checked-in evidence does **not** prove that Default, High, or Extra High
+generally outperform Fast, or that any prompt-evolution or multi-model
+collaboration improves production quality. The exact boundary is documented in
 [Evaluation](docs/EVALUATION.md).
 
 ## Repository Map
