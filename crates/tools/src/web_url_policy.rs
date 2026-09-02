@@ -187,6 +187,20 @@ fn ipv6_is_public(ip: Ipv6Addr) -> bool {
             !(segments[7] & 0xFF) as u8,
         ));
     }
+    // Remaining IANA special-purpose IPv6 ranges are never public-routable to an
+    // arbitrary host, so they fail closed too (audit P1-04 completeness).
+    // 2001:db8::/32 documentation.
+    if segments[0] == 0x2001 && segments[1] == 0x0DB8 {
+        return false;
+    }
+    // 100::/64 discard-only address block (blackhole).
+    if segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 {
+        return false;
+    }
+    // fec0::/10 deprecated site-local.
+    if (segments[0] & 0xFFC0) == 0xFEC0 {
+        return false;
+    }
     true
 }
 
@@ -299,6 +313,26 @@ mod tests {
         assert!(!ip_is_public(IpAddr::V6(Ipv6Addr::new(
             0xfe80, 0, 0, 0, 0, 0, 0, 1
         ))));
+        assert!(ip_is_public(IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x2800, 0x220, 0x1, 0x248, 0x1893, 0x25c8, 0x1946
+        ))));
+    }
+
+    #[test]
+    fn reserved_ipv6_ranges_are_never_public() {
+        // 2001:db8::/32 documentation.
+        assert!(!ip_is_public(IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x0db8, 0, 0, 0, 0, 0, 1
+        ))));
+        // 100::/64 discard-only blackhole.
+        assert!(!ip_is_public(IpAddr::V6(Ipv6Addr::new(
+            0x0100, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // fec0::/10 deprecated site-local.
+        assert!(!ip_is_public(IpAddr::V6(Ipv6Addr::new(
+            0xfec0, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // A genuine global unicast address still passes.
         assert!(ip_is_public(IpAddr::V6(Ipv6Addr::new(
             0x2606, 0x2800, 0x220, 0x1, 0x248, 0x1893, 0x25c8, 0x1946
         ))));

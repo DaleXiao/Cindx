@@ -883,6 +883,13 @@ fn execute_worker_network_tool(
             Err(error) => return fail(error),
         }
     }
+    // Re-check cancellation/steer immediately before the outbound call: the
+    // approval above may have parked on user input, and a cancel or steer during
+    // that window must prevent the network egress (audit P1-04). The inherited
+    // capability path is cheap to re-check too, so this covers both.
+    if crate::agent_query_commands::agent_run_should_stop(cancellation) {
+        return fail("subagent stopped before the approved network request executed".to_string());
+    }
     tool.execute(invocation).unwrap_or_else(|error| {
         agent_core::ToolResult::failed(agent_core::ToolCallId(call_id.to_string()), error.message)
     })
