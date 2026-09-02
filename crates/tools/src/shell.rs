@@ -1206,6 +1206,13 @@ mod tests {
             "terraform destroy",
             "terraform apply",
             "security delete-keychain login.keychain",
+            // Flag/context insertion must not hide the verb past a fixed window
+            // (codex audit P1-03): each carries the destructive verb after
+            // intervening flags and must still be one-shot Destructive.
+            "kubectl --context prod --namespace ns delete pod api",
+            "gh --repo org/repo issue delete 42",
+            "docker --log-level debug rm container-1",
+            "npm --registry https://registry.example publish",
         ] {
             let classification = classify_shell_permission(command);
             assert_eq!(
@@ -1216,13 +1223,17 @@ mod tests {
             assert!(!classification.auto_grant_eligible);
             assert!(!classification.session_reusable);
         }
-        // Read-only and non-verb uses of the same CLIs keep Execute behavior.
+        // Read-only and non-verb uses of the same CLIs keep Execute behavior,
+        // including when flags precede the read verb (no false-positive drift).
         for command in [
             "kubectl get pods",
+            "kubectl --context prod get pods",
             "npm install",
             "brew list",
             "docker ps",
+            "docker --log-level debug ps",
             "gh pr list",
+            "gh --repo org/repo pr list",
             "terraform plan",
         ] {
             let classification = classify_shell_permission(command);

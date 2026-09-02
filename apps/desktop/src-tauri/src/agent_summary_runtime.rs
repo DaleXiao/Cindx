@@ -24,22 +24,35 @@ fn summary_cache() -> &'static Mutex<HashMap<u64, String>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Schema version for the rolling-summary cache key. Bump when the summary
+/// system prompt or transcript serialization changes so stale summaries from a
+/// previous schema never alias into a new run.
+const SUMMARY_SCHEMA_VERSION: u64 = 2;
+
+/// A digest over the *full* canonical transcript (every message's role and
+/// content, in order) plus the summary schema version.
+///
+/// Keying on the whole transcript — not just its length, total characters,
+/// first user message, and last message — makes cross-session cache aliasing
+/// non-constructible: two conversations that differ anywhere in the middle
+/// digest differently, so one session's summary can never leak into another's
+/// context. The historical fingerprint hashed only length + total characters +
+/// first-user + last, which let two distinct sessions with an identical shape
+/// collide on one key.
 fn transcript_fingerprint(messages: &[Message]) -> u64 {
     let mut hasher = DefaultHasher::new();
+    SUMMARY_SCHEMA_VERSION.hash(&mut hasher);
     messages.len().hash(&mut hasher);
-    let mut total_chars = 0usize;
     for message in messages {
-        total_chars = total_chars.saturating_add(message.content.chars().count());
-    }
-    total_chars.hash(&mut hasher);
-    if let Some(first_user) = messages
-        .iter()
-        .find(|message| message.role == MessageRole::User)
-    {
-        first_user.content.trim().hash(&mut hasher);
-    }
-    if let Some(last) = messages.last() {
-        last.content.trim().hash(&mut hasher);
+        let role_tag = match message.role {
+            MessageRole::System => 0u8,
+            MessageRole::User => 1,
+            MessageRole::Assistant => 2,
+            MessageRole::Tool => 3,
+            MessageRole::Reviewer => 4,
+        };
+        role_tag.hash(&mut hasher);
+        message.content.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -230,6 +243,43 @@ mod tests {
         assert_ne!(
             transcript_fingerprint(&base),
             transcript_fingerprint(&changed)
+        );
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_same_shape_different_middle_transcripts() {
+        // The historical cross-session alias: equal length, equal total
+        // characters, equal first user message, and equal last message, but
+        // different middle content. The full-transcript digest must separate
+        // them so one session's summary can never alias into another's context.
+        let alpha = vec![
+            message(MessageRole::User, "shared first user"),
+            message(MessageRole::Assistant, "alpha middle content"),
+            message(MessageRole::User, "shared last"),
+        ];
+        let beta = vec![
+            message(MessageRole::User, "shared first user"),
+            message(MessageRole::Assistant, "betaa middle content"),
+            message(MessageRole::User, "shared last"),
+        ];
+        let total_chars = |transcript: &Vec<Message>| {
+            transcript
+                .iter()
+                .map(|item| item.content.chars().count())
+                .sum::<usize>()
+        };
+        // Sanity: identical shape under the old fingerprint's inputs.
+        assert_eq!(alpha.len(), beta.len());
+        assert_eq!(total_chars(&alpha), total_chars(&beta));
+        assert_eq!(
+            alpha.first().unwrap().content,
+            beta.first().unwrap().content
+        );
+        assert_eq!(alpha.last().unwrap().content, beta.last().unwrap().content);
+        // The fix: a different middle produces a different digest.
+        assert_ne!(
+            transcript_fingerprint(&alpha),
+            transcript_fingerprint(&beta)
         );
     }
 }

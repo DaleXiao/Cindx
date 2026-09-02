@@ -1,46 +1,37 @@
 //! macOS Keychain backing for the provider API key.
 //!
-//! The private config file keeps only a credential *reference*: on save the
-//! key is written to the login keychain through `/usr/bin/security` and the
-//! on-disk `api_key` field is cleared; on load an empty field is filled from
-//! the keychain. Legacy conf files that still carry a plaintext key are
-//! migrated on the next save. If the keychain is unavailable the save falls
-//! back to the historical private (0600) conf file so the app never loses the
-//! ability to run, and the fallback is recorded in the startup log.
+//! The private config file keeps only a credential *reference*: on save the key
+//! is written to the login keychain through the Security.framework API and the
+//! on-disk `api_key` field is cleared; on load an empty field is filled from the
+//! keychain. Legacy conf files that still carry a plaintext key are migrated on
+//! the next save. The secret is handed to the framework in-process and never
+//! appears in argv, the environment, logs, or persisted events. If the keychain
+//! is unavailable the save falls back to the historical private (0600) conf file
+//! so the app never loses the ability to run, and the fallback is recorded in
+//! the startup log.
 
-use std::process::Command;
+#[cfg(target_os = "macos")]
+use security_framework::passwords::{
+    delete_generic_password, get_generic_password, set_generic_password,
+};
 
 use crate::configuration_models::ProviderConfig;
 
 const KEYCHAIN_SERVICE: &str = "Cindx provider";
 const KEYCHAIN_ACCOUNT: &str = "api-key";
 
+/// `errSecItemNotFound`: clearing an absent entry counts as success, matching
+/// the historical CLI behavior (exit code 44).
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
 #[cfg(target_os = "macos")]
 pub(crate) fn store_provider_api_key(key: &str) -> Result<(), String> {
     if key.is_empty() {
         return clear_provider_api_key();
     }
-    let output = Command::new("/usr/bin/security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-            key,
-        ])
-        .output()
-        .map_err(|error| format!("failed to invoke the keychain CLI: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "keychain rejected the provider credential: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
-    }
+    set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key.as_bytes())
+        .map_err(|error| format!("keychain rejected the provider credential: {error}"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -50,23 +41,10 @@ pub(crate) fn store_provider_api_key(_key: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn read_provider_api_key() -> String {
-    let Ok(output) = Command::new("/usr/bin/security")
-        .args([
-            "find-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-            "-w",
-        ])
-        .output()
-    else {
-        return String::new();
-    };
-    if !output.status.success() {
-        return String::new();
+    match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
+        Err(_) => String::new(),
     }
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -76,24 +54,13 @@ pub(crate) fn read_provider_api_key() -> String {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn clear_provider_api_key() -> Result<(), String> {
-    let output = Command::new("/usr/bin/security")
-        .args([
-            "delete-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            KEYCHAIN_ACCOUNT,
-        ])
-        .output()
-        .map_err(|error| format!("failed to invoke the keychain CLI: {error}"))?;
-    // Absent entries are fine: clearing something that is not there succeeds.
-    if output.status.success() || output.status.code() == Some(44) {
-        Ok(())
-    } else {
-        Err(format!(
-            "keychain could not clear the provider credential: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ))
+    match delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+        Ok(()) => Ok(()),
+        // Absent entries are fine: clearing something that is not there succeeds.
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(format!(
+            "keychain could not clear the provider credential: {error}"
+        )),
     }
 }
 

@@ -75,7 +75,9 @@ The desktop app currently includes:
 - Long runs keep a rolling summary injected into the trusted runtime context so the
   model retains the objective across compaction. Only transcripts already pressing on
   the context window (≥40% used) pay a model-generated summary
-  (Goal/Constraints/Progress/Decisions/Next Steps), cached by transcript fingerprint;
+  (Goal/Constraints/Progress/Decisions/Next Steps), cached by a full-transcript
+  digest (every message's role and content plus a schema version) so two distinct
+  sessions can never alias one cache key;
   everything else uses the cheap deterministic extractive
   Goal/Progress/Latest-position summary, so routine runs never block at startup.
   Context token usage (compaction trigger, budget allocation, attempt

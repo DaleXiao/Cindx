@@ -413,12 +413,18 @@ fn segment_runs_destructive_cli_verbs(segment: &[String], executable: &str) -> b
         ],
         _ => return false,
     };
-    // The verb sits within the first few tokens after the executable; tokens
-    // further out are typically values, so they are not matched.
+    // Scan every non-flag token after the executable, not a fixed window. A
+    // narrow window let flag/context insertion hide the verb: for example
+    // `kubectl --context prod --namespace ns delete pod` placed `delete` past a
+    // 3-token window and auto-granted a remote deletion. Flag-like tokens
+    // (`--rm`, `--label`) are skipped so a flag is never read as a subcommand.
+    // A verb appearing as a positional value is an accepted false positive that
+    // only costs one manual approval, whereas a false negative would
+    // auto-approve a remote deletion or a publication.
     segment
         .iter()
         .skip(1)
-        .take(3)
+        .filter(|token| !token.starts_with('-'))
         .any(|token| verbs.contains(&token.as_str()))
 }
 

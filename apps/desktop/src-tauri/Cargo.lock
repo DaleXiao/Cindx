@@ -1013,6 +1013,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "rustls",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",
