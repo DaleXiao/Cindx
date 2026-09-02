@@ -242,6 +242,27 @@ fn subagent_denies_effectful_tool() {
 }
 
 #[test]
+fn subagent_read_tool_is_gated_by_steer_and_cancel_before_execution() {
+    let (_workspace, registry, task_id) = fixture();
+    let control = Arc::new(AgentRunControl::new("fast"));
+    control.request_cancel();
+    let observation = execute_subagent_tool_call(
+        &registry,
+        &task_id,
+        &read_call("r1", "README.md"),
+        None,
+        &control,
+    );
+    // The epoch/cancel gate refuses the call once the run is cancelled, so the
+    // read never executes stale (audit P1-01 safe increment).
+    assert!(
+        observation.contains("superseded by user steering or cancellation"),
+        "observation: {observation}"
+    );
+    assert!(!observation.contains("status=succeeded"));
+}
+
+#[test]
 fn subagent_aborts_before_any_model_call_when_cancelled() {
     let (_workspace, registry, task_id) = fixture();
     let provider = ScriptedProvider::new(vec![final_answer("should not run")]);

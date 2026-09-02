@@ -776,6 +776,23 @@ pub(crate) fn execute_subagent_tool_call(
         );
     }
     let invocation = tool_invocation_from_request(task_id, &request);
+    // Epoch/cancel gate before any subagent tool dispatch (audit P1-01, safe
+    // increment): a steer or cancel that lands while the child loop is running
+    // must stop the call rather than execute stale discovery. This extends the
+    // network-path cancel re-check to read tools and adds the objective-epoch
+    // check. It intentionally does NOT consume the parent tool-call budget:
+    // coupling subagent reads to the run-level tool budget makes exhaustion set a
+    // run-wide stop_reason and breaks the child loop's bounded-by-steps contract,
+    // so unifying the tool budget needs a subagent-scoped accounting design and
+    // is deferred rather than rushed.
+    let tool_epoch = cancellation.steer_epoch();
+    if agent_run_should_stop(cancellation) || !cancellation.objective_epoch_is_current(tool_epoch) {
+        return observation_from_tool_result(
+            &call.name,
+            "cancelled",
+            "The subagent tool call was superseded by user steering or cancellation before execution; no action was taken.",
+        );
+    }
     // Read-only discovery gate first; the controlled network capability
     // (web.search/web.fetch) is a separate named-allowlist gate wrapped in
     // the parent-run permission path, so a denial from the pure-read gate is
