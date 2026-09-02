@@ -5,7 +5,7 @@ use agent_runtime::{
     ModelUsageSource, PhysicalModelAttempt, RunResourceSnapshot, RunStageClass, RunStopReason,
     CONSERVATIVE_TOKENS_PER_PHYSICAL_MODEL_ATTEMPT,
 };
-use model_provider::{ModelRequest, ModelResponse};
+use model_provider::{ModelError, ModelRequest, ModelResponse};
 use std::sync::Arc;
 
 #[must_use = "a reserved physical model attempt must be settled"]
@@ -112,6 +112,66 @@ impl ControlledModelAttempt {
 impl Drop for ControlledModelAttempt {
     fn drop(&mut self) {
         let _ = self.settle(None);
+    }
+}
+
+/// The outcome of one auxiliary model call routed through the unified physical
+/// resource ledger.
+pub(crate) enum AuxModelCall {
+    /// Dispatched and settled with the provider's usage.
+    Response(ModelResponse),
+    /// The provider call failed; the reserved attempt was settled as unknown.
+    ProviderError,
+    /// The run's physical resource budget is exhausted; the caller degrades
+    /// gracefully (fallback summary, abandoned plan draft, bounded child answer).
+    BudgetExhausted,
+    /// The run stopped (cancel/steer); the caller stops.
+    Stopped,
+}
+
+/// Run one auxiliary model call (Plan, Subagent, Summary, Judge, Guardian) on the
+/// same physical resource ledger as the Owner: reserve a physical attempt against
+/// the run budget, dispatch through the caller's closure, and settle with the
+/// provider usage. The reservation is RAII-settled on every path, so a reserved
+/// attempt is never leaked.
+///
+/// This closes audit P1-01 for model calls: aux calls previously counted only a
+/// logical stage call (Plan/Subagent) or nothing at all (Summary), so
+/// `max_total_tokens` and physical-attempt telemetry undercounted real cost and
+/// parallel children could amplify provider calls for free under one parent
+/// budget. The caller retains its logical `begin_stage_model_call` /
+/// `finish_model_call` pair; this helper owns only the physical reservation and
+/// settlement, keeping every aux lane on one accounting spine.
+pub(crate) fn controlled_aux_model_call<F>(
+    control: &Arc<AgentRunControl>,
+    model: &str,
+    request: &ModelRequest,
+    stage: RunStageClass,
+    dispatch: F,
+) -> AuxModelCall
+where
+    F: FnOnce() -> Result<ModelResponse, ModelError>,
+{
+    let attempt = match ControlledModelAttempt::reserve_at(
+        control,
+        control.steer_epoch(),
+        model,
+        request,
+        stage,
+    ) {
+        Ok(Some(attempt)) => attempt,
+        Ok(None) => return AuxModelCall::BudgetExhausted,
+        Err(_) => return AuxModelCall::Stopped,
+    };
+    match dispatch() {
+        Ok(response) => {
+            attempt.settle_response(&response);
+            AuxModelCall::Response(response)
+        }
+        Err(_) => {
+            attempt.settle_unknown();
+            AuxModelCall::ProviderError
+        }
     }
 }
 
@@ -405,5 +465,73 @@ mod tests {
         assert_eq!(usage.usage_sources.estimated, 1);
         assert_eq!(usage.usage_sources.provider, 1);
         assert_eq!(usage.usage_sources.total(), 2);
+    }
+
+    #[test]
+    fn aux_model_call_counts_on_the_shared_physical_ledger() {
+        let control = Arc::new(AgentRunControl::new("default"));
+        control
+            .begin_stage_model_call("summary", RunStageClass::Other)
+            .unwrap();
+        let request = model_request(Some("32"));
+        let outcome = controlled_aux_model_call(
+            &control,
+            "summarizer",
+            &request,
+            RunStageClass::Other,
+            || {
+                let mut response = ModelResponse {
+                    message: Message {
+                        role: MessageRole::Assistant,
+                        content: "summary".to_string(),
+                        metadata: Metadata::new(),
+                    },
+                    raw_tool_calls_json: None,
+                    tool_calls: Vec::new(),
+                    metadata: Metadata::new(),
+                };
+                response
+                    .metadata
+                    .insert("prompt_tokens".to_string(), "11".to_string());
+                response
+                    .metadata
+                    .insert("completion_tokens".to_string(), "2".to_string());
+                response
+                    .metadata
+                    .insert("total_tokens".to_string(), "13".to_string());
+                response
+                    .metadata
+                    .insert("usage_source".to_string(), "provider".to_string());
+                Ok(response)
+            },
+        );
+        control.finish_model_call();
+        assert!(matches!(outcome, AuxModelCall::Response(_)));
+        let usage = control.resource_usage().segment;
+        assert_eq!(usage.physical_attempts, 1, "aux call must count physically");
+        assert_eq!(usage.total_tokens, 13);
+        assert_eq!(usage.usage_sources.provider, 1);
+    }
+
+    #[test]
+    fn aux_model_call_settles_unknown_on_provider_error_and_never_leaks() {
+        let control = Arc::new(AgentRunControl::new("default"));
+        control
+            .begin_stage_model_call("subagent", RunStageClass::Worker)
+            .unwrap();
+        let request = model_request(Some("32"));
+        let outcome = controlled_aux_model_call(
+            &control,
+            "subagent",
+            &request,
+            RunStageClass::Worker,
+            || Err(ModelError::new("provider unavailable")),
+        );
+        control.finish_model_call();
+        assert!(matches!(outcome, AuxModelCall::ProviderError));
+        // The reserved attempt still settled (as unknown) rather than leaking.
+        let usage = control.resource_usage().segment;
+        assert_eq!(usage.physical_attempts, 1);
+        assert_eq!(usage.usage_sources.unknown, 1);
     }
 }

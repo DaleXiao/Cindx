@@ -117,7 +117,12 @@ capabilities, then persists the user message and start state. Logical run ID,
 physical attempt ID, and steer epoch define replay and recovery boundaries.
 
 `agent-harness` admits only one active owner for the same run/work key.
-`AgentRunControl` applies cancellation, deadlines, stage budgets, and steer.
+`AgentRunControl` applies cancellation, deadlines, stage budgets, and steer, and
+owns the one physical model-resource ledger: the Owner turn loop and every
+auxiliary lane (Plan drafting, Subagent children, rolling Summary) reserve and
+settle physical attempts through it (`ControlledModelAttempt` /
+`controlled_aux_model_call`), so `max_total_tokens` and physical-attempt
+telemetry account for the whole run instead of undercounting the aux lanes.
 
 ### 2. Context and execution plan
 
@@ -160,7 +165,9 @@ tool loop that reuses the subagent whitelist (`file.read`, `file.list`,
 `file.search`, `file.glob`, `web.search`, `web.fetch`) and the registry's
 permissionless-read guard, and
 charges every drafting call through `begin_stage_model_call(_,
-RunStageClass::Worker)`. The proposal (bounded markdown plus its
+RunStageClass::Worker)` plus a physical-attempt reservation on the unified
+resource ledger, so plan drafting counts against the run budget like an Owner
+call. The proposal (bounded markdown plus its
 content-bound digest) and the later user decision are persisted as ordinary
 run events; the gate then parks the run with the existing nonterminal pause
 plus recovery-envelope mechanism (`waiting_for_plan_confirmation`), so

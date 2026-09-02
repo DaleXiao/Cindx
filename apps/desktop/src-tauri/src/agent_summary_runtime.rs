@@ -9,6 +9,7 @@ use agent_core::{
 };
 use agent_runtime::{
     compaction_summary_instruction, serialize_transcript_for_compaction, AgentRunControl,
+    RunStageClass,
 };
 use model_provider::StreamingModelProvider;
 
@@ -18,6 +19,8 @@ const MODEL_SUMMARY_MIN_MESSAGES: usize = 16;
 const SUMMARY_TRANSCRIPT_MESSAGE_CAP_CHARS: usize = 600;
 const SUMMARY_RESULT_CAP_CHARS: usize = 2400;
 const SUMMARY_CACHE_MAX_ENTRIES: usize = 24;
+const SUMMARY_STAGE_LABEL: &str = "rolling_summary";
+const SUMMARY_MODEL_LABEL: &str = "summarizer";
 
 fn summary_cache() -> &'static Mutex<HashMap<u64, String>> {
     static CACHE: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
@@ -109,11 +112,37 @@ pub(crate) fn model_rolling_summary(
         }
     }
     let request = build_summary_request(messages)?;
+    // Route the summarization call through the unified physical resource ledger
+    // (audit P1-01). Summary previously reserved nothing, so its tokens and
+    // physical attempts were invisible to the run budget and telemetry.
+    if cancellation
+        .begin_stage_model_call(SUMMARY_STAGE_LABEL, RunStageClass::Other)
+        .is_err()
+    {
+        return None;
+    }
     let mut should_cancel = || agent_run_should_stop(cancellation);
     let mut ignore_delta = |_delta: &str| {};
-    let response = provider
-        .complete_streaming_cancellable(request, &mut ignore_delta, &mut should_cancel)
-        .ok()?;
+    let outcome = crate::model_resource_runtime::controlled_aux_model_call(
+        cancellation,
+        SUMMARY_MODEL_LABEL,
+        &request,
+        RunStageClass::Other,
+        || {
+            provider.complete_streaming_cancellable(
+                request.clone(),
+                &mut ignore_delta,
+                &mut should_cancel,
+            )
+        },
+    );
+    cancellation.finish_model_call();
+    let response = match outcome {
+        crate::model_resource_runtime::AuxModelCall::Response(response) => response,
+        // Budget exhausted, run stopped, or provider error: fall back to the
+        // deterministic extractive summary the caller already uses.
+        _ => return None,
+    };
     let summary: String = response
         .message
         .content

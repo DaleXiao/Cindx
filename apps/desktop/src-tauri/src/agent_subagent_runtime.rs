@@ -315,12 +315,30 @@ pub(crate) fn subagent_child_answer(
             metadata: Metadata::new(),
         };
         let mut should_cancel = || agent_run_should_stop(cancellation);
-        let response =
-            actor_provider.complete_streaming_cancellable(request, &mut |_| {}, &mut should_cancel);
+        // Reserve a physical attempt on the unified ledger (audit P1-01): the
+        // logical stage call above bounded the child loop, but the physical
+        // tokens/attempts were never counted, so parallel children could
+        // amplify provider calls for free under the parent budget.
+        let outcome = crate::model_resource_runtime::controlled_aux_model_call(
+            cancellation,
+            "subagent",
+            &request,
+            RunStageClass::Worker,
+            || {
+                actor_provider.complete_streaming_cancellable(
+                    request.clone(),
+                    &mut |_| {},
+                    &mut should_cancel,
+                )
+            },
+        );
         cancellation.finish_model_call();
-        let response = match response {
-            Ok(response) => response,
-            Err(_) => {
+        let response = match outcome {
+            crate::model_resource_runtime::AuxModelCall::Response(response) => response,
+            crate::model_resource_runtime::AuxModelCall::BudgetExhausted => {
+                return (description, subagent_budget_answer(&last_content));
+            }
+            _ => {
                 return (
                     description,
                     if last_content.is_empty() {
