@@ -15,9 +15,11 @@
 //! it). There is deliberately no recursive chmod sweep: each directory whose
 //! mode is forced is a real directory this module just created or validated.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -138,7 +140,64 @@ pub fn ensure_private_dir(trusted_root: &Path, dir: &Path) -> io::Result<()> {
         }
         set_mode_no_follow(&current, 0o700, true)?;
     }
+    migrate_legacy_files_once(&current);
     Ok(())
+}
+
+/// Directories whose legacy files have already been migrated this process, so a
+/// frequently-written managed dir is never re-scanned on every write.
+fn migrated_dirs() -> &'static Mutex<BTreeSet<PathBuf>> {
+    static MIGRATED: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+    MIGRATED.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// One-time, bounded, best-effort migration of legacy world-readable files in a
+/// managed leaf directory to owner-only (audit P2-07). `ensure_private_dir`
+/// already forces the directory chain to 0700; this covers pre-existing 0600
+/// files that predate the hardening. It runs at most once per directory per
+/// process, skips symlinks (never following them) and subdirectories (each
+/// migrates when ensured as a leaf), uses `O_NOFOLLOW` fchmod, and ignores every
+/// error so it can never block or fail a managed write.
+fn migrate_legacy_files_once(canonical_leaf: &Path) {
+    #[cfg(not(unix))]
+    {
+        let _ = canonical_leaf;
+    }
+    #[cfg(unix)]
+    {
+        {
+            let Ok(mut migrated) = migrated_dirs().lock() else {
+                return;
+            };
+            if migrated.contains(canonical_leaf) {
+                return;
+            }
+            // Bound the dedup set so a long-lived process touching many managed
+            // directories cannot grow it without limit.
+            if migrated.len() >= 4096 {
+                migrated.clear();
+            }
+            migrated.insert(canonical_leaf.to_path_buf());
+        }
+        const MAX_MIGRATION_ENTRIES: usize = 1000;
+        let Ok(entries) = fs::read_dir(canonical_leaf) else {
+            return;
+        };
+        let mut seen = 0usize;
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > MAX_MIGRATION_ENTRIES {
+                break;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_file() {
+                let _ = set_mode_no_follow(&path, 0o600, false);
+            }
+        }
+    }
 }
 
 /// Atomically write owner-only content under a trusted root. The parent chain is
@@ -322,5 +381,35 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
         let target = elsewhere.path().join("escape");
         assert!(ensure_private_dir(root.path(), &target).is_err());
+    }
+
+    #[test]
+    fn migrates_legacy_world_readable_files_and_skips_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("external.txt");
+        fs::write(&outside_file, b"external").unwrap();
+        fs::set_permissions(&outside_file, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let dir = root.path().join(".cindx").join("attachments");
+        fs::create_dir_all(&dir).unwrap();
+        // A legacy world-readable file predating the hardening.
+        let legacy = dir.join("legacy.txt");
+        fs::write(&legacy, b"private").unwrap();
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o644)).unwrap();
+        // A planted symlink that must be skipped, never followed.
+        std::os::unix::fs::symlink(&outside_file, dir.join("link.txt")).unwrap();
+
+        ensure_private_dir(root.path(), &dir).unwrap();
+
+        // The legacy regular file is migrated to owner-only.
+        assert_eq!(mode_of(&legacy), 0o600);
+        // The symlink is left as a symlink and its target was never modified.
+        assert!(fs::symlink_metadata(dir.join("link.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&outside_file).unwrap(), b"external");
+        assert_eq!(mode_of(&outside_file), 0o644);
     }
 }

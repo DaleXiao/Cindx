@@ -36,7 +36,11 @@ hostile workspace that pre-plants `.cindx/...` as a symlink cannot redirect a
 write or a recursive chmod outside the project. The online provider eval example
 (`crates/agent-eval/examples/real_provider.rs`) is likewise contained: case ids
 must be a single safe slug, each run uses an exclusive temp root, and the example
-refuses to run without `CINDX_EVAL_AUTHORIZE=yes`.
+refuses to run without `CINDX_EVAL_AUTHORIZE=yes`. `ensure_private_dir` also runs
+a bounded, once-per-directory, best-effort migration that forces pre-existing
+legacy files in a managed leaf to owner-only (0600), skipping symlinks and
+subdirectories, so world-readable artifacts left by older builds converge on the
+next managed write without a recursive chmod of an arbitrary tree.
 
 ## Fast Checks
 
@@ -443,6 +447,10 @@ Without `--skip-tests`, the script runs sidecars, frontend tests, Rust tests,
 and `shipping-performance` before building. The complete dependency graph can
 produce many gigabytes of reproducible `target` output and can be quiet while
 Rust is compiling. Check the compiler process; do not start a duplicate build.
+After archiving, the build fails closed if `dist/Cindx-<version>-macOS-arm64.zip`
+exceeds its bundle-size budget (audit P3-01), so a dependency or asset regression
+that bloats the published artifact is caught at build time instead of shipping
+silently; raise the budget deliberately, never to absorb an unexplained jump.
 
 Use `--ephemeral-target` only when disposable build storage is desired. Cleanup
 must preserve source, user data, configuration, and the installed app.

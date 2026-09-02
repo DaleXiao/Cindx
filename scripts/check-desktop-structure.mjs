@@ -1015,9 +1015,10 @@ const toolsModuleBudgets = new Map([
   ["process_tests.rs", 740],
   ["process_tools.rs", 370],
   // Symlink-safe managed-artifact filesystem primitives (codex audit P0-01):
-  // trusted-root component validation, O_NOFOLLOW mode setting, and atomic
-  // temp+rename publishes. The single audited home for `.cindx` writes.
-  ["safe_fs.rs", 220],
+  // trusted-root component validation, O_NOFOLLOW mode setting, atomic
+  // temp+rename publishes, and the bounded once-per-dir legacy-file migration
+  // (P2-07). The single audited home for `.cindx` writes.
+  ["safe_fs.rs", 280],
   // 950 -> 960: the http.server dev-server exemption + its test.
   // 960 -> 800: the classification policy (known-executable list, piped code
   // execution, script-file and unrecognized-executable gates) moved to

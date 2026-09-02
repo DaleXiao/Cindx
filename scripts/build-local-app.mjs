@@ -250,6 +250,23 @@ try {
     outputArchive
   ]);
   run("shasum", ["-a", "256", outputArchive]);
+
+  // Bundle-size regression gate (audit P3-01): the published archive must stay
+  // within budget so a dependency or asset regression that bloats the bundle
+  // fails the build instead of shipping silently. The budget is the ~53 MiB
+  // current archive plus headroom; raise it deliberately, never to absorb an
+  // unexplained jump.
+  const archiveBytes = fs.statSync(outputArchive).size;
+  const archiveSizeBudgetBytes = 64 * 1024 * 1024;
+  if (archiveBytes > archiveSizeBudgetBytes) {
+    throw new Error(
+      `Bundle size regression: archive is ${archiveBytes} bytes, over the ${archiveSizeBudgetBytes}-byte budget`
+    );
+  }
+  process.stdout.write(
+    `Archive size ${archiveBytes} bytes (budget ${archiveSizeBudgetBytes})\n`
+  );
+
   buildCompleted = true;
   if (installApp) install(outputApp);
   process.stdout.write(`Local Cindx build ${version}\n${outputApp}\n${outputArchive}\n`);
