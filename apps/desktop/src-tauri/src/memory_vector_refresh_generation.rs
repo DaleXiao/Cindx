@@ -12,7 +12,7 @@ use crate::{
 use agent_memory::{MemoryLedger, MemoryRecord};
 use agent_rag::{
     apply_embeddings_to_index_cancellable, lancedb_index_exists, local_query_embedding,
-    replace_lancedb_index, RagChunk, RagIndex, RagIndexStats,
+    replace_lancedb_index, restore_local_embeddings, RagChunk, RagError, RagIndex, RagIndexStats,
 };
 use std::path::Path;
 
@@ -64,6 +64,26 @@ fn memory_rag_chunk(ledger: &MemoryLedger, record: &MemoryRecord, indexed_at_ms:
     }
 }
 
+/// Resolves one memory embedding pass into the backend label and disclosed
+/// error. Cloud embeddings stream in bounded batches and land in place (P1-08),
+/// so a mid-pass failure can leave the batches already streamed externally
+/// embedded; the fallback therefore restores the deterministic local profile
+/// across every chunk before the generation is published as `local-fallback`,
+/// keeping the published index homogeneous — the same invariant the workspace
+/// knowledge path holds.
+pub(crate) fn resolve_memory_embedding_outcome(
+    index: &mut RagIndex,
+    outcome: Result<(), RagError>,
+) -> (String, Option<String>) {
+    match outcome {
+        Ok(()) => ("cloud".to_string(), None),
+        Err(error) => {
+            restore_local_embeddings(index);
+            ("local-fallback".to_string(), Some(error.to_string()))
+        }
+    }
+}
+
 pub(crate) fn prepare_project_memory_vector_refresh(
     workspace_root: &Path,
     config: &ProviderConfig,
@@ -96,13 +116,8 @@ pub(crate) fn prepare_project_memory_vector_refresh(
             expected_steer_epoch: None,
             resource_checkpoint: None,
         };
-        match apply_embeddings_to_index_cancellable(&mut index, &mut embedder, || false) {
-            Ok(()) => embedding_backend = "cloud".to_string(),
-            Err(error) => {
-                embedding_backend = "local-fallback".to_string();
-                fallback_error = Some(error.to_string());
-            }
-        }
+        let outcome = apply_embeddings_to_index_cancellable(&mut index, &mut embedder, || false);
+        (embedding_backend, fallback_error) = resolve_memory_embedding_outcome(&mut index, outcome);
     }
     Ok(Some(PreparedMemoryVectorRefresh {
         embedding_backend,

@@ -40,6 +40,11 @@ const DEFAULT_MAX_FILES: usize = 10_000;
 const DEFAULT_CHUNK_LINES: usize = 80;
 const DEFAULT_CHUNK_OVERLAP: usize = 8;
 const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 20;
+/// Transient memory bound for one embedding batch (P1-08). Batches are cut on
+/// whichever binds first — this cumulative text budget or the provider-safe
+/// chunk count above — so a batch of unusually large chunks cannot inflate one
+/// request or one transient allocation.
+const EMBEDDING_BATCH_TEXT_BYTES: usize = 128 * 1024;
 const FILE_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const FILE_SEARCH_MAX_FILES: usize = 20_000;
 const FILE_SEARCH_CONTEXT_LINES: usize = 2;
@@ -149,6 +154,29 @@ pub struct RagIndexReuse {
     pub files_reindexed: usize,
     /// Chunks carried over from the previous index.
     pub chunks_reused: usize,
+}
+
+/// Peak-memory telemetry for one streaming embedding pass (P1-08). The maxima
+/// are the evidence that the pass held one bounded batch live at a time instead
+/// of the whole corpus plus every vector.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RagEmbeddingStreamStats {
+    /// Chunks whose embedding was assigned from a streamed batch.
+    pub chunks_embedded: usize,
+    /// Embedder requests made.
+    pub batches: usize,
+    /// Largest batch by chunk count (bounded by `DEFAULT_EMBEDDING_BATCH_SIZE`).
+    pub max_batch_chunks: usize,
+    /// Largest batch by cloned text bytes (bounded by
+    /// `EMBEDDING_BATCH_TEXT_BYTES`, except a single oversized chunk).
+    pub max_batch_text_bytes: usize,
+    /// Largest batch by returned vector bytes.
+    pub max_batch_vector_bytes: usize,
+    /// High-water mark of transient bytes held live by one batch: its cloned
+    /// texts plus its returned vectors.
+    pub peak_transient_bytes: usize,
+    /// The pass's only whole-pass allocation: the selected chunks' text lengths.
+    pub plan_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1125,61 +1153,130 @@ pub fn index_workspace_with_embedder_cancellable(
 pub fn apply_embeddings_to_index_cancellable(
     index: &mut RagIndex,
     embedder: &mut dyn RagEmbedder,
-    mut should_cancel: impl FnMut() -> bool,
+    should_cancel: impl FnMut() -> bool,
 ) -> Result<(), RagError> {
-    let texts = index
-        .chunks
-        .iter()
-        .map(|chunk| chunk.text.clone())
-        .collect::<Vec<_>>();
-    if texts.is_empty() {
-        return Ok(());
-    }
+    stream_index_embeddings_cancellable(index, embedder, should_cancel).map(|_| ())
+}
 
-    let mut provider = None;
-    let mut model = None;
-    let mut vectors = Vec::with_capacity(texts.len());
-    for texts_batch in texts.chunks(DEFAULT_EMBEDDING_BATCH_SIZE) {
+/// Embeds every chunk through the streaming batch path and reports its
+/// peak-memory telemetry (P1-08).
+pub fn stream_index_embeddings_cancellable(
+    index: &mut RagIndex,
+    embedder: &mut dyn RagEmbedder,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<RagEmbeddingStreamStats, RagError> {
+    stream_embeddings_for_selection(index, None, embedder, &mut should_cancel)
+}
+
+/// Returns the exclusive end of the embedding batch starting at `cursor`: at most
+/// [`DEFAULT_EMBEDDING_BATCH_SIZE`] chunks (the provider-safe request size) and
+/// at most [`EMBEDDING_BATCH_TEXT_BYTES`] of cumulative text (the transient
+/// memory bound). A batch always holds at least one chunk, so a single chunk
+/// larger than the byte budget still progresses as its own batch.
+fn embedding_batch_end(text_lengths: &[usize], cursor: usize) -> usize {
+    let mut end = cursor;
+    let mut bytes = 0usize;
+    while end < text_lengths.len() {
+        let next = text_lengths[end];
+        let count_saturated = end - cursor >= DEFAULT_EMBEDDING_BATCH_SIZE;
+        let bytes_saturated = bytes.saturating_add(next) > EMBEDDING_BATCH_TEXT_BYTES;
+        if end > cursor && (count_saturated || bytes_saturated) {
+            break;
+        }
+        bytes = bytes.saturating_add(next);
+        end += 1;
+    }
+    end
+}
+
+/// Streams embeddings for the selected chunks — every chunk when `selection` is
+/// `None`, otherwise exactly the listed chunk positions.
+///
+/// Only one batch of texts and one batch of vectors are live at a time: each
+/// batch is cloned from the chunks it covers, embedded, validated, and assigned
+/// back in place before the next request, so the transient allocation is bounded
+/// by the batch budgets instead of by the corpus. The single whole-pass
+/// allocation is the selected chunks' text lengths (8 bytes per chunk), reported
+/// as `plan_bytes`. Cancellation is still checked before and after every embedder
+/// request, so the cancellation cadence is unchanged.
+///
+/// Because each batch lands as it arrives, a mid-stream failure leaves the
+/// batches already streamed applied. Callers that fall back to the deterministic
+/// local profile must restore it across every chunk (`restore_local_embeddings`)
+/// so the published index stays homogeneous.
+fn stream_embeddings_for_selection(
+    index: &mut RagIndex,
+    selection: Option<&[usize]>,
+    embedder: &mut dyn RagEmbedder,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<RagEmbeddingStreamStats, RagError> {
+    let total = selection.map_or(index.chunks.len(), |positions| positions.len());
+    let selected = |offset: usize| selection.map_or(offset, |positions| positions[offset]);
+    let text_lengths = (0..total)
+        .map(|offset| index.chunks[selected(offset)].text.len())
+        .collect::<Vec<_>>();
+    let mut stats = RagEmbeddingStreamStats {
+        plan_bytes: text_lengths.len() * std::mem::size_of::<usize>(),
+        ..RagEmbeddingStreamStats::default()
+    };
+    let mut profile: Option<(String, String)> = None;
+    let mut cursor = 0usize;
+    while cursor < total {
         if should_cancel() {
             return Err(RagError::new(RAG_INDEX_CANCELLED));
         }
-        let batch = embedder.embed_texts(texts_batch)?;
+        let end = embedding_batch_end(&text_lengths, cursor);
+        let texts = (cursor..end)
+            .map(|offset| index.chunks[selected(offset)].text.clone())
+            .collect::<Vec<_>>();
+        let batch_text_bytes = texts.iter().map(String::len).sum::<usize>();
+        let batch = embedder.embed_texts(&texts)?;
         if should_cancel() {
             return Err(RagError::new(RAG_INDEX_CANCELLED));
         }
-        if batch.vectors.len() != texts_batch.len() {
+        if batch.vectors.len() != texts.len() {
             return Err(RagError::new(format!(
                 "embedding count mismatch: got {}, expected {}",
                 batch.vectors.len(),
-                texts_batch.len()
+                texts.len()
             )));
         }
-        if provider
-            .as_ref()
-            .is_some_and(|value| value != &batch.provider)
-            || model.as_ref().is_some_and(|value| value != &batch.model)
-        {
-            return Err(RagError::new(
-                "embedding provider or model changed between batches",
-            ));
+        if let Some((provider, model)) = profile.as_ref() {
+            if provider != &batch.provider || model != &batch.model {
+                return Err(RagError::new(
+                    "embedding provider or model changed between batches",
+                ));
+            }
         }
-        provider.get_or_insert(batch.provider);
-        model.get_or_insert(batch.model);
-        vectors.extend(batch.vectors);
-    }
-
-    let provider = provider.unwrap_or_default();
-    let model = model.unwrap_or_default();
-    for (chunk, vector) in index.chunks.iter_mut().zip(vectors) {
-        if vector.is_empty() {
-            return Err(RagError::new("embedding vector was empty"));
+        let batch_vector_bytes = batch
+            .vectors
+            .iter()
+            .map(|vector| vector.len() * std::mem::size_of::<f32>())
+            .sum::<usize>();
+        let provider = batch.provider;
+        let model = batch.model;
+        for (offset, vector) in batch.vectors.into_iter().enumerate() {
+            if vector.is_empty() {
+                return Err(RagError::new("embedding vector was empty"));
+            }
+            let chunk = &mut index.chunks[selected(cursor + offset)];
+            chunk.embedding_dimensions = vector.len();
+            chunk.embedding = vector;
+            chunk.embedding_provider = provider.clone();
+            chunk.embedding_model = model.clone();
         }
-        chunk.embedding_dimensions = vector.len();
-        chunk.embedding = vector;
-        chunk.embedding_provider = provider.clone();
-        chunk.embedding_model = model.clone();
+        profile.get_or_insert((provider, model));
+        stats.batches += 1;
+        stats.chunks_embedded = stats.chunks_embedded.saturating_add(end - cursor);
+        stats.max_batch_chunks = stats.max_batch_chunks.max(end - cursor);
+        stats.max_batch_text_bytes = stats.max_batch_text_bytes.max(batch_text_bytes);
+        stats.max_batch_vector_bytes = stats.max_batch_vector_bytes.max(batch_vector_bytes);
+        stats.peak_transient_bytes = stats
+            .peak_transient_bytes
+            .max(batch_text_bytes.saturating_add(batch_vector_bytes));
+        cursor = end;
     }
-    Ok(())
+    Ok(stats)
 }
 
 /// Re-embeds only the chunks that still carry the deterministic local
@@ -1192,8 +1289,19 @@ pub fn apply_embeddings_to_index_cancellable(
 pub fn apply_embeddings_to_placeholder_chunks_cancellable(
     index: &mut RagIndex,
     embedder: &mut dyn RagEmbedder,
-    mut should_cancel: impl FnMut() -> bool,
+    should_cancel: impl FnMut() -> bool,
 ) -> Result<usize, RagError> {
+    stream_placeholder_embeddings_cancellable(index, embedder, should_cancel)
+        .map(|stats| stats.chunks_embedded)
+}
+
+/// Re-embeds only the placeholder chunks through the streaming batch path
+/// (P1-08) and reports its peak-memory telemetry.
+pub fn stream_placeholder_embeddings_cancellable(
+    index: &mut RagIndex,
+    embedder: &mut dyn RagEmbedder,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<RagEmbeddingStreamStats, RagError> {
     let local_model = format!("local-hash-{EMBEDDING_DIMS}");
     let targets = index
         .chunks
@@ -1205,58 +1313,9 @@ pub fn apply_embeddings_to_placeholder_chunks_cancellable(
         .map(|(position, _)| position)
         .collect::<Vec<_>>();
     if targets.is_empty() {
-        return Ok(0);
+        return Ok(RagEmbeddingStreamStats::default());
     }
-
-    let mut provider = None;
-    let mut model = None;
-    let mut vectors = Vec::with_capacity(targets.len());
-    for batch_positions in targets.chunks(DEFAULT_EMBEDDING_BATCH_SIZE) {
-        if should_cancel() {
-            return Err(RagError::new(RAG_INDEX_CANCELLED));
-        }
-        let texts = batch_positions
-            .iter()
-            .map(|position| index.chunks[*position].text.clone())
-            .collect::<Vec<_>>();
-        let batch = embedder.embed_texts(&texts)?;
-        if should_cancel() {
-            return Err(RagError::new(RAG_INDEX_CANCELLED));
-        }
-        if batch.vectors.len() != texts.len() {
-            return Err(RagError::new(format!(
-                "embedding count mismatch: got {}, expected {}",
-                batch.vectors.len(),
-                texts.len()
-            )));
-        }
-        if provider
-            .as_ref()
-            .is_some_and(|value| value != &batch.provider)
-            || model.as_ref().is_some_and(|value| value != &batch.model)
-        {
-            return Err(RagError::new(
-                "embedding provider or model changed between batches",
-            ));
-        }
-        provider.get_or_insert(batch.provider);
-        model.get_or_insert(batch.model);
-        vectors.extend(batch.vectors);
-    }
-
-    let provider = provider.unwrap_or_default();
-    let model = model.unwrap_or_default();
-    for (position, vector) in targets.iter().zip(vectors) {
-        if vector.is_empty() {
-            return Err(RagError::new("embedding vector was empty"));
-        }
-        let chunk = &mut index.chunks[*position];
-        chunk.embedding_dimensions = vector.len();
-        chunk.embedding = vector;
-        chunk.embedding_provider = provider.clone();
-        chunk.embedding_model = model.clone();
-    }
-    Ok(targets.len())
+    stream_embeddings_for_selection(index, Some(&targets), embedder, &mut should_cancel)
 }
 
 /// Recomputes every chunk's embedding with the deterministic local hash
@@ -3443,6 +3502,321 @@ mod tests {
             .chunks
             .iter()
             .all(|chunk| chunk.embedding_model == "test-embedding"));
+    }
+
+    /// The batch planner honours both bounds and never stalls on a chunk larger
+    /// than the transient text budget (P1-08).
+    #[test]
+    fn embedding_batches_are_bounded_by_chunk_count_and_text_bytes() {
+        let batch_bounds = |lengths: &[usize]| -> Vec<(usize, usize)> {
+            let mut bounds = Vec::new();
+            let mut cursor = 0usize;
+            while cursor < lengths.len() {
+                let end = embedding_batch_end(lengths, cursor);
+                bounds.push((cursor, end));
+                cursor = end;
+            }
+            bounds
+        };
+
+        // Small chunks: the provider-safe count cap binds, exactly as before.
+        assert_eq!(
+            batch_bounds(&vec![16usize; 45]),
+            vec![(0, 20), (20, 40), (40, 45)]
+        );
+
+        // Large chunks: the text-byte budget binds before the count cap.
+        assert_eq!(
+            batch_bounds(&[EMBEDDING_BATCH_TEXT_BYTES / 4; 9]),
+            vec![(0, 4), (4, 8), (8, 9)]
+        );
+
+        // A single chunk larger than the budget is its own batch — never dropped,
+        // never split — and the pass still advances.
+        assert_eq!(
+            batch_bounds(&[EMBEDDING_BATCH_TEXT_BYTES * 2, 8, 8]),
+            vec![(0, 1), (1, 3)]
+        );
+    }
+
+    /// The streaming pass holds one bounded batch live at a time instead of
+    /// cloning every chunk text and accumulating every vector first (P1-08).
+    #[test]
+    fn streamed_embeddings_hold_only_one_batch_transiently() {
+        struct MeasuringEmbedder {
+            max_batch_chunks: usize,
+            max_batch_text_bytes: usize,
+        }
+
+        impl RagEmbedder for MeasuringEmbedder {
+            fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+                self.max_batch_chunks = self.max_batch_chunks.max(texts.len());
+                self.max_batch_text_bytes = self
+                    .max_batch_text_bytes
+                    .max(texts.iter().map(String::len).sum());
+                Ok(EmbeddingBatch {
+                    provider: "test-provider".to_string(),
+                    model: "test-embedding".to_string(),
+                    vectors: vec![vec![1.0, 0.0]; texts.len()],
+                })
+            }
+        }
+
+        let root = temp_workspace();
+        let content = (0..4_000)
+            .map(|line| format!("knowledge line {line} with some padding text"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("large-corpus.md"), content).expect("file should write");
+        let mut index = index_workspace_cancellable(
+            &root,
+            IndexOptions {
+                chunk_lines: 8,
+                chunk_overlap: 0,
+                ..IndexOptions::default()
+            },
+            || false,
+        )
+        .expect("index should build");
+        let corpus_text_bytes = index
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.len())
+            .sum::<usize>();
+        let chunk_count = index.chunks.len();
+        assert!(
+            chunk_count > 100,
+            "expected a multi-batch corpus, got {chunk_count} chunks"
+        );
+
+        let mut embedder = MeasuringEmbedder {
+            max_batch_chunks: 0,
+            max_batch_text_bytes: 0,
+        };
+        let stats = stream_index_embeddings_cancellable(&mut index, &mut embedder, || false)
+            .expect("streamed embeddings should build");
+
+        // Every chunk was embedded in provider-safe batches, and what the
+        // embedder actually received matches the reported telemetry.
+        assert_eq!(stats.chunks_embedded, chunk_count);
+        assert_eq!(
+            stats.batches,
+            chunk_count.div_ceil(DEFAULT_EMBEDDING_BATCH_SIZE)
+        );
+        assert_eq!(stats.max_batch_chunks, DEFAULT_EMBEDDING_BATCH_SIZE);
+        assert_eq!(embedder.max_batch_chunks, stats.max_batch_chunks);
+        assert!(stats.max_batch_text_bytes <= EMBEDDING_BATCH_TEXT_BYTES);
+        assert_eq!(embedder.max_batch_text_bytes, stats.max_batch_text_bytes);
+        assert!(index
+            .chunks
+            .iter()
+            .all(|chunk| chunk.embedding_model == "test-embedding"));
+
+        // The transient high-water mark stays a small fraction of the corpus:
+        // the pass no longer materialises the whole corpus or every vector.
+        assert!(
+            stats.peak_transient_bytes * 10 < corpus_text_bytes,
+            "peak transient {} should be far below corpus {corpus_text_bytes}",
+            stats.peak_transient_bytes
+        );
+        // The only whole-pass allocation is 8 bytes per selected chunk.
+        assert_eq!(stats.plan_bytes, chunk_count * std::mem::size_of::<usize>());
+    }
+
+    /// With large chunks the text-byte budget cuts batches before the count cap,
+    /// so neither one request nor one transient allocation grows with the corpus.
+    #[test]
+    fn streamed_embedding_batches_shrink_for_large_chunks() {
+        struct CountingEmbedder {
+            batches: usize,
+        }
+
+        impl RagEmbedder for CountingEmbedder {
+            fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+                self.batches += 1;
+                Ok(EmbeddingBatch {
+                    provider: "test-provider".to_string(),
+                    model: "test-embedding".to_string(),
+                    vectors: vec![vec![1.0, 0.0]; texts.len()],
+                })
+            }
+        }
+
+        let root = temp_workspace();
+        let line = "x".repeat(4 * 1024);
+        let content = (0..96).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+        fs::write(root.join("wide-lines.md"), content).expect("file should write");
+        let mut index = index_workspace_cancellable(
+            &root,
+            IndexOptions {
+                chunk_lines: 8,
+                chunk_overlap: 0,
+                max_file_bytes: 4 * 1024 * 1024,
+                ..IndexOptions::default()
+            },
+            || false,
+        )
+        .expect("index should build");
+        assert_eq!(index.chunks.len(), 12);
+
+        let mut embedder = CountingEmbedder { batches: 0 };
+        let stats = stream_index_embeddings_cancellable(&mut index, &mut embedder, || false)
+            .expect("streamed embeddings should build");
+
+        assert!(stats.max_batch_text_bytes <= EMBEDDING_BATCH_TEXT_BYTES);
+        assert!(
+            stats.max_batch_chunks < DEFAULT_EMBEDDING_BATCH_SIZE,
+            "the byte budget should bind before the count cap, got {} chunks per batch",
+            stats.max_batch_chunks
+        );
+        assert!(
+            stats.batches > 1,
+            "12 large chunks must span several bounded batches, got {}",
+            stats.batches
+        );
+        assert_eq!(embedder.batches, stats.batches);
+        assert_eq!(stats.chunks_embedded, 12);
+    }
+
+    /// Streaming assigns each batch as it lands, so a mid-stream failure stops
+    /// without further provider spend and leaves the earlier batches applied —
+    /// the contract a fallback publisher meets by restoring the local profile
+    /// across every chunk.
+    #[test]
+    fn streamed_embeddings_fail_fast_on_an_empty_vector_mid_stream() {
+        struct FailingEmbedder {
+            calls: usize,
+        }
+
+        impl RagEmbedder for FailingEmbedder {
+            fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+                self.calls += 1;
+                let mut vectors = vec![vec![1.0, 0.0]; texts.len()];
+                if self.calls == 2 {
+                    vectors[0] = Vec::new();
+                }
+                Ok(EmbeddingBatch {
+                    provider: "test-provider".to_string(),
+                    model: "test-embedding".to_string(),
+                    vectors,
+                })
+            }
+        }
+
+        let root = temp_workspace();
+        let content = (0..360)
+            .map(|line| format!("knowledge line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("many-chunks.md"), content).expect("file should write");
+        let mut index = index_workspace_cancellable(
+            &root,
+            IndexOptions {
+                chunk_lines: 8,
+                chunk_overlap: 0,
+                ..IndexOptions::default()
+            },
+            || false,
+        )
+        .expect("index should build");
+        assert_eq!(index.chunks.len(), 45);
+        let placeholder_model = format!("local-hash-{EMBEDDING_DIMS}");
+
+        let mut embedder = FailingEmbedder { calls: 0 };
+        let error = stream_index_embeddings_cancellable(&mut index, &mut embedder, || false)
+            .expect_err("an empty vector must fail the pass");
+
+        assert_eq!(error.message, "embedding vector was empty");
+        // Fail-fast: the remaining batch was never requested.
+        assert_eq!(embedder.calls, 2);
+        // The first batch already landed in place; the rest keep the placeholder.
+        assert!(index.chunks[..DEFAULT_EMBEDDING_BATCH_SIZE]
+            .iter()
+            .all(|chunk| chunk.embedding_model == "test-embedding"));
+        assert!(index.chunks[DEFAULT_EMBEDDING_BATCH_SIZE..]
+            .iter()
+            .all(|chunk| chunk.embedding_model == placeholder_model));
+        // Restoring the local profile over every chunk makes the index
+        // homogeneous again.
+        restore_local_embeddings(&mut index);
+        assert!(index
+            .chunks
+            .iter()
+            .all(|chunk| chunk.embedding_provider == "local"
+                && chunk.embedding_model == placeholder_model));
+    }
+
+    /// Only placeholder chunks pay the embedder; externally embedded chunks keep
+    /// their profile, and the telemetry reports exactly what was streamed.
+    #[test]
+    fn placeholder_streaming_embeds_only_placeholder_chunks() {
+        struct CountingEmbedder {
+            texts: usize,
+        }
+
+        impl RagEmbedder for CountingEmbedder {
+            fn embed_texts(&mut self, texts: &[String]) -> Result<EmbeddingBatch, RagError> {
+                self.texts += texts.len();
+                Ok(EmbeddingBatch {
+                    provider: "test-provider".to_string(),
+                    model: "test-embedding".to_string(),
+                    vectors: vec![vec![1.0, 0.0]; texts.len()],
+                })
+            }
+        }
+
+        let root = temp_workspace();
+        let content = (0..360)
+            .map(|line| format!("knowledge line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join("many-chunks.md"), content).expect("file should write");
+        let mut index = index_workspace_cancellable(
+            &root,
+            IndexOptions {
+                chunk_lines: 8,
+                chunk_overlap: 0,
+                ..IndexOptions::default()
+            },
+            || false,
+        )
+        .expect("index should build");
+        assert_eq!(index.chunks.len(), 45);
+        // Mark the first chunk as already externally embedded.
+        index.chunks[0].embedding_provider = "external".to_string();
+        index.chunks[0].embedding_model = "external-model".to_string();
+        let kept_embedding = index.chunks[0].embedding.clone();
+
+        let mut embedder = CountingEmbedder { texts: 0 };
+        let stats = stream_placeholder_embeddings_cancellable(&mut index, &mut embedder, || false)
+            .expect("placeholder streaming should succeed");
+
+        assert_eq!(stats.chunks_embedded, 44);
+        assert_eq!(embedder.texts, 44);
+        assert_eq!(index.chunks[0].embedding, kept_embedding);
+        assert_eq!(index.chunks[0].embedding_model, "external-model");
+        assert!(index.chunks[1..]
+            .iter()
+            .all(|chunk| chunk.embedding_model == "test-embedding"));
+        assert!(stats.max_batch_chunks <= DEFAULT_EMBEDDING_BATCH_SIZE);
+        assert!(stats.max_batch_text_bytes <= EMBEDDING_BATCH_TEXT_BYTES);
+        assert!(stats.peak_transient_bytes > 0);
+        // The compatibility wrapper still reports the embedded chunk count.
+        let mut index = index_workspace_cancellable(
+            &root,
+            IndexOptions {
+                chunk_lines: 8,
+                chunk_overlap: 0,
+                ..IndexOptions::default()
+            },
+            || false,
+        )
+        .expect("index should build");
+        let mut embedder = CountingEmbedder { texts: 0 };
+        let embedded =
+            apply_embeddings_to_placeholder_chunks_cancellable(&mut index, &mut embedder, || false)
+                .expect("placeholder embeddings should apply");
+        assert_eq!(embedded, 45);
     }
 
     #[test]

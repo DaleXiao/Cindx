@@ -4,6 +4,7 @@ use crate::{
     memory_vector_generation_runtime::PendingMemoryVectorGeneration,
     memory_vector_refresh_generation::{
         prepare_project_memory_vector_refresh, publish_prepared_memory_vector_refresh,
+        resolve_memory_embedding_outcome,
     },
     persistence_runtime::memory_lancedb_root_for,
     runtime_constants::{
@@ -1408,6 +1409,92 @@ fn session_retirement_removes_legacy_sensitive_vectors_before_safe_rebuild() {
         safe_generation
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// Cloud embeddings stream in bounded batches and land in place (P1-08), so a
+/// mid-pass failure leaves the batches already streamed externally embedded. The
+/// memory generation must then publish a homogeneous local fallback rather than a
+/// mixed index labelled `local-fallback`.
+#[test]
+fn a_failed_memory_embedding_pass_restores_a_homogeneous_local_fallback() {
+    fn fixture_chunk(id: &str, text: &str) -> agent_rag::RagChunk {
+        let embedding = agent_rag::local_query_embedding(text);
+        agent_rag::RagChunk {
+            id: id.to_string(),
+            path: format!("memory://project-embedding-fallback/{id}"),
+            file_hash: format!("fingerprint-{id}"),
+            modified_time_ms: 1,
+            start_line: 1,
+            end_line: 1,
+            indexed_at_ms: 1,
+            text: text.to_string(),
+            embedding_dimensions: embedding.len(),
+            embedding,
+            embedding_provider: "local".to_string(),
+            embedding_model: "local-hash".to_string(),
+        }
+    }
+
+    fn fixture_index() -> agent_rag::RagIndex {
+        let chunks = vec![
+            fixture_chunk("memory-a", "Always keep preparation persistence atomic"),
+            fixture_chunk("memory-b", "Never publish a mixed embedding profile"),
+        ];
+        agent_rag::RagIndex {
+            stats: agent_rag::RagIndexStats {
+                files_indexed: 2,
+                chunks_indexed: chunks.len(),
+                indexed_at_ms: 1,
+            },
+            chunks,
+        }
+    }
+
+    let mut index = fixture_index();
+    // The state a mid-pass streaming failure leaves behind: the first batch
+    // already carries the external profile, the rest are still placeholders.
+    index.chunks[0].embedding_provider = "cloud".to_string();
+    index.chunks[0].embedding_model = "cloud-embedding".to_string();
+
+    let (backend, error) = resolve_memory_embedding_outcome(
+        &mut index,
+        Err(agent_rag::RagError::new("embedding vector was empty")),
+    );
+
+    assert_eq!(backend, "local-fallback");
+    assert_eq!(error.as_deref(), Some("embedding vector was empty"));
+    assert!(index
+        .chunks
+        .iter()
+        .all(|chunk| chunk.embedding_provider == "local"));
+    let models = index
+        .chunks
+        .iter()
+        .map(|chunk| chunk.embedding_model.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(models.len(), 1, "fallback profile was {models:?}");
+    assert!(index
+        .chunks
+        .iter()
+        .all(|chunk| chunk.embedding_dimensions == chunk.embedding.len()
+            && !chunk.embedding.is_empty()));
+    // The restored vectors are the deterministic local profile, not the partial
+    // external ones.
+    assert_eq!(
+        index.chunks[0].embedding,
+        agent_rag::local_query_embedding(&index.chunks[0].text)
+    );
+
+    // A successful pass leaves the streamed external profile untouched.
+    let mut index = fixture_index();
+    index.chunks[0].embedding_provider = "cloud".to_string();
+    index.chunks[0].embedding_model = "cloud-embedding".to_string();
+    let (backend, error) = resolve_memory_embedding_outcome(&mut index, Ok(()));
+    assert_eq!(backend, "cloud");
+    assert_eq!(error, None);
+    assert_eq!(index.chunks[0].embedding_provider, "cloud");
+    assert_eq!(index.chunks[0].embedding_model, "cloud-embedding");
+    assert_eq!(index.chunks[1].embedding_provider, "local");
 }
 
 #[test]

@@ -198,7 +198,16 @@ Workspace retrieval and durable memory are independent inputs:
   supersession, conflict, retention, and diversity constraints.
 
 The desktop adapter coordinates provider embeddings, background queues, and
-state persistence. Retrieved data retains source provenance and does not mutate
+state persistence. `agent-rag` owns the embedding batch planner and the streaming
+pass: a batch is cut on whichever binds first — the provider-safe chunk count or a
+cumulative chunk-text byte budget — and each batch's vectors are assigned in place
+before the next request, so the transient allocation is one batch rather than the
+corpus (P1-08). The pass reports its own peak-memory telemetry
+(`RagEmbeddingStreamStats`). Because batches land as they arrive, the two fallback
+publishers — workspace knowledge and project memory vectors — own restoring the
+deterministic local profile across every chunk before publishing a
+`local-fallback` generation, so a mid-pass failure can never publish a mixed
+index. Retrieved data retains source provenance and does not mutate
 canonical chat history.
 
 ### 4. No workflow lane

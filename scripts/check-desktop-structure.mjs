@@ -529,6 +529,12 @@ const dashScopeAsrTaskProviderSource = read(
 );
 const modelProviderCargo = read("crates/model-provider/Cargo.toml");
 const ragSource = read("crates/agent-rag/src/lib.rs");
+const memoryVectorRefreshSource = read(
+  "apps/desktop/src-tauri/src/memory_vector_refresh_generation.rs"
+);
+const memoryRuntimeTestsSource = read(
+  "apps/desktop/src-tauri/src/memory_runtime_tests.rs"
+);
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = readRustCrateSource("agent-memory");
 const agentRuntimeSource = readRustCrateSource("agent-runtime");
@@ -4024,9 +4030,22 @@ assert(
 );
 assert(
   ragSource.includes("DEFAULT_EMBEDDING_BATCH_SIZE: usize = 20") &&
-    ragSource.includes("texts.chunks(DEFAULT_EMBEDDING_BATCH_SIZE)") &&
-    ragSource.includes("external_embeddings_are_requested_in_provider_safe_batches"),
-  "RAG cloud embeddings must stay within the provider-safe batch limit"
+    ragSource.includes("EMBEDDING_BATCH_TEXT_BYTES: usize = 128 * 1024") &&
+    ragSource.includes("fn embedding_batch_end(") &&
+    ragSource.includes("fn stream_embeddings_for_selection(") &&
+    !ragSource.includes("texts.chunks(DEFAULT_EMBEDDING_BATCH_SIZE)") &&
+    ragSource.includes("external_embeddings_are_requested_in_provider_safe_batches") &&
+    ragSource.includes("streamed_embeddings_hold_only_one_batch_transiently") &&
+    ragSource.includes("streamed_embedding_batches_shrink_for_large_chunks"),
+  "RAG cloud embeddings must stream in provider-safe, byte-bounded batches"
+);
+assert(
+  memoryVectorRefreshSource.includes("fn resolve_memory_embedding_outcome(") &&
+    memoryVectorRefreshSource.includes("restore_local_embeddings(index)") &&
+    memoryRuntimeTestsSource.includes(
+      "a_failed_memory_embedding_pass_restores_a_homogeneous_local_fallback"
+    ),
+  "A failed memory embedding pass must restore a homogeneous local fallback"
 );
 assert(
   rustLib.includes("run_planned_retrieval(") &&

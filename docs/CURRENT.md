@@ -490,6 +490,18 @@ Tool visibility does not grant authority.
   same workspace, and the atomic generation publish (file snapshot, LanceDB
   export and database, graph store) is unchanged; a changed embedding profile
   discards the reuse base so the whole workspace is re-embedded.
+- Cloud embeddings stream in bounded batches: each batch is cut on whichever binds
+  first — 20 chunks (the provider-safe request size) or 128 KiB of cumulative
+  chunk text — and its vectors are assigned in place before the next request, so
+  the transient allocation is one batch instead of a clone of the whole corpus
+  plus every vector. A single chunk larger than the byte budget is its own batch,
+  never dropped or split, and cancellation is still checked before and after every
+  embedder request. The pass reports its own peak-memory telemetry: batch count,
+  per-batch chunk/text/vector maxima, the transient high-water mark, and its
+  8-bytes-per-chunk plan. Because batches land as they arrive, a mid-pass failure
+  leaves the batches already streamed applied, so both fallback publishers —
+  workspace knowledge and project memory vectors — restore the deterministic local
+  profile across every chunk before publishing a `local-fallback` index.
 - Manual knowledge indexing runs under explicit finite hard budgets — a 6-hour
   wall-clock cap, a 30-minute no-progress timeout, and bounded embedding/model/
   tool/turn attempt and token ceilings — so a runaway or corrupt operation cannot
