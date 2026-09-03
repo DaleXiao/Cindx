@@ -1,7 +1,7 @@
 {
   "name": "cindx-desktop",
   "private": true,
-  "version": "0.3.34",
+  "version": "0.3.35",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
