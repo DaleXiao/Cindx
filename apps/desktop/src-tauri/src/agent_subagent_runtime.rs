@@ -827,9 +827,47 @@ pub(crate) fn execute_subagent_tool_call(
     // the parent-run permission path, so a denial from the pure-read gate is
     // not a denial of the network reads the subagent surface promises.
     let result = match registry.permissionless_read_tool(&invocation) {
-        Ok(tool) => tool.execute(invocation).unwrap_or_else(|error| {
-            agent_core::ToolResult::failed(agent_core::ToolCallId(call.id.clone()), error.message)
-        }),
+        Ok(tool) => {
+            // Durable started event for the subagent read (P1-01): the read path
+            // previously executed without durable started/finished events, so
+            // child discovery was invisible to the run's durable tool lineage.
+            if let Some(context) = network {
+                if let Ok(mut store) = context.state.store.lock() {
+                    let _ = crate::tool_execution::append_tool_proposed_event(
+                        &mut store,
+                        &invocation,
+                        Some(context.run_context),
+                    );
+                }
+            }
+            let result = tool.execute(invocation).unwrap_or_else(|error| {
+                agent_core::ToolResult::failed(
+                    agent_core::ToolCallId(call.id.clone()),
+                    error.message,
+                )
+            });
+            if let Some(context) = network {
+                if let Ok(mut store) = context.state.store.lock() {
+                    let status = match result.status {
+                        ToolOutcomeStatus::Succeeded => "succeeded",
+                        ToolOutcomeStatus::Failed => "failed",
+                        ToolOutcomeStatus::Cancelled => "cancelled",
+                        ToolOutcomeStatus::Denied => "denied",
+                    };
+                    let _ = crate::tool_execution::append_tool_finished_event(
+                        &mut store,
+                        task_id,
+                        &call.id,
+                        &call.name,
+                        status,
+                        &result.output,
+                        Metadata::new(),
+                        Some(context.run_context),
+                    );
+                }
+            }
+            result
+        }
         Err(_) => match registry.worker_network_read_tool(&invocation) {
             Ok(tool) => execute_worker_network_tool(
                 tool,

@@ -252,7 +252,10 @@ amplify tool calls unbounded; exhaustion stops the child, not the parent run
 (P1-01 resource governance). Child tool calls additionally aggregate into the
 parent run's tool-call accounting (`record_external_tool_call`), so the parent
 budget and resource snapshot reflect real child usage while the parent enforces
-its own limit on its own tool calls.
+its own limit on its own tool calls. Subagent read tools now also emit durable
+started/finished events (`append_tool_proposed_event` /
+`append_tool_finished_event`) so child discovery is visible in the run's durable
+tool lineage, completing P1-01's tool-accounting unification.
 
 The approval handshake also differs deliberately from the run-level
 suspend/resume mechanism. A subagent loop runs on a scoped thread inside the
