@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_eval::{
-    check_postconditions, parse_suite, run_case, CaseBudget, CaseCategory, CaseReceipts,
-    CaseReport, EvalCase, FixtureFile, Postcondition, ScriptedProvider, ScriptedStep,
-    ScriptedToolCall, SuiteReport,
+    check_postconditions, knowledge_decision_for_effort, parse_suite, plan_effort_run, run_case,
+    CaseBudget, CaseCategory, CaseReceipts, CaseReport, EvalCase, FixtureFile, Postcondition,
+    ScriptedProvider, ScriptedStep, ScriptedToolCall, SuiteReport,
 };
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -661,4 +661,27 @@ fn run_case_captures_resource_receipts_provider_free() {
     assert_eq!(report.receipts.network_tool_calls, 0);
     assert_eq!(report.receipts.usage_reported, 0);
     assert!(!report.receipts.usage_complete());
+}
+
+#[test]
+fn eval_harness_shares_the_product_effort_scheduling_authority() {
+    // Phase 4 product-path fidelity: the harness drives the SAME deterministic
+    // effort-tier scheduling authority the shipping product uses (extracted to
+    // agent-application), so an effort-tier arm plans identically to production
+    // instead of reinventing budget/knowledge defaults.
+    let fast = plan_effort_run("fast", "model-fast".to_string(), "quick question");
+    assert_eq!(fast.effort_label, "fast");
+    assert!(!fast.knowledge.retrieve_workspace);
+
+    let high = plan_effort_run("high", "model-high".to_string(), "deep mission");
+    assert_eq!(high.effort_label, "high");
+    assert!(high.knowledge.retrieve_workspace);
+    assert_eq!(high.knowledge.workspace_max_results, 12);
+
+    // Legacy auto/pro labels normalize to the canonical tiers exactly as the
+    // product does, so an arm labeled with a legacy name plans identically.
+    assert_eq!(
+        knowledge_decision_for_effort("pro", "x").memory_policy,
+        knowledge_decision_for_effort("high", "x").memory_policy
+    );
 }

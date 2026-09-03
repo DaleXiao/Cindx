@@ -21,3 +21,11 @@ pub use runner::{
     run_case, CaseReceipts, CaseReport, EvalError, EvalModelProvider, ScriptedProvider,
     ScriptedStep, ScriptedToolCall,
 };
+
+// Phase 4 product-path fidelity: the harness shares the product's deterministic
+// effort-tier scheduling authority (extracted from the desktop crate into
+// agent-application) so an effort-tier arm plans identically to the shipping
+// product instead of reinventing budget/knowledge defaults.
+pub use agent_application::{
+    knowledge_decision_for_effort, plan_effort_run, EffortRunPlan, KnowledgeDecision,
+};

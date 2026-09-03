@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+agent-application = { path = "../agent-application" }
 agent-core = { path = "../agent-core" }
 agent-runtime = { path = "../agent-runtime" }
 serde = { version = "1", features = ["derive"] }

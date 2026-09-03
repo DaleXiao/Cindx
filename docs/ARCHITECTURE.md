@@ -73,9 +73,9 @@ legacy and are not reclassified from display strings.
 | Crate | Current owner responsibility |
 | --- | --- |
 | `agent-core` | Transport-free IDs, messages, events, permissions, tool/model contracts, and shared schemas |
-| `agent-eval` | Deterministic portable evaluation skeleton: case schema, postcondition checks, scripted-provider runner, and suite reports; no production consumer and no provider network calls |
+| `agent-eval` | Deterministic portable evaluation skeleton: case schema, postcondition checks, scripted-provider runner, per-run resource receipts, matched position-balanced arms, and suite reports; shares the product effort-tier scheduling authority; no production consumer, and the deterministic harness makes no provider network calls |
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, system-prompt composition, model-turn and tool-runtime semantics |
-| `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, and portable externally verified outcome contract |
+| `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, the portable effort-tier scheduling authority (`EffortRunPlan`/planner, extracted from the desktop crate so the eval harness shares it), and the portable externally verified outcome contract |
 | `agent-harness` | Active-run and exclusive-work registries; no model policy |
 | `agent-memory` | Memory records, retention, recall, utility attribution, and deterministic curation contracts |
 | `agent-rag` | Workspace indexing, file adapter, semantic retrieval, and vector-store integration |

@@ -34,7 +34,7 @@ use tools::ToolRegistry;
 #[test]
 fn permission_cold_recovery_preserves_verification_contract() {
     let mut run_context = Metadata::new();
-    let conductor_contract = crate::agent_effort_planner::effort_execution_contract("auto")
+    let conductor_contract = agent_application::effort_execution_contract("auto")
         .to_json()
         .expect("contract serializes");
     let request_metadata = [
@@ -902,7 +902,7 @@ fn later_permission_pause_restores_after_prior_permission_evidence() {
 #[test]
 fn cold_permission_recovery_reconstructs_verified_workspace_postcondition() {
     let mut run_context = permission_run_context(0, 0);
-    let conductor_contract = crate::agent_effort_planner::effort_execution_contract("auto")
+    let conductor_contract = agent_application::effort_execution_contract("auto")
         .to_json()
         .expect("contract serializes");
     run_context.insert("conductor_contract".to_string(), conductor_contract);

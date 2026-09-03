@@ -2,6 +2,7 @@ mod artifacts;
 mod direct_judge_admission;
 mod direct_judge_fitness;
 mod direct_judge_outcome;
+mod effort_planner;
 mod loss_aware_work_queue;
 mod outcome_evidence;
 mod outcome_projection;
@@ -38,6 +39,10 @@ pub use direct_judge_outcome::{
     DIRECT_JUDGE_DISPOSITION_RECHECK_PASSED, DIRECT_JUDGE_DISPOSITION_REPAIR_EMPTY,
     DIRECT_JUDGE_DISPOSITION_REPAIR_UNAVAILABLE, DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED,
     DIRECT_JUDGE_DISPOSITION_UNAVAILABLE, DIRECT_JUDGE_OUTCOME_SCHEMA,
+};
+pub use effort_planner::{
+    apply_effort_plan_keys, effort_execution_contract, knowledge_decision_for_effort,
+    plan_effort_run, EffortRunPlan, KnowledgeDecision,
 };
 pub use loss_aware_work_queue::{
     ClaimedWork, LossAwareWorkQueue, WorkEnqueueOutcome, WorkEnqueueResult, WorkQueueMetrics,
