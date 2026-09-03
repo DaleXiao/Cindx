@@ -344,6 +344,23 @@ pub(crate) fn install_skill_package(
     Ok(view)
 }
 
+/// The complete `curl` argv for one skill-package download. The shared HTTP
+/// policy owner supplies the bounded redirect count (previously curl's unlimited
+/// default), the HTTPS-only scheme allowlist for the request and any redirect,
+/// the bounded timeout, and the product user agent; this adds the failure and
+/// package-size limits and the URL last.
+pub(crate) fn skill_download_curl_args(url: &str) -> Vec<String> {
+    let policy = agent_core::http_policy(agent_core::HttpEgressProfile::SkillInstall);
+    let mut argv = agent_core::curl_policy_args(&policy);
+    argv.extend([
+        "--fail".to_string(),
+        "--max-filesize".to_string(),
+        policy.response_max_bytes.to_string(),
+        url.to_string(),
+    ]);
+    argv
+}
+
 #[tauri::command]
 pub(crate) fn install_skill_url(
     state: tauri::State<'_, AppState>,
@@ -354,21 +371,7 @@ pub(crate) fn install_skill_url(
         return Err("skill URL must use HTTPS".to_string());
     }
     let output = std::process::Command::new("/usr/bin/curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--max-time",
-            "30",
-            "--max-filesize",
-            "52428800",
-            url,
-        ])
+        .args(skill_download_curl_args(url))
         .output()
         .map_err(|error| format!("failed to download skill: {error}"))?;
     if !output.status.success() {
@@ -417,7 +420,7 @@ pub(crate) fn skill_state_after_install(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_web_search_transport;
+    use super::{skill_download_curl_args, validate_web_search_transport};
 
     #[test]
     fn web_search_transport_requires_https_only_when_an_api_key_is_present() {
@@ -427,6 +430,47 @@ mod tests {
             validate_web_search_transport("http://127.0.0.1:8080", "secret")
                 .unwrap_err()
                 .contains("must use HTTPS")
+        );
+    }
+
+    /// The skill download takes its posture from the shared HTTP policy owner:
+    /// bounded redirects instead of curl's unlimited default, HTTPS for the
+    /// request and every redirect, the product user agent, and a stated size cap.
+    #[test]
+    fn skill_download_argv_is_bounded_by_the_shared_http_policy() {
+        let argv = skill_download_curl_args("https://skills.example/package.zip");
+
+        assert_eq!(argv[0], "-q");
+        assert!(argv.contains(&"--silent".to_string()));
+        assert!(argv.contains(&"--show-error".to_string()));
+        assert!(argv.contains(&agent_core::HTTP_USER_AGENT.to_string()));
+        assert!(argv.contains(&"--fail".to_string()));
+        assert!(argv.contains(&"-L".to_string()));
+        let bound = argv
+            .iter()
+            .position(|arg| arg == "--max-redirs")
+            .expect("redirects are bounded");
+        assert_eq!(
+            argv[bound + 1],
+            agent_core::HTTP_PUBLIC_FETCH_MAX_REDIRECTS.to_string()
+        );
+        assert_eq!(
+            argv.iter().filter(|arg| arg.as_str() == "=https").count(),
+            2,
+            "the request and any redirect stay on HTTPS"
+        );
+        let size = argv
+            .iter()
+            .position(|arg| arg == "--max-filesize")
+            .expect("size cap present");
+        assert_eq!(
+            argv[size + 1],
+            agent_core::HTTP_SKILL_PACKAGE_MAX_BYTES.to_string()
+        );
+        assert!(argv.contains(&"30".to_string()), "argv was {argv:?}");
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("https://skills.example/package.zip")
         );
     }
 }

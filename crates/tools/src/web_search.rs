@@ -3,8 +3,9 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRisk, ToolEffectSemantics, ToolInvocation,
-    ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    curl_policy_args, http_policy, HttpEgressProfile, Metadata, PermissionRequest, PermissionRisk,
+    ToolEffectSemantics, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    HTTP_STDERR_MAX_BYTES, HTTP_WEB_RESPONSE_MAX_BYTES,
 };
 
 use super::{
@@ -13,8 +14,8 @@ use super::{
 };
 use crate::stream_capture::capture_stream_limited;
 
-pub(crate) const WEB_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const WEB_STDERR_MAX_BYTES: usize = 256 * 1024;
+pub(crate) const WEB_RESPONSE_MAX_BYTES: usize = HTTP_WEB_RESPONSE_MAX_BYTES;
+pub(crate) const WEB_STDERR_MAX_BYTES: usize = HTTP_STDERR_MAX_BYTES;
 
 #[derive(Debug, Clone, Default)]
 pub struct WebSearchTool {
@@ -102,20 +103,16 @@ impl Tool for WebSearchTool {
 
 fn fetch_url(url: &str) -> Result<String, ToolError> {
     let mut command = Command::new("/usr/bin/curl");
-    command
-        .arg("-q")
-        .arg("-L")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--max-time")
-        .arg("25")
-        .arg("--user-agent")
-        .arg("LocalAgent/0.1")
-        .arg(url);
+    // The fallback endpoint is a compile-time constant, so no address audit
+    // applies, but its redirects are bounded and HTTPS-only through the shared
+    // policy owner instead of curl's unlimited default.
+    let policy = http_policy(HttpEgressProfile::PublicSearchFallback);
+    command.args(curl_policy_args(&policy));
+    command.arg(url);
     let output = run_command_with_limited_output(
         &mut command,
-        WEB_RESPONSE_MAX_BYTES,
-        WEB_STDERR_MAX_BYTES,
+        policy.response_max_bytes,
+        policy.stderr_max_bytes,
         "curl",
         None,
     )?;
@@ -186,21 +183,21 @@ fn search_api_request(
     let url = endpoint
         .replace("{query}", &url_encode(query))
         .replace("{limit}", &max_results.to_string());
+    // One owner decides the posture: a credentialed endpoint is HTTPS-only and
+    // follows no redirect at all, so the bearer header can never be replayed to
+    // another origin; an uncredentialed endpoint keeps plain-HTTP loopback
+    // compatibility with a bounded redirect count.
+    let policy = http_policy(if api_key.is_empty() {
+        HttpEgressProfile::ConfiguredSearchApi
+    } else {
+        HttpEgressProfile::CredentialedSearchApi
+    });
     let mut command = Command::new("/usr/bin/curl");
-    command.args(["-q", "-L"]);
-    command
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--fail")
-        .arg("--max-time")
-        .arg("25")
-        .arg("--user-agent")
-        .arg("Cindx/1");
+    command.args(curl_policy_args(&policy));
+    command.arg("--fail");
     let secret_stdin = if api_key.is_empty() {
         None
     } else {
-        command.args(["--max-redirs", "0"]);
-        command.args(["--proto", "=https", "--proto-redir", "=https"]);
         command.args(["--header", "@-"]);
         Some(format!("Authorization: Bearer {api_key}\n").into_bytes())
     };

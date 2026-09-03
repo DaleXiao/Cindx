@@ -1,6 +1,14 @@
 use reqwest::{redirect, Url};
 
-const MAX_HTTP_REDIRECTS: usize = 10;
+/// The provider redirect bound, owned by the single HTTP policy module so every
+/// egress path states its bound in one place.
+const MAX_HTTP_REDIRECTS: usize = agent_core::HTTP_PROVIDER_MAX_REDIRECTS;
+
+/// The redirect policy for a provider client that carries no per-request
+/// credential header: the same bound, without the Azure cross-origin stop.
+pub(crate) fn provider_redirect_policy() -> redirect::Policy {
+    redirect::Policy::limited(MAX_HTTP_REDIRECTS)
+}
 
 fn same_origin(left: &Url, right: &Url) -> bool {
     left.scheme() == right.scheme()

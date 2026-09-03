@@ -18,8 +18,8 @@ use tools::{write_private_file_atomically, Tool, ToolError, ToolExecutionControl
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MCP_HTTP_STDOUT_MAX_BYTES: usize = 16 * 1024 * 1024;
-const MCP_HTTP_STDERR_MAX_BYTES: usize = 256 * 1024;
+const MCP_HTTP_STDOUT_MAX_BYTES: usize = agent_core::HTTP_MCP_RESPONSE_MAX_BYTES;
+const MCP_HTTP_STDERR_MAX_BYTES: usize = agent_core::HTTP_STDERR_MAX_BYTES;
 const MCP_STDIO_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const MCP_TOOL_PREVIEW_MAX_BYTES: usize = 256 * 1024;
 
@@ -685,6 +685,33 @@ impl Drop for McpStdioClient {
 }
 
 impl McpHttpClient {
+    /// The complete `curl` argv for one MCP HTTP/SSE request.
+    ///
+    /// The shared knobs — quiet mode so a user's `.curlrc` cannot inject options,
+    /// the bounded timeout, the product user agent, the scheme allowlist, and an
+    /// explicit no-redirect posture — come from the single HTTP policy owner
+    /// (`agent_core::http_policy`), so a 3xx stays an error this client reports
+    /// instead of a silent re-dial to another origin. Extracted from the request
+    /// path so that posture is asserted by a test rather than living inline.
+    fn http_curl_argv(&self, header_path: &std::path::Path) -> Vec<String> {
+        let policy = agent_core::HttpPolicy {
+            timeout_ms: self.timeout.as_millis() as u64,
+            ..agent_core::http_policy(agent_core::HttpEgressProfile::McpHttp)
+        };
+        let mut argv = agent_core::curl_policy_args(&policy);
+        argv.extend([
+            "--include".to_string(),
+            "--request".to_string(),
+            "POST".to_string(),
+            "--header".to_string(),
+            format!("@{}", header_path.display()),
+            "--data-binary".to_string(),
+            "@-".to_string(),
+            self.url.clone(),
+        ]);
+        argv
+    }
+
     fn connect(config: &McpServerConfig) -> Result<Self, McpError> {
         let McpTransportConfig::StreamableHttp { url, headers } = &config.transport else {
             return Err(McpError::new("MCP server is not configured for HTTP"));
@@ -807,18 +834,7 @@ impl McpHttpClient {
         write_private_text(&header_path, &header_lines.join("\n"))?;
         let mut command = Command::new("/usr/bin/curl");
         command
-            .arg("--silent")
-            .arg("--show-error")
-            .arg("--include")
-            .arg("--request")
-            .arg("POST")
-            .arg("--max-time")
-            .arg(format!("{:.3}", self.timeout.as_secs_f64()))
-            .arg("--header")
-            .arg(format!("@{}", header_path.display()))
-            .arg("--data-binary")
-            .arg("@-")
-            .arg(&self.url)
+            .args(self.http_curl_argv(&header_path))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1952,6 +1968,52 @@ mod tests {
             distinct.len(),
             all.len(),
             "same-millisecond concurrent requests must not share a header file"
+        );
+    }
+}
+
+#[cfg(test)]
+mod http_transport_policy_tests {
+    use super::*;
+
+    /// The MCP HTTP/SSE transport takes its posture from the shared HTTP policy
+    /// owner: quiet mode so a user's `.curlrc` cannot inject options, the product
+    /// user agent and scheme allowlist it previously lacked, millisecond timeout
+    /// precision, and an explicit no-redirect posture so a 3xx is reported to the
+    /// caller instead of silently re-dialing another origin.
+    #[test]
+    fn mcp_http_argv_takes_its_posture_from_the_shared_policy_owner() {
+        let client = McpHttpClient {
+            url: "https://mcp.example.test/api".to_string(),
+            headers: BTreeMap::new(),
+            session_id: Mutex::new(None),
+            next_id: AtomicU64::new(1),
+            timeout: Duration::from_millis(1_500),
+        };
+
+        let argv = client.http_curl_argv(std::path::Path::new("/tmp/cindx-mcp-headers-test"));
+
+        assert_eq!(argv[0], "-q", "a user's .curlrc must not inject options");
+        assert!(argv.contains(&"--silent".to_string()));
+        assert!(argv.contains(&"--show-error".to_string()));
+        assert!(argv.contains(&agent_core::HTTP_USER_AGENT.to_string()));
+        assert!(argv.contains(&"=http,https".to_string()));
+        assert!(argv.contains(&"1.500".to_string()), "argv was {argv:?}");
+        assert!(
+            !argv.contains(&"-L".to_string()),
+            "a redirect is reported, never followed"
+        );
+        assert!(!argv.contains(&"--max-redirs".to_string()));
+        assert!(
+            !argv.contains(&"--noproxy".to_string()),
+            "a user-configured endpoint honors the user's proxy"
+        );
+        assert!(argv.contains(&"POST".to_string()));
+        assert!(argv.contains(&"--data-binary".to_string()));
+        assert!(argv.contains(&"--include".to_string()));
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("https://mcp.example.test/api")
         );
     }
 }

@@ -5,6 +5,7 @@ mod direct_judge;
 mod event_contract;
 mod exec_policy;
 pub mod execution_contract;
+mod http_policy;
 mod knowledge_plan;
 mod learning_evidence;
 mod model_attribution;
@@ -34,6 +35,15 @@ pub use exec_policy::{
 };
 pub use execution_contract::{
     ConductorExecutionContract, ConductorFallbackPolicy, ConductorStopPolicy, MAX_PLANNING_STEPS,
+};
+pub use http_policy::{
+    curl_policy_args, http_policy, ip_is_public, resolve_redirect_location,
+    validate_public_http_url, HttpEgressProfile, HttpPolicy, HttpPolicyError, ProxyMode,
+    PublicHttpTarget, HTTP_MCP_DEFAULT_TIMEOUT_MS, HTTP_MCP_RESPONSE_MAX_BYTES,
+    HTTP_MODEL_RESPONSE_MAX_BYTES, HTTP_PROVIDER_MAX_REDIRECTS, HTTP_PUBLIC_FETCH_MAX_REDIRECTS,
+    HTTP_SKILL_PACKAGE_MAX_BYTES, HTTP_SKILL_TIMEOUT_SECONDS, HTTP_STDERR_MAX_BYTES,
+    HTTP_USER_AGENT, HTTP_WEB_MAX_TIMEOUT_SECONDS, HTTP_WEB_RESPONSE_MAX_BYTES,
+    HTTP_WEB_TIMEOUT_SECONDS,
 };
 pub use knowledge_plan::{
     MemoryRecallPlan, MemoryRecallPolicy, WorkspaceRetrievalChannel, WorkspaceRetrievalPlan,

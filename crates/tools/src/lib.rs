@@ -47,7 +47,6 @@ mod tool_contract_v2;
 mod tool_support;
 mod web_fetch;
 mod web_search;
-mod web_url_policy;
 mod workspace_file;
 
 pub use browser_session_retirement::retire_browser_session;
@@ -106,6 +105,14 @@ pub struct ToolError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+}
+
+/// The HTTP policy owner lives in `agent-core` so every egress crate can reach
+/// it; a refusal surfaces to a tool caller as an ordinary tool error.
+impl From<agent_core::HttpPolicyError> for ToolError {
+    fn from(error: agent_core::HttpPolicyError) -> Self {
+        ToolError::new(error.message)
+    }
 }
 
 impl ToolError {

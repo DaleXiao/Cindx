@@ -466,6 +466,24 @@ Tool visibility does not grant authority.
   a clamped timeout) and wraps the body in an explicit untrusted-provenance
   boundary; it shares the `web.search` Network permission and risk level. Both
   tools are on the subagent and plan-mode read-only whitelist.
+- Outbound HTTP has one policy owner (`agent_core::http_policy`), so every egress
+  path — `web.fetch`, the `web.search` public fallback and configured API, the MCP
+  streamable-HTTP/SSE transport, model-provider API calls, and skill-package
+  downloads — takes its proxy posture, redirect bound, timeout, response byte
+  caps, User-Agent, and scheme allowlist from one reviewed table instead of
+  hardcoding them per call site. Concretely: the public search fallback and an
+  uncredentialed search endpoint now bound redirects at five instead of following
+  them without limit, and present the product User-Agent instead of a legacy one;
+  the MCP transport runs curl in quiet mode (so a user's `.curlrc` cannot inject
+  options), sends the product User-Agent, and enforces an HTTP/HTTPS scheme
+  allowlist it previously lacked; skill-package downloads bound redirects at five
+  instead of curl's unlimited default. Unchanged by design: only `web.fetch`
+  refuses ambient proxies, because a proxy would bypass its audited IP pin, and
+  only `web.fetch` audits resolved addresses, because every other endpoint comes
+  from the user's own configuration, which explicitly supports loopback providers
+  and local search endpoints; a credentialed search endpoint still follows no
+  redirect at all and stays HTTPS-only, so its bearer header can never be replayed
+  to another origin.
 - MCP servers already configured for other tools can be imported via
   "Import installed" in Settings → MCP. Cindx reads the standard config
   locations (Claude Desktop, Claude Code, Cursor, opencode `.jsonc`/`.json`,

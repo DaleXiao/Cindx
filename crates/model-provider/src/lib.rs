@@ -32,7 +32,7 @@ mod streaming_response;
 mod streaming_wire;
 mod usage;
 
-use redirect_policy::api_key_safe_redirect_policy;
+use redirect_policy::{api_key_safe_redirect_policy, provider_redirect_policy};
 #[cfg(test)]
 use request_builder::{
     build_chat_request_json_with_tools_and_output_limit,
@@ -82,7 +82,7 @@ pub use usage::{
 pub const MODEL_REQUEST_CANCELLED: &str = "model request cancelled";
 const STREAMING_HARD_TIMEOUT_MULTIPLIER: u64 = 4;
 const HTTP_POLL_INTERVAL: Duration = Duration::from_millis(40);
-const MAX_MODEL_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MODEL_RESPONSE_BYTES: usize = agent_core::HTTP_MODEL_RESPONSE_MAX_BYTES;
 const DSML_TOOL_CALLS_OPEN: &str = "<｜DSML｜tool_calls>";
 const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 const DSML_INVOKE_OPEN: &str = "<｜DSML｜invoke";
@@ -252,7 +252,9 @@ fn initialize_http_client(
 }
 
 fn http_client() -> Result<&'static Client, ModelError> {
-    initialize_http_client(&HTTP_CLIENT, None)
+    // The bound is stated explicitly from the shared HTTP policy owner instead of
+    // relying on the client library's implicit default.
+    initialize_http_client(&HTTP_CLIENT, Some(provider_redirect_policy()))
 }
 
 fn azure_api_key_http_client() -> Result<&'static Client, ModelError> {

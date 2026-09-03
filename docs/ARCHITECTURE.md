@@ -72,7 +72,7 @@ legacy and are not reclassified from display strings.
 
 | Crate | Current owner responsibility |
 | --- | --- |
-| `agent-core` | Transport-free IDs, messages, events, permissions, tool/model contracts, and shared schemas |
+| `agent-core` | Transport-free IDs, messages, events, permissions, tool/model contracts, shared schemas, and the single outbound HTTP policy owner (`http_policy`) |
 | `agent-eval` | Deterministic portable evaluation skeleton: case schema, postcondition checks, scripted-provider runner, per-run resource receipts, matched position-balanced arms, and suite reports; shares the product effort-tier scheduling authority; no production consumer, and the deterministic harness makes no provider network calls |
 | `agent-runtime` | Kernel, run control, context governor, task contract, adaptive cursor, system-prompt composition, model-turn and tool-runtime semantics |
 | `agent-application` | The run/reprepare driver, strategy/terminal lifecycle, the portable effort-tier scheduling authority (`EffortRunPlan`/planner, extracted from the desktop crate so the eval harness shares it), the portable externally verified outcome contract, and the delivery-judge fail-closed decision (so the evaluation harness applies the same verification rule as the product) |
@@ -293,6 +293,38 @@ stopping repair loops that could never succeed on a missing target. Anchor
 matching stays mandatory, so failures against unrelated inputs grant nothing;
 the absent receipt is surfaced to the model context so the answer can state
 the absence instead of fabricating content.
+
+### 5a. One owner for outbound HTTP policy
+
+Every egress path takes its proxy posture, redirect bound, timeout, response byte
+caps, User-Agent, scheme allowlist, and public-address audit decision from
+`agent_core::http_policy` for its `HttpEgressProfile`, and every `curl` path
+derives its shared argument fragment from `curl_policy_args`. The profiles are
+`PublicFetch` (`web.fetch`), `PublicSearchFallback`, `ConfiguredSearchApi`,
+`CredentialedSearchApi`, `McpHttp`, `ProviderApi`, and `SkillInstall`; the table
+in that module is the single place where those seven postures are written down,
+so a change to one is a reviewed change in one file with a test.
+
+The owner lives in `agent-core` because that is the only crate every egress path
+can reach: `tools` depends on `model-provider`, so a policy owned by either could
+never be shared by both, and `agent-runtime` is gate-barred from the provider
+transport stack. The public-address audit (loopback, RFC1918, link-local
+including the cloud-metadata range, CGNAT, broadcast, multicast, reserved, and
+their IPv6 and IPv4-bearing-IPv6 forms, rejected fail-closed) moved there with the
+policy, and `web.fetch` still pins the audited IPs with `--resolve` so the
+connection cannot drift between audit and use.
+
+Two postures are deliberate and asymmetric. Only `PublicFetch` refuses ambient
+proxies (`--noproxy '*'`), because a proxy would connect on its behalf and bypass
+the IP pin that is the SSRF defense; every user-configured endpoint honors the
+environment proxy, since refusing it would break provider, MCP, and search access
+for users whose only egress is proxied. Only `PublicFetch` audits resolved
+addresses, because the other endpoints are chosen by the user's own
+configuration, which explicitly supports loopback providers and local search
+endpoints. Redirects are bounded everywhere: a credentialed search endpoint
+follows none at all (`-L --max-redirs 0`, HTTPS-only) so a bearer header can never
+be replayed to another origin, the MCP transport treats a 3xx as an error rather
+than a silent re-dial, and the remaining paths share one bound.
 
 ### 6. Completion and recovery
 

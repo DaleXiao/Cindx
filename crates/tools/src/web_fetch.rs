@@ -2,21 +2,20 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use agent_core::{
-    Metadata, PermissionRequest, PermissionRisk, ToolEffectSemantics, ToolInvocation,
-    ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    curl_policy_args, http_policy, resolve_redirect_location, validate_public_http_url,
+    HttpEgressProfile, HttpPolicy, Metadata, PermissionRequest, PermissionRisk, PublicHttpTarget,
+    ToolEffectSemantics, ToolInvocation, ToolOutcomeStatus, ToolResult, ToolRisk, ToolSpec,
+    HTTP_PUBLIC_FETCH_MAX_REDIRECTS, HTTP_WEB_MAX_TIMEOUT_SECONDS, HTTP_WEB_TIMEOUT_SECONDS,
 };
 
 use super::web_search::{
     run_command_with_limited_output, WEB_RESPONSE_MAX_BYTES, WEB_STDERR_MAX_BYTES,
 };
-use super::web_url_policy::{
-    resolve_redirect_location, validate_public_http_url, PublicHttpTarget,
-};
 use super::{parse_input, permission_request, required_url, tool_result, Tool, ToolError};
 
-const WEB_FETCH_MAX_REDIRECTS: usize = 5;
-const WEB_FETCH_DEFAULT_TIMEOUT_SECONDS: usize = 25;
-const WEB_FETCH_MAX_TIMEOUT_SECONDS: usize = 60;
+const WEB_FETCH_MAX_REDIRECTS: usize = HTTP_PUBLIC_FETCH_MAX_REDIRECTS;
+const WEB_FETCH_DEFAULT_TIMEOUT_SECONDS: usize = HTTP_WEB_TIMEOUT_SECONDS;
+const WEB_FETCH_MAX_TIMEOUT_SECONDS: usize = HTTP_WEB_MAX_TIMEOUT_SECONDS;
 
 /// Fetch one HTTP/HTTPS page body from the public web through `/usr/bin/curl`.
 /// Every hop — the initial URL and each redirect target — is audited before a
@@ -91,23 +90,17 @@ impl Tool for WebFetchTool {
 /// `--resolve` so curl never re-resolves the host on its own.
 fn fetch_hop_command(url: &str, target: &PublicHttpTarget, timeout_seconds: usize) -> Command {
     let mut command = Command::new("/usr/bin/curl");
-    command
-        .arg("-q")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--max-time")
-        .arg(timeout_seconds.to_string())
-        .arg("--user-agent")
-        .arg("Cindx/1")
-        .arg("--proto")
-        .arg("=http,https")
-        .arg("--include")
-        // Never inherit an ambient proxy (http_proxy/https_proxy/ALL_PROXY): a
-        // proxy would connect on our behalf and bypass the per-hop `--resolve`
-        // public-IP pin that is the SSRF defense (audit P1-04). Trusted-proxy
-        // support is a future explicit, audited configuration, not implicit env.
-        .arg("--noproxy")
-        .arg("*");
+    // Every shared knob — quiet mode, the bounded timeout, the product user
+    // agent, the scheme allowlist, no redirect following (each hop is re-audited
+    // by the caller), and the proxy refusal that keeps the audited IP pin
+    // meaningful — comes from the one HTTP policy owner. Only the caller's
+    // clamped timeout differs from the profile default.
+    let policy = HttpPolicy {
+        timeout_ms: (timeout_seconds * 1000) as u64,
+        ..http_policy(HttpEgressProfile::PublicFetch)
+    };
+    command.args(curl_policy_args(&policy));
+    command.arg("--include");
     let authority = format!("{}:{}", target.host, target.port);
     for ip in &target.pinned_ips {
         command.arg("--resolve").arg(format!("{authority}:{ip}"));

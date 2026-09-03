@@ -549,6 +549,10 @@ const agentToolRuntimeSource = read("crates/agent-runtime/src/tool_runtime.rs");
 const runControlSource = read("crates/agent-runtime/src/control.rs");
 const coreAgentPrompt = read("crates/agent-runtime/src/core_prompt.txt");
 const agentCoreSource = readRustCrateSource("agent-core");
+const mcpSource = readRustCrateSource("agent-mcp");
+const integrationCommandsSource = read(
+  "apps/desktop/src-tauri/src/integration_commands.rs"
+);
 const memoryBenchmarkSuite = JSON.parse(read("benchmarks/agent/memory-v1.json"));
 const qualityGateManifest = JSON.parse(
   read("benchmarks/system/quality-gates-v1.json")
@@ -1059,9 +1063,10 @@ const toolsModuleBudgets = new Map([
   // shortcut (audit E1/P0).
   ["web_fetch.rs", 240],
   ["web_search.rs", 420],
-  // Public-web URL policy (SSRF audit, IP pinning, redirect resolution) —
-  // new module for the audited fetch contract (audit E1/P0).
-  ["web_url_policy.rs", 340],
+  // The public-web URL policy moved out of this crate to
+  // `agent-core::http_policy`, the single HTTP policy owner every egress crate
+  // can reach (audit P1-04): `tools` depends on `model-provider`, so neither of
+  // them could own a policy the other one needs.
   ["workspace_file.rs", 380],
 ]);
 const toolsModules = listRustSourceFiles(
@@ -3314,9 +3319,9 @@ assert(
     rustLib.includes("with_workspace_tools_and_services") &&
     toolsSource.includes("fetch_search_api") &&
     toolsSource.includes('stdin_bytes: Option<&[u8]>') &&
-    toolsSource.includes('command.args(["-q", "-L"])') &&
-    toolsSource.includes('command.args(["--max-redirs", "0"])') &&
-    toolsSource.includes('["--proto", "=https", "--proto-redir", "=https"]') &&
+    toolsSource.includes("HttpEgressProfile::ConfiguredSearchApi") &&
+    toolsSource.includes("HttpEgressProfile::CredentialedSearchApi") &&
+    toolsSource.includes("curl_policy_args(&policy)") &&
     toolsSource.includes('command.args(["--header", "@-"])') &&
     toolsSource.includes("web search endpoints with an API key must use HTTPS") &&
     !toolsSource.includes('.arg(format!("Authorization: Bearer'),
@@ -4077,6 +4082,30 @@ assert(
       "a_line_reference_at_the_end_of_a_sentence_never_leaks_into_the_target"
     ),
   "A line reference at the end of a sentence must not leak into an evidence target"
+);
+assert(
+  agentCoreSource.includes("pub fn http_policy(profile: HttpEgressProfile) -> HttpPolicy") &&
+    agentCoreSource.includes("pub fn curl_policy_args(policy: &HttpPolicy) -> Vec<String>") &&
+    agentCoreSource.includes("pub fn validate_public_http_url(") &&
+    agentCoreSource.includes(
+      "every_curl_path_shares_one_agent_and_a_bounded_redirect_posture"
+    ) &&
+    agentCoreSource.includes("only_the_audited_public_fetch_disables_ambient_proxies") &&
+    agentCoreSource.includes(
+      "a_credentialed_endpoint_never_follows_a_redirect_and_stays_on_https"
+    ) &&
+    toolsSource.includes("HttpEgressProfile::PublicFetch") &&
+    toolsSource.includes("HttpEgressProfile::PublicSearchFallback") &&
+    mcpSource.includes("HttpEgressProfile::McpHttp") &&
+    mcpSource.includes("mcp_http_argv_takes_its_posture_from_the_shared_policy_owner") &&
+    integrationCommandsSource.includes("fn skill_download_curl_args(") &&
+    integrationCommandsSource.includes(
+      "skill_download_argv_is_bounded_by_the_shared_http_policy"
+    ) &&
+    modelProviderSource.includes("agent_core::HTTP_PROVIDER_MAX_REDIRECTS") &&
+    modelProviderSource.includes("provider_redirect_policy") &&
+    modelProviderSource.includes("agent_core::HTTP_MODEL_RESPONSE_MAX_BYTES"),
+  "Every HTTP egress path must take its policy from the single agent-core owner"
 );
 assert(
   rustLib.includes("run_planned_retrieval(") &&
