@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_eval::{
-    check_postconditions, parse_suite, run_case, CaseBudget, CaseCategory, CaseReport, EvalCase,
-    FixtureFile, Postcondition, ScriptedProvider, ScriptedStep, ScriptedToolCall, SuiteReport,
+    check_postconditions, parse_suite, run_case, CaseBudget, CaseCategory, CaseReceipts,
+    CaseReport, EvalCase, FixtureFile, Postcondition, ScriptedProvider, ScriptedStep,
+    ScriptedToolCall, SuiteReport,
 };
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -614,9 +615,50 @@ fn case_report_serializes_for_suite_json_output() {
         tool_calls: 2,
         turns: 3,
         error: None,
+        receipts: CaseReceipts {
+            model_calls: 2,
+            usage_reported: 2,
+            prompt_tokens: 20,
+            completion_tokens: 6,
+            total_tokens: 26,
+            tool_calls: 2,
+            network_tool_calls: 0,
+            wall_clock_ms: 5,
+        },
     };
     let suite = SuiteReport::new(vec![report]);
     let json = suite.to_json();
     let decoded: SuiteReport = serde_json::from_str(&json).expect("suite json round-trips");
     assert_eq!(decoded, suite);
+    assert!(decoded.cases[0].receipts.usage_complete());
+}
+
+#[test]
+fn run_case_captures_resource_receipts_provider_free() {
+    let root = temp_root("receipts");
+    let case = EvalCase {
+        id: "receipts".to_string(),
+        category: CaseCategory::Shell,
+        prompt: "list files".to_string(),
+        fixture: vec![],
+        allowed_tools: vec!["shell.run".to_string()],
+        postconditions: vec![],
+        budget: CaseBudget {
+            max_turns: 4,
+            max_tool_calls: 4,
+        },
+    };
+    let mut provider = ScriptedProvider::new(vec![
+        shell_step("printf hello"),
+        ScriptedStep::Final("done".to_string()),
+    ]);
+    let report = run_case(&case, &mut provider, &root);
+    // Two model attempts (the tool-call turn and the final answer) and one tool
+    // call; wall-clock is measured. ScriptedProvider reports no usage metadata,
+    // so the receipts stay honestly incomplete rather than fabricating zeros.
+    assert_eq!(report.receipts.model_calls, 2);
+    assert_eq!(report.receipts.tool_calls, 1);
+    assert_eq!(report.receipts.network_tool_calls, 0);
+    assert_eq!(report.receipts.usage_reported, 0);
+    assert!(!report.receipts.usage_complete());
 }

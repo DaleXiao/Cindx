@@ -32,17 +32,32 @@ impl SuiteReport {
 
     /// One bounded status line per case plus the aggregate.
     pub fn summary(&self) -> String {
-        let mut out = format!("suite: {}/{} cases passed\n", self.passed_count, self.total);
+        let total_model_calls: usize = self
+            .cases
+            .iter()
+            .map(|case| case.receipts.model_calls)
+            .sum();
+        let total_tokens: u64 = self
+            .cases
+            .iter()
+            .map(|case| case.receipts.total_tokens)
+            .sum();
+        let mut out = format!(
+            "suite: {}/{} cases passed | model_calls={total_model_calls} tokens={total_tokens}\n",
+            self.passed_count, self.total
+        );
         for case in &self.cases {
             let status = if case.passed { "PASS" } else { "FAIL" };
             let checks_passed = case.checks.iter().filter(|check| check.passed).count();
             let mut line = format!(
-                "- [{status}] {} checks={}/{} turns={} tool_calls={}",
+                "- [{status}] {} checks={}/{} turns={} tool_calls={} model_calls={} tokens={}",
                 case.id,
                 checks_passed,
                 case.checks.len(),
                 case.turns,
-                case.tool_calls
+                case.tool_calls,
+                case.receipts.model_calls,
+                case.receipts.total_tokens
             );
             if let Some(error) = &case.error {
                 line.push_str(&format!(" error={error}"));

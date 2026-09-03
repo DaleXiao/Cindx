@@ -152,6 +152,22 @@ impl EvalModelProvider for CurlProvider {
         } else {
             "tool_calls"
         };
+        let mut metadata = Metadata::new();
+        metadata.insert("finish_reason".to_string(), finish.to_string());
+        // Capture provider usage so the run receipts carry real token totals
+        // (Phase 4 harness readiness). Absent usage leaves the receipts marked
+        // incomplete rather than fabricating zeros.
+        let usage = &parsed["usage"];
+        if let (Some(prompt), Some(completion), Some(total)) = (
+            usage["prompt_tokens"].as_u64(),
+            usage["completion_tokens"].as_u64(),
+            usage["total_tokens"].as_u64(),
+        ) {
+            metadata.insert("prompt_tokens".to_string(), prompt.to_string());
+            metadata.insert("completion_tokens".to_string(), completion.to_string());
+            metadata.insert("total_tokens".to_string(), total.to_string());
+            metadata.insert("usage_source".to_string(), "provider".to_string());
+        }
         Ok(ModelResponse {
             message: Message {
                 role: MessageRole::Assistant,
@@ -160,9 +176,7 @@ impl EvalModelProvider for CurlProvider {
             },
             raw_tool_calls_json: raw_calls.map(|c| c.to_string()),
             tool_calls,
-            metadata: [("finish_reason".to_string(), finish.to_string())]
-                .into_iter()
-                .collect(),
+            metadata,
         })
     }
 }

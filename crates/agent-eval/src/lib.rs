@@ -8,14 +8,16 @@
 //! judged by pure postcondition checks. The crate has no production consumer.
 
 mod case;
+mod matched;
 mod postcondition;
 mod report;
 mod runner;
 
 pub use case::{parse_suite, CaseBudget, CaseCategory, EvalCase, FixtureFile, Postcondition};
+pub use matched::{run_matched_arms, ArmRun, MatchedArmReport, MatchedCaseReport};
 pub use postcondition::{check_postconditions, CheckResult, CHECK_OUTPUT_LIMIT};
 pub use report::SuiteReport;
 pub use runner::{
-    run_case, CaseReport, EvalError, EvalModelProvider, ScriptedProvider, ScriptedStep,
-    ScriptedToolCall,
+    run_case, CaseReceipts, CaseReport, EvalError, EvalModelProvider, ScriptedProvider,
+    ScriptedStep, ScriptedToolCall,
 };

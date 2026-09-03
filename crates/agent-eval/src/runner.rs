@@ -152,6 +152,34 @@ impl EvalModelProvider for ScriptedProvider {
     }
 }
 
+/// Resource receipts for one case run (Phase 4 harness readiness). The frozen
+/// protocol requires complete token / physical-attempt / tool / network / time
+/// receipts with every failure retained in the denominator. These are captured
+/// provider-free by the deterministic harness and populated with real provider
+/// usage during an authorized run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CaseReceipts {
+    /// Physical model attempts (provider completions dispatched).
+    pub model_calls: usize,
+    /// Model attempts that reported complete provider usage metadata.
+    pub usage_reported: usize,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub tool_calls: usize,
+    /// Tool calls with network-egress semantics (`web.search` / `web.fetch`).
+    pub network_tool_calls: usize,
+    pub wall_clock_ms: u64,
+}
+
+impl CaseReceipts {
+    /// True when every dispatched model attempt reported complete usage, so the
+    /// token totals are trustworthy rather than a partial undercount.
+    pub fn usage_complete(&self) -> bool {
+        self.model_calls > 0 && self.usage_reported == self.model_calls
+    }
+}
+
 /// Outcome of one case run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaseReport {
@@ -161,6 +189,8 @@ pub struct CaseReport {
     pub tool_calls: usize,
     pub turns: usize,
     pub error: Option<String>,
+    #[serde(default)]
+    pub receipts: CaseReceipts,
 }
 
 struct PreparedCase {
@@ -213,9 +243,12 @@ pub fn run_case<P: EvalModelProvider>(
                 tool_calls: 0,
                 turns: 0,
                 error: Some(error.to_string()),
+                receipts: CaseReceipts::default(),
             };
         }
     };
+    let started_at = std::time::Instant::now();
+    let mut receipts = CaseReceipts::default();
     let mut final_answer = String::new();
     let mut tool_call_count = 0usize;
     let mut turns = 0usize;
@@ -224,13 +257,16 @@ pub fn run_case<P: EvalModelProvider>(
     match prepare_case_workspace(case, &case_root) {
         Err(preparation_error) => error = Some(preparation_error),
         Ok(prepared) => {
-            let (answer, calls, completed_turns, loop_error) = run_loop(case, &prepared, provider);
+            let (answer, calls, completed_turns, loop_error) =
+                run_loop(case, &prepared, provider, &mut receipts);
             final_answer = answer;
             tool_call_count = calls;
             turns = completed_turns;
             error = loop_error;
         }
     }
+    receipts.wall_clock_ms = started_at.elapsed().as_millis() as u64;
+    receipts.tool_calls = tool_call_count;
 
     let checks = check_postconditions(&case_root, &final_answer, &case.postconditions);
     let passed = error.is_none() && checks.iter().all(|check| check.passed);
@@ -241,6 +277,7 @@ pub fn run_case<P: EvalModelProvider>(
         tool_calls: tool_call_count,
         turns,
         error: error.map(|eval_error| eval_error.to_string()),
+        receipts,
     }
 }
 
@@ -334,12 +371,41 @@ fn fixture_target(case_root: &Path, fixture_path: &str) -> Result<PathBuf, EvalE
     Ok(case_root.join(candidate))
 }
 
+/// Fold one provider response's usage metadata into the run receipts. A response
+/// without complete normalized usage is counted as a model attempt with no usage
+/// reported, so `usage_complete()` stays false rather than silently
+/// undercounting tokens (the protocol keeps incomplete usage visible).
+fn accumulate_model_receipts(receipts: &mut CaseReceipts, response: &ModelResponse) {
+    receipts.model_calls += 1;
+    let parse = |key: &str| {
+        response
+            .metadata
+            .get(key)
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let source = response.metadata.get("usage_source").map(String::as_str);
+    if let (Some(prompt), Some(completion), Some(total), Some(source)) = (
+        parse("prompt_tokens"),
+        parse("completion_tokens"),
+        parse("total_tokens"),
+        source,
+    ) {
+        if matches!(source, "provider" | "provider_partial" | "estimated") {
+            receipts.prompt_tokens = receipts.prompt_tokens.saturating_add(prompt);
+            receipts.completion_tokens = receipts.completion_tokens.saturating_add(completion);
+            receipts.total_tokens = receipts.total_tokens.saturating_add(total);
+            receipts.usage_reported += 1;
+        }
+    }
+}
+
 /// Drive the runtime loop until completion, budget exhaustion, or failure.
 /// Returns `(final_answer, tool_call_count, turns, error)`.
 fn run_loop<P: EvalModelProvider>(
     case: &EvalCase,
     prepared: &PreparedCase,
     provider: &mut P,
+    receipts: &mut CaseReceipts,
 ) -> (String, usize, usize, Option<EvalError>) {
     let mut state = start_agent_loop(
         TaskId(format!("eval:{}", case.id)),
@@ -370,6 +436,7 @@ fn run_loop<P: EvalModelProvider>(
                 )
             }
         };
+        accumulate_model_receipts(receipts, &response);
         match advance_with_model_response(&mut state, response, &prepared.specs) {
             AgentAdvance::Completed { answer } => {
                 return (answer, tool_call_count, state.turn, None)
@@ -391,6 +458,9 @@ fn run_loop<P: EvalModelProvider>(
                     );
                 }
                 for call in &calls {
+                    if matches!(call.tool_name.as_str(), "web.search" | "web.fetch") {
+                        receipts.network_tool_calls += 1;
+                    }
                     let result = execute_tool_call(&state.task_id, case, prepared, call);
                     record_tool_outcome(&mut state, &call.tool_name, &call.input, &result.status);
                     let observation = observation_from_agent_tool_result(&call.tool_name, &result);
@@ -459,5 +529,74 @@ fn execute_tool_call(
             format!("{}: {}", tool_error.code, tool_error.message),
             Metadata::new(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response_with_usage(
+        prompt: u64,
+        completion: u64,
+        total: u64,
+        source: &str,
+    ) -> ModelResponse {
+        let mut metadata = Metadata::new();
+        metadata.insert("prompt_tokens".to_string(), prompt.to_string());
+        metadata.insert("completion_tokens".to_string(), completion.to_string());
+        metadata.insert("total_tokens".to_string(), total.to_string());
+        metadata.insert("usage_source".to_string(), source.to_string());
+        ModelResponse {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: String::new(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: Vec::new(),
+            metadata,
+        }
+    }
+
+    fn response_without_usage() -> ModelResponse {
+        ModelResponse {
+            message: Message {
+                role: MessageRole::Assistant,
+                content: String::new(),
+                metadata: Metadata::new(),
+            },
+            raw_tool_calls_json: None,
+            tool_calls: Vec::new(),
+            metadata: Metadata::new(),
+        }
+    }
+
+    #[test]
+    fn complete_provider_usage_folds_into_receipts() {
+        let mut receipts = CaseReceipts::default();
+        accumulate_model_receipts(&mut receipts, &response_with_usage(10, 5, 15, "provider"));
+        accumulate_model_receipts(&mut receipts, &response_with_usage(20, 7, 27, "provider"));
+        assert_eq!(receipts.model_calls, 2);
+        assert_eq!(receipts.usage_reported, 2);
+        assert_eq!(receipts.prompt_tokens, 30);
+        assert_eq!(receipts.completion_tokens, 12);
+        assert_eq!(receipts.total_tokens, 42);
+        assert!(receipts.usage_complete());
+    }
+
+    #[test]
+    fn missing_or_untrusted_usage_keeps_receipts_honestly_incomplete() {
+        let mut receipts = CaseReceipts::default();
+        accumulate_model_receipts(&mut receipts, &response_without_usage());
+        assert_eq!(receipts.model_calls, 1);
+        assert_eq!(receipts.usage_reported, 0);
+        assert!(!receipts.usage_complete());
+        // An unknown usage_source is never trusted as provider accounting.
+        accumulate_model_receipts(&mut receipts, &response_with_usage(1, 1, 2, "guessed"));
+        assert_eq!(receipts.model_calls, 2);
+        assert_eq!(receipts.usage_reported, 0);
+        assert_eq!(receipts.total_tokens, 0);
+        assert!(!receipts.usage_complete());
     }
 }
