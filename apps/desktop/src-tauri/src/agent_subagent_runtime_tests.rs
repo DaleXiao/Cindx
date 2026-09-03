@@ -196,6 +196,45 @@ fn subagent_child_request_carries_the_parent_effort_reasoning() {
 }
 
 #[test]
+fn subagent_child_tool_calls_are_capped_per_child() {
+    let (_workspace, registry, task_id) = fixture();
+    // One model step returning far more tool calls than the per-child cap.
+    let many: Vec<ModelToolCall> = (0..(agent_runtime::SUBAGENT_MAX_TOOL_CALLS + 12))
+        .map(|i| read_call(&format!("c{i}"), "README.md"))
+        .collect();
+    let provider = ScriptedProvider::new(vec![ModelResponse {
+        message: Message {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            metadata: Metadata::new(),
+        },
+        raw_tool_calls_json: None,
+        tool_calls: many,
+        metadata: Metadata::new(),
+    }]);
+    let control = Arc::new(AgentRunControl::new("fast"));
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+
+    let (_description, answer) = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        None,
+        &[],
+        "default",
+    );
+
+    // The child stopped at the per-child tool-call cap after a single model call
+    // rather than executing every requested call (P1-01 resource governance).
+    assert_eq!(provider.served(), 1);
+    assert!(answer.contains("stage budget"), "answer was: {answer}");
+}
+
+#[test]
 fn subagent_child_requests_streaming_mode() {
     let (_workspace, registry, task_id) = fixture();
     let provider = ScriptedProvider::new(vec![

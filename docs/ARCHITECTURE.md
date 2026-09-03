@@ -246,7 +246,10 @@ so grant non-propagation is structural rather than emergent.
 Child model calls carry the parent run's effort tier as `reasoning_effort`
 request metadata, so thinking-family providers apply the tier's thinking budget
 to subagent calls instead of the previous empty-metadata default (which left
-High/Xhigh reasoning unreachable for children).
+High/Xhigh reasoning unreachable for children). Each child also enforces a
+per-child tool-call cap (`SUBAGENT_MAX_TOOL_CALLS`) so parallel children cannot
+amplify tool calls unbounded; exhaustion stops the child, not the parent run
+(P1-01 resource governance).
 
 The approval handshake also differs deliberately from the run-level
 suspend/resume mechanism. A subagent loop runs on a scoped thread inside the

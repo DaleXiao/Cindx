@@ -10,6 +10,11 @@ use agent_core::{Message, MessageRole};
 // Raised from 8 so delegated work can run deeper multi-step loops.
 pub const SUBAGENT_MAX_STEPS: usize = 12;
 
+/// Per-child tool-call cap (P1-01 resource governance): bounds how many tool
+/// calls one subagent child may execute so parallel children cannot amplify tool
+/// calls unbounded. Exhaustion stops the child, not the parent run.
+pub const SUBAGENT_MAX_TOOL_CALLS: usize = 48;
+
 /// Maximum parent messages a subagent context fork may seed into the child.
 // Raised from 32 so a forked subagent inherits more of the parent's context.
 pub const SUBAGENT_CONTEXT_FORK_MAX_MESSAGES: usize = 48;

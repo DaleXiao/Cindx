@@ -11,7 +11,7 @@ use agent_runtime::{
     observation_from_agent_tool_result, observation_from_tool_result, prompt_completion_intent,
     subagent_patch_tool_allowed, subagent_tool_allowed, subagent_write_system_prompt,
     tool_input_fingerprint, tool_invocation_from_request, AgentRunControl, AgentToolRequest,
-    PromptEffectAuthority, RunStageClass, SUBAGENT_MAX_STEPS,
+    PromptEffectAuthority, RunStageClass, SUBAGENT_MAX_STEPS, SUBAGENT_MAX_TOOL_CALLS,
 };
 use agent_storage::{PermissionStore, SqliteStore};
 use model_provider::{ModelCallMode, ModelRequest, StreamingModelProvider};
@@ -302,6 +302,7 @@ pub(crate) fn subagent_child_answer(
         metadata: Metadata::new(),
     });
     let mut last_content = String::new();
+    let mut child_tool_calls = 0usize;
     for _step in 0..SUBAGENT_MAX_STEPS {
         if agent_run_should_stop(cancellation) {
             return (description, subagent_stopped_answer(&last_content));
@@ -395,6 +396,12 @@ pub(crate) fn subagent_child_answer(
             metadata: assistant_metadata,
         });
         for call in &response.tool_calls {
+            // Per-child tool-call budget (P1-01 resource governance): stop the
+            // child rather than amplify tool calls unbounded across parallel
+            // children; exhaustion stops the child, not the parent run.
+            if child_tool_calls >= SUBAGENT_MAX_TOOL_CALLS {
+                return (description, subagent_budget_answer(&last_content));
+            }
             let observation = match &write {
                 Some(context) if subagent_patch_tool_allowed(&call.name) => {
                     execute_write_subagent_tool_call(
@@ -424,6 +431,7 @@ pub(crate) fn subagent_child_answer(
                 .into_iter()
                 .collect(),
             });
+            child_tool_calls += 1;
         }
     }
     (description, subagent_step_limit_answer(&last_content))
