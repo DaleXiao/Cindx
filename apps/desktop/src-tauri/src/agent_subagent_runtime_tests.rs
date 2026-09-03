@@ -13,6 +13,7 @@ struct ScriptedProvider {
     calls: AtomicUsize,
     modes: Mutex<Vec<ModelCallMode>>,
     first_messages: Mutex<Option<Vec<Message>>>,
+    first_metadata: Mutex<Option<Metadata>>,
 }
 
 impl ScriptedProvider {
@@ -22,6 +23,7 @@ impl ScriptedProvider {
             calls: AtomicUsize::new(0),
             modes: Mutex::new(Vec::new()),
             first_messages: Mutex::new(None),
+            first_metadata: Mutex::new(None),
         }
     }
 
@@ -38,6 +40,14 @@ impl ScriptedProvider {
         self.first_messages
             .lock()
             .expect("first messages poisoned")
+            .clone()
+    }
+
+    /// The request metadata of the first model call, once captured.
+    fn first_metadata(&self) -> Option<Metadata> {
+        self.first_metadata
+            .lock()
+            .expect("first metadata poisoned")
             .clone()
     }
 }
@@ -61,6 +71,12 @@ impl StreamingModelProvider for ScriptedProvider {
             let mut first_messages = self.first_messages.lock().expect("first messages poisoned");
             if first_messages.is_none() {
                 *first_messages = Some(request.messages.clone());
+            }
+        }
+        {
+            let mut first_metadata = self.first_metadata.lock().expect("first metadata poisoned");
+            if first_metadata.is_none() {
+                *first_metadata = Some(request.metadata.clone());
             }
         }
         self.responses
@@ -140,10 +156,43 @@ fn subagent_runs_read_only_loop_to_a_final_answer() {
         None,
         None,
         &[],
+        "default",
     );
 
     assert_eq!(answer, "README.md:1 says line one");
     assert_eq!(provider.served(), 2);
+}
+
+#[test]
+fn subagent_child_request_carries_the_parent_effort_reasoning() {
+    let (_workspace, registry, task_id) = fixture();
+    let provider = ScriptedProvider::new(vec![final_answer("done")]);
+    let control = Arc::new(AgentRunControl::new("high"));
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+
+    let (_description, _answer) = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        None,
+        &[],
+        "high",
+    );
+
+    // The child's model request carries the parent tier's reasoning effort so
+    // thinking-family providers apply the tier's thinking budget (audit: children
+    // previously ran with empty request metadata, so High/Xhigh never reached them).
+    let metadata = provider.first_metadata().expect("first request metadata");
+    assert_eq!(
+        metadata
+            .get(agent_core::REASONING_EFFORT_KEY)
+            .map(String::as_str),
+        Some("high")
+    );
 }
 
 #[test]
@@ -166,6 +215,7 @@ fn subagent_child_requests_streaming_mode() {
         None,
         None,
         &[],
+        "default",
     );
 
     assert_eq!(answer, "README.md:1 says line one");
@@ -198,6 +248,7 @@ fn subagent_loop_is_bounded_by_step_limit() {
         None,
         None,
         &[],
+        "default",
     );
 
     // The loop never exceeds the step budget even with an infinite tool-call
@@ -280,6 +331,7 @@ fn subagent_aborts_before_any_model_call_when_cancelled() {
         None,
         None,
         &[],
+        "default",
     );
 
     assert!(answer.contains("stopped"));
@@ -316,6 +368,7 @@ fn subagent_model_calls_draw_from_the_shared_worker_stage_budget() {
         None,
         None,
         &[],
+        "default",
     );
 
     assert!(answer.contains("budget"));
@@ -407,6 +460,7 @@ fn subagent_fork_seeds_the_balanced_parent_prefix_before_the_contract() {
         None,
         None,
         &prefix,
+        "default",
     );
 
     assert_eq!(answer, "done");
@@ -455,6 +509,7 @@ fn subagent_fork_excludes_an_in_flight_parent_round() {
         None,
         None,
         &prefix,
+        "default",
     );
 
     let messages = provider.first_messages().expect("first call captured");
@@ -506,6 +561,7 @@ fn subagent_fork_without_parent_history_keeps_the_isolated_shape() {
         None,
         None,
         &prefix,
+        "default",
     );
 
     let messages = provider.first_messages().expect("first call captured");

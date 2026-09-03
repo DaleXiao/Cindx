@@ -79,6 +79,13 @@ pub(crate) fn execute_subagent_delegations(
         &runtime.messages,
         agent_runtime::SUBAGENT_CONTEXT_FORK_MAX_MESSAGES,
     );
+    // Propagate the parent run's effort tier to child model calls so subagents
+    // honor the tier's reasoning/thinking budget (audit: children previously ran
+    // with empty request metadata, so High/Xhigh reasoning never reached them).
+    let reasoning_effort = run_context
+        .get("agent_effort")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
     let answers: Vec<(String, String)> = std::thread::scope(|scope| {
         let handles: Vec<_> = task_calls
             .iter()
@@ -114,6 +121,7 @@ pub(crate) fn execute_subagent_delegations(
                         write_context,
                         Some(SubagentNetworkContext { state, run_context }),
                         &context_prefix,
+                        &reasoning_effort,
                     )
                 }))
             })
@@ -268,6 +276,7 @@ pub(crate) fn subagent_child_answer(
     write: Option<SubagentWriteContext<'_>>,
     network: Option<SubagentNetworkContext<'_>>,
     parent_context: &[Message],
+    reasoning_effort: &str,
 ) -> (String, String) {
     let description = subagent_description(input_json);
     let input = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
@@ -305,6 +314,18 @@ pub(crate) fn subagent_child_answer(
         {
             return (description, subagent_budget_answer(&last_content));
         }
+        // Propagate the parent run's effort tier so the child's model call honors
+        // the tier's reasoning/thinking budget instead of defaulting to empty
+        // metadata (audit: children previously shared the actor provider with no
+        // reasoning effort, so High/Xhigh never reached subagent calls).
+        let mut request_metadata = Metadata::new();
+        let effort = reasoning_effort.trim();
+        if !effort.is_empty() {
+            request_metadata.insert(
+                agent_core::REASONING_EFFORT_KEY.to_string(),
+                effort.to_string(),
+            );
+        }
         let request = ModelRequest {
             role: ModelRole::Executor,
             messages: messages.clone(),
@@ -312,7 +333,7 @@ pub(crate) fn subagent_child_answer(
             // The child dispatches through `complete_streaming_cancellable`, so
             // declare the streaming mode the transport actually runs.
             mode: ModelCallMode::Streaming,
-            metadata: Metadata::new(),
+            metadata: request_metadata,
         };
         let mut should_cancel = || agent_run_should_stop(cancellation);
         // Reserve a physical attempt on the unified ledger (audit P1-01): the

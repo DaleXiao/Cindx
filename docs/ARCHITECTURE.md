@@ -243,6 +243,11 @@ parent did not necessarily foresee, so widening must be re-authorized at each
 call. The subagent gate never consults the session-capability store at all,
 so grant non-propagation is structural rather than emergent.
 
+Child model calls carry the parent run's effort tier as `reasoning_effort`
+request metadata, so thinking-family providers apply the tier's thinking budget
+to subagent calls instead of the previous empty-metadata default (which left
+High/Xhigh reasoning unreachable for children).
+
 The approval handshake also differs deliberately from the run-level
 suspend/resume mechanism. A subagent loop runs on a scoped thread inside the
 parent's tool batch, and its internal message history is not part of the
