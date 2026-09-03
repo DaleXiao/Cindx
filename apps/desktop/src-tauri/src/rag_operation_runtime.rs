@@ -13,7 +13,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const MAX_ACTIVE_RAG_OPERATIONS: usize = 8;
 const MAX_RAG_OPERATION_ID_BYTES: usize = 160;
 const RAG_PROVIDER_TIMEOUT: Duration = Duration::from_secs(180);
-const RAG_OPERATION_MAX_DURATION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// Hard wall-clock cap for one manual RAG operation. A stuck operation also
+/// stops via the no-progress timeout, so this bounds runaway wall time.
+const RAG_OPERATION_MAX_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
+/// An operation that makes no progress for this long stops rather than burning
+/// provider calls indefinitely (P1-07 runaway guard).
+const RAG_OPERATION_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Finite hard caps on embedding/model/tool/turn attempts per operation (P1-07):
+/// generous for realistic corpora but bounded so a runaway or corrupt operation
+/// cannot burn unbounded provider tokens.
+const RAG_OPERATION_MAX_ATTEMPTS: usize = 50_000;
+const RAG_OPERATION_MAX_TOTAL_TOKENS: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RagOperationPhase {
@@ -94,27 +104,26 @@ impl RagOperationControl {
 }
 
 fn rag_operation_budget() -> RunBudget {
-    let practical_limit = usize::MAX / 4;
     let mut budget = RunBudget::for_effort("default");
     budget.max_duration = RAG_OPERATION_MAX_DURATION;
     budget.model_call_timeout = RAG_PROVIDER_TIMEOUT;
     budget.tool_call_timeout = RAG_PROVIDER_TIMEOUT;
-    budget.initial_model_calls = practical_limit;
-    budget.max_model_calls = practical_limit;
+    budget.initial_model_calls = RAG_OPERATION_MAX_ATTEMPTS;
+    budget.max_model_calls = RAG_OPERATION_MAX_ATTEMPTS;
     budget.model_calls_per_extension = 1;
-    budget.initial_tool_calls = practical_limit;
-    budget.max_tool_calls = practical_limit;
+    budget.initial_tool_calls = RAG_OPERATION_MAX_ATTEMPTS;
+    budget.max_tool_calls = RAG_OPERATION_MAX_ATTEMPTS;
     budget.tool_calls_per_extension = 1;
-    budget.no_progress_timeout = RAG_OPERATION_MAX_DURATION;
-    budget.max_identical_actions = practical_limit;
-    budget.initial_agent_turns = practical_limit;
-    budget.max_agent_turns = practical_limit;
+    budget.no_progress_timeout = RAG_OPERATION_NO_PROGRESS_TIMEOUT;
+    budget.max_identical_actions = RAG_OPERATION_MAX_ATTEMPTS;
+    budget.initial_agent_turns = RAG_OPERATION_MAX_ATTEMPTS;
+    budget.max_agent_turns = RAG_OPERATION_MAX_ATTEMPTS;
     budget.agent_turns_per_extension = 1;
-    budget.max_repair_attempts = practical_limit;
+    budget.max_repair_attempts = RAG_OPERATION_MAX_ATTEMPTS;
     budget.terminal_model_call_reserve = 0;
     budget.terminal_time_reserve = RAG_PROVIDER_TIMEOUT;
-    budget.max_total_tokens = u64::MAX / 2;
-    budget.max_physical_model_attempts = usize::MAX / 2;
+    budget.max_total_tokens = RAG_OPERATION_MAX_TOTAL_TOKENS;
+    budget.max_physical_model_attempts = RAG_OPERATION_MAX_ATTEMPTS;
     budget.terminal_token_reserve = 0;
     budget.terminal_physical_model_attempt_reserve = 0;
     budget
@@ -621,6 +630,21 @@ mod tests {
         );
         control.agent().finish_model_call();
         assert!(!control.should_cancel());
+    }
+
+    #[test]
+    fn operation_budget_is_finite_not_unbounded() {
+        // P1-07: manual RAG must carry explicit finite hard budgets so a runaway or
+        // corrupt operation cannot burn unbounded provider tokens or wall time.
+        let budget = rag_operation_budget();
+        assert!(budget.max_model_calls <= RAG_OPERATION_MAX_ATTEMPTS);
+        assert!(budget.max_physical_model_attempts <= RAG_OPERATION_MAX_ATTEMPTS);
+        assert!(budget.max_total_tokens <= RAG_OPERATION_MAX_TOTAL_TOKENS);
+        assert!(budget.max_duration <= RAG_OPERATION_MAX_DURATION);
+        assert!(budget.no_progress_timeout <= RAG_OPERATION_NO_PROGRESS_TIMEOUT);
+        // Still generous enough for realistic corpora.
+        assert!(budget.max_model_calls >= 1_000);
+        assert!(budget.max_total_tokens >= 1_000_000);
     }
 
     #[test]

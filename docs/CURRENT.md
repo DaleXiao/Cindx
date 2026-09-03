@@ -490,6 +490,11 @@ Tool visibility does not grant authority.
   same workspace, and the atomic generation publish (file snapshot, LanceDB
   export and database, graph store) is unchanged; a changed embedding profile
   discards the reuse base so the whole workspace is re-embedded.
+- Manual knowledge indexing runs under explicit finite hard budgets — a 6-hour
+  wall-clock cap, a 30-minute no-progress timeout, and bounded embedding/model/
+  tool/turn attempt and token ceilings — so a runaway or corrupt operation cannot
+  burn unbounded provider tokens, while the ceilings stay generous enough for
+  realistic corpora.
 - Memory recall combines lexical and semantic evidence with trust, utility,
   deduplication, supersession, conflict suppression, and session diversity.
 - Memory is not append-only. Capacity retention protects pins and verified user
