@@ -733,6 +733,22 @@ impl AgentRunControl {
         state.last_progress_at = Instant::now();
     }
 
+    /// Account for a tool call executed outside the parent's own begin/finish
+    /// pair — a subagent child's read/network call (P1-01). Increments the run's
+    /// tool-call counter so the parent budget and resource snapshot reflect the
+    /// child's real tool usage, without setting a run-wide stop_reason: the child
+    /// is bounded by its own per-child cap, and the parent enforces its limit on
+    /// its own begin_tool_call.
+    pub fn record_external_tool_call(&self) {
+        self.tool_calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The run's accumulated tool-call count (parent calls plus child calls
+    /// recorded via [`Self::record_external_tool_call`]).
+    pub fn tool_call_count(&self) -> usize {
+        self.tool_calls.load(Ordering::SeqCst)
+    }
+
     pub fn finish_tool_call_at(&self, expected_epoch: u64) -> bool {
         let mut state = self.state.lock().expect("run control state poisoned");
         state.active_tool_calls = state.active_tool_calls.saturating_sub(1);

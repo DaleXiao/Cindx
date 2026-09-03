@@ -845,6 +845,10 @@ pub(crate) fn execute_subagent_tool_call(
             ),
         },
     };
+    // Aggregate the child's tool call into the parent run's tool-call accounting
+    // (P1-01) so the parent budget/snapshot reflect real child usage; the child
+    // itself is bounded by its per-child cap and the epoch/cancel gate above.
+    cancellation.record_external_tool_call();
     let status = match result.status {
         ToolOutcomeStatus::Succeeded => "succeeded",
         ToolOutcomeStatus::Failed => "failed",

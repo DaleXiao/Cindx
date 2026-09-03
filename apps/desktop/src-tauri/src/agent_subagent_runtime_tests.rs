@@ -232,6 +232,12 @@ fn subagent_child_tool_calls_are_capped_per_child() {
     // rather than executing every requested call (P1-01 resource governance).
     assert_eq!(provider.served(), 1);
     assert!(answer.contains("stage budget"), "answer was: {answer}");
+    // The executed child tool calls aggregated into the parent run's tool
+    // accounting (record_external_tool_call), up to the per-child cap.
+    assert_eq!(
+        control.tool_call_count(),
+        agent_runtime::SUBAGENT_MAX_TOOL_CALLS
+    );
 }
 
 #[test]
