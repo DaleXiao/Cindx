@@ -537,6 +537,21 @@ Background services are bounded and must not block the healthy foreground path:
 
 - Semantic memory curation and vector refresh.
 - Schedule dispatch and sidecar health work.
+- Workspace `.cindx` retention (aggregate quota plus TTL sweep).
+
+Workspace state retention is owned by the desktop crate
+(`cindx_retention_runtime`), because that is the only composition root that can
+enumerate every registered workspace root and reach the audited deletion
+primitives. One bounded sweep runs per root shortly after startup, at most once
+per launch: it measures the whole `.cindx` tree without following a symlink,
+expires the regenerable recovery and capture classes past a TTL, and — only if
+the aggregate quota is still exceeded — evicts the oldest remaining candidates
+until the tree fits. Planning is a pure function over the measurement, and each
+deletion re-checks containment and file type at the moment it happens, so a plan
+built from an earlier measurement cannot delete through a path that changed
+shape. Knowledge and memory-vector generations keep their own lease-guarded
+generation-count GC, which this sweep never preempts: semantic state is measured
+but never expired or evicted here.
 
 The continuous prompt-evolution loop (prompt evidence projection,
 mutation/evaluation, rollout, canary, transfer, and distillation) and the

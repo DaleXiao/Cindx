@@ -35,6 +35,7 @@ mod app_state;
 mod attachment_commands;
 mod attachment_upload_batches;
 mod background_work_runtime;
+mod cindx_retention_runtime;
 mod collaboration_execution;
 mod collaboration_service;
 mod collaboration_stage_runtime;
@@ -121,6 +122,7 @@ pub use app_bootstrap::run;
 use app_state::*;
 use attachment_commands::*;
 use attachment_upload_batches::*;
+use cindx_retention_runtime::*;
 use collaboration_execution::*;
 #[cfg(test)]
 use collaboration_stage_runtime::*;
@@ -172,6 +174,8 @@ mod app_store_persistence_tests;
 mod attachment_projection_tests;
 #[cfg(test)]
 mod chat_projection_tests;
+#[cfg(test)]
+mod cindx_retention_runtime_tests;
 #[cfg(test)]
 mod collaboration_stage_runtime_tests;
 #[cfg(test)]

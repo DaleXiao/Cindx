@@ -549,7 +549,10 @@ fn remove_tree_without_following_links(path: &Path) -> Result<(), String> {
     })
 }
 
-fn remove_empty_parents(mut current: Option<&Path>, stop: &Path) -> Result<usize, String> {
+pub(crate) fn remove_empty_parents(
+    mut current: Option<&Path>,
+    stop: &Path,
+) -> Result<usize, String> {
     let mut removed = 0usize;
     while let Some(path) = current {
         if path == stop || !path.starts_with(stop) {

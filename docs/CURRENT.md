@@ -528,6 +528,20 @@ Tool visibility does not grant authority.
   tool/turn attempt and token ceilings — so a runaway or corrupt operation cannot
   burn unbounded provider tokens, while the ceilings stay generous enough for
   realistic corpora.
+- The workspace `.cindx` tree is measured as a whole and kept under an aggregate
+  quota (2 GiB per workspace) with a TTL sweep. Only the regenerable recovery and
+  capture classes are candidates — `undo-history`, `output-history`,
+  `tool-output`, `screenshots`, `browser-captures`: files older than 14 days
+  expire, and if the aggregate still exceeds the quota afterwards, the oldest
+  remaining candidates are evicted until it fits. Knowledge generations, memory
+  vector generations, project instructions, custom commands, installed skills,
+  todos, context checkpoints, and the trace export are measured but never removed
+  by the sweep. The walk never follows a symlink, a deletion is refused unless the
+  path is still a regular file inside the same `.cindx` root, empty parent
+  directories are cleaned up but the `.cindx` root itself never is, and one
+  bounded sweep runs per known workspace shortly after startup (at most once per
+  launch), logging to `startup.log` only when it removed something or hit a
+  failure.
 - Memory recall combines lexical and semantic evidence with trust, utility,
   deduplication, supersession, conflict suppression, and session diversity.
 - Memory is not append-only. Capacity retention protects pins and verified user
@@ -764,6 +778,11 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   authority. It fails closed across output-root relocation and normal crashes,
   but it is not an external anti-rollback service against an actor able to
   delete or restore every private control-plane file under the same user ID.
+- The `.cindx` retention sweep expires undo and output-history snapshots older
+  than its TTL, so undoing a file change made more than 14 days ago is not
+  available. That is the same state the panel already handles: an entry whose
+  snapshot cannot be read is projected as not undoable, and undo fails closed
+  rather than guessing.
 - Answer-citation verification is location-level, not content-level. The
   deterministic binder proves that a cited path was really observed by a
   whitelisted file tool in this run, and flags citations to paths the run never

@@ -423,8 +423,10 @@ Persistent state is stored under:
 ~/Library/Application Support/Cindx
 ```
 
-`startup.log` in that directory records startup probes and persistent-store
-failure. If SQLite cannot be opened, Cindx logs
+`startup.log` in that directory records startup probes, persistent-store
+failure, and the workspace `.cindx` retention sweep (one line per workspace, only
+when the sweep removed something or hit a failure). If SQLite cannot be opened,
+Cindx logs
 `persistent state unavailable; startup aborted` and exits instead of using an
 in-memory substitute.
 

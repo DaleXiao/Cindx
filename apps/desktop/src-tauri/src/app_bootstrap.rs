@@ -165,6 +165,7 @@ pub fn run() -> Result<(), String> {
             schedule_main_window_reveal_fallback(app.handle().clone());
             start_schedule_runner(app.handle().clone());
             start_tool_event_metadata_compaction();
+            start_cindx_retention_sweep(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

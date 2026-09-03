@@ -4108,6 +4108,20 @@ assert(
   "Every HTTP egress path must take its policy from the single agent-core owner"
 );
 assert(
+  rustLib.includes("pub(crate) const CINDX_AGGREGATE_QUOTA_BYTES") &&
+    rustLib.includes("pub(crate) const CINDX_RETENTION_TTL_MS") &&
+    rustLib.includes("RETENTION_ELIGIBLE_ROOTS") &&
+    rustLib.includes("pub(crate) fn measure_cindx_usage(") &&
+    rustLib.includes("pub(crate) fn plan_cindx_retention(") &&
+    rustLib.includes("pub(crate) fn apply_cindx_retention(") &&
+    rustLib.includes("start_cindx_retention_sweep(app.handle().clone())") &&
+    rustLib.includes("aged_regenerable_classes_expire_and_semantic_state_never_does") &&
+    rustLib.includes("over_quota_trees_evict_the_oldest_candidates_first_and_stop_when_they_fit") &&
+    rustLib.includes("a_symlink_is_neither_measured_as_content_nor_deleted_through") &&
+    rustLib.includes("a_plan_carrying_an_escaping_path_is_refused_at_deletion_time"),
+  "The .cindx tree must stay under an aggregate quota with a TTL sweep that never touches semantic state"
+);
+assert(
   rustLib.includes("run_planned_retrieval(") &&
     rustLib.includes("retrieval_plan: &WorkspaceRetrievalPlan") &&
     rustLib.includes('timed_retrieval_channel("semantic_rag"') &&
