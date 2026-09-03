@@ -101,7 +101,13 @@ fn fetch_hop_command(url: &str, target: &PublicHttpTarget, timeout_seconds: usiz
         .arg("Cindx/1")
         .arg("--proto")
         .arg("=http,https")
-        .arg("--include");
+        .arg("--include")
+        // Never inherit an ambient proxy (http_proxy/https_proxy/ALL_PROXY): a
+        // proxy would connect on our behalf and bypass the per-hop `--resolve`
+        // public-IP pin that is the SSRF defense (audit P1-04). Trusted-proxy
+        // support is a future explicit, audited configuration, not implicit env.
+        .arg("--noproxy")
+        .arg("*");
     let authority = format!("{}:{}", target.host, target.port);
     for ip in &target.pinned_ips {
         command.arg("--resolve").arg(format!("{authority}:{ip}"));

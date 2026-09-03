@@ -352,7 +352,9 @@
 }
 
 .schedule-effort-segmented {
-  grid-template-columns: repeat(3, 72px);
+  /* Four effort tiers (Fast/Default/High/Extra High); a 3-column grid wrapped
+     the fourth tier onto a second row and misaligned the selected pill. */
+  grid-template-columns: repeat(4, 72px);
 }
 
 .schedule-weekdays {

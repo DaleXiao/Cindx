@@ -300,6 +300,15 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
         {
             config.reviewer_model = defaults.reviewer.clone();
         }
+        // P2-01: pre-0.3.22 configs defaulted reviewer to the executor model, and
+        // the judge needs a distinct reviewer, so migrate reviewer==executor to
+        // the distinct default (only when that default is genuinely distinct).
+        if config.reviewer_model.trim() == config.executor_model.trim()
+            && !defaults.reviewer.trim().is_empty()
+            && defaults.reviewer.trim() != config.executor_model.trim()
+        {
+            config.reviewer_model = defaults.reviewer.clone();
+        }
         if !loaded_model_fields.contains("summarizer_model")
             || config.summarizer_model.trim().is_empty()
         {

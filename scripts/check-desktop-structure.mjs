@@ -853,7 +853,9 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["background_work_runtime.rs", 80],
   // 405 -> 410: the provider API key moved to the macOS login keychain
   // (provider_secret_store); load/save keep the two integration calls.
-  ["configuration_persistence.rs", 410],
+  // 410 -> 425: the P2-01 load-time migration that repairs legacy
+  // reviewer==executor configs (which silently skipped the delivery judge).
+  ["configuration_persistence.rs", 425],
   ["event_persistence.rs", 180],
   ["event_security.rs", 500],
   ["permission_service.rs", 220],
