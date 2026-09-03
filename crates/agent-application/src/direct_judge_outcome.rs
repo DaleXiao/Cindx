@@ -348,6 +348,42 @@ fn hex_digest(bytes: &[u8]) -> String {
     output
 }
 
+/// Fail-closed delivery decision for the judge gate. Only a judged quality
+/// failure on a mutation-bearing run blocks delivery: the recheck still required
+/// revision, or the judge required revision and the repair could not be grounded
+/// against the task contract. Judge unavailability, inconclusive receipts, and
+/// repair transport failures stay fail-open — they are infrastructure failures,
+/// not quality evidence. Portable so the evaluation harness applies the same
+/// fail-closed rule as the product (Phase 4 fidelity, audit 3b).
+pub fn direct_judge_fail_closed_block(
+    fail_closed_enabled: bool,
+    successful_mutations: usize,
+    disposition: &str,
+    findings: &[String],
+) -> Option<String> {
+    if !fail_closed_enabled || successful_mutations == 0 {
+        return None;
+    }
+    let detail = match disposition {
+        DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED => {
+            "the judge still requires revision after the single repair round"
+        }
+        DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED => {
+            "the repair could not be grounded against the task contract"
+        }
+        _ => return None,
+    };
+    let findings_text = if findings.is_empty() {
+        "(no findings recorded)".to_string()
+    } else {
+        findings.join("; ")
+    };
+    Some(format!(
+        "Delivery verification failed: {detail}. The candidate answer was not delivered. \
+         Judge findings: {findings_text}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +548,39 @@ mod tests {
         let mut bad = facts(DIRECT_JUDGE_DISPOSITION_PASSED);
         bad.grounded_basis = "claimed";
         assert!(DirectJudgeOutcomeV1::from_completion_facts(&bad).is_err());
+    }
+
+    #[test]
+    fn fail_closed_block_only_for_judged_quality_failures_on_mutation_runs() {
+        // Fail-open for infrastructure outcomes, disabled fail-closed, and
+        // mutation-free runs.
+        assert!(direct_judge_fail_closed_block(
+            true,
+            0,
+            DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+            &[]
+        )
+        .is_none());
+        assert!(direct_judge_fail_closed_block(
+            false,
+            3,
+            DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+            &[]
+        )
+        .is_none());
+        assert!(
+            direct_judge_fail_closed_block(true, 3, DIRECT_JUDGE_DISPOSITION_UNAVAILABLE, &[])
+                .is_none()
+        );
+        // Fail-closed for judged quality failures on mutation-bearing runs.
+        let message = direct_judge_fail_closed_block(
+            true,
+            3,
+            DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED,
+            &["revise the claim".to_string()],
+        )
+        .expect("blocks delivery");
+        assert!(message.contains("Delivery verification failed"));
+        assert!(message.contains("revise the claim"));
     }
 }

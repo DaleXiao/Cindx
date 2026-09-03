@@ -30,9 +30,9 @@ pub use direct_judge_fitness::{
     DIRECT_JUDGE_FITNESS_WINDOW,
 };
 pub use direct_judge_outcome::{
-    disposition_family, disposition_used_repair_round, DirectJudgeCompletionFacts,
-    DirectJudgeDispositionFamilyV1, DirectJudgeMutationVerificationV1, DirectJudgeOutcomeError,
-    DirectJudgeOutcomeV1, DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED,
+    direct_judge_fail_closed_block, disposition_family, disposition_used_repair_round,
+    DirectJudgeCompletionFacts, DirectJudgeDispositionFamilyV1, DirectJudgeMutationVerificationV1,
+    DirectJudgeOutcomeError, DirectJudgeOutcomeV1, DIRECT_JUDGE_DISPOSITION_FAIL_CLOSED_BLOCKED,
     DIRECT_JUDGE_DISPOSITION_INCONCLUSIVE, DIRECT_JUDGE_DISPOSITION_NOT_APPLICABLE,
     DIRECT_JUDGE_DISPOSITION_NOT_ELIGIBLE, DIRECT_JUDGE_DISPOSITION_PASSED,
     DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED, DIRECT_JUDGE_DISPOSITION_RECHECK_INCONCLUSIVE,

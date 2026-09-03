@@ -25,40 +25,10 @@ pub(crate) enum DirectJudgeGateOutcome {
     },
 }
 
-/// Fail-closed delivery decision for the judge gate. Only a judged quality
-/// failure on a mutation-bearing run blocks delivery: the recheck still
-/// required revision, or the judge required revision and the repair could not
-/// be grounded against the task contract. Judge unavailability, inconclusive
-/// receipts, and repair transport failures stay fail-open — they are
-/// infrastructure failures, not quality evidence.
-pub(crate) fn direct_judge_fail_closed_block(
-    fail_closed_enabled: bool,
-    successful_mutations: usize,
-    disposition: &str,
-    findings: &[String],
-) -> Option<String> {
-    if !fail_closed_enabled || successful_mutations == 0 {
-        return None;
-    }
-    let detail = match disposition {
-        agent_application::DIRECT_JUDGE_DISPOSITION_RECHECK_EXHAUSTED => {
-            "the judge still requires revision after the single repair round"
-        }
-        agent_application::DIRECT_JUDGE_DISPOSITION_REPAIR_UNGROUNDED => {
-            "the repair could not be grounded against the task contract"
-        }
-        _ => return None,
-    };
-    let findings_text = if findings.is_empty() {
-        "(no findings recorded)".to_string()
-    } else {
-        findings.join("; ")
-    };
-    Some(format!(
-        "Delivery verification failed: {detail}. The candidate answer was not delivered. \
-         Judge findings: {findings_text}"
-    ))
-}
+// The fail-closed delivery decision now lives in the portable agent-application
+// crate (Phase 4 fidelity, audit 3b) so the evaluation harness applies the same
+// rule as the product; re-exported here so desktop call sites are unchanged.
+pub(crate) use agent_application::direct_judge_fail_closed_block;
 
 pub(crate) fn plan_direct_judge(
     effort: &str,
