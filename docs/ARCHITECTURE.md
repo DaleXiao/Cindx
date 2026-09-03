@@ -332,6 +332,25 @@ successful workspace mutation, recording a
 fail-open. Fast execution is
 never judged.
 
+The judge's bounded execution facts are not only counts. `agent-runtime`'s
+`claim_evidence` module deterministically binds the candidate's workspace
+citations (`path`, `path:line`, `path:start-end`, `#Lline`) to the locations the
+run actually observed: the tool dispatcher stamps each whitelisted file-tool call
+onto its durable tool message (`file.read`/`file.read_many` reads,
+`file.search`/`file.list`/`file.glob` subtree scopes, `file.write`/`file.patch`/
+`file.patch_batch` mutations — successes and failures alike, since a failed read
+is what contradicts a citation), and the judge path reads those stamps back to
+classify every citation as supported, unsupported (no observed call covered that
+path), or contradicted (the run's own call on that path did not succeed). The
+receipt (`cindx.agent.claim-evidence.v1`) is additive judge evidence — it never
+blocks delivery on its own — and it is location-level binding, not
+natural-language entailment: a citation can bind to real evidence while the prose
+around it is still wrong. Citation parsing is shared with the prompt-evidence
+anchors (`evidence_target`), so an answer citation and a prompt anchor can never
+disagree about what a path is, and a line reference written at the end of a
+sentence no longer leaks into the target. An answer that cites nothing produces no
+block, so its judge prompt is byte-identical to the previous one.
+
 The completion transaction persists terminal event, result, artifacts,
 lifecycle, learning evidence, the observed-use measurement for recalled
 memories, and cleanup under one attempt/epoch identity.

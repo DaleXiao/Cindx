@@ -14,6 +14,7 @@ const DSML_TOOL_CALLS_CLOSE: &str = "</｜DSML｜tool_calls>";
 
 mod adaptive_loop;
 mod anytime_parallel;
+mod claim_evidence;
 mod completion_intent;
 mod context_compiler;
 mod context_engine;
@@ -58,6 +59,12 @@ mod worker_tools;
 
 pub use adaptive_loop::{AdaptiveLoopCursor, AdaptiveLoopDisposition};
 pub use anytime_parallel::{AnytimeQuorumExecution, AnytimeQuorumPolicy};
+pub use claim_evidence::{
+    answer_citations, bind_answer_citations, claim_evidence_facts, insert_observed_locations,
+    observed_locations_for_call, observed_locations_from_messages, AnswerCitation, CitationFinding,
+    CitationStatus, ClaimEvidenceReceipt, ObservedLocation, ObservedLocationKind,
+    CLAIM_EVIDENCE_SCHEMA, OBSERVED_LOCATIONS_SCHEMA,
+};
 pub use completion_intent::{
     prompt_completion_intent, prompt_evidence_target_anchors, prompt_replaces_prior_objective,
     PromptCompletionIntent, PromptEffectAuthority, PromptToolRequirement,

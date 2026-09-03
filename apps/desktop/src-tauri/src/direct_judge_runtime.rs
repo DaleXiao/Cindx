@@ -150,7 +150,10 @@ fn ground_repaired_answer(
         .ok()
 }
 
-pub(crate) fn direct_judge_execution_summary(runtime: &agent_runtime::AgentLoopState) -> String {
+pub(crate) fn direct_judge_execution_summary(
+    runtime: &agent_runtime::AgentLoopState,
+    candidate: &str,
+) -> String {
     let contract = &runtime.task_contract;
     let mutations = contract.successful_mutations();
     let verification_state = if mutations == 0 {
@@ -166,10 +169,22 @@ pub(crate) fn direct_judge_execution_summary(runtime: &agent_runtime::AgentLoopS
         }
         _ => "workspace verification is not required",
     };
-    format!(
+    let facts = format!(
         "Execution facts (trusted runtime record):\n- Successful workspace mutations: {mutations}\n- Mutation verification: {verification_state}\n- Policy: {policy}\n- Grounding evidence recorded: {}",
         contract.has_prompt_evidence()
-    )
+    );
+    // P1-10: bind the candidate's workspace citations to the locations this run
+    // actually observed, so the judge sees claim-evidence facts instead of counts
+    // alone. Additive only: an answer that cites nothing produces no block and
+    // leaves the prompt byte-identical.
+    let observed = agent_runtime::observed_locations_from_messages(&runtime.messages);
+    let receipt = agent_runtime::bind_answer_citations(candidate, &observed);
+    let citation_facts = agent_runtime::claim_evidence_facts(&receipt);
+    if citation_facts.is_empty() {
+        facts
+    } else {
+        format!("{facts}\n{citation_facts}")
+    }
 }
 
 pub(crate) fn direct_judge_prompt_with_facts(
@@ -180,7 +195,7 @@ pub(crate) fn direct_judge_prompt_with_facts(
     format!(
         "{}\n\n{}",
         agent_core::direct_judge_prompt(objective, candidate),
-        direct_judge_execution_summary(runtime)
+        direct_judge_execution_summary(runtime, candidate)
     )
 }
 
@@ -221,7 +236,7 @@ pub(crate) fn apply_direct_judge_gate(
         format!(
             "{prompt}\n\n{facts}",
             prompt = plan.prompt,
-            facts = direct_judge_execution_summary(runtime)
+            facts = direct_judge_execution_summary(runtime, &candidate.content)
         ),
     ) {
         Ok(output) => output,
@@ -387,12 +402,69 @@ mod tests {
             "objective",
             agent_runtime::AgentRuntimeConfig::default(),
         );
-        let summary = direct_judge_execution_summary(&runtime);
+        let summary = direct_judge_execution_summary(&runtime, "candidate");
         assert!(summary.contains("Successful workspace mutations: 0"));
         assert!(summary.contains("no workspace mutations occurred"));
+        // An answer with no workspace citation adds no claim-evidence block.
+        assert!(!summary.contains("Answer citations"));
         let prompt = direct_judge_prompt_with_facts("objective", "candidate", &runtime);
         assert!(prompt.contains("Execution facts"));
         assert!(prompt.contains("CINDX_DIRECT_JUDGE:"));
+    }
+
+    /// The judge's trusted facts include the answer's citations bound to the
+    /// locations the run really observed (P1-10), so a fabricated or refuted
+    /// citation is visible to the reviewer instead of passing as prose.
+    #[test]
+    fn direct_judge_execution_summary_binds_answer_citations_to_observed_locations() {
+        let mut runtime = agent_runtime::start_agent_loop(
+            agent_core::TaskId("judge-claims".to_string()),
+            "objective",
+            agent_runtime::AgentRuntimeConfig::default(),
+        );
+        // Two durable tool messages stamped at dispatch: one successful read and
+        // one failed read of a path the answer still cites.
+        for (input, succeeded) in [
+            (r#"{"path":"crates/agent-rag/src/lib.rs"}"#, true),
+            (r#"{"path":"src/gone.rs"}"#, false),
+        ] {
+            let observed =
+                agent_runtime::observed_locations_for_call("file.read", input, succeeded);
+            let mut metadata = Metadata::new();
+            agent_runtime::insert_observed_locations(&mut metadata, &observed);
+            runtime.messages.push(agent_core::Message {
+                role: agent_core::MessageRole::Tool,
+                content: "observation".to_string(),
+                metadata,
+            });
+        }
+
+        let candidate = "The planner is at crates/agent-rag/src/lib.rs:1142, the \
+                         missing file was src/gone.rs:9, and see src/never-read.rs:3.";
+        let summary = direct_judge_execution_summary(&runtime, candidate);
+
+        assert!(
+            summary
+                .contains("Answer citations: 3 parsed, 1 supported, 1 unsupported, 1 contradicted"),
+            "summary was {summary}"
+        );
+        assert!(
+            summary.contains("src/never-read.rs:3"),
+            "summary was {summary}"
+        );
+        assert!(summary.contains("src/gone.rs:9"), "summary was {summary}");
+        assert!(summary.contains("did not succeed"), "summary was {summary}");
+        // Contradictions are listed before gaps.
+        assert!(
+            summary.find("contradicted `src/gone.rs:9`")
+                < summary.find("unsupported `src/never-read.rs:3`"),
+            "summary was {summary}"
+        );
+
+        // The same runtime with an answer that cites nothing is unchanged.
+        let plain = direct_judge_execution_summary(&runtime, "Done; every test passes.");
+        assert!(!plain.contains("Answer citations"));
+        assert!(plain.contains("Execution facts (trusted runtime record)"));
     }
 
     #[test]

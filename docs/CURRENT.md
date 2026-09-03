@@ -271,7 +271,10 @@ answers never needed a second call.
 Every tier above Fast (Default, High, and Extra High) carries a contracted
 delivery judge at the shared completion point: a model-distinct Reviewer audits
 the final answer together with bounded execution facts (mutation count,
-mutation-verification state, verification policy, grounding evidence) and
+mutation-verification state, verification policy, grounding evidence, and a
+deterministic binding of the answer's own workspace citations to the file
+locations the run really observed — each citation classified supported,
+unsupported, or contradicted) and
 returns one typed single-line receipt (`pass` or `revise` with findings). A
 `revise` verdict permits at most one repair round and one recheck; Fast runs are
 never judged. Judge unavailability, inconclusive receipts, empty or ungrounded
@@ -743,6 +746,16 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   authority. It fails closed across output-root relocation and normal crashes,
   but it is not an external anti-rollback service against an actor able to
   delete or restore every private control-plane file under the same user ID.
+- Answer-citation verification is location-level, not content-level. The
+  deterministic binder proves that a cited path was really observed by a
+  whitelisted file tool in this run, and flags citations to paths the run never
+  observed (unsupported) or tried and failed to observe (contradicted), but it
+  does not check that the prose about a cited location is entailed by that
+  location's content; the outcome ledger still records a delivered claim as
+  evidence-available-not-entailed. Tools outside the file whitelist contribute no
+  observed locations, so a path seen only through, for example, a shell read is
+  reported as unsupported. The receipt is additive judge evidence and never
+  blocks delivery by itself.
 - Current evidence does not establish general Auto/Pro superiority, successful
   prompt-evolution self-improvement, or external-benchmark parity.
 - The per-request `generation_temperature` override is produced by the

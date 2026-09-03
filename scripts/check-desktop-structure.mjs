@@ -535,6 +535,12 @@ const memoryVectorRefreshSource = read(
 const memoryRuntimeTestsSource = read(
   "apps/desktop/src-tauri/src/memory_runtime_tests.rs"
 );
+const directJudgeRuntimeSource = read(
+  "apps/desktop/src-tauri/src/direct_judge_runtime.rs"
+);
+const agentResultEvidenceSource = read(
+  "apps/desktop/src-tauri/src/agent_result_evidence.rs"
+);
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = readRustCrateSource("agent-memory");
 const agentRuntimeSource = readRustCrateSource("agent-runtime");
@@ -4046,6 +4052,31 @@ assert(
       "a_failed_memory_embedding_pass_restores_a_homogeneous_local_fallback"
     ),
   "A failed memory embedding pass must restore a homogeneous local fallback"
+);
+assert(
+  agentRuntimeSource.includes("pub const CLAIM_EVIDENCE_SCHEMA") &&
+    agentRuntimeSource.includes("pub fn bind_answer_citations(") &&
+    agentRuntimeSource.includes("pub fn observed_locations_for_call(") &&
+    agentRuntimeSource.includes("pub fn observed_locations_from_messages(") &&
+    agentRuntimeSource.includes("binds_a_citation_to_the_read_that_observed_it") &&
+    agentRuntimeSource.includes("reports_a_citation_whose_read_failed_as_contradicted") &&
+    agentResultEvidenceSource.includes("observed_locations_for_call(") &&
+    agentResultEvidenceSource.includes("insert_observed_locations(") &&
+    directJudgeRuntimeSource.includes("bind_answer_citations(") &&
+    directJudgeRuntimeSource.includes("claim_evidence_facts(") &&
+    directJudgeRuntimeSource.includes("observed_locations_from_messages(") &&
+    directJudgeRuntimeSource.includes(
+      "direct_judge_execution_summary_binds_answer_citations_to_observed_locations"
+    ),
+  "Answer citations must be bound to observed locations and disclosed to the delivery judge"
+);
+assert(
+  agentRuntimeSource.includes("fn trim_citation_punctuation(") &&
+    agentRuntimeSource.includes("fn token_workspace_path_and_line(") &&
+    agentRuntimeSource.includes(
+      "a_line_reference_at_the_end_of_a_sentence_never_leaks_into_the_target"
+    ),
+  "A line reference at the end of a sentence must not leak into an evidence target"
 );
 assert(
   rustLib.includes("run_planned_retrieval(") &&

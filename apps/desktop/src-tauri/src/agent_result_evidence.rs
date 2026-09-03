@@ -98,6 +98,16 @@ pub(crate) fn annotate_latest_tool_observation(
             ),
         ]);
     }
+    // Stamp the workspace locations this call actually observed, so finalization
+    // can bind the delivered answer's citations to real evidence (P1-10). Only
+    // the whitelisted file tools contribute and the record is bounded; a failed
+    // call is stamped too, because it is what contradicts a citation.
+    let observed_locations = agent_runtime::observed_locations_for_call(
+        effective_tool_name,
+        &call.input,
+        matches!(status, ToolOutcomeStatus::Succeeded),
+    );
+    agent_runtime::insert_observed_locations(&mut message.metadata, &observed_locations);
 }
 
 pub(crate) fn completion_tool_evidence(
@@ -489,6 +499,109 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+        // The deferred wrapper's nested arguments still yield the real location.
+        let recovered = agent_runtime::observed_locations_from_messages(&runtime.messages);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].path, "README.md");
+        assert_eq!(recovered[0].kind, agent_runtime::ObservedLocationKind::Read);
+    }
+
+    /// The dispatcher stamps the workspace locations a file tool actually
+    /// observed — including a failed read, which is what contradicts a citation —
+    /// so finalization can bind the answer's citations to real evidence (P1-10).
+    #[test]
+    fn tool_annotation_stamps_observed_locations_for_file_tools_only() {
+        let mut runtime = runtime_with_messages("stamp", Vec::new());
+        runtime.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "observation".to_string(),
+            metadata: Metadata::new(),
+        });
+        let read = AgentToolRequest {
+            call_id: agent_core::ToolCallId("read-1".to_string()),
+            tool_name: "file.read".to_string(),
+            input: r#"{"path":"crates/agent-rag/src/lib.rs","offset_bytes":0}"#.to_string(),
+        };
+
+        annotate_latest_tool_observation(
+            &mut runtime,
+            &[],
+            &read,
+            None,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ReadOnly),
+            0,
+            None,
+            None,
+        );
+
+        let recovered = agent_runtime::observed_locations_from_messages(&runtime.messages);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].path, "crates/agent-rag/src/lib.rs");
+        assert_eq!(recovered[0].kind, agent_runtime::ObservedLocationKind::Read);
+        assert!(recovered[0].succeeded);
+
+        // A failed read of another path is stamped as contradiction evidence, and
+        // a non-file tool stamps nothing.
+        runtime.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "denied".to_string(),
+            metadata: Metadata::new(),
+        });
+        let failed = AgentToolRequest {
+            call_id: agent_core::ToolCallId("read-2".to_string()),
+            tool_name: "file.read".to_string(),
+            input: r#"{"path":"src/gone.rs"}"#.to_string(),
+        };
+        annotate_latest_tool_observation(
+            &mut runtime,
+            &[],
+            &failed,
+            None,
+            &ToolOutcomeStatus::Failed,
+            Some(&ToolRisk::ReadOnly),
+            0,
+            None,
+            None,
+        );
+        runtime.messages.push(Message {
+            role: MessageRole::Tool,
+            content: "output".to_string(),
+            metadata: Metadata::new(),
+        });
+        let shell = AgentToolRequest {
+            call_id: agent_core::ToolCallId("shell-1".to_string()),
+            tool_name: "shell.run".to_string(),
+            input: r#"{"command":"cat src/gone.rs"}"#.to_string(),
+        };
+        annotate_latest_tool_observation(
+            &mut runtime,
+            &[],
+            &shell,
+            None,
+            &ToolOutcomeStatus::Succeeded,
+            Some(&ToolRisk::ExecutesProcess),
+            0,
+            None,
+            None,
+        );
+
+        let recovered = agent_runtime::observed_locations_from_messages(&runtime.messages);
+        assert_eq!(recovered.len(), 2, "recovered was {recovered:?}");
+        let gone = recovered
+            .iter()
+            .find(|location| location.path == "src/gone.rs")
+            .expect("failed read is recorded");
+        assert!(!gone.succeeded);
+
+        // Binding the two locations classifies an answer citing both.
+        let receipt = agent_runtime::bind_answer_citations(
+            "Read crates/agent-rag/src/lib.rs:10 and src/gone.rs:4.",
+            &recovered,
+        );
+        assert_eq!(receipt.citations_checked, 2);
+        assert_eq!(receipt.supported, 1);
+        assert_eq!(receipt.contradicted, 1);
     }
 
     #[test]

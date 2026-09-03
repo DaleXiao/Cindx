@@ -149,3 +149,45 @@ fn persisted_target_witness_is_bound_to_epoch_tool_input_and_anchor_set() {
         4
     ));
 }
+
+#[test]
+fn a_line_reference_at_the_end_of_a_sentence_never_leaks_into_the_target() {
+    // The punctuation that ends a clause must not defeat the `:line` strip: a
+    // polluted target (`src/config.rs:12`) matches no real tool input, so the
+    // obligation it anchors could never be satisfied, and the same parse is what
+    // answer-citation binding relies on (P1-10).
+    let anchors = evidence_target_anchors("Confirm the fix in src/config.rs:12.");
+
+    assert!(anchors.contains(&EvidenceTargetAnchor::Workspace(
+        "src/config.rs".to_string()
+    )));
+    assert!(!anchors.iter().any(|anchor| matches!(
+        anchor,
+        EvidenceTargetAnchor::Workspace(path) if path.contains(':')
+    )));
+    assert!(evidence_input_matches_anchors(
+        r#"{"path":"src/config.rs"}"#,
+        &anchors
+    ));
+
+    let ranged = evidence_target_anchors("See crates/lib.rs:40-58, then stop.");
+    assert!(ranged.contains(&EvidenceTargetAnchor::Workspace(
+        "crates/lib.rs".to_string()
+    )));
+
+    // The same tokens expose their line reference to citation binding.
+    assert_eq!(
+        token_workspace_path_and_line("src/config.rs:12."),
+        Some(("src/config.rs".to_string(), Some(12), None))
+    );
+    assert_eq!(
+        token_workspace_path_and_line("crates/lib.rs:40-58,"),
+        Some(("crates/lib.rs".to_string(), Some(40), Some(58)))
+    );
+    assert_eq!(
+        token_workspace_path_and_line("docs/CURRENT.md#L12"),
+        Some(("docs/current.md".to_string(), Some(12), None))
+    );
+    // A bare time is not a path with a line reference.
+    assert_eq!(token_workspace_path_and_line("12:30"), None);
+}

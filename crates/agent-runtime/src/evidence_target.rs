@@ -293,7 +293,7 @@ fn significant_subject(word: &str) -> bool {
         )
 }
 
-fn tokens(value: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn tokens(value: &str) -> impl Iterator<Item = &str> {
     value
         .split(|character: char| {
             character.is_whitespace()
@@ -314,6 +314,11 @@ fn tokens(value: &str) -> impl Iterator<Item = &str> {
 }
 
 fn workspace_target(token: &str) -> Option<String> {
+    // Trailing sentence punctuation must go before the line-reference strip: a
+    // citation written at the end of a sentence (`src/foo.rs:12.` or
+    // `src/foo.rs:12,`) would otherwise keep its line number inside the path,
+    // which both weakens anchor matching and mis-binds an answer citation.
+    let token = trim_citation_punctuation(token);
     let token = strip_line_reference(token).trim_end_matches('.');
     if token.is_empty() || token.starts_with("http://") || token.starts_with("https://") {
         return None;
@@ -363,9 +368,29 @@ fn workspace_target(token: &str) -> Option<String> {
     (explicit_filename || explicit_path).then(|| normalized.to_ascii_lowercase())
 }
 
+/// Removes trailing sentence punctuation from a token so a path written at the
+/// end of a clause parses the same as one written mid-sentence.
+fn trim_citation_punctuation(value: &str) -> &str {
+    value.trim_end_matches(['.', ',', ';', ':', '\u{2026}', '\u{3002}', '\u{ff1b}'])
+}
+
+fn is_line_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn strip_line_reference(value: &str) -> &str {
     if let Some((path, line)) = value.rsplit_once(':') {
         if !path.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit()) {
+            return path;
+        }
+        // A `:start-end` range is the same kind of reference. Without this the
+        // range leaks into the path, and a target that carries it can never match
+        // a real tool input.
+        if !path.is_empty()
+            && line
+                .split_once('-')
+                .is_some_and(|(start, end)| is_line_digits(start) && is_line_digits(end))
+        {
             return path;
         }
     }
@@ -378,7 +403,47 @@ fn strip_line_reference(value: &str) -> &str {
     value
 }
 
-fn workspace_targets_match(target: &str, candidate: &str) -> bool {
+/// The `:line`, `:start-end`, or `#Lline` reference a token carries, if any.
+fn line_reference(value: &str) -> Option<(u64, Option<u64>)> {
+    if let Some((_, suffix)) = value.rsplit_once(':') {
+        if let Some((start, end)) = suffix.split_once('-') {
+            if is_line_digits(start) && is_line_digits(end) {
+                if let (Ok(start), Ok(end)) = (start.parse::<u64>(), end.parse::<u64>()) {
+                    return Some((start, Some(end)));
+                }
+            }
+        }
+        if is_line_digits(suffix) {
+            return suffix.parse::<u64>().ok().map(|line| (line, None));
+        }
+    }
+    let lowercase = value.to_ascii_lowercase();
+    if let Some(index) = lowercase.rfind("#l") {
+        let suffix = &value[index + 2..];
+        if is_line_digits(suffix) {
+            return suffix.parse::<u64>().ok().map(|line| (line, None));
+        }
+    }
+    None
+}
+
+/// Splits a token into the same normalized workspace path the anchor parser
+/// produces plus its optional line reference, so a citation in a delivered answer
+/// and an evidence anchor in a prompt can never disagree about what a path is.
+pub(crate) fn token_workspace_path_and_line(
+    token: &str,
+) -> Option<(String, Option<u64>, Option<u64>)> {
+    // Trim first, exactly like the path parser does, so a citation written at the
+    // end of a sentence yields the same line reference as one written mid-clause.
+    let token = trim_citation_punctuation(token);
+    let reference = line_reference(token);
+    workspace_target(token).map(|path| match reference {
+        Some((start, end)) => (path, Some(start), end),
+        None => (path, None, None),
+    })
+}
+
+pub(crate) fn workspace_targets_match(target: &str, candidate: &str) -> bool {
     if target.contains('/') {
         let relative = target.trim_start_matches("./");
         candidate == target || candidate.ends_with(&format!("/{relative}"))
