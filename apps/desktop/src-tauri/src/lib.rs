@@ -42,6 +42,7 @@ mod collaboration_stage_runtime;
 mod configuration_models;
 mod configuration_persistence;
 mod custom_commands_runtime;
+mod delivery_verification_runtime;
 mod desktop_event_sink;
 mod desktop_prelude;
 mod direct_judge_runtime;

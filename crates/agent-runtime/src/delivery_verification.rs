@@ -1,3 +1,4 @@
+use crate::claim_evidence::{CitationStatus, ClaimEvidenceReceipt};
 use crate::{GroundedCompletionBasis, GroundedCompletionReceipt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -419,6 +420,19 @@ impl DeliveryVerificationStateV1 {
     }
 }
 
+impl DeliveryVerificationStatus {
+    /// The wire label a run records on its terminal metadata.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingVerification => "awaiting_verification",
+            Self::AwaitingRepair => "awaiting_repair",
+            Self::AwaitingRecheck => "awaiting_recheck",
+            Self::Passed => "passed",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
 fn repair_preserves_scope(
     initial: &DeliveryVerificationSubjectV1,
     repaired: &DeliveryVerificationSubjectV1,
@@ -633,9 +647,133 @@ fn strictly_increasing_strings(items: &[String]) -> bool {
     strictly_increasing(items.iter())
 }
 
+/// Turns one finding summary into the bounded, control-free text this contract
+/// accepts: at most [`MAX_DELIVERY_VERIFICATION_FINDING_SUMMARY_BYTES`] bytes,
+/// cut on a character boundary.
+fn bounded_finding_summary(summary: &str) -> String {
+    let mut cleaned: String = summary
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    while cleaned.len() > MAX_DELIVERY_VERIFICATION_FINDING_SUMMARY_BYTES {
+        let cut = cleaned
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= MAX_DELIVERY_VERIFICATION_FINDING_SUMMARY_BYTES)
+            .last()
+            .unwrap_or(0);
+        cleaned.truncate(cut);
+    }
+    cleaned.trim().to_string()
+}
+
+/// The deterministic verdict producer for this contract: it classifies a
+/// claim-evidence receipt into the typed finding vocabulary with no provider call.
+///
+/// A contradicted citation becomes
+/// [`DeliveryVerificationFindingKind::Contradiction`] and an unsupported one
+/// becomes [`DeliveryVerificationFindingKind::UnsupportedClaim`]. A receipt with no
+/// findings — including an answer that cites no workspace location at all —
+/// yields `Passed` with the empty finding list the contract requires.
+/// [`DeliveryVerificationFindingKind::OmittedObligation`] is deliberately never
+/// produced here: deciding that an answer omitted an obligation means reading the
+/// obligations, which a location-level binder does not do. Findings carry no
+/// obligation or evidence refs for the same reason — a ref would claim a binding
+/// this producer did not check.
+pub fn claim_evidence_verdict(
+    subject: &DeliveryVerificationSubjectV1,
+    claims: &ClaimEvidenceReceipt,
+) -> Result<DeliveryVerificationVerdictV1, DeliveryVerificationIssue> {
+    if !subject.contract_is_valid() {
+        return Err(DeliveryVerificationIssue::InvalidSubject);
+    }
+    // The claim receipt must have been computed over exactly the candidate this
+    // subject binds, so a receipt for one answer can never verify another.
+    if claims.answer_sha256 != subject.candidate_sha256 {
+        return Err(DeliveryVerificationIssue::VerdictBindingMismatch);
+    }
+    let findings = claims
+        .findings
+        .iter()
+        .take(MAX_DELIVERY_VERIFICATION_FINDINGS)
+        .map(|finding| DeliveryVerificationFinding {
+            kind: match finding.status {
+                CitationStatus::Contradicted => DeliveryVerificationFindingKind::Contradiction,
+                CitationStatus::Supported | CitationStatus::Unsupported => {
+                    DeliveryVerificationFindingKind::UnsupportedClaim
+                }
+            },
+            summary: bounded_finding_summary(&format!(
+                "{} citation `{}`: {}",
+                finding.status.label(),
+                finding.citation.display(),
+                finding.reason
+            )),
+            obligation_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let decision = if findings.is_empty() {
+        DeliveryVerificationDecision::Passed
+    } else {
+        DeliveryVerificationDecision::NeedsRevision
+    };
+    let mut verdict = DeliveryVerificationVerdictV1 {
+        schema: DELIVERY_VERIFICATION_VERDICT_SCHEMA.to_string(),
+        subject_sha256: subject.subject_sha256.clone(),
+        reviewed_objective_sha256: subject.objective_sha256.clone(),
+        decision,
+        reviewed_obligation_refs: subject.obligation_refs.clone(),
+        reviewed_evidence_refs: subject.evidence_refs.clone(),
+        findings,
+        receipt_sha256: String::new(),
+    };
+    validate_findings(subject, verdict.decision, &verdict.findings)?;
+    verdict.receipt_sha256 =
+        verdict_digest(&verdict).ok_or(DeliveryVerificationIssue::InvalidVerdictJson)?;
+    verdict
+        .contract_is_valid_for(subject)
+        .then_some(verdict)
+        .ok_or(DeliveryVerificationIssue::InvalidVerdictJson)
+}
+
+/// Binds the subject to the exact candidate bytes and reference context, records
+/// the deterministic claim verdict, and closes the state.
+///
+/// A `Passed` verdict terminates as `Passed`. A `NeedsRevision` verdict terminates
+/// as `Unverified` rather than resting in `AwaitingRepair`, because this contract
+/// attempts no repair of its own: the product's judge gate owns repair, and
+/// leaving the state open would report an unrepaired answer as still under review
+/// after the run has committed.
+pub fn verify_delivery_against_claims(
+    objective: &str,
+    candidate: &str,
+    receipt: &GroundedCompletionReceipt,
+    obligations: &[DeliveryVerificationObligation],
+    evidence: &[DeliveryVerificationEvidence],
+    claims: &ClaimEvidenceReceipt,
+) -> Result<DeliveryVerificationStateV1, DeliveryVerificationIssue> {
+    let subject =
+        DeliveryVerificationSubjectV1::bind(objective, candidate, receipt, obligations, evidence)?;
+    let verdict = claim_evidence_verdict(&subject, claims)?;
+    let mut state = DeliveryVerificationStateV1::new(subject)?;
+    state.record_initial_verdict(verdict)?;
+    if !state.is_terminal() {
+        state.fail_closed()?;
+    }
+    Ok(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claim_evidence::{bind_answer_citations, ObservedLocation, ObservedLocationKind};
     use crate::GROUNDED_COMPLETION_SCHEMA;
     use serde_json::{json, Value};
 
@@ -1045,6 +1183,135 @@ mod tests {
         assert_eq!(
             state.fail_closed(),
             Err(DeliveryVerificationIssue::InvalidTransition)
+        );
+    }
+
+    /// The deterministic producer: an answer whose citations all bind to observed
+    /// locations passes the contract with the empty finding list it requires.
+    #[test]
+    fn a_fully_bound_answer_passes_the_delivery_verification_contract() {
+        let claims = bind_answer_citations(CANDIDATE, &[]);
+        assert!(claims.findings.is_empty(), "this candidate cites nothing");
+
+        let state = verify_delivery_against_claims(
+            OBJECTIVE,
+            CANDIDATE,
+            &grounded_receipt(CANDIDATE),
+            &obligations(),
+            &evidence(),
+            &claims,
+        )
+        .expect("a claim receipt with no findings verifies");
+
+        assert_eq!(state.status(), DeliveryVerificationStatus::Passed);
+        assert!(state.is_terminal());
+        let verdict = state.initial_verdict().expect("verdict recorded");
+        assert_eq!(verdict.decision, DeliveryVerificationDecision::Passed);
+        assert!(verdict.findings.is_empty());
+        assert!(verdict.contract_is_valid_for(state.subject()));
+        // Full review coverage of the bound reference context.
+        assert_eq!(
+            verdict.reviewed_obligation_refs,
+            state.subject().obligation_refs
+        );
+        assert_eq!(
+            verdict.reviewed_evidence_refs,
+            state.subject().evidence_refs
+        );
+        assert_eq!(verdict.subject_sha256, state.subject().subject_sha256);
+    }
+
+    #[test]
+    fn an_unsupported_citation_closes_the_contract_as_unverified_with_a_typed_finding() {
+        const CITED: &str = "The fix is in src/invented.rs:12.";
+        let claims = bind_answer_citations(CITED, &[]);
+        assert_eq!(claims.unsupported, 1);
+
+        let state = verify_delivery_against_claims(
+            OBJECTIVE,
+            CITED,
+            &grounded_receipt(CITED),
+            &obligations(),
+            &evidence(),
+            &claims,
+        )
+        .expect("the state closes even when the verdict needs revision");
+
+        // No repair runs under this contract, so it closes unverified instead of
+        // resting in AwaitingRepair after the run has committed.
+        assert_eq!(state.status(), DeliveryVerificationStatus::Unverified);
+        assert!(state.is_terminal());
+        let verdict = state.initial_verdict().expect("verdict recorded");
+        assert_eq!(
+            verdict.decision,
+            DeliveryVerificationDecision::NeedsRevision
+        );
+        assert_eq!(verdict.findings.len(), 1);
+        assert_eq!(
+            verdict.findings[0].kind,
+            DeliveryVerificationFindingKind::UnsupportedClaim
+        );
+        assert!(
+            verdict.findings[0].summary.contains("src/invented.rs:12"),
+            "summary was {}",
+            verdict.findings[0].summary
+        );
+        // A location-level binder never claims an obligation or evidence binding.
+        assert!(verdict.findings[0].obligation_refs.is_empty());
+        assert!(verdict.findings[0].evidence_refs.is_empty());
+        assert!(verdict.contract_is_valid_for(state.subject()));
+    }
+
+    #[test]
+    fn a_contradicted_citation_is_recorded_as_a_contradiction_finding() {
+        const CITED: &str = "Confirmed at src/gone.rs:4.";
+        let claims = bind_answer_citations(
+            CITED,
+            &[ObservedLocation {
+                path: "src/gone.rs".to_string(),
+                kind: ObservedLocationKind::Read,
+                succeeded: false,
+            }],
+        );
+        assert_eq!(claims.contradicted, 1);
+
+        let state = verify_delivery_against_claims(
+            OBJECTIVE,
+            CITED,
+            &grounded_receipt(CITED),
+            &obligations(),
+            &evidence(),
+            &claims,
+        )
+        .expect("the state closes");
+
+        let verdict = state.initial_verdict().expect("verdict recorded");
+        assert_eq!(
+            verdict.findings[0].kind,
+            DeliveryVerificationFindingKind::Contradiction
+        );
+        assert_eq!(state.status(), DeliveryVerificationStatus::Unverified);
+        // OmittedObligation is reserved for a producer that reads obligations.
+        assert!(!verdict
+            .findings
+            .iter()
+            .any(|finding| finding.kind == DeliveryVerificationFindingKind::OmittedObligation));
+    }
+
+    #[test]
+    fn a_claim_receipt_for_a_different_answer_can_never_verify_this_candidate() {
+        let claims = bind_answer_citations("An entirely different answer.", &[]);
+
+        assert_eq!(
+            verify_delivery_against_claims(
+                OBJECTIVE,
+                CANDIDATE,
+                &grounded_receipt(CANDIDATE),
+                &obligations(),
+                &evidence(),
+                &claims
+            ),
+            Err(DeliveryVerificationIssue::VerdictBindingMismatch)
         );
     }
 }

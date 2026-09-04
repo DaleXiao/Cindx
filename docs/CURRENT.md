@@ -793,6 +793,15 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   observed locations, so a path seen only through, for example, a shell read is
   reported as unsupported. The receipt is additive judge evidence and never
   blocks delivery by itself.
+- The same claim-evidence receipt now drives the delivery-verification contract
+  (`cindx.agent.delivery-verification.v1`), which records a typed, digest-bound
+  state — `passed`, `unverified`, or `unbound` with its reason — on every
+  terminal commit. It is a record, not a gate: it never withholds an answer, and
+  the judge gate still owns repair and fail-closed. Its bound reference context
+  is each obligation's and evidence item's typed identity (kind, satisfaction,
+  source tool), not the underlying prose, because the deterministic producer does
+  not read that text; the digest binds it so a future provider-backed producer
+  cannot be handed a different context than the one recorded.
 - Current evidence does not establish general Auto/Pro superiority, successful
   prompt-evolution self-improvement, or external-benchmark parity.
 - The per-request `generation_temperature` override is produced by the

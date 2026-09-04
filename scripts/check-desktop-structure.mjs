@@ -4122,6 +4122,23 @@ assert(
   "The .cindx tree must stay under an aggregate quota with a TTL sweep that never touches semantic state"
 );
 assert(
+  agentRuntimeSource.includes("pub fn claim_evidence_verdict(") &&
+    agentRuntimeSource.includes("pub fn verify_delivery_against_claims(") &&
+    agentRuntimeSource.includes(
+      "a_fully_bound_answer_passes_the_delivery_verification_contract"
+    ) &&
+    agentRuntimeSource.includes(
+      "a_claim_receipt_for_a_different_answer_can_never_verify_this_candidate"
+    ) &&
+    rustLib.includes("pub(crate) fn record_delivery_verification_state(") &&
+    rustLib.includes("fn delivery_verification_reference_context(") &&
+    rustLib.includes("an_unbindable_subject_is_recorded_as_unbound_and_never_fails_the_commit") &&
+    agentCompletionRuntimeSource.includes(
+      "crate::delivery_verification_runtime::record_delivery_verification_state("
+    ),
+  "The delivery-verification contract must be driven by the deterministic claim verdict at finalization"
+);
+assert(
   rustLib.includes("run_planned_retrieval(") &&
     rustLib.includes("retrieval_plan: &WorkspaceRetrievalPlan") &&
     rustLib.includes('timed_retrieval_channel("semantic_rag"') &&

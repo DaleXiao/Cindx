@@ -527,6 +527,19 @@ pub(crate) fn finalize_agent_completion(
     {
         return Err("grounded terminal lineage validation failed".to_string());
     }
+    // P1-10: record the deterministic delivery-verification state for the exact
+    // committed answer bytes, beside the grounded-completion receipt and the
+    // outcome ledger. Additive and fail-open: an unbindable subject is recorded as
+    // `unbound` with its reason and never fails this commit, and nothing here
+    // changes what the user receives.
+    crate::delivery_verification_runtime::record_delivery_verification_state(
+        runtime,
+        prompt,
+        &final_answer,
+        &grounded_completion_receipt,
+        &terminal_outcome_ledger,
+        &mut terminal_metadata,
+    );
     let memory_attribution_observation =
         crate::memory_projection_runtime::attribution::CompletionMemoryAttributionObservation::from_runtime(
             runtime,

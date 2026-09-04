@@ -383,6 +383,28 @@ disagree about what a path is, and a line reference written at the end of a
 sentence no longer leaks into the target. An answer that cites nothing produces no
 block, so its judge prompt is byte-identical to the previous one.
 
+That same claim-evidence receipt now drives the delivery-verification contract,
+which was built and tested but had no verdict producer and therefore never ran.
+`agent_runtime::claim_evidence_verdict` is the deterministic producer: a
+contradicted citation becomes a `Contradiction` finding, an unsupported one an
+`UnsupportedClaim`, and a receipt with no findings — including an answer that
+cites nothing — yields `Passed` with the empty finding list the contract
+requires. `OmittedObligation` is never produced, because deciding that an answer
+omitted an obligation means reading the obligations, which a location-level binder
+does not do, and findings carry no obligation or evidence refs for the same
+reason. `verify_delivery_against_claims` binds the subject to the exact answer
+bytes and reference context, records that verdict, and closes the state: `Passed`
+terminates as passed, and `NeedsRevision` terminates as `Unverified` rather than
+resting in `AwaitingRepair`, since this contract attempts no repair of its own —
+the judge gate owns repair. The claim receipt must have been computed over exactly
+the candidate the subject binds, so a receipt for one answer can never verify
+another. At the terminal commit the desktop seam records the state
+(`cindx.agent.delivery-verification.v1`: status, subject digest, answer digest,
+citation count, verdict digest, finding count) beside the grounded-completion
+receipt and the outcome ledger. It is additive and fail-open: an unbindable
+subject is recorded as `unbound` with its reason, never fails a commit, and never
+changes what the user receives.
+
 The completion transaction persists terminal event, result, artifacts,
 lifecycle, learning evidence, the observed-use measurement for recalled
 memories, and cleanup under one attempt/epoch identity.
