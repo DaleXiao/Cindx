@@ -127,6 +127,15 @@ serves exactly the values that were loaded, and the caches, registries, generati
 counter, and exit flags all provably start empty, so a composed state cannot
 inherit another run's leftovers.
 
+The one startup read that can block for reasons outside the process — the provider
+API key from the login keychain — is bounded. `read_provider_api_key_bounded` gives
+the `SecItemCopyMatching` 1.5 seconds and then degrades to an empty key with a
+`startup.log` line, because a keychain waiting on an authorization prompt that a
+locked or asleep session cannot render would otherwise hang startup with no window
+and no log at all. `clone_provider_config` re-reads, bounded, whenever the
+in-memory key is empty and caches a success, so unlocking the session heals the
+next run without the user re-entering anything.
+
 Several workflows still cross desktop services by shared composition state, so this
 layer is not yet a thin adapter. Future refactors should move a complete owner and
 its tests behind a narrow interface; merely creating more sibling files would not

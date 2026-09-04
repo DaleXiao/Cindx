@@ -18,11 +18,13 @@ use std::{fs, io::Write};
 pub(crate) fn clone_provider_config(
     state: &tauri::State<'_, AppState>,
 ) -> Result<ProviderConfig, String> {
-    state
+    let mut config = state
         .provider_config
         .lock()
-        .map(|config| config.clone())
-        .map_err(|error| format!("provider config lock poisoned: {error}"))
+        .map_err(|error| format!("provider config lock poisoned: {error}"))?
+        .clone();
+    crate::provider_secret_store::refresh_missing_api_key(state, &mut config);
+    Ok(config)
 }
 
 pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: ProviderConfigInput) {

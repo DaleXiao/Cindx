@@ -891,7 +891,10 @@ const criticalDesktopAgentModuleBudgets = new Map([
   // (provider_secret_store); load/save keep the two integration calls.
   // 410 -> 425: the P2-01 load-time migration that repairs legacy
   // reviewer==executor configs (which silently skipped the delivery judge).
-  ["configuration_persistence.rs", 425],
+  // 425 -> 440: clone_provider_config now heals a keychain read that degraded at
+  // startup (locked or asleep session) through the keychain owner's bounded
+  // re-read, so a start without the key recovers on unlock.
+  ["configuration_persistence.rs", 440],
   ["event_persistence.rs", 180],
   ["event_security.rs", 500],
   ["permission_service.rs", 220],
@@ -4231,6 +4234,17 @@ assert(
     ) &&
     rustLib.includes("resuming_no_recovered_lifecycle_operations_is_a_no_op"),
   "The desktop composition root must own the load order and every AppState field, not the builder inside run()"
+);
+assert(
+  // The startup keychain read must be bounded and degrade instead of blocking:
+  // an unbounded SecItemCopyMatching hangs startup whenever the authorization
+  // prompt cannot be rendered (locked or asleep session).
+  rustLib.includes("pub(crate) fn read_provider_api_key_bounded(") &&
+    rustLib.includes("pub(crate) const KEYCHAIN_READ_TIMEOUT") &&
+    rustLib.includes("recv_timeout(timeout)") &&
+    rustLib.includes("a_bounded_keychain_read_returns_inside_its_bound") &&
+    !rustLib.includes("config.api_key = read_provider_api_key();"),
+  "The startup keychain read must be bounded and degrade instead of blocking startup"
 );
 // P2-05 ratchet: a command that runs on the thread that delivered the invoke must
 // be justified by name. Everything else is async and moves its body into a

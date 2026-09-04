@@ -31,6 +31,13 @@ The desktop app currently includes:
   first, then the inspector, before the thread gives up any floor space.
 - Schedules, model/provider settings, tools, MCP, skills, permissions, knowledge,
   personalization, appearance, and runtime diagnostics.
+- The provider API key lives in the macOS login keychain and the on-disk config
+  keeps only a reference. Every keychain read is bounded at 1.5 seconds: a keychain
+  that cannot show its authorization prompt — a locked session or an asleep
+  display — degrades to a start without the key and says so in `startup.log`,
+  instead of hanging startup with no window and no log line. Unlocking the session
+  makes the next run re-read the key by itself and cache it; re-entering the key in
+  Settings always works.
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed

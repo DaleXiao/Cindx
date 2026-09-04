@@ -20,6 +20,16 @@ use crate::configuration_models::ProviderConfig;
 const KEYCHAIN_SERVICE: &str = "Cindx provider";
 const KEYCHAIN_ACCOUNT: &str = "api-key";
 
+/// How long any keychain read may take before the app gives up on it. The read is
+/// a `SecItemCopyMatching`, which waits for a SecurityAgent authorization prompt
+/// when the calling binary's signature is not in the item's ACL — and that prompt
+/// cannot be rendered while the session is locked or the display is asleep, so an
+/// unbounded read hangs startup with no window and no log line. Bounding it turns
+/// that hang into a degraded start the user can see and recover from.
+#[cfg(target_os = "macos")]
+pub(crate) const KEYCHAIN_READ_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(1500);
+
 /// `errSecItemNotFound`: clearing an absent entry counts as success, matching
 /// the historical CLI behavior (exit code 44).
 #[cfg(target_os = "macos")]
@@ -45,6 +55,33 @@ pub(crate) fn read_provider_api_key() -> String {
         Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
         Err(_) => String::new(),
     }
+}
+
+/// The same read, bounded. Returns `None` when the read did not finish within
+/// [`KEYCHAIN_READ_TIMEOUT`] — the signature of a keychain waiting on a prompt that
+/// cannot be shown — in which case the caller degrades instead of waiting, and the
+/// reason is written to the startup log. A read that finishes late is dropped: its
+/// thread exits against a closed channel.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_provider_api_key_bounded(timeout: std::time::Duration) -> Option<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read_provider_api_key());
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(key) => Some(key),
+        Err(_) => {
+            crate::persistence_runtime::append_startup_log(
+                "provider api key read did not complete within the startup bound; the keychain is probably waiting on an authorization prompt that cannot be shown (locked or asleep session). Starting without the key: unlock the session and the next run re-reads it, or re-enter the key in Settings.",
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn read_provider_api_key_bounded(_timeout: std::time::Duration) -> Option<String> {
+    Some(String::new())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -86,12 +123,40 @@ pub(crate) fn config_for_disk(config: &ProviderConfig) -> ProviderConfig {
     disk
 }
 
+/// Re-read a missing API key from the keychain, bounded, and cache a success back
+/// into the managed config so the recovery happens once. A startup read degrades to
+/// "no key" when the session was locked or the display asleep; this is what makes
+/// unlocking the session heal the next run without the user re-entering anything.
+/// When the key is present it does nothing, so the common path costs no read.
+pub(crate) fn refresh_missing_api_key(
+    state: &tauri::State<'_, crate::app_state::AppState>,
+    config: &mut ProviderConfig,
+) {
+    if !config.api_key.is_empty() {
+        return;
+    }
+    let Some(key) = read_provider_api_key_bounded(KEYCHAIN_READ_TIMEOUT) else {
+        return;
+    };
+    if key.is_empty() {
+        return;
+    }
+    config.api_key = key.clone();
+    if let Ok(mut stored) = state.provider_config.lock() {
+        if stored.api_key.is_empty() {
+            stored.api_key = key;
+        }
+    }
+}
+
 /// The conf file carries only a credential reference: an empty api_key is
 /// filled from the login keychain. Legacy plaintext keys stay in memory
-/// until the next save migrates them.
+/// until the next save migrates them. The read is bounded: a keychain that
+/// cannot show its authorization prompt (locked or asleep session) degrades
+/// to an empty key rather than hanging startup.
 pub(crate) fn fill_api_key_from_keychain(config: &mut ProviderConfig) {
     if config.api_key.is_empty() {
-        config.api_key = read_provider_api_key();
+        config.api_key = read_provider_api_key_bounded(KEYCHAIN_READ_TIMEOUT).unwrap_or_default();
     }
 }
 
@@ -127,4 +192,24 @@ pub(crate) fn validate_provider_base_url_for_credentials(base_url: &str) -> Resu
         return Ok(());
     }
     Err(format!("unsupported provider scheme: {trimmed}"))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// The bound is the contract. Whatever the keychain is doing — item present,
+    /// item absent, or waiting on an authorization prompt that cannot be shown —
+    /// the call returns inside the bound plus scheduling slack, so startup can
+    /// never hang on it again.
+    #[test]
+    fn a_bounded_keychain_read_returns_inside_its_bound() {
+        let started = std::time::Instant::now();
+        let _key = read_provider_api_key_bounded(KEYCHAIN_READ_TIMEOUT);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < KEYCHAIN_READ_TIMEOUT + std::time::Duration::from_secs(3),
+            "the bounded keychain read took {elapsed:?}"
+        );
+    }
 }
