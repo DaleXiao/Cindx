@@ -863,6 +863,41 @@ fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
     }
 }
 
+/// The published-delete cleanup that both a project delete and a session delete
+/// run: managed-artifact retirement, browser session retirement, and the durable
+/// cleanup itself. Owned here rather than in either command module so the two
+/// never depend on each other.
+pub(crate) fn cleanup_published_delete_with_managed_artifacts(
+    state: &tauri::State<'_, AppState>,
+    project_id: &str,
+    project_root: &Path,
+    session_ids: &[String],
+    delete_project: bool,
+) -> Result<Option<MemoryLedger>, String> {
+    let initial_retirement = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|error| format!("store lock poisoned: {error}"))?;
+        plan_managed_artifact_retirement(&store, project_root, session_ids)?
+    };
+    retire_managed_browser_sessions(&initial_retirement)?;
+
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))?;
+    let retirement = plan_managed_artifact_retirement(&store, project_root, session_ids)?;
+    apply_managed_artifact_retirement(&retirement)?;
+    cleanup_published_delete(
+        &mut store,
+        project_id,
+        project_root,
+        session_ids,
+        delete_project,
+    )
+}
+
 #[cfg(test)]
 #[path = "project_lifecycle_runtime_tests.rs"]
 mod tests;

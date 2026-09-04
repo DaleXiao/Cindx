@@ -4224,27 +4224,6 @@ const syncIpcCommandAllowlist = new Set([
   // A non-Result return type cannot report a join failure, and the body is one
   // small file read.
   "get_personalization_config",
-  // Not yet converted: the project/session lifecycle mutations, which need
-  // project_commands.rs split first because it is at its cohesion budget.
-  "create_project",
-  "create_session",
-  "rename_project",
-  "delete_project",
-  "rename_session",
-  "set_session_effort",
-  "set_session_model",
-  "fork_session",
-  "archive_session",
-  "restore_session",
-  "delete_session",
-  "select_project",
-  "select_session",
-  "acknowledge_session_activity",
-  "save_workspace_root",
-  // Blocked on the skill install path's atomicity: main-thread serialization is
-  // currently what keeps two concurrent installs out of one directory.
-  "install_skill_package",
-  "install_skill_url",
 ]);
 const syncIpcCommands = [
   ...rustLib.matchAll(/#\[tauri::command\]\npub\(crate\) fn (\w+)\(/g),

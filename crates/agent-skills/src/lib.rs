@@ -875,4 +875,51 @@ mod tests {
         assert!(error.contains("unsafe skill path"));
         assert!(!root.exists());
     }
+    /// Publication is a rename of a unique staging directory, so concurrent
+    /// installs of one skill cannot interleave: exactly one wins, every loser fails
+    /// against the published directory, and no staging directory survives. This is
+    /// what lets the two install commands run off the invoke thread without relying
+    /// on the main thread's implicit serialization.
+    #[test]
+    fn concurrent_installs_of_one_skill_publish_exactly_one_and_leave_no_staging() {
+        let root = test_root();
+        let destination = root.join("skills");
+        let skill_files = || {
+            vec![SkillInstallFile {
+                path: PathBuf::from("demo/SKILL.md"),
+                bytes: b"---\nname: demo\ndescription: a demo skill\n---\n# Demo\nBody.".to_vec(),
+            }]
+        };
+
+        let outcomes: Vec<Result<String, String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| install_skill_files(&destination, skill_files())))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("install thread panicked"))
+                .collect()
+        });
+
+        let successes = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one install may publish: {outcomes:?}"
+        );
+        assert!(
+            destination.join("demo").join("SKILL.md").is_file(),
+            "the winner published a complete skill"
+        );
+        let staging = fs::read_dir(&destination)
+            .expect("read the skills root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("-install-"))
+            .collect::<Vec<_>>();
+        assert!(
+            staging.is_empty(),
+            "every loser must remove its own staging directory: {staging:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

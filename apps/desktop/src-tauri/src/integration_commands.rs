@@ -479,8 +479,23 @@ fn save_skill_preference_blocking(
     })
 }
 
+/// Decoding a data URL of up to 50 MB and extracting it is heavy enough to stall the
+/// UI, so this runs off the invoke thread (P2-05), with the same staging-plus-rename
+/// publication that makes concurrent installs safe.
 #[tauri::command]
-pub(crate) fn install_skill_package(
+pub(crate) async fn install_skill_package(
+    app: tauri::AppHandle,
+    input: SkillPackageInstallInput,
+) -> Result<SkillStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        install_skill_package_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("skill package install failed to join: {error}"))?
+}
+
+fn install_skill_package_blocking(
     state: tauri::State<'_, AppState>,
     input: SkillPackageInstallInput,
 ) -> Result<SkillStateView, String> {
@@ -509,8 +524,26 @@ pub(crate) fn skill_download_curl_args(url: &str) -> Vec<String> {
     argv
 }
 
+/// The download is a blocking `curl` and the install extracts up to 50 MB, so this
+/// runs off the invoke thread (P2-05). Concurrent installs are safe without the
+/// main thread's implicit serialization: `install_skill_archive` extracts into a
+/// unique staging directory and publishes with `fs::rename`, so a second install of
+/// the same skill fails against the non-empty published directory and cleans up its
+/// own staging.
 #[tauri::command]
-pub(crate) fn install_skill_url(
+pub(crate) async fn install_skill_url(
+    app: tauri::AppHandle,
+    input: SkillUrlInstallInput,
+) -> Result<SkillStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        install_skill_url_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("skill URL install failed to join: {error}"))?
+}
+
+fn install_skill_url_blocking(
     state: tauri::State<'_, AppState>,
     input: SkillUrlInstallInput,
 ) -> Result<SkillStateView, String> {

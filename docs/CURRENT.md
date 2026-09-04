@@ -792,22 +792,18 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   merge or retire one); the Tauri builder and command registration live in
   `app_bootstrap.rs`. Portable crates own substantial contracts, but desktop
   orchestration remains the primary coupling hotspot.
-- The commands whose bodies block for seconds to minutes, the read-only
-  projections the UI polls on navigation, and the mutating commands outside the
-  project/session lifecycle now run off the IPC thread, so the window stays
-  responsive during the Settings prompt test (one streamed model call), a manual
-  tool run and its permission resolution, a browser tool run and its permission
-  resolution, a sidecar health probe or configuration save, every panel, session,
-  undo, skill, and custom-command state read, schedule changes, project memory
-  updates, undo/redo execution, context compaction, trace export, MCP and search
-  configuration saves, attachment removal, and run cancellation. The remaining
-  synchronous commands are enumerated by name in the structure gate: the project
-  and session lifecycle mutations (create, rename, delete, fork, archive, restore,
-  select, effort/model, activity acknowledgement, workspace root), so a slow disk
-  or a large session delete can still stall the UI briefly; the two skill
-  installers; `get_personalization_config`, whose non-`Result` return cannot
-  report a join failure; and `pick_workspace_folder`, whose native folder panel
-  needs the main thread, plus the window and pure in-memory commands.
+- Every IPC command whose body can block now runs off the invoke thread: the
+  commands that block for seconds to minutes, the read-only projections the UI
+  polls on navigation, and all the mutating ones — schedules, project memory,
+  undo/redo, context compaction, trace export, MCP and search configuration,
+  attachments, artifacts, run cancellation, both skill installers, and the whole
+  project and session lifecycle. So the window stays responsive during a streamed
+  model call, a manual or browser tool run, a sidecar probe, a skill download, a
+  session delete or fork, and every panel read. Nine commands stay synchronous by
+  argument, enumerated by name in the structure gate: `pick_workspace_folder`
+  (its native folder panel needs the main thread), the two window commands, five
+  pure in-memory reads, and `get_personalization_config`, whose non-`Result`
+  return cannot report a join failure.
 - The frontend has been split into components and style sheets. A top-level
   error boundary converts an uncaught render error into a visible recovery
   panel (with reload) and records the stack in the startup log, so the

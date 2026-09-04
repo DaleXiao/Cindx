@@ -145,14 +145,31 @@ already a thin wrapper over `cancel_agent_task_blocking` — but its one interna
 caller, `cancel_schedule_run`, had to be repointed at that blocking path, since an
 async command cannot be called from a synchronous body.
 
+The last batch needed one structural change first: `project_commands.rs` stood at
+1199 lines, so fifteen wrappers would have exceeded the 1316-line module budget. It
+split along its real ownership axis instead — `project_commands` keeps projects, the
+workspace root, and the runtime status projection; `session_commands` owns the
+session lifecycle (create, rename, effort and model selection, title generation,
+fork, archive, restore, delete, select, activity acknowledgement); and the
+published-delete cleanup both of them call moved to `project_lifecycle_runtime`, so
+neither command module depends on the other. The split left them at 491 and 921
+lines, and the fifteen lifecycle mutations then converted with room to spare.
+
+The two skill installers converted once their publication path was checked rather
+than assumed. `install_skill_archive` extracts into a unique staging directory
+(`.{name}-install-{nonce}`), verifies `SKILL.md` inside it, publishes with
+`fs::rename`, and removes its staging on any failure, so two concurrent installs of
+one skill cannot interleave: exactly one rename wins and every loser fails against
+the non-empty published directory. An `agent-skills` test now pins that property —
+four racing installs yield one success, a complete published skill, and no staging
+leftovers — which is what removes the main thread from the installers' safety
+argument.
+
 What is still synchronous is enumerated by name in the structure gate rather than
-left implicit. The project and session lifecycle mutations (create, rename,
-delete, fork, archive, restore, select, effort/model selection, activity
-acknowledgement, workspace root) wait on `project_commands.rs` being split first:
-it is at its cohesion budget, and fifteen wrappers would exceed it. The two skill
-installers wait on the install path's atomicity. `get_personalization_config`
-cannot report a join failure because its return type is not a `Result`. The rest
-are the main-thread and pure in-memory commands described above.
+left implicit, and it is down to nine: `pick_workspace_folder`, whose `NSOpenPanel`
+modal needs a `MainThreadMarker` that is `None` inside `spawn_blocking`; the two
+window commands; five pure in-memory reads; and `get_personalization_config`, whose
+return type is not a `Result` and so cannot report a join failure.
 
 The gate enforces both directions: a command that runs on the invoke thread must
 appear in the allowlist by name, and every `async` command must move its body into
