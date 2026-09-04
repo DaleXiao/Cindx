@@ -21,8 +21,21 @@ use std::path::Path;
 use tauri::Manager;
 use tools::WebSearchConfig;
 
+/// The sidecar health probe spawns `sidecar --health` per configured endpoint and
+/// waits for each to exit, which can cost as long as a cold node start. A sync
+/// command would spend that on the IPC thread and stall the UI, so the body runs
+/// on a blocking task.
 #[tauri::command]
-pub(crate) fn get_sidecar_state(state: tauri::State<'_, AppState>) -> Result<SidecarState, String> {
+pub(crate) async fn get_sidecar_state(app: tauri::AppHandle) -> Result<SidecarState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_sidecar_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("sidecar state failed to join: {error}"))?
+}
+
+fn get_sidecar_state_blocking(state: tauri::State<'_, AppState>) -> Result<SidecarState, String> {
     let config = state
         .sidecar_config
         .lock()
@@ -31,8 +44,22 @@ pub(crate) fn get_sidecar_state(state: tauri::State<'_, AppState>) -> Result<Sid
     Ok(sidecar_state(&config, None))
 }
 
+/// Saving the sidecar configuration writes it to disk and then health-probes both
+/// endpoints, so it blocks for as long as `get_sidecar_state` does.
 #[tauri::command]
-pub(crate) fn save_sidecar_config(
+pub(crate) async fn save_sidecar_config(
+    app: tauri::AppHandle,
+    input: SidecarConfigInput,
+) -> Result<SidecarState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        save_sidecar_config_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("sidecar configuration save failed to join: {error}"))?
+}
+
+fn save_sidecar_config_blocking(
     state: tauri::State<'_, AppState>,
     input: SidecarConfigInput,
 ) -> Result<SidecarState, String> {

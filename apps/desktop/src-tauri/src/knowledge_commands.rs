@@ -870,8 +870,24 @@ pub(crate) fn compact_context(state: tauri::State<'_, AppState>) -> Result<Conte
     context_state(&store, &root, &run_context, Some(pack), None)
 }
 
+/// A browser tool run drives the browser sidecar, whose pages and network make its
+/// duration unbounded. It runs on a blocking task so the IPC thread stays free,
+/// behind the same `manual_tool_execution_gate` that serializes manual tool
+/// execution.
 #[tauri::command]
-pub(crate) fn run_browser_tool(
+pub(crate) async fn run_browser_tool(
+    app: tauri::AppHandle,
+    input: BrowserToolInput,
+) -> Result<Phase8State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        run_browser_tool_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("browser tool run failed to join: {error}"))?
+}
+
+fn run_browser_tool_blocking(
     state: tauri::State<'_, AppState>,
     input: BrowserToolInput,
 ) -> Result<Phase8State, String> {
@@ -964,8 +980,24 @@ pub(crate) fn run_browser_tool(
     phase8_state(&store, None).map_err(|error| error.to_string())
 }
 
+/// Resolving a browser permission executes the approved browser tool inline, so it
+/// inherits `run_browser_tool`'s unbounded duration and runs on a blocking task
+/// behind the same gate.
 #[tauri::command]
-pub(crate) fn resolve_browser_permission(
+pub(crate) async fn resolve_browser_permission(
+    app: tauri::AppHandle,
+    request_id: String,
+    decision: String,
+) -> Result<Phase8State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        resolve_browser_permission_blocking(state, request_id, decision)
+    })
+    .await
+    .map_err(|error| format!("browser permission resolution failed to join: {error}"))?
+}
+
+fn resolve_browser_permission_blocking(
     state: tauri::State<'_, AppState>,
     request_id: String,
     decision: String,

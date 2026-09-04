@@ -420,9 +420,26 @@ pub(crate) async fn validate_image_endpoint(
     .map_err(|error| format!("image endpoint validation task failed: {error}"))?
 }
 
+/// The Settings prompt test streams one full model call, bounded only by the
+/// provider's 180-second timeout. A sync command would hold the IPC thread for the
+/// whole call — no scrolling, no other command, no cancel — so the body runs on a
+/// blocking task. Streaming deltas are emitted from that task, which is already how
+/// the session-title and agent-run paths emit.
 #[tauri::command]
-pub(crate) fn send_model_prompt(
+pub(crate) async fn send_model_prompt(
     app: tauri::AppHandle,
+    prompt: String,
+) -> Result<Phase4State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        send_model_prompt_blocking(&app, state, prompt)
+    })
+    .await
+    .map_err(|error| format!("model prompt failed to join: {error}"))?
+}
+
+fn send_model_prompt_blocking(
+    app: &tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     prompt: String,
 ) -> Result<Phase4State, String> {

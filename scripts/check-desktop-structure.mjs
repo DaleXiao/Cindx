@@ -4189,6 +4189,32 @@ assert(
     rustLib.includes("subagent_aborts_an_in_flight_model_call_when_the_run_is_steered"),
   "A delegated subagent must leave a bounded durable run record, persist its answer, report its real stop reason, stop promptly on a steer, and run only on a model the user configured"
 );
+// P2-05: a command whose body can block for seconds or minutes must not run on the
+// thread that delivered the invoke. Each converted command is async, moves its body
+// into spawn_blocking, and keeps that body in a `_blocking` sibling so internal
+// callers stay untouched. The sync form must be gone, or the wait moves back onto
+// the UI thread.
+const blockingIpcCommands = [
+  ["get_sidecar_state", "sidecar state failed to join"],
+  ["save_sidecar_config", "sidecar configuration save failed to join"],
+  ["run_tool", "tool run failed to join"],
+  ["resolve_tool_permission", "tool permission resolution failed to join"],
+  ["run_browser_tool", "browser tool run failed to join"],
+  [
+    "resolve_browser_permission",
+    "browser permission resolution failed to join",
+  ],
+  ["send_model_prompt", "model prompt failed to join"],
+];
+for (const [name, joinMessage] of blockingIpcCommands) {
+  assert(
+    rustLib.includes(`pub(crate) async fn ${name}(`) &&
+      rustLib.includes(`fn ${name}_blocking(`) &&
+      rustLib.includes(joinMessage) &&
+      !rustLib.includes(`pub(crate) fn ${name}(`),
+    `${name} must run its blocking body off the IPC thread`
+  );
+}
 assert(
   rustLib.includes("run_planned_retrieval(") &&
     rustLib.includes("retrieval_plan: &WorkspaceRetrievalPlan") &&

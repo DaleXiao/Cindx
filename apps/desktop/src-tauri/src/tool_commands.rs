@@ -11,8 +11,27 @@ pub(crate) fn get_phase5_state(state: tauri::State<'_, AppState>) -> Result<Phas
     phase5_state(&store, None, &root).map_err(|error| error.to_string())
 }
 
+/// A manual tool run executes whichever tool the user picked, so its duration is
+/// the tool's own: a shell command, a network fetch, or a browser sidecar can take
+/// arbitrarily long. Running that on the IPC thread would freeze the UI for the
+/// whole call, so the body moves to a blocking task. `manual_tool_execution_gate`
+/// still serializes the executions themselves, exactly as the main thread used to
+/// serialize every command, so this changes where the wait happens and not how
+/// many tools run at once.
 #[tauri::command]
-pub(crate) fn run_tool(
+pub(crate) async fn run_tool(
+    app: tauri::AppHandle,
+    input: ToolRunInput,
+) -> Result<Phase5State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        run_tool_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("tool run failed to join: {error}"))?
+}
+
+fn run_tool_blocking(
     state: tauri::State<'_, AppState>,
     input: ToolRunInput,
 ) -> Result<Phase5State, String> {
@@ -101,8 +120,24 @@ pub(crate) fn run_tool(
     phase5_state(&store, None, &root).map_err(|error| error.to_string())
 }
 
+/// Resolving a manual tool permission executes the approved tool inline, so it
+/// inherits `run_tool`'s unbounded duration and runs on a blocking task for the
+/// same reason, behind the same `manual_tool_execution_gate`.
 #[tauri::command]
-pub(crate) fn resolve_tool_permission(
+pub(crate) async fn resolve_tool_permission(
+    app: tauri::AppHandle,
+    request_id: String,
+    decision: String,
+) -> Result<Phase5State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        resolve_tool_permission_blocking(state, request_id, decision)
+    })
+    .await
+    .map_err(|error| format!("tool permission resolution failed to join: {error}"))?
+}
+
+fn resolve_tool_permission_blocking(
     state: tauri::State<'_, AppState>,
     request_id: String,
     decision: String,

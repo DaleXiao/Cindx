@@ -108,6 +108,55 @@ workflows still cross desktop services by shared composition state. Future
 refactors should move a complete owner and its tests behind a narrow
 interface; merely creating more sibling files would not reduce coupling.
 
+### IPC command threading
+
+Tauri runs a non-`async` `#[tauri::command]` on the thread that delivered the
+invoke, so blocking work in a sync command body stalls the UI for its whole
+duration. The house rule is therefore: a command whose body can block for longer
+than a trivial in-memory read is `async fn` and moves its body into
+`tauri::async_runtime::spawn_blocking`, obtaining state inside the closure with
+`app.state::<AppState>()` and mapping the join error to a command-specific
+message. The original body stays in a `_blocking` sibling, so internal callers and
+the body's own indentation are untouched.
+
+Converted so far are the commands whose bodies block for seconds to minutes: the
+Settings prompt test (one streamed model call under a 180-second provider
+timeout), manual tool run and its permission resolution, browser tool run and its
+permission resolution (all four execute a tool of unbounded duration), and the
+sidecar state probe and sidecar configuration save (each waits on `sidecar
+--health` per endpoint, which can cost a cold node start). The store- and
+filesystem-bound lifecycle commands — project/session create, rename, delete,
+fork, archive, select, schedules, memory management, undo/redo, context
+compaction, trace export, and the phase-state readers — are still sync and are the
+next batch.
+
+Two classes stay sync deliberately. `pick_workspace_folder` cannot move: it needs
+a `MainThreadMarker` for `NSOpenPanel::runModal`, which is `None` inside
+`spawn_blocking`, so converting it would make the picker always fail. The window
+and pure in-memory commands (`reveal_main_window`, `set_sidebar_material_width`,
+`get_web_search_config`, `get_mcp_state`, `cancel_rag_operation`,
+`open_external_url`, `model_supports_thinking`) have no blocking body to move, and
+converting them would only add a task switch — and, for the window commands,
+delay the startup reveal.
+
+Moving off the main thread also removes the serialization the main thread used to
+provide implicitly, so a command may only be converted once its work is internally
+gated or genuinely concurrent-safe. That is why the four tool commands converted
+without a new lock: `manual_tool_execution_gate` already serializes manual tool
+execution. It is also why `install_skill_url` — a blocking `curl` download
+followed by extraction into `.cindx/skills` — waits for the install path's
+atomicity to be established before it moves.
+
+Lock discipline in this crate was audited rather than assumed. All 13 acquisitions
+of `session_lifecycle_gate` take it as the first lock in their scope, so it is
+always the outermost lock and no order can invert against it; the
+`provider_config_update` mutex has exactly one acquisition site, whose hold across
+the provider verification call is the serialization it exists for, with the
+configuration guard itself dropped after the clone. No production site unwraps or
+expects on a poisoned lock, no guard is held across an `.await` (the async
+commands hold guards only inside their synchronous closure), and read paths open a
+separate read-only connection instead of contending for the store mutex.
+
 ## Interactive Run Flow
 
 ### 1. Admission and identity

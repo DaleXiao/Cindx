@@ -782,10 +782,21 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
 - Project instruction files are enabled by default and can currently only be
   toggled or extended through `project_instructions.json` in the app support
   directory; a Settings UI is not wired yet.
-- `apps/desktop/src-tauri/src/lib.rs` is now a module index (around 230 lines);
-  the Tauri builder and command registration live in `app_bootstrap.rs`.
-  Portable crates own substantial contracts, but desktop orchestration
-  remains the primary coupling hotspot.
+- `apps/desktop/src-tauri/src/lib.rs` is now a module index (242 lines, 8 under
+  its 250-line structure-gate budget, so a change that adds a module must also
+  merge or retire one); the Tauri builder and command registration live in
+  `app_bootstrap.rs`. Portable crates own substantial contracts, but desktop
+  orchestration remains the primary coupling hotspot.
+- The commands whose bodies block for seconds to minutes now run off the IPC
+  thread, so the window stays responsive during the Settings prompt test (one
+  streamed model call), a manual tool run and its permission resolution, a browser
+  tool run and its permission resolution, and a sidecar health probe or sidecar
+  configuration save. The remaining store- and filesystem-bound commands —
+  project/session create, rename, delete, fork, archive, select, schedules, memory
+  management, undo/redo, context compaction, trace export, and the phase-state
+  readers — are still synchronous, so a slow disk or a large session delete can
+  still stall the UI briefly. `pick_workspace_folder` must stay synchronous: its
+  native folder panel needs the main thread.
 - The frontend has been split into components and style sheets. A top-level
   error boundary converts an uncaught render error into a visible recovery
   panel (with reload) and records the stack in the startup log, so the
