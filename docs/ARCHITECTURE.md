@@ -298,6 +298,17 @@ outcomes its own wire label. A steered child previously returned the
 stage-budget answer, so the parent model and the durable record were both told
 the delegation ran out of budget when the user had actually moved the goal.
 
+Steering also ends a child's work promptly, which is a responsiveness property
+rather than a labeling one. The child checks the epoch at its step boundary
+before charging another turn, and its streaming cancel closure treats a steer
+like a cancellation, so a model call already in flight for a superseded objective
+is aborted instead of run to completion. The parent is blocked in the delegation
+join until every child returns, so those two checks are what bound how long a
+steer has to wait; without them a steer could sit behind a full child turn per
+remaining step. An aborted call reports `steered`, never `provider_unavailable`,
+even though the transport surfaces it as a provider error: the reason recorded is
+the one the run actually had.
+
 The approval handshake also differs deliberately from the run-level
 suspend/resume mechanism. A subagent loop runs on a scoped thread inside the
 parent's tool batch, and its internal message history is not part of the

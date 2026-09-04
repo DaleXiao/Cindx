@@ -1165,3 +1165,84 @@ fn subagent_network_tool_fails_closed_without_a_capability_context() {
         "the observation must state the capability gap: {observation}"
     );
 }
+
+/// A provider whose single call is steered while it is in flight: the transport
+/// polls before the first byte (no steer yet, so the call starts), the user then
+/// steers, and the transport polls again mid-stream. Honoring that second poll is
+/// what stops the child; ignoring it would run the turn to completion for an
+/// objective the user had already moved.
+struct SteeringProvider {
+    control: Arc<AgentRunControl>,
+    served: AtomicUsize,
+}
+
+impl StreamingModelProvider for SteeringProvider {
+    fn complete_streaming_cancellable(
+        &self,
+        _request: ModelRequest,
+        _on_delta: &mut dyn FnMut(&str),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, model_provider::ModelError> {
+        if should_cancel() {
+            return Err(model_provider::ModelError::new("cancelled before start"));
+        }
+        self.served.fetch_add(1, Ordering::SeqCst);
+        self.control
+            .request_steer("queue-mid-call")
+            .expect("steer request");
+        if should_cancel() {
+            return Err(model_provider::ModelError::new("cancelled mid-stream"));
+        }
+        Ok(final_answer("a completed turn for a superseded objective"))
+    }
+}
+
+#[test]
+fn subagent_aborts_an_in_flight_model_call_when_the_run_is_steered() {
+    let (_workspace, registry, task_id) = fixture();
+    let control = Arc::new(AgentRunControl::new("fast"));
+    let provider = SteeringProvider {
+        control: control.clone(),
+        served: AtomicUsize::new(0),
+    };
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+
+    let outcome = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        None,
+        &[],
+        "default",
+    );
+
+    assert_eq!(outcome.stop_reason, SubagentStopReason::Steered);
+    assert!(
+        outcome.answer.contains("steered"),
+        "answer was {:?}",
+        outcome.answer
+    );
+    assert!(
+        !outcome.answer.contains("provider unavailable"),
+        "a steer is not a provider failure: {:?}",
+        outcome.answer
+    );
+    assert!(
+        !outcome.answer.contains("superseded objective"),
+        "the aborted turn's content must not be delivered as the answer: {:?}",
+        outcome.answer
+    );
+    assert_eq!(
+        provider.served.load(Ordering::SeqCst),
+        1,
+        "the call had already started when the steer arrived"
+    );
+    // One turn was attempted and no more: the child does not spend another call on
+    // a superseded objective, and the parent's join is released promptly.
+    assert_eq!(outcome.steps, 1);
+    assert_eq!(outcome.tool_calls, 0);
+}

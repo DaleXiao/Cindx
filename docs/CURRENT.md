@@ -102,8 +102,13 @@ The desktop app currently includes:
   share the run's budget and cannot run unbounded; the child is asked to cite
   file findings as `path:line`. The read-only tool policy and step budget live in
   `agent_runtime::subagent`. Multiple delegations in one batch run concurrently
-  (results rejoined in call order) and honour the parent run's cancellation, so
-  stopping a run aborts its subagents. While subagents run, the Agent actions
+  (results rejoined in call order) and honour the parent run's cancellation and
+  steering, so stopping a run aborts its subagents and a steer ends a delegation
+  at its step boundary — including aborting a child model call already in flight —
+  instead of letting the child finish a turn for an objective the user has already
+  moved. That matters because the parent is blocked in the delegation join until
+  every child returns, so a prompt child stop is what makes a steer take effect
+  quickly. While subagents run, the Agent actions
   header shows a per-subagent panel (one row each, orb while running, check when
   done) plus a "Running subagents done/total" status; the panel collapses when
   every delegation completes.

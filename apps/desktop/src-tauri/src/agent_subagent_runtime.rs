@@ -387,6 +387,20 @@ pub(crate) fn subagent_child_answer(
                 child_tool_calls,
             );
         }
+        // A steer supersedes this delegation, so the child stops at its step
+        // boundary rather than charging another turn for an objective the user has
+        // already moved. The parent stays blocked in the delegation join until
+        // every child returns, so stopping promptly here is what makes a steer
+        // responsive instead of waiting out the child's remaining turns.
+        if subagent_run_was_steered(cancellation) {
+            return child_outcome(
+                &description,
+                subagent_steered_answer(&last_content),
+                SubagentStopReason::Steered,
+                steps,
+                child_tool_calls,
+            );
+        }
         steps += 1;
         // Charge the model call to the parent run's Worker stage budget; an
         // exhausted stage budget stops the child loop without stopping the run.
@@ -424,7 +438,12 @@ pub(crate) fn subagent_child_answer(
             mode: ModelCallMode::Streaming,
             metadata: request_metadata,
         };
-        let mut should_cancel = || agent_run_should_stop(cancellation);
+        // Cancellation and steering both end the child's work. Honoring the steer
+        // here also aborts an already-streaming call: without it the child kept
+        // receiving a full model turn for a superseded objective while the parent
+        // waited in the delegation join for it to finish.
+        let mut should_cancel =
+            || agent_run_should_stop(cancellation) || subagent_run_was_steered(cancellation);
         // Reserve a physical attempt on the unified ledger (audit P1-01): the
         // logical stage call above bounded the child loop, but the physical
         // tokens/attempts were never counted, so parallel children could
@@ -468,17 +487,19 @@ pub(crate) fn subagent_child_answer(
                 } else {
                     SubagentStopReason::ProviderUnavailable
                 };
-                return child_outcome(
-                    &description,
-                    if last_content.is_empty() {
-                        "Subagent could not run (provider unavailable).".to_string()
-                    } else {
-                        last_content
-                    },
-                    reason,
-                    steps,
-                    child_tool_calls,
-                );
+                // A call the run cancelled or steered away from says so; only a
+                // genuine provider failure blames the provider.
+                let answer = match reason {
+                    SubagentStopReason::ProviderUnavailable => {
+                        if last_content.is_empty() {
+                            "Subagent could not run (provider unavailable).".to_string()
+                        } else {
+                            last_content
+                        }
+                    }
+                    stopped => subagent_stop_answer(stopped, &last_content),
+                };
+                return child_outcome(&description, answer, reason, steps, child_tool_calls);
             }
         };
         last_content = response.message.content.clone();

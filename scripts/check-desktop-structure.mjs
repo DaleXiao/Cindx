@@ -4159,8 +4159,13 @@ assert(
     subagentRuntimeSource.includes(
       "const SUBAGENT_DESCRIPTION_MAX_CHARS: usize = agent_runtime::SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS;"
     ) &&
-    rustLib.includes("subagent_stopped_by_a_steer_is_not_reported_as_a_budget_exhaustion"),
-  "A delegated subagent must leave a bounded durable run record, persist its answer, and report its real stop reason"
+    subagentRuntimeSource.includes(
+      "agent_run_should_stop(cancellation) || subagent_run_was_steered(cancellation)"
+    ) &&
+    subagentRuntimeSource.includes("if subagent_run_was_steered(cancellation) {") &&
+    rustLib.includes("subagent_stopped_by_a_steer_is_not_reported_as_a_budget_exhaustion") &&
+    rustLib.includes("subagent_aborts_an_in_flight_model_call_when_the_run_is_steered"),
+  "A delegated subagent must leave a bounded durable run record, persist its answer, report its real stop reason, and stop promptly on a steer"
 );
 assert(
   rustLib.includes("run_planned_retrieval(") &&
