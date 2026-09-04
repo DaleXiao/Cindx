@@ -5,8 +5,22 @@ use crate::knowledge_generation_runtime::{
 };
 use crate::knowledge_runtime::rag_index_profile_matches_config;
 
+/// Replays the project memory ledger and reads the workspace knowledge snapshot,
+/// which opens the RAG index on a cache miss.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_phase7_state(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
+pub(crate) async fn get_phase7_state(app: tauri::AppHandle) -> Result<Phase7State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_phase7_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("knowledge state failed to join: {error}"))?
+}
+
+fn get_phase7_state_blocking(state: tauri::State<'_, AppState>) -> Result<Phase7State, String> {
     let root = active_workspace_root(&state)?;
     let project_id = active_project_id_for_memory(&state)?;
     let knowledge = active_workspace_knowledge_state_snapshot_for(&state, &root)?;
@@ -774,8 +788,21 @@ pub(crate) fn cancel_rag_operation(
     cancel_rag_operation_control(&state.rag_operation_controls, operation_id.trim())
 }
 
+/// Scans the browser events and audits for the panel.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_phase8_state(state: tauri::State<'_, AppState>) -> Result<Phase8State, String> {
+pub(crate) async fn get_phase8_state(app: tauri::AppHandle) -> Result<Phase8State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_phase8_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("browser state failed to join: {error}"))?
+}
+
+fn get_phase8_state_blocking(state: tauri::State<'_, AppState>) -> Result<Phase8State, String> {
     let store = state
         .store
         .lock()

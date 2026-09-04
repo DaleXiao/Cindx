@@ -1,9 +1,21 @@
 use super::*;
 
+/// Reads the workspace, tool registry, and skill catalog, so a registry cache
+/// miss costs filesystem scans. The UI polls it on navigation.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_runtime_status(
-    state: tauri::State<'_, AppState>,
-) -> Result<RuntimeStatus, String> {
+pub(crate) async fn get_runtime_status(app: tauri::AppHandle) -> Result<RuntimeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_runtime_status_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("runtime status failed to join: {error}"))?
+}
+
+fn get_runtime_status_blocking(state: tauri::State<'_, AppState>) -> Result<RuntimeStatus, String> {
     runtime_status(&state)
 }
 

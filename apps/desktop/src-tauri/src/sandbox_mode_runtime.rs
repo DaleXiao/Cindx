@@ -10,6 +10,7 @@
 
 use agent_core::{Event, Metadata, SandboxMode, SANDBOX_MODE_METADATA_KEY};
 use agent_storage::SqliteStore;
+use tauri::Manager;
 
 pub(crate) const SANDBOX_MODE_SCHEMA: &str = "cindx.sandbox-mode.v1";
 pub(crate) const SANDBOX_MODE_EVENT_KEY: &str = "sandbox_event";
@@ -139,8 +140,24 @@ pub(crate) fn set_session_sandbox_mode(
     Ok(mode.label().to_string())
 }
 
+/// Scans the session's events to fold out its effective sandbox mode.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_session_sandbox_mode(
+pub(crate) async fn get_session_sandbox_mode(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::app_state::AppState>();
+        get_session_sandbox_mode_blocking(state, session_id)
+    })
+    .await
+    .map_err(|error| format!("sandbox mode failed to join: {error}"))?
+}
+
+fn get_session_sandbox_mode_blocking(
     state: tauri::State<'_, crate::app_state::AppState>,
     session_id: String,
 ) -> Result<String, String> {

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
+use tauri::Manager;
 
 pub(crate) const WORKSPACE_UNDO_READ_MODEL_NAMESPACE: &str = "workspace-undo-v1";
 const WORKSPACE_UNDO_SCHEMA: &str = "cindx.workspace-undo-registry.v1";
@@ -526,8 +527,24 @@ fn change_undo_stack(
     .message())
 }
 
+/// Scans the session's events and stats every undo entry's target file.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_workspace_undo_state(
+pub(crate) async fn get_workspace_undo_state(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<WorkspaceUndoState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_workspace_undo_state_blocking(state, session_id)
+    })
+    .await
+    .map_err(|error| format!("workspace undo state failed to join: {error}"))?
+}
+
+fn get_workspace_undo_state_blocking(
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<WorkspaceUndoState, String> {

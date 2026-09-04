@@ -3,6 +3,7 @@ use crate::persistence_runtime::active_workspace_root;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tauri::Manager;
 
 pub(crate) const CUSTOM_COMMANDS_SCHEMA: &str = "cindx.custom-commands.v1";
 const MAX_CUSTOM_COMMAND_FILES: usize = 24;
@@ -130,8 +131,23 @@ fn home_directory() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Reads up to 24 command files from two roots on every call.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_custom_commands(
+pub(crate) async fn get_custom_commands(
+    app: tauri::AppHandle,
+) -> Result<CustomCommandsState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_custom_commands_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("custom commands failed to join: {error}"))?
+}
+
+fn get_custom_commands_blocking(
     state: tauri::State<'_, AppState>,
 ) -> Result<CustomCommandsState, String> {
     let workspace_root = active_workspace_root(&state)?;

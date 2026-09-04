@@ -119,16 +119,27 @@ than a trivial in-memory read is `async fn` and moves its body into
 message. The original body stays in a `_blocking` sibling, so internal callers and
 the body's own indentation are untouched.
 
-Converted so far are the commands whose bodies block for seconds to minutes: the
+Converted so far are two classes. The first blocks for seconds to minutes: the
 Settings prompt test (one streamed model call under a 180-second provider
 timeout), manual tool run and its permission resolution, browser tool run and its
 permission resolution (all four execute a tool of unbounded duration), and the
 sidecar state probe and sidecar configuration save (each waits on `sidecar
---health` per endpoint, which can cost a cold node start). The store- and
-filesystem-bound lifecycle commands — project/session create, rename, delete,
-fork, archive, select, schedules, memory management, undo/redo, context
-compaction, trace export, and the phase-state readers — are still sync and are the
-next batch.
+--health` per endpoint, which can cost a cold node start). The second is the
+read-only projections the UI polls on navigation and after every run: runtime
+status, project/session state, the permission, provider, tool, knowledge, and
+browser panel states, a session's sandbox mode, its workspace undo state, the
+skill catalog, and the custom commands. Those only read, and concurrent reads are
+already the norm here — the async agent-state commands have always opened their
+own read-only connection — so converting them introduces no new concurrency class.
+
+The mutating lifecycle commands are still sync and are the next batch: project and
+session create, rename, delete, fork, archive, select, the schedule commands,
+memory management, undo/redo execution, context compaction, trace export, and the
+configuration savers. Each needs its own serialization argument before it moves,
+because the main thread currently provides one implicitly. Two are already
+resolved: `cancel_agent_task` has a `_blocking` sibling and one internal caller
+(`cancel_schedule_run`) to repoint at it, and `install_skill_url` waits on the
+skill install path's atomicity.
 
 Two classes stay sync deliberately. `pick_workspace_folder` cannot move: it needs
 a `MainThreadMarker` for `NSOpenPanel::runModal`, which is `None` inside

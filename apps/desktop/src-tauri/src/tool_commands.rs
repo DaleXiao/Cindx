@@ -1,7 +1,20 @@
 use super::*;
 
+/// Scans the tool events and audits for the panel.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_phase5_state(state: tauri::State<'_, AppState>) -> Result<Phase5State, String> {
+pub(crate) async fn get_phase5_state(app: tauri::AppHandle) -> Result<Phase5State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_phase5_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("tool state failed to join: {error}"))?
+}
+
+fn get_phase5_state_blocking(state: tauri::State<'_, AppState>) -> Result<Phase5State, String> {
     let root = active_workspace_root(&state)?;
     let store = state
         .store

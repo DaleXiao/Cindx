@@ -1,7 +1,23 @@
 use super::*;
 
+/// Opens a read-only store connection and projects every session's snapshot; the
+/// UI polls it on navigation and after each run.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_project_session_state(
+pub(crate) async fn get_project_session_state(
+    app: tauri::AppHandle,
+) -> Result<ProjectSessionState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_project_session_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("project session state failed to join: {error}"))?
+}
+
+fn get_project_session_state_blocking(
     state: tauri::State<'_, AppState>,
 ) -> Result<ProjectSessionState, String> {
     let config = state

@@ -1,8 +1,21 @@
 use super::*;
 use crate::desktop_event_sink::DesktopEventSink;
 
+/// Scans the permission audits and events for the panel.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_phase3_state(state: tauri::State<'_, AppState>) -> Result<Phase3State, String> {
+pub(crate) async fn get_phase3_state(app: tauri::AppHandle) -> Result<Phase3State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_phase3_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("permission state failed to join: {error}"))?
+}
+
+fn get_phase3_state_blocking(state: tauri::State<'_, AppState>) -> Result<Phase3State, String> {
     let store = state
         .store
         .lock()
@@ -56,8 +69,21 @@ pub(crate) fn resolve_permission(
         .map_err(|error| error.to_string())
 }
 
+/// Scans the provider events for the panel.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_phase4_state(state: tauri::State<'_, AppState>) -> Result<Phase4State, String> {
+pub(crate) async fn get_phase4_state(app: tauri::AppHandle) -> Result<Phase4State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_phase4_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("provider state failed to join: {error}"))?
+}
+
+fn get_phase4_state_blocking(state: tauri::State<'_, AppState>) -> Result<Phase4State, String> {
     let config = clone_provider_config(&state)?;
     let mut store = state
         .store

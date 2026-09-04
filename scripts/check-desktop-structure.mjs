@@ -4189,11 +4189,12 @@ assert(
     rustLib.includes("subagent_aborts_an_in_flight_model_call_when_the_run_is_steered"),
   "A delegated subagent must leave a bounded durable run record, persist its answer, report its real stop reason, stop promptly on a steer, and run only on a model the user configured"
 );
-// P2-05: a command whose body can block for seconds or minutes must not run on the
-// thread that delivered the invoke. Each converted command is async, moves its body
-// into spawn_blocking, and keeps that body in a `_blocking` sibling so internal
-// callers stay untouched. The sync form must be gone, or the wait moves back onto
-// the UI thread.
+// P2-05: a command whose body blocks — for seconds on a model call or a tool the
+// user picked, or for a store/filesystem scan the UI polls on every navigation —
+// must not run on the thread that delivered the invoke. Each converted command is
+// async, moves its body into spawn_blocking, and keeps that body in a `_blocking`
+// sibling so internal callers stay untouched. The sync form must be gone, or the
+// wait moves back onto the UI thread.
 const blockingIpcCommands = [
   ["get_sidecar_state", "sidecar state failed to join"],
   ["save_sidecar_config", "sidecar configuration save failed to join"],
@@ -4205,6 +4206,17 @@ const blockingIpcCommands = [
     "browser permission resolution failed to join",
   ],
   ["send_model_prompt", "model prompt failed to join"],
+  ["get_runtime_status", "runtime status failed to join"],
+  ["get_skill_state", "skill state failed to join"],
+  ["get_project_session_state", "project session state failed to join"],
+  ["get_phase3_state", "permission state failed to join"],
+  ["get_phase4_state", "provider state failed to join"],
+  ["get_phase5_state", "tool state failed to join"],
+  ["get_phase7_state", "knowledge state failed to join"],
+  ["get_phase8_state", "browser state failed to join"],
+  ["get_session_sandbox_mode", "sandbox mode failed to join"],
+  ["get_workspace_undo_state", "workspace undo state failed to join"],
+  ["get_custom_commands", "custom commands failed to join"],
 ];
 for (const [name, joinMessage] of blockingIpcCommands) {
   assert(

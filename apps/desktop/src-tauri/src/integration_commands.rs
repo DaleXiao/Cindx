@@ -315,8 +315,21 @@ pub(crate) fn mcp_state_view(
     }
 }
 
+/// Loads the skill catalog from two filesystem roots on every call.
+///
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole read (P2-05).
 #[tauri::command]
-pub(crate) fn get_skill_state(state: tauri::State<'_, AppState>) -> Result<SkillStateView, String> {
+pub(crate) async fn get_skill_state(app: tauri::AppHandle) -> Result<SkillStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_skill_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("skill state failed to join: {error}"))?
+}
+
+fn get_skill_state_blocking(state: tauri::State<'_, AppState>) -> Result<SkillStateView, String> {
     let root = active_workspace_root(&state)?;
     let catalog = skill_catalog_for_root(&root);
     Ok(SkillStateView {
