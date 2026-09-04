@@ -1,6 +1,4 @@
-#[path = "agent_execution_provider_runtime.rs"]
-mod execution_providers;
-
+use crate::agent_execution_provider_runtime::build_agent_execution_providers;
 use crate::agent_loop_runtime::{
     execute_agent_loop_epoch_with_provider, AgentLoopExecutionOutcome,
 };
@@ -15,7 +13,6 @@ use agent_application::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, Agen
 use agent_core::AgentPolicy;
 use agent_core::{Message, Metadata, ModelRole, TaskId};
 use agent_runtime::{AgentLoopState, AgentRunControl};
-use execution_providers::build_agent_execution_providers;
 use std::path::Path;
 use std::sync::Arc;
 

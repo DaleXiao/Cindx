@@ -544,6 +544,12 @@ const agentResultEvidenceSource = read(
 const subagentRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_subagent_runtime.rs"
 );
+const subagentModelSource = read(
+  "apps/desktop/src-tauri/src/agent_subagent_model_runtime.rs"
+);
+const subagentOutcomeSource = read(
+  "apps/desktop/src-tauri/src/agent_subagent_outcome_runtime.rs"
+);
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = readRustCrateSource("agent-memory");
 const agentRuntimeSource = readRustCrateSource("agent-runtime");
@@ -4149,9 +4155,6 @@ assert(
     agentRuntimeSource.includes("a_record_with_counters_past_the_child_caps_fails_closed") &&
     agentRuntimeSource.includes("every_stop_reason_has_a_distinct_stable_wire_label") &&
     agentRuntimeSource.includes("pub struct SubagentChildOutcome") &&
-    subagentRuntimeSource.includes("fn subagent_stage_stop_reason(") &&
-    subagentRuntimeSource.includes("fn subagent_run_was_steered(") &&
-    subagentRuntimeSource.includes("fn persist_subagent_result_message(") &&
     subagentRuntimeSource.includes("SubagentRunRecord::new(") &&
     subagentRuntimeSource.includes(
       "persist_subagent_result_message(state, &runtime.task_id, run_context, message)"
@@ -4163,9 +4166,28 @@ assert(
       "agent_run_should_stop(cancellation) || subagent_run_was_steered(cancellation)"
     ) &&
     subagentRuntimeSource.includes("if subagent_run_was_steered(cancellation) {") &&
+    subagentRuntimeSource.includes("use crate::agent_subagent_model_runtime::{") &&
+    subagentRuntimeSource.includes("use crate::agent_subagent_outcome_runtime::{") &&
+    subagentModelSource.includes("pub(crate) struct SubagentModelChoice") &&
+    subagentModelSource.includes("pub(crate) fn subagent_model_choice(") &&
+    subagentModelSource.includes("pub(crate) fn subagent_model_providers(") &&
+    subagentModelSource.includes("config.serves_model(&requested)") &&
+    subagentModelSource.includes("build_subagent_provider(") &&
+    subagentOutcomeSource.includes("pub(crate) fn subagent_stage_stop_reason(") &&
+    subagentOutcomeSource.includes("pub(crate) fn persist_subagent_result_message(") &&
+    subagentOutcomeSource.includes("pub(crate) fn subagent_steered_answer(") &&
+    rustLib.includes("pub(crate) fn serves_model(&self, name: &str) -> bool") &&
+    rustLib.includes("pub(super) fn build_subagent_provider(") &&
+    rustLib.includes("mod agent_execution_provider_runtime;") &&
+    rustLib.includes("a_delegation_model_is_honored_only_when_the_configuration_can_serve_it") &&
+    rustLib.includes("honored_model_choices_get_one_provider_each_and_the_run_model_gets_none") &&
+    toolsSource.includes('"model":{"type":"string"}') &&
+    toolsSource.includes("the_task_schema_declares_model_as_an_optional_override") &&
+    agentRuntimeSource.includes("pub requested_model: String") &&
+    agentRuntimeSource.includes('"subagent_model_requested"') &&
     rustLib.includes("subagent_stopped_by_a_steer_is_not_reported_as_a_budget_exhaustion") &&
     rustLib.includes("subagent_aborts_an_in_flight_model_call_when_the_run_is_steered"),
-  "A delegated subagent must leave a bounded durable run record, persist its answer, report its real stop reason, and stop promptly on a steer"
+  "A delegated subagent must leave a bounded durable run record, persist its answer, report its real stop reason, stop promptly on a steer, and run only on a model the user configured"
 );
 assert(
   rustLib.includes("run_planned_retrieval(") &&

@@ -226,8 +226,12 @@ pub struct SubagentRunRecord {
     pub tool_calls: usize,
     pub answer_bytes: usize,
     pub answer_sha256: String,
-    /// The model the run's actor provider serves, as configured for this run.
+    /// The model that actually served this child: its own choice when the run
+    /// could honor it, otherwise the run's model.
     pub model: String,
+    /// The model the delegation asked for, empty when it asked for none. Kept
+    /// beside `model` so a fallback is visible instead of silent.
+    pub requested_model: String,
     /// The effort tier propagated to the child's model calls.
     pub effort: String,
 }
@@ -241,6 +245,7 @@ impl SubagentRunRecord {
         outcome: &SubagentChildOutcome,
         write: bool,
         model: &str,
+        requested_model: &str,
         effort: &str,
     ) -> Self {
         let bounded_description: String = outcome
@@ -264,6 +269,7 @@ impl SubagentRunRecord {
             answer_bytes: outcome.answer.len(),
             answer_sha256: subagent_answer_sha256(&outcome.answer),
             model: model.trim().to_string(),
+            requested_model: requested_model.trim().to_string(),
             effort: effort.trim().to_string(),
         }
     }
@@ -308,6 +314,14 @@ impl SubagentRunRecord {
             ("subagent_effort", self.effort.as_str()),
         ] {
             metadata.insert(key.to_string(), value.to_string());
+        }
+        // Written only when a delegation actually asked for one, so the common
+        // case carries no empty key and a present key means a real request.
+        if !self.requested_model.is_empty() {
+            metadata.insert(
+                "subagent_model_requested".to_string(),
+                self.requested_model.clone(),
+            );
         }
         true
     }
@@ -497,6 +511,7 @@ mod tests {
             ),
             true,
             "qwen3.8-max",
+            "gpt-5-mini",
             "high",
         );
         assert!(record.contract_is_valid());
@@ -537,7 +552,13 @@ mod tests {
         );
         assert_eq!(
             metadata.get("subagent_model").map(String::as_str),
-            Some("qwen3.8-max")
+            Some("qwen3.8-max"),
+            "the record names the model that actually served the child"
+        );
+        assert_eq!(
+            metadata.get("subagent_model_requested").map(String::as_str),
+            Some("gpt-5-mini"),
+            "an unhonored request stays visible next to the model that ran"
         );
         assert_eq!(
             metadata.get("subagent_effort").map(String::as_str),
@@ -565,6 +586,7 @@ mod tests {
             ),
             false,
             "m",
+            "",
             "fast",
         );
         assert_eq!(
@@ -572,12 +594,22 @@ mod tests {
             SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS
         );
         assert!(bounded.contract_is_valid());
+        // A delegation that asked for no model carries no request key, so a
+        // present key always means a real request.
+        let mut bounded_metadata = Metadata::new();
+        assert!(bounded.insert_metadata(&mut bounded_metadata));
+        assert_eq!(
+            bounded_metadata.get("subagent_model").map(String::as_str),
+            Some("m")
+        );
+        assert!(!bounded_metadata.contains_key("subagent_model_requested"));
 
         let blank = SubagentRunRecord::new(
             "call_1",
             &SubagentChildOutcome::new("   ", "", SubagentStopReason::Refused, 0, 0),
             false,
             "m",
+            "",
             "fast",
         );
         assert_eq!(
@@ -607,6 +639,7 @@ mod tests {
             ),
             false,
             "m",
+            "",
             "fast",
         );
         assert!(record.contract_is_valid());

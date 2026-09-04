@@ -130,6 +130,16 @@ The desktop app currently includes:
   record — rather than as a `stage_budget` exhaustion it did not have. A refused
   delegation records on its refusal event, because it never starts a child and so
   never emits a finish event.
+  A delegation may also name the model it runs on: `task` accepts an optional
+  `model`, honored only when the user's own configuration can serve it — a model
+  in the enabled catalog, or one the user pinned to a tier or role slot — so a
+  name nobody configured never reaches the provider. An unavailable name, an
+  unreadable configuration, and no request at all each run on the run's own model,
+  and the record keeps both names so a fallback is never mistaken for a choice.
+  Children sharing an honored model share one provider built for it; a delegation
+  that keeps the run's model builds nothing and dispatches exactly as before. The
+  effort tier and the parent's Worker stage budget apply unchanged, so a
+  delegation cannot buy itself more calls or more time by changing model.
   A delegation may also set `allow_patches: true`: when the parent run's own
   prompt effect authority permits workspace effects, the child becomes a write
   subagent whose surface adds exactly `file.patch` and `file.patch_batch` (never

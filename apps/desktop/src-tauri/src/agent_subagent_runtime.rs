@@ -1,6 +1,13 @@
 use crate::agent_query_commands::{agent_run_should_stop, append_agent_progress_event};
+use crate::agent_subagent_model_runtime::{
+    subagent_model_choice, subagent_model_providers, SubagentModelChoice,
+};
+use crate::agent_subagent_outcome_runtime::{
+    child_outcome, persist_subagent_result_message, subagent_budget_answer,
+    subagent_run_was_steered, subagent_stage_stop_reason, subagent_steered_answer,
+    subagent_step_limit_answer, subagent_stop_answer, subagent_stopped_answer,
+};
 use crate::app_state::AppState;
-use crate::project_session_persistence::metadata_with_context;
 use crate::runtime_values::phase16_task_id;
 use agent_application::{insert_run_objectives, merge_persistable_run_context};
 use agent_core::{
@@ -75,10 +82,31 @@ pub(crate) fn execute_subagent_delegations(
         .get("agent_effort")
         .cloned()
         .unwrap_or_else(|| "default".to_string());
-    // The model the run's actor provider serves. Children share the parent's
-    // provider today; the record states which one answered the delegation.
+    // The model the run's actor provider serves. A delegation that names no model
+    // — the ordinary case — keeps it, so no second provider is built and the child
+    // dispatches exactly as before.
     let run_model = run_context.get("agent_model").cloned().unwrap_or_default();
-    for (call, write_mode) in task_calls.iter().zip(&write_modes) {
+    // Read the provider configuration once for this batch: it decides which
+    // delegation model choices the run can honor, and builds the providers for the
+    // honored ones. A poisoned lock honors nothing, so every child stays on the
+    // parent's actor provider and the record says that.
+    let provider_config = state
+        .provider_config
+        .lock()
+        .ok()
+        .map(|config| config.clone());
+    let delegation_models: Vec<SubagentModelChoice> = task_calls
+        .iter()
+        .map(|call| subagent_model_choice(provider_config.as_ref(), &run_model, &call.input))
+        .collect();
+    let delegation_providers = subagent_model_providers(
+        provider_config.as_ref(),
+        &delegation_models,
+        &run_model,
+        cancellation,
+    );
+    for ((call, write_mode), choice) in task_calls.iter().zip(&write_modes).zip(&delegation_models)
+    {
         let description = subagent_description(&call.input);
         let summary = match write_mode {
             SubagentWriteMode::ReadOnly => format!("Subagent started: {description}"),
@@ -91,7 +119,8 @@ pub(crate) fn execute_subagent_delegations(
         if matches!(write_mode, SubagentWriteMode::Refused) {
             // A refused delegation never starts a child, so this start event is
             // also its terminal one and carries the run record: no finish event
-            // will ever be emitted for it.
+            // will ever be emitted for it. Its model is the selection that never
+            // ran, which `refused` with zero steps already states.
             let record = SubagentRunRecord::new(
                 call.call_id.0.clone(),
                 &child_outcome(
@@ -102,7 +131,8 @@ pub(crate) fn execute_subagent_delegations(
                     0,
                 ),
                 true,
-                &run_model,
+                &choice.effective,
+                &choice.requested,
                 &reasoning_effort,
             );
             record.insert_metadata(&mut event_context);
@@ -125,7 +155,8 @@ pub(crate) fn execute_subagent_delegations(
         let handles: Vec<_> = task_calls
             .iter()
             .zip(&write_modes)
-            .map(|(call, write_mode)| {
+            .zip(&delegation_models)
+            .map(|((call, write_mode), choice)| {
                 if matches!(write_mode, SubagentWriteMode::Refused) {
                     // A refused write delegation never starts a child: it costs
                     // no model call and its answer states the refusal.
@@ -145,9 +176,17 @@ pub(crate) fn execute_subagent_delegations(
                 } else {
                     &read_only_tools
                 };
+                // An honored model choice has a provider built for it; anything
+                // else runs on the parent's actor provider, which already serves
+                // the run's model. The record names `choice.effective`, and this
+                // lookup is keyed on the same value, so the two can never disagree
+                // about which model answered the delegation.
                 Some(scope.spawn(|| {
                     subagent_child_answer(
-                        actor_provider,
+                        delegation_providers
+                            .get(&choice.effective)
+                            .map(|provider| provider as &dyn StreamingModelProvider)
+                            .unwrap_or(actor_provider),
                         &call.input,
                         cancellation,
                         registry,
@@ -169,9 +208,10 @@ pub(crate) fn execute_subagent_delegations(
                     Ok(outcome) => outcome,
                     // A panicking child reports zero counters: its step and
                     // tool-call counts lived on the thread that unwound, so the
-                    // record states the crash rather than inventing a total.
+                    // record states the crash rather than inventing a total. Its
+                    // description is still known from the delegation itself.
                     Err(_) => child_outcome(
-                        "delegated task",
+                        &subagent_description(&call.input),
                         "Subagent did not complete.".to_string(),
                         SubagentStopReason::Crashed,
                         0,
@@ -188,7 +228,12 @@ pub(crate) fn execute_subagent_delegations(
             })
             .collect()
     });
-    for ((call, write_mode), outcome) in task_calls.iter().zip(&write_modes).zip(outcomes) {
+    for (((call, write_mode), choice), outcome) in task_calls
+        .iter()
+        .zip(&write_modes)
+        .zip(&delegation_models)
+        .zip(outcomes)
+    {
         strip_subagent_call_id(runtime, &call.call_id.0);
         agent_runtime::append_internal_instruction(
             runtime,
@@ -222,7 +267,8 @@ pub(crate) fn execute_subagent_delegations(
                 call.call_id.0.clone(),
                 &outcome,
                 matches!(write_mode, SubagentWriteMode::Write),
-                &run_model,
+                &choice.effective,
+                &choice.requested,
                 &reasoning_effort,
             );
             if !record.insert_metadata(&mut event_context) {
@@ -584,90 +630,6 @@ pub(crate) fn subagent_child_answer(
         steps,
         child_tool_calls,
     )
-}
-
-/// The child loop's own report type lives in `agent_runtime::subagent` beside the
-/// caps it reports against, so the durable record and the eval harness read the
-/// same vocabulary; this helper only shortens the loop's seven stop sites.
-fn child_outcome(
-    description: &str,
-    answer: String,
-    stop_reason: SubagentStopReason,
-    steps: usize,
-    tool_calls: usize,
-) -> SubagentChildOutcome {
-    SubagentChildOutcome::new(description, answer, stop_reason, steps, tool_calls)
-}
-
-/// Whether the parent run's objective moved under this child: a steer is pending,
-/// or the child can no longer act on the epoch it started with.
-fn subagent_run_was_steered(cancellation: &Arc<AgentRunControl>) -> bool {
-    cancellation.has_pending_steer()
-        || !cancellation.objective_epoch_is_current(cancellation.steer_epoch())
-}
-
-/// Why a child's model-call reservation was refused. Cancellation wins, then a
-/// steer that superseded the delegation, then the Worker stage budget.
-fn subagent_stage_stop_reason(cancellation: &Arc<AgentRunControl>) -> SubagentStopReason {
-    if agent_run_should_stop(cancellation) {
-        SubagentStopReason::Cancelled
-    } else if subagent_run_was_steered(cancellation) {
-        SubagentStopReason::Steered
-    } else {
-        SubagentStopReason::StageBudget
-    }
-}
-
-/// The answer text for a child that stopped before finishing. Each reason keeps
-/// the wording the parent already receives for it, except `Steered`, which used
-/// to be indistinguishable from a stage-budget exhaustion.
-fn subagent_stop_answer(reason: SubagentStopReason, partial: &str) -> String {
-    match reason {
-        SubagentStopReason::Steered => subagent_steered_answer(partial),
-        SubagentStopReason::Cancelled => subagent_stopped_answer(partial),
-        SubagentStopReason::StepLimit => subagent_step_limit_answer(partial),
-        _ => subagent_budget_answer(partial),
-    }
-}
-
-fn subagent_steered_answer(partial: &str) -> String {
-    if partial.trim().is_empty() {
-        "Subagent stopped: the run was steered before this delegation produced an answer."
-            .to_string()
-    } else {
-        format!("{partial}\n\n[subagent stopped: superseded by user steering]")
-    }
-}
-
-/// Persist a delegation's `subagent_result` message as a durable `MessageAdded`
-/// event, with exactly the metadata the in-memory message carries plus the run
-/// context every persisted message carries.
-///
-/// Best-effort like the progress events: a store failure must not lose the
-/// in-memory result the parent is about to reason over.
-fn persist_subagent_result_message(
-    state: &tauri::State<'_, AppState>,
-    task_id: &TaskId,
-    run_context: &Metadata,
-    message: &Message,
-) {
-    let persisted = state
-        .store
-        .lock()
-        .map_err(|error| format!("store lock poisoned: {error}"))
-        .and_then(|mut store| {
-            crate::event_persistence::append_message_event_with_metadata(
-                &mut store,
-                task_id,
-                message.role.clone(),
-                &message.content,
-                metadata_with_context(message.metadata.clone(), run_context),
-            )
-            .map_err(|error| format!("failed to persist the subagent result message: {error}"))
-        });
-    if let Err(error) = persisted {
-        eprintln!("{error}");
-    }
 }
 
 /// The decision a write subagent's parked patch approval resolved to.
@@ -1232,30 +1194,6 @@ fn execute_worker_network_tool(
     tool.execute(invocation).unwrap_or_else(|error| {
         agent_core::ToolResult::failed(agent_core::ToolCallId(call_id.to_string()), error.message)
     })
-}
-
-fn subagent_stopped_answer(partial: &str) -> String {
-    if partial.trim().is_empty() {
-        "Subagent stopped before producing an answer.".to_string()
-    } else {
-        format!("{partial}\n\n[subagent stopped by run cancellation]")
-    }
-}
-
-fn subagent_budget_answer(partial: &str) -> String {
-    if partial.trim().is_empty() {
-        "Subagent exhausted its stage budget before producing an answer.".to_string()
-    } else {
-        format!("{partial}\n\n[subagent stopped: stage budget exhausted]")
-    }
-}
-
-fn subagent_step_limit_answer(partial: &str) -> String {
-    if partial.trim().is_empty() {
-        "Subagent reached its step limit without a final answer.".to_string()
-    } else {
-        format!("{partial}\n\n[subagent stopped: step limit {SUBAGENT_MAX_STEPS} reached]")
-    }
 }
 
 /// Remove a delegated `task` call id from the latest assistant message so the

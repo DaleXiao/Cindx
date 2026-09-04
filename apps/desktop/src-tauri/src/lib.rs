@@ -6,6 +6,7 @@ mod agent_effort_decision_runtime;
 // the orchestrator/conductor planning surface in run preparation.
 mod agent_effort_planner;
 mod agent_execution_constraint;
+mod agent_execution_provider_runtime;
 mod agent_failure_terminal_runtime;
 mod agent_finalizer_runtime;
 mod agent_grounded_response_runtime;
@@ -26,6 +27,8 @@ mod agent_runtime_snapshot;
 mod agent_runtime_snapshot_cursor;
 mod agent_steer_runtime;
 mod agent_strategy_receipt_runtime;
+mod agent_subagent_model_runtime;
+mod agent_subagent_outcome_runtime;
 mod agent_subagent_runtime;
 mod agent_summary_runtime;
 mod agent_terminal_commit_runtime;

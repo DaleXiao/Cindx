@@ -1,4 +1,5 @@
 use super::*;
+use crate::configuration_models::ProviderConfig;
 use agent_core::ModelToolCall;
 use model_provider::ModelResponse;
 use std::collections::VecDeque;
@@ -1245,4 +1246,133 @@ fn subagent_aborts_an_in_flight_model_call_when_the_run_is_steered() {
     // a superseded objective, and the parent's join is released promptly.
     assert_eq!(outcome.steps, 1);
     assert_eq!(outcome.tool_calls, 0);
+}
+
+/// A delegation may name a model, but only one the user configured can serve it;
+/// anything else falls back to the run's model, and the fallback keeps the request
+/// visible instead of silently pretending the choice was honored.
+#[test]
+fn a_delegation_model_is_honored_only_when_the_configuration_can_serve_it() {
+    let config = ProviderConfig {
+        model: "run-model".to_string(),
+        enabled_models: vec!["cheap-model".to_string()],
+        ..Default::default()
+    };
+
+    // No request at all: the run's own model, with nothing recorded as requested.
+    let plain = subagent_model_choice(Some(&config), "run-model", &delegation_input());
+    assert_eq!(plain.effective, "run-model");
+    assert_eq!(plain.requested, "");
+
+    // A model the user enabled is honored.
+    let honored = subagent_model_choice(
+        Some(&config),
+        "run-model",
+        r#"{"description":"broad search","model":"cheap-model"}"#,
+    );
+    assert_eq!(honored.effective, "cheap-model");
+    assert_eq!(honored.requested, "cheap-model");
+
+    // A name nobody configured never reaches the provider.
+    let invented = subagent_model_choice(
+        Some(&config),
+        "run-model",
+        r#"{"description":"broad search","model":"model-that-does-not-exist"}"#,
+    );
+    assert_eq!(
+        invented.effective, "run-model",
+        "an unavailable model falls back to the run's own"
+    );
+    assert_eq!(
+        invented.requested, "model-that-does-not-exist",
+        "the unhonored request stays visible in the record"
+    );
+
+    // A tier pin counts as configured even when the enabled catalog is empty,
+    // which is the default: an empty catalog means "everything" to the composer
+    // picker but cannot be checked here without a provider call.
+    let pinned = ProviderConfig {
+        model: "run-model".to_string(),
+        pro_model: "strong-model".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        subagent_model_choice(
+            Some(&pinned),
+            "run-model",
+            r#"{"description":"deep audit","model":"strong-model"}"#
+        )
+        .effective,
+        "strong-model"
+    );
+
+    // An unreadable configuration honors nothing rather than guessing.
+    let locked_out = subagent_model_choice(
+        None,
+        "run-model",
+        r#"{"description":"deep audit","model":"cheap-model"}"#,
+    );
+    assert_eq!(locked_out.effective, "run-model");
+    assert_eq!(locked_out.requested, "cheap-model");
+
+    // Blank and non-string values are no request at all.
+    for input in [
+        r#"{"description":"a","model":"   "}"#,
+        r#"{"description":"a","model":42}"#,
+        r#"{"description":"a"}"#,
+    ] {
+        let choice = subagent_model_choice(Some(&config), "run-model", input);
+        assert_eq!(choice.effective, "run-model", "input was {input}");
+        assert_eq!(choice.requested, "", "input was {input}");
+    }
+}
+
+#[test]
+fn honored_model_choices_get_one_provider_each_and_the_run_model_gets_none() {
+    let config = ProviderConfig {
+        model: "run-model".to_string(),
+        base_url: "http://127.0.0.1:9/v1".to_string(),
+        api_key: "test-key".to_string(),
+        enabled_models: vec!["cheap-model".to_string(), "strong-model".to_string()],
+        ..Default::default()
+    };
+    let control = Arc::new(AgentRunControl::new("fast"));
+    let choices = vec![
+        subagent_model_choice(
+            Some(&config),
+            "run-model",
+            r#"{"description":"a","model":"cheap-model"}"#,
+        ),
+        subagent_model_choice(
+            Some(&config),
+            "run-model",
+            r#"{"description":"b","model":"cheap-model"}"#,
+        ),
+        subagent_model_choice(
+            Some(&config),
+            "run-model",
+            r#"{"description":"c","model":"strong-model"}"#,
+        ),
+        subagent_model_choice(Some(&config), "run-model", &delegation_input()),
+        subagent_model_choice(
+            Some(&config),
+            "run-model",
+            r#"{"description":"e","model":"not-configured"}"#,
+        ),
+    ];
+
+    let providers = subagent_model_providers(Some(&config), &choices, "run-model", &control);
+
+    // One provider per distinct honored model: two children sharing a choice share
+    // a provider, the run's own model reuses the parent's actor provider, and an
+    // unhonored name gets none — so a child can never be recorded against a model
+    // that no provider actually served.
+    assert_eq!(providers.len(), 2);
+    assert!(providers.contains_key("cheap-model"));
+    assert!(providers.contains_key("strong-model"));
+    assert!(!providers.contains_key("run-model"));
+    assert!(!providers.contains_key("not-configured"));
+
+    // Without the configuration nothing is honored, so nothing is built.
+    assert!(subagent_model_providers(None, &choices, "run-model", &control).is_empty());
 }

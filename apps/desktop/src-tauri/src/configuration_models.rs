@@ -255,6 +255,36 @@ impl ProviderConfig {
         }
     }
 
+    /// Whether a model name is one this configuration can actually serve: the
+    /// user's enabled catalog, or a model the user pinned in a tier or role slot.
+    ///
+    /// A delegation may move its child only onto a model the user configured
+    /// somewhere, so a name the model invented can never reach the provider. An
+    /// empty `enabled_models` means "the whole catalog" to the composer's picker,
+    /// but it cannot mean that here: checking an arbitrary name against the
+    /// provider's live catalog would cost a network call per delegation, so an
+    /// unpinned name falls back to the run's own model instead.
+    pub(crate) fn serves_model(&self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        self.enabled_models.iter().any(|model| model.trim() == name)
+            || [
+                &self.model,
+                &self.conductor_model,
+                &self.planner_model,
+                &self.executor_model,
+                &self.reviewer_model,
+                &self.summarizer_model,
+                &self.fast_model,
+                &self.auto_model,
+                &self.pro_model,
+            ]
+            .iter()
+            .any(|model| model.trim() == name)
+    }
+
     pub(crate) fn model_for_conductor(&self) -> String {
         if self.conductor_model.trim().is_empty() {
             self.model_for_role(&ModelRole::Planner)

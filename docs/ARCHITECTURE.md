@@ -309,6 +309,35 @@ remaining step. An aborted call reports `steered`, never `provider_unavailable`,
 even though the transport surfaces it as a provider error: the reason recorded is
 the one the run actually had.
 
+A delegation may also run on its own model. `task` accepts an optional `model`,
+and `subagent_model_choice` honors it only when `ProviderConfig::serves_model`
+says the user's own configuration can serve it — the enabled catalog, or a model
+pinned to a tier or role slot. That check is deliberately narrower than the
+composer's picker, which reads an empty `enabled_models` as "the whole catalog":
+there is no durable catalog to check an arbitrary name against without a provider
+call per delegation, so an unpinned name falls back to the run's model instead of
+being sent to the provider to fail there. `subagent_model_providers` then builds
+one `OpenAiCompatibleProvider` per distinct honored model before any child spawns,
+with the timeout allowance of the Worker stage the child actually charges to, and
+children sharing a choice share a provider. A delegation that keeps the run's
+model gets no entry in that map and dispatches through the parent's actor
+provider, so the default path builds nothing and is unchanged. The record names
+both the model that served the child and the model it asked for, and the provider
+lookup is keyed on the same value the record names, so a fallback is visible
+rather than silent and the two can never disagree.
+`agent_execution_provider_runtime` became a crate-level module for this: it was a
+private nested module inside `agent_run_engine`, and a provider builder two
+runtimes need should not be reached through one of them.
+
+Ownership inside the desktop's subagent surface is split by responsibility rather
+than by size. `agent_subagent_runtime` runs the delegation batch and the child
+loop; `agent_subagent_model_runtime` decides which model serves a delegation and
+builds the providers for honored choices; `agent_subagent_outcome_runtime` owns
+how a child's stop is classified, phrased for the parent model, and persisted.
+Both dependencies point one way — the orchestrator and the loop call into them and
+neither calls back — so the vocabulary a steered or crashed child is reported with
+cannot be changed from inside the loop that produced it.
+
 The approval handshake also differs deliberately from the run-level
 suspend/resume mechanism. A subagent loop runs on a scoped thread inside the
 parent's tool batch, and its internal message history is not part of the

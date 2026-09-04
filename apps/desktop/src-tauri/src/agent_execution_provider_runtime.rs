@@ -38,6 +38,18 @@ fn agent_provider_timeout_seconds(cancellation: &AgentRunControl, stage: RunStag
     cancellation.stage_model_call_timeout_seconds(stage)
 }
 
+/// One provider serving a delegation's own model choice, with the timeout
+/// allowance of the stage a subagent actually charges to (Worker) rather than the
+/// parent's Actor stage. The parent's actor provider still serves every delegation
+/// that did not ask for a model, so the default path is unchanged.
+pub(super) fn build_subagent_provider(
+    config: &ProviderConfig,
+    model: &str,
+    cancellation: &AgentRunControl,
+) -> OpenAiCompatibleProvider {
+    build_provider(config, model, cancellation, RunStageClass::Worker)
+}
+
 #[cfg(test)]
 mod tests {
     use super::agent_provider_timeout_seconds;
