@@ -541,6 +541,9 @@ const directJudgeRuntimeSource = read(
 const agentResultEvidenceSource = read(
   "apps/desktop/src-tauri/src/agent_result_evidence.rs"
 );
+const subagentRuntimeSource = read(
+  "apps/desktop/src-tauri/src/agent_subagent_runtime.rs"
+);
 const graphSource = read("crates/agent-graph/src/lib.rs");
 const agentMemorySource = readRustCrateSource("agent-memory");
 const agentRuntimeSource = readRustCrateSource("agent-runtime");
@@ -4137,6 +4140,27 @@ assert(
       "crate::delivery_verification_runtime::record_delivery_verification_state("
     ),
   "The delivery-verification contract must be driven by the deterministic claim verdict at finalization"
+);
+assert(
+  agentRuntimeSource.includes('pub const SUBAGENT_RUN_SCHEMA: &str = "cindx.agent.subagent-run.v1"') &&
+    agentRuntimeSource.includes("pub enum SubagentStopReason") &&
+    agentRuntimeSource.includes("pub struct SubagentRunRecord") &&
+    agentRuntimeSource.includes("pub fn subagent_answer_sha256(") &&
+    agentRuntimeSource.includes("a_record_with_counters_past_the_child_caps_fails_closed") &&
+    agentRuntimeSource.includes("every_stop_reason_has_a_distinct_stable_wire_label") &&
+    agentRuntimeSource.includes("pub struct SubagentChildOutcome") &&
+    subagentRuntimeSource.includes("fn subagent_stage_stop_reason(") &&
+    subagentRuntimeSource.includes("fn subagent_run_was_steered(") &&
+    subagentRuntimeSource.includes("fn persist_subagent_result_message(") &&
+    subagentRuntimeSource.includes("SubagentRunRecord::new(") &&
+    subagentRuntimeSource.includes(
+      "persist_subagent_result_message(state, &runtime.task_id, run_context, message)"
+    ) &&
+    subagentRuntimeSource.includes(
+      "const SUBAGENT_DESCRIPTION_MAX_CHARS: usize = agent_runtime::SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS;"
+    ) &&
+    rustLib.includes("subagent_stopped_by_a_steer_is_not_reported_as_a_budget_exhaustion"),
+  "A delegated subagent must leave a bounded durable run record, persist its answer, and report its real stop reason"
 );
 assert(
   rustLib.includes("run_planned_retrieval(") &&

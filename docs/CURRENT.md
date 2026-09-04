@@ -86,7 +86,7 @@ The desktop app currently includes:
   fallback if tokenizer initialization fails.
 - Subagent delegation (borrowed from opencode/pi/deepseek-harness): a `task` tool
   delegates to a child run seeded with a bounded prefix of the parent's balanced
-  completed rounds (at most 32 messages, in-flight unpaired tool-call rounds
+  completed rounds (at most 48 messages, in-flight unpaired tool-call rounds
   excluded; an empty parent history keeps the former delegation-prompt-only
   shape) ahead of the subagent contract and the delegated task, and its answer
   returns to the parent as an internal instruction. The child runs a bounded read-only tool loop (not a single
@@ -107,6 +107,24 @@ The desktop app currently includes:
   header shows a per-subagent panel (one row each, orb while running, check when
   done) plus a "Running subagents done/total" status; the panel collapses when
   every delegation completes.
+  A delegation is durable at its boundaries. Its terminal progress event carries
+  a `cindx.agent.subagent-run.v1` record — the `task` call id, the description
+  bounded to 80 characters, the write flag, the stop reason, the model turns
+  attempted, the child tool calls executed, the answer's size and SHA-256, and
+  the model and effort tier that served it — and the answer itself is persisted
+  as the internal `subagent_result` message, so a delegated result survives an
+  app restart instead of being replaced by a synthetic "interrupted" tool
+  observation. That message is internal, so it never renders as a chat bubble,
+  while the recovery and resume transcripts do read it. The child's own
+  intermediate history is still not persisted. A record whose counters outran the
+  caps the child loop enforces, or that carries no call id, is not written at
+  all. The stop reason separates outcomes that used to share one answer:
+  `completed`, `step_limit`, `tool_call_budget`, `stage_budget`, `cancelled`,
+  `steered`, `provider_unavailable`, `crashed`, and `refused`. A child the user
+  steered away from is now reported as `steered` — to the parent model and in the
+  record — rather than as a `stage_budget` exhaustion it did not have. A refused
+  delegation records on its refusal event, because it never starts a child and so
+  never emits a finish event.
   A delegation may also set `allow_patches: true`: when the parent run's own
   prompt effect authority permits workspace effects, the child becomes a write
   subagent whose surface adds exactly `file.patch` and `file.patch_batch` (never

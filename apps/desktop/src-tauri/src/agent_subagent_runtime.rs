@@ -1,5 +1,6 @@
 use crate::agent_query_commands::{agent_run_should_stop, append_agent_progress_event};
 use crate::app_state::AppState;
+use crate::project_session_persistence::metadata_with_context;
 use crate::runtime_values::phase16_task_id;
 use agent_application::{insert_run_objectives, merge_persistable_run_context};
 use agent_core::{
@@ -11,7 +12,8 @@ use agent_runtime::{
     observation_from_agent_tool_result, observation_from_tool_result, prompt_completion_intent,
     subagent_patch_tool_allowed, subagent_tool_allowed, subagent_write_system_prompt,
     tool_input_fingerprint, tool_invocation_from_request, AgentRunControl, AgentToolRequest,
-    PromptEffectAuthority, RunStageClass, SUBAGENT_MAX_STEPS, SUBAGENT_MAX_TOOL_CALLS,
+    PromptEffectAuthority, RunStageClass, SubagentChildOutcome, SubagentRunRecord,
+    SubagentStopReason, SUBAGENT_MAX_STEPS, SUBAGENT_MAX_TOOL_CALLS,
 };
 use agent_storage::{PermissionStore, SqliteStore};
 use model_provider::{ModelCallMode, ModelRequest, StreamingModelProvider};
@@ -27,15 +29,25 @@ use tools::{Tool, ToolRegistry};
 pub(crate) const SUBAGENT_PERMISSION_ORIGIN_KEY: &str = "subagent";
 pub(crate) const SUBAGENT_PERMISSION_ORIGIN_VALUE: &str = "true";
 const SUBAGENT_PERMISSION_POLL_INTERVAL: Duration = Duration::from_millis(150);
-const SUBAGENT_DESCRIPTION_MAX_CHARS: usize = 80;
+/// One owner for the description bound: the durable run record and a write
+/// subagent's permission row must describe the same child with the same
+/// truncation, so they can never disagree about which delegation is which.
+const SUBAGENT_DESCRIPTION_MAX_CHARS: usize = agent_runtime::SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS;
 
 /// Split a tool-call batch, run any `task` delegations as isolated child
 /// completions (returning their answers as internal instructions), and hand back
 /// the remaining normal calls for regular execution. Delegations run concurrently
-/// (preserving call order), honour run cancellation, and emit transient
+/// (preserving call order), honour run cancellation, and emit durable
 /// started/finished progress events so the UI can show each subagent working.
 /// A delegation may request `allow_patches`; the write surface is granted only
 /// when the parent run's own prompt effect authority permits workspace effects.
+///
+/// Each delegation also leaves a durable [`SubagentRunRecord`] on its terminal
+/// progress event, and its `subagent_result` message is persisted where it is
+/// appended: both commit points downstream capture their `previous_message_count`
+/// after this function appended it, so without persisting it here the child's
+/// answer would exist only in memory and an app restart would replace it with a
+/// synthetic "interrupted" tool observation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_subagent_delegations(
     runtime: &mut agent_runtime::AgentLoopState,
@@ -56,6 +68,16 @@ pub(crate) fn execute_subagent_delegations(
         .iter()
         .map(|call| subagent_write_mode(run_context, &call.input))
         .collect();
+    // Propagate the parent run's effort tier to child model calls so subagents
+    // honor the tier's reasoning/thinking budget (audit: children previously ran
+    // with empty request metadata, so High/Xhigh reasoning never reached them).
+    let reasoning_effort = run_context
+        .get("agent_effort")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+    // The model the run's actor provider serves. Children share the parent's
+    // provider today; the record states which one answered the delegation.
+    let run_model = run_context.get("agent_model").cloned().unwrap_or_default();
     for (call, write_mode) in task_calls.iter().zip(&write_modes) {
         let description = subagent_description(&call.input);
         let summary = match write_mode {
@@ -65,7 +87,27 @@ pub(crate) fn execute_subagent_delegations(
                 format!("Write subagent refused: {description} (run forbids workspace effects)")
             }
         };
-        let _ = append_agent_progress_event(state, &runtime.task_id, run_context, &summary);
+        let mut event_context = run_context.clone();
+        if matches!(write_mode, SubagentWriteMode::Refused) {
+            // A refused delegation never starts a child, so this start event is
+            // also its terminal one and carries the run record: no finish event
+            // will ever be emitted for it.
+            let record = SubagentRunRecord::new(
+                call.call_id.0.clone(),
+                &child_outcome(
+                    &description,
+                    subagent_write_refused_answer(),
+                    SubagentStopReason::Refused,
+                    0,
+                    0,
+                ),
+                true,
+                &run_model,
+                &reasoning_effort,
+            );
+            record.insert_metadata(&mut event_context);
+        }
+        let _ = append_agent_progress_event(state, &runtime.task_id, &event_context, &summary);
     }
     // Resolve the subagent tool surfaces once, before spawning children, so
     // every child sees the same bounded whitelist.
@@ -79,14 +121,7 @@ pub(crate) fn execute_subagent_delegations(
         &runtime.messages,
         agent_runtime::SUBAGENT_CONTEXT_FORK_MAX_MESSAGES,
     );
-    // Propagate the parent run's effort tier to child model calls so subagents
-    // honor the tier's reasoning/thinking budget (audit: children previously ran
-    // with empty request metadata, so High/Xhigh reasoning never reached them).
-    let reasoning_effort = run_context
-        .get("agent_effort")
-        .cloned()
-        .unwrap_or_else(|| "default".to_string());
-    let answers: Vec<(String, String)> = std::thread::scope(|scope| {
+    let outcomes: Vec<SubagentChildOutcome> = std::thread::scope(|scope| {
         let handles: Vec<_> = task_calls
             .iter()
             .zip(&write_modes)
@@ -131,36 +166,72 @@ pub(crate) fn execute_subagent_delegations(
             .zip(&task_calls)
             .map(|(handle, call)| match handle {
                 Some(handle) => match handle.join() {
-                    Ok(answer) => answer,
-                    Err(_) => (
-                        "delegated task".to_string(),
+                    Ok(outcome) => outcome,
+                    // A panicking child reports zero counters: its step and
+                    // tool-call counts lived on the thread that unwound, so the
+                    // record states the crash rather than inventing a total.
+                    Err(_) => child_outcome(
+                        "delegated task",
                         "Subagent did not complete.".to_string(),
+                        SubagentStopReason::Crashed,
+                        0,
+                        0,
                     ),
                 },
-                None => (
-                    subagent_description(&call.input),
+                None => child_outcome(
+                    &subagent_description(&call.input),
                     subagent_write_refused_answer(),
+                    SubagentStopReason::Refused,
+                    0,
+                    0,
                 ),
             })
             .collect()
     });
-    for ((call, write_mode), (description, answer)) in
-        task_calls.iter().zip(&write_modes).zip(answers)
-    {
+    for ((call, write_mode), outcome) in task_calls.iter().zip(&write_modes).zip(outcomes) {
         strip_subagent_call_id(runtime, &call.call_id.0);
         agent_runtime::append_internal_instruction(
             runtime,
             "subagent_result",
-            &format!("Subagent result for {description:?}:\n{answer}"),
+            &format!(
+                "Subagent result for {:?}:\n{}",
+                outcome.description, outcome.answer
+            ),
         );
+        // Persist the appended result message where it is appended. It carries
+        // `internal=true`, so the chat projection skips it while the recovery and
+        // resume transcripts keep it: the delegated answer survives an app restart
+        // without surfacing a raw internal instruction in the thread.
+        if let Some(message) = runtime.messages.last() {
+            persist_subagent_result_message(state, &runtime.task_id, run_context, message);
+        }
         let summary = match write_mode {
-            SubagentWriteMode::ReadOnly => Some(format!("Subagent finished: {description}")),
-            SubagentWriteMode::Write => Some(format!("Write subagent finished: {description}")),
-            // The refusal was already announced when the delegation arrived.
+            SubagentWriteMode::ReadOnly => {
+                Some(format!("Subagent finished: {}", outcome.description))
+            }
+            SubagentWriteMode::Write => {
+                Some(format!("Write subagent finished: {}", outcome.description))
+            }
+            // The refusal was already announced, and recorded, when the
+            // delegation arrived.
             SubagentWriteMode::Refused => None,
         };
         if let Some(summary) = summary {
-            let _ = append_agent_progress_event(state, &runtime.task_id, run_context, &summary);
+            let mut event_context = run_context.clone();
+            let record = SubagentRunRecord::new(
+                call.call_id.0.clone(),
+                &outcome,
+                matches!(write_mode, SubagentWriteMode::Write),
+                &run_model,
+                &reasoning_effort,
+            );
+            if !record.insert_metadata(&mut event_context) {
+                eprintln!(
+                    "subagent run record for {:?} was not valid and was not recorded",
+                    outcome.description
+                );
+            }
+            let _ = append_agent_progress_event(state, &runtime.task_id, &event_context, &summary);
         }
     }
     normal_calls
@@ -277,7 +348,7 @@ pub(crate) fn subagent_child_answer(
     network: Option<SubagentNetworkContext<'_>>,
     parent_context: &[Message],
     reasoning_effort: &str,
-) -> (String, String) {
+) -> SubagentChildOutcome {
     let description = subagent_description(input_json);
     let input = serde_json::from_str::<serde_json::Value>(input_json).unwrap_or_default();
     let detail = input
@@ -303,17 +374,34 @@ pub(crate) fn subagent_child_answer(
     });
     let mut last_content = String::new();
     let mut child_tool_calls = 0usize;
+    // Model turns actually attempted, for the durable run record. A turn the
+    // cancel check skipped is not counted: it did no work.
+    let mut steps = 0usize;
     for _step in 0..SUBAGENT_MAX_STEPS {
         if agent_run_should_stop(cancellation) {
-            return (description, subagent_stopped_answer(&last_content));
+            return child_outcome(
+                &description,
+                subagent_stopped_answer(&last_content),
+                SubagentStopReason::Cancelled,
+                steps,
+                child_tool_calls,
+            );
         }
+        steps += 1;
         // Charge the model call to the parent run's Worker stage budget; an
         // exhausted stage budget stops the child loop without stopping the run.
         if cancellation
             .begin_stage_model_call("subagent", RunStageClass::Worker)
             .is_err()
         {
-            return (description, subagent_budget_answer(&last_content));
+            let reason = subagent_stage_stop_reason(cancellation);
+            return child_outcome(
+                &description,
+                subagent_stop_answer(reason, &last_content),
+                reason,
+                steps,
+                child_tool_calls,
+            );
         }
         // Propagate the parent run's effort tier so the child's model call honors
         // the tier's reasoning/thinking budget instead of defaulting to empty
@@ -357,23 +445,51 @@ pub(crate) fn subagent_child_answer(
         cancellation.finish_model_call();
         let response = match outcome {
             crate::model_resource_runtime::AuxModelCall::Response(response) => response,
+            // A refused physical attempt is either the Worker budget or a steer
+            // that superseded this delegation. The two are distinguishable, and
+            // reporting a steered child as a budget exhaustion tells the parent
+            // something false about why the delegation ended.
             crate::model_resource_runtime::AuxModelCall::BudgetExhausted => {
-                return (description, subagent_budget_answer(&last_content));
+                let reason = subagent_stage_stop_reason(cancellation);
+                return child_outcome(
+                    &description,
+                    subagent_stop_answer(reason, &last_content),
+                    reason,
+                    steps,
+                    child_tool_calls,
+                );
             }
-            _ => {
-                return (
-                    description,
+            crate::model_resource_runtime::AuxModelCall::Stopped
+            | crate::model_resource_runtime::AuxModelCall::ProviderError => {
+                let reason = if agent_run_should_stop(cancellation) {
+                    SubagentStopReason::Cancelled
+                } else if subagent_run_was_steered(cancellation) {
+                    SubagentStopReason::Steered
+                } else {
+                    SubagentStopReason::ProviderUnavailable
+                };
+                return child_outcome(
+                    &description,
                     if last_content.is_empty() {
                         "Subagent could not run (provider unavailable).".to_string()
                     } else {
                         last_content
                     },
-                )
+                    reason,
+                    steps,
+                    child_tool_calls,
+                );
             }
         };
         last_content = response.message.content.clone();
         if response.tool_calls.is_empty() {
-            return (description, last_content);
+            return child_outcome(
+                &description,
+                last_content,
+                SubagentStopReason::Completed,
+                steps,
+                child_tool_calls,
+            );
         }
         // Record the assistant turn (with its raw tool calls) so the next
         // request payload is well-formed, then execute each read-only call.
@@ -400,7 +516,13 @@ pub(crate) fn subagent_child_answer(
             // child rather than amplify tool calls unbounded across parallel
             // children; exhaustion stops the child, not the parent run.
             if child_tool_calls >= SUBAGENT_MAX_TOOL_CALLS {
-                return (description, subagent_budget_answer(&last_content));
+                return child_outcome(
+                    &description,
+                    subagent_budget_answer(&last_content),
+                    SubagentStopReason::ToolCallBudget,
+                    steps,
+                    child_tool_calls,
+                );
             }
             let observation = match &write {
                 Some(context) if subagent_patch_tool_allowed(&call.name) => {
@@ -434,7 +556,97 @@ pub(crate) fn subagent_child_answer(
             child_tool_calls += 1;
         }
     }
-    (description, subagent_step_limit_answer(&last_content))
+    child_outcome(
+        &description,
+        subagent_step_limit_answer(&last_content),
+        SubagentStopReason::StepLimit,
+        steps,
+        child_tool_calls,
+    )
+}
+
+/// The child loop's own report type lives in `agent_runtime::subagent` beside the
+/// caps it reports against, so the durable record and the eval harness read the
+/// same vocabulary; this helper only shortens the loop's seven stop sites.
+fn child_outcome(
+    description: &str,
+    answer: String,
+    stop_reason: SubagentStopReason,
+    steps: usize,
+    tool_calls: usize,
+) -> SubagentChildOutcome {
+    SubagentChildOutcome::new(description, answer, stop_reason, steps, tool_calls)
+}
+
+/// Whether the parent run's objective moved under this child: a steer is pending,
+/// or the child can no longer act on the epoch it started with.
+fn subagent_run_was_steered(cancellation: &Arc<AgentRunControl>) -> bool {
+    cancellation.has_pending_steer()
+        || !cancellation.objective_epoch_is_current(cancellation.steer_epoch())
+}
+
+/// Why a child's model-call reservation was refused. Cancellation wins, then a
+/// steer that superseded the delegation, then the Worker stage budget.
+fn subagent_stage_stop_reason(cancellation: &Arc<AgentRunControl>) -> SubagentStopReason {
+    if agent_run_should_stop(cancellation) {
+        SubagentStopReason::Cancelled
+    } else if subagent_run_was_steered(cancellation) {
+        SubagentStopReason::Steered
+    } else {
+        SubagentStopReason::StageBudget
+    }
+}
+
+/// The answer text for a child that stopped before finishing. Each reason keeps
+/// the wording the parent already receives for it, except `Steered`, which used
+/// to be indistinguishable from a stage-budget exhaustion.
+fn subagent_stop_answer(reason: SubagentStopReason, partial: &str) -> String {
+    match reason {
+        SubagentStopReason::Steered => subagent_steered_answer(partial),
+        SubagentStopReason::Cancelled => subagent_stopped_answer(partial),
+        SubagentStopReason::StepLimit => subagent_step_limit_answer(partial),
+        _ => subagent_budget_answer(partial),
+    }
+}
+
+fn subagent_steered_answer(partial: &str) -> String {
+    if partial.trim().is_empty() {
+        "Subagent stopped: the run was steered before this delegation produced an answer."
+            .to_string()
+    } else {
+        format!("{partial}\n\n[subagent stopped: superseded by user steering]")
+    }
+}
+
+/// Persist a delegation's `subagent_result` message as a durable `MessageAdded`
+/// event, with exactly the metadata the in-memory message carries plus the run
+/// context every persisted message carries.
+///
+/// Best-effort like the progress events: a store failure must not lose the
+/// in-memory result the parent is about to reason over.
+fn persist_subagent_result_message(
+    state: &tauri::State<'_, AppState>,
+    task_id: &TaskId,
+    run_context: &Metadata,
+    message: &Message,
+) {
+    let persisted = state
+        .store
+        .lock()
+        .map_err(|error| format!("store lock poisoned: {error}"))
+        .and_then(|mut store| {
+            crate::event_persistence::append_message_event_with_metadata(
+                &mut store,
+                task_id,
+                message.role.clone(),
+                &message.content,
+                metadata_with_context(message.metadata.clone(), run_context),
+            )
+            .map_err(|error| format!("failed to persist the subagent result message: {error}"))
+        });
+    if let Err(error) = persisted {
+        eprintln!("{error}");
+    }
 }
 
 /// The decision a write subagent's parked patch approval resolved to.

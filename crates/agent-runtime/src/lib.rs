@@ -157,8 +157,9 @@ pub use state_transaction::AgentLoopAppendTransaction;
 pub use subagent::{
     build_subagent_task_prompt, subagent_context_fork_prefix, subagent_patch_tool_allowed,
     subagent_system_prompt, subagent_tool_allowed, subagent_write_system_prompt,
-    SUBAGENT_ALLOWED_TOOLS, SUBAGENT_CONTEXT_FORK_MAX_MESSAGES, SUBAGENT_MAX_STEPS,
-    SUBAGENT_MAX_TOOL_CALLS, SUBAGENT_PATCH_TOOLS,
+    SubagentChildOutcome, SubagentRunRecord, SubagentStopReason, SUBAGENT_ALLOWED_TOOLS,
+    SUBAGENT_CONTEXT_FORK_MAX_MESSAGES, SUBAGENT_MAX_STEPS, SUBAGENT_MAX_TOOL_CALLS,
+    SUBAGENT_PATCH_TOOLS, SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS,
 };
 pub use task_contract::{
     AgentActionDenial, AgentActionDenialFeedback, AgentActionDenialKind, AgentActionDenialScope,

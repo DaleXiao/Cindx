@@ -266,6 +266,38 @@ started/finished events (`append_tool_proposed_event` /
 `append_tool_finished_event`) so child discovery is visible in the run's durable
 tool lineage, completing P1-01's tool-accounting unification.
 
+A delegation is durable at its boundaries, not in its middle. The child's own
+message history still lives only on its scoped thread — persisting it would make
+the durable transcript diverge from the in-memory one the parent reasons over —
+but the two things a parent needs after a restart are recorded. The appended
+`subagent_result` message is persisted where it is appended, because both commit
+points downstream capture their `previous_message_count` after the delegation
+appended it and would otherwise skip it, so a restart used to rebuild the
+transcript without the delegated answer and close the durable `task` call with a
+synthetic "interrupted" observation. The message carries `internal=true`, which
+the chat projection drops and the recovery and resume transcripts keep, so the
+answer survives without surfacing a raw internal instruction in the thread. The
+child's facts ride on its terminal progress event as a
+`cindx.agent.subagent-run.v1` record (`agent_runtime::SubagentRunRecord`): the
+`task` call id, the description bounded by the same
+`SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS` the permission path truncates to, the
+write flag, the stop reason, model turns attempted, child tool calls executed,
+the answer's size and digest, and the model and effort tier that served it. It
+stores the answer's digest rather than its text, so the two durable pieces
+corroborate each other without storing the answer twice, and it is written only
+when it stays inside the bounds the child loop itself enforces — a counter that
+outran its cap, or a record with no call id, fails closed and writes nothing. A
+refused delegation never starts a child and so never emits a finish event; its
+record rides on the refusal event instead.
+
+The same pass separated the stop reasons the child loop had been collapsing.
+`subagent_stage_stop_reason` reports `cancelled` for a stopped run, `steered` for
+an objective epoch the child can no longer act on, and `stage_budget` only for a
+real Worker-budget refusal, and `SubagentStopReason` gives each of the nine
+outcomes its own wire label. A steered child previously returned the
+stage-budget answer, so the parent model and the durable record were both told
+the delegation ran out of budget when the user had actually moved the goal.
+
 The approval handshake also differs deliberately from the run-level
 suspend/resume mechanism. A subagent loop runs on a scoped thread inside the
 parent's tool batch, and its internal message history is not part of the

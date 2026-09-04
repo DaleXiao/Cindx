@@ -5,7 +5,8 @@
 //! This module holds the deterministic policy; the child execution is wired by
 //! the desktop loop.
 
-use agent_core::{Message, MessageRole};
+use agent_core::{Message, MessageRole, Metadata};
+use sha2::{Digest, Sha256};
 
 // Raised from 8 so delegated work can run deeper multi-step loops.
 pub const SUBAGENT_MAX_STEPS: usize = 12;
@@ -114,6 +115,214 @@ pub fn subagent_tool_allowed(tool_name: &str) -> bool {
 /// browser, file.write, ...) is never part of the write-subagent surface.
 pub fn subagent_patch_tool_allowed(tool_name: &str) -> bool {
     SUBAGENT_PATCH_TOOLS.contains(&tool_name)
+}
+
+/// Schema of the durable record a delegated child run leaves behind.
+pub const SUBAGENT_RUN_SCHEMA: &str = "cindx.agent.subagent-run.v1";
+
+/// Description bound for a durable record. One owner for the bound: the
+/// permission path already truncates a write subagent's description to this
+/// length, so a record and its approval row always describe the same child.
+pub const SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS: usize = 80;
+
+/// How one delegated child finished.
+///
+/// A child that stopped because the user steered the parent run used to return
+/// the same "stage budget exhausted" answer a real Worker-budget exhaustion
+/// produces, so a redirected run looked like a child that ran out of budget. The
+/// vocabulary separates the two, and separates the step limit, the per-child
+/// tool-call cap, cancellation, provider failure, and a panicking child, so the
+/// durable record states what actually ended the delegation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStopReason {
+    /// The child answered without a further tool call.
+    Completed,
+    /// [`SUBAGENT_MAX_STEPS`] model turns elapsed without a final answer.
+    StepLimit,
+    /// [`SUBAGENT_MAX_TOOL_CALLS`] child tool calls were executed.
+    ToolCallBudget,
+    /// The parent run's Worker stage budget refused another physical attempt.
+    StageBudget,
+    /// The user cancelled the parent run.
+    Cancelled,
+    /// The user steered the parent run, superseding this delegation.
+    Steered,
+    /// The provider errored or was unavailable.
+    ProviderUnavailable,
+    /// The child thread panicked.
+    Crashed,
+    /// The delegation never started: `allow_patches` was refused fail-closed.
+    Refused,
+}
+
+impl SubagentStopReason {
+    /// The wire label recorded on the durable event.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::StepLimit => "step_limit",
+            Self::ToolCallBudget => "tool_call_budget",
+            Self::StageBudget => "stage_budget",
+            Self::Cancelled => "cancelled",
+            Self::Steered => "steered",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::Crashed => "crashed",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+/// One delegated child's own report: what it was asked, what it answered, and how
+/// it stopped. The stop reason travels with the answer so a child that was
+/// steered, cancelled, crashed, or ran out of steps is never reported to the
+/// parent — or to the durable record — as something it was not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentChildOutcome {
+    pub description: String,
+    pub answer: String,
+    pub stop_reason: SubagentStopReason,
+    /// Model turns actually attempted; a turn the cancel check skipped did no
+    /// work and is not counted.
+    pub steps: usize,
+    /// Child tool calls executed, at most [`SUBAGENT_MAX_TOOL_CALLS`].
+    pub tool_calls: usize,
+}
+
+impl SubagentChildOutcome {
+    pub fn new(
+        description: &str,
+        answer: impl Into<String>,
+        stop_reason: SubagentStopReason,
+        steps: usize,
+        tool_calls: usize,
+    ) -> Self {
+        Self {
+            description: description.to_string(),
+            answer: answer.into(),
+            stop_reason,
+            steps,
+            tool_calls,
+        }
+    }
+}
+
+/// The durable record of one delegated child run.
+///
+/// The record is bounded: it carries the answer's size and digest but never its
+/// text, because the text rides on the persisted `subagent_result` message the
+/// parent appends. Together the two make a delegation's outcome survive an app
+/// restart — previously the child's history and counters lived only on its
+/// thread, and recovery replaced the answer with a synthetic "interrupted" tool
+/// observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentRunRecord {
+    pub schema: String,
+    /// The parent's `task` tool-call id this delegation answered.
+    pub call_id: String,
+    pub description: String,
+    pub write: bool,
+    pub stop_reason: SubagentStopReason,
+    pub steps: usize,
+    pub tool_calls: usize,
+    pub answer_bytes: usize,
+    pub answer_sha256: String,
+    /// The model the run's actor provider serves, as configured for this run.
+    pub model: String,
+    /// The effort tier propagated to the child's model calls.
+    pub effort: String,
+}
+
+impl SubagentRunRecord {
+    /// Builds one record from the child's own outcome plus the delegation
+    /// identity only the parent knows, bounding the description and digesting the
+    /// answer.
+    pub fn new(
+        call_id: impl Into<String>,
+        outcome: &SubagentChildOutcome,
+        write: bool,
+        model: &str,
+        effort: &str,
+    ) -> Self {
+        let bounded_description: String = outcome
+            .description
+            .trim()
+            .chars()
+            .take(SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS)
+            .collect();
+        Self {
+            schema: SUBAGENT_RUN_SCHEMA.to_string(),
+            call_id: call_id.into(),
+            description: if bounded_description.is_empty() {
+                "delegated task".to_string()
+            } else {
+                bounded_description
+            },
+            write,
+            stop_reason: outcome.stop_reason,
+            steps: outcome.steps,
+            tool_calls: outcome.tool_calls,
+            answer_bytes: outcome.answer.len(),
+            answer_sha256: subagent_answer_sha256(&outcome.answer),
+            model: model.trim().to_string(),
+            effort: effort.trim().to_string(),
+        }
+    }
+
+    /// A record is only writable when it stays inside the bounds the child loop
+    /// itself enforces, so a counter that outran its cap fails closed instead of
+    /// recording an impossible run.
+    pub fn contract_is_valid(&self) -> bool {
+        self.schema == SUBAGENT_RUN_SCHEMA
+            && !self.call_id.trim().is_empty()
+            && !self.description.trim().is_empty()
+            && self.description.chars().count() <= SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS
+            && self.steps <= SUBAGENT_MAX_STEPS
+            && self.tool_calls <= SUBAGENT_MAX_TOOL_CALLS
+            && self.answer_sha256.len() == 64
+            && self
+                .answer_sha256
+                .chars()
+                .all(|digit| digit.is_ascii_hexdigit())
+    }
+
+    /// Writes the record onto a durable event's metadata. Returns false, writing
+    /// nothing, when the record is not valid.
+    pub fn insert_metadata(&self, metadata: &mut Metadata) -> bool {
+        if !self.contract_is_valid() {
+            return false;
+        }
+        let steps = self.steps.to_string();
+        let tool_calls = self.tool_calls.to_string();
+        let answer_bytes = self.answer_bytes.to_string();
+        for (key, value) in [
+            ("subagent_run_schema", self.schema.as_str()),
+            ("subagent_call_id", self.call_id.as_str()),
+            ("subagent_description", self.description.as_str()),
+            ("subagent_write", if self.write { "true" } else { "false" }),
+            ("subagent_stop_reason", self.stop_reason.label()),
+            ("subagent_steps", steps.as_str()),
+            ("subagent_tool_calls", tool_calls.as_str()),
+            ("subagent_answer_bytes", answer_bytes.as_str()),
+            ("subagent_answer_sha256", self.answer_sha256.as_str()),
+            ("subagent_model", self.model.as_str()),
+            ("subagent_effort", self.effort.as_str()),
+        ] {
+            metadata.insert(key.to_string(), value.to_string());
+        }
+        true
+    }
+}
+
+/// The answer digest a record binds, so a persisted `subagent_result` message can
+/// be matched to the run record that describes it.
+pub fn subagent_answer_sha256(answer: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(answer.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -269,5 +478,189 @@ mod tests {
         assert!(prompt.contains("expected_base_sha256"));
         assert!(prompt.contains("explicit user approval"));
         assert!(prompt.contains("denied"));
+    }
+
+    /// The durable record carries a delegation's bounded identity and the digest
+    /// of its answer — never the answer text, which rides on the persisted
+    /// `subagent_result` message instead.
+    #[test]
+    fn a_subagent_run_record_writes_its_bounded_facts_to_event_metadata() {
+        let answer = "The retry path is bounded.";
+        let record = SubagentRunRecord::new(
+            "call_task_1",
+            &SubagentChildOutcome::new(
+                "Audit the retry path",
+                answer,
+                SubagentStopReason::Completed,
+                3,
+                5,
+            ),
+            true,
+            "qwen3.8-max",
+            "high",
+        );
+        assert!(record.contract_is_valid());
+
+        let mut metadata = Metadata::new();
+        assert!(record.insert_metadata(&mut metadata));
+        assert_eq!(
+            metadata.get("subagent_run_schema").map(String::as_str),
+            Some(SUBAGENT_RUN_SCHEMA)
+        );
+        assert_eq!(
+            metadata.get("subagent_call_id").map(String::as_str),
+            Some("call_task_1")
+        );
+        assert_eq!(
+            metadata.get("subagent_stop_reason").map(String::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            metadata.get("subagent_write").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            metadata.get("subagent_steps").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            metadata.get("subagent_tool_calls").map(String::as_str),
+            Some("5")
+        );
+        assert_eq!(
+            metadata.get("subagent_answer_bytes").map(String::as_str),
+            Some("26")
+        );
+        assert_eq!(
+            metadata.get("subagent_answer_sha256").map(String::as_str),
+            Some(subagent_answer_sha256(answer).as_str())
+        );
+        assert_eq!(
+            metadata.get("subagent_model").map(String::as_str),
+            Some("qwen3.8-max")
+        );
+        assert_eq!(
+            metadata.get("subagent_effort").map(String::as_str),
+            Some("high")
+        );
+        assert!(
+            !metadata
+                .values()
+                .any(|value| value.contains("retry path is")),
+            "the answer text must not ride on the record"
+        );
+    }
+
+    #[test]
+    fn a_record_bounds_its_description_and_never_records_an_empty_one() {
+        let long = "x".repeat(SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS * 3);
+        let bounded = SubagentRunRecord::new(
+            "call_1",
+            &SubagentChildOutcome::new(
+                &long,
+                "",
+                SubagentStopReason::StepLimit,
+                SUBAGENT_MAX_STEPS,
+                0,
+            ),
+            false,
+            "m",
+            "fast",
+        );
+        assert_eq!(
+            bounded.description.chars().count(),
+            SUBAGENT_RECORD_DESCRIPTION_MAX_CHARS
+        );
+        assert!(bounded.contract_is_valid());
+
+        let blank = SubagentRunRecord::new(
+            "call_1",
+            &SubagentChildOutcome::new("   ", "", SubagentStopReason::Refused, 0, 0),
+            false,
+            "m",
+            "fast",
+        );
+        assert_eq!(
+            blank.description, "delegated task",
+            "a blank description falls back to the delegation default rather than recording nothing"
+        );
+        assert!(blank.contract_is_valid());
+        assert_eq!(
+            blank.stop_reason.label(),
+            "refused",
+            "a delegation that never started is recorded as refused, not completed"
+        );
+    }
+
+    /// Counters that outran the caps the child loop itself enforces mean the
+    /// record was built by a bug, so it fails closed and writes nothing.
+    #[test]
+    fn a_record_with_counters_past_the_child_caps_fails_closed() {
+        let mut record = SubagentRunRecord::new(
+            "call_1",
+            &SubagentChildOutcome::new(
+                "bounded work",
+                "answer",
+                SubagentStopReason::ToolCallBudget,
+                1,
+                SUBAGENT_MAX_TOOL_CALLS,
+            ),
+            false,
+            "m",
+            "fast",
+        );
+        assert!(record.contract_is_valid());
+
+        record.tool_calls = SUBAGENT_MAX_TOOL_CALLS + 1;
+        assert!(!record.contract_is_valid());
+        let mut metadata = Metadata::new();
+        assert!(!record.insert_metadata(&mut metadata));
+        assert!(metadata.is_empty(), "an invalid record writes nothing");
+
+        record.tool_calls = SUBAGENT_MAX_TOOL_CALLS;
+        record.steps = SUBAGENT_MAX_STEPS + 1;
+        assert!(!record.contract_is_valid());
+
+        record.steps = 1;
+        record.call_id = " ".to_string();
+        assert!(
+            !record.contract_is_valid(),
+            "a record must bind the delegation it describes"
+        );
+    }
+
+    /// Steer and stage-budget exhaustion are the pair that used to be confounded
+    /// in the child's answer, so their labels must stay distinct and stable.
+    #[test]
+    fn every_stop_reason_has_a_distinct_stable_wire_label() {
+        let reasons = [
+            SubagentStopReason::Completed,
+            SubagentStopReason::StepLimit,
+            SubagentStopReason::ToolCallBudget,
+            SubagentStopReason::StageBudget,
+            SubagentStopReason::Cancelled,
+            SubagentStopReason::Steered,
+            SubagentStopReason::ProviderUnavailable,
+            SubagentStopReason::Crashed,
+            SubagentStopReason::Refused,
+        ];
+        let labels = reasons
+            .iter()
+            .map(|reason| reason.label())
+            .collect::<Vec<_>>();
+        let mut unique = labels.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len(), "labels: {labels:?}");
+        assert_ne!(
+            SubagentStopReason::Steered.label(),
+            SubagentStopReason::StageBudget.label()
+        );
+        assert!(
+            labels
+                .iter()
+                .all(|label| !label.is_empty() && !label.contains(' ')),
+            "labels are wire values: {labels:?}"
+        );
     }
 }

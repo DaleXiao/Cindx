@@ -146,7 +146,7 @@ fn subagent_runs_read_only_loop_to_a_final_answer() {
     let control = Arc::new(AgentRunControl::new("fast"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
 
-    let (_description, answer) = subagent_child_answer(
+    let outcome = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -159,8 +159,14 @@ fn subagent_runs_read_only_loop_to_a_final_answer() {
         "default",
     );
 
-    assert_eq!(answer, "README.md:1 says line one");
+    assert_eq!(outcome.answer, "README.md:1 says line one");
     assert_eq!(provider.served(), 2);
+    // The durable record's counters are the child's real work: two model turns
+    // and one executed tool call, closed by an answer with no further call.
+    assert_eq!(outcome.stop_reason, SubagentStopReason::Completed);
+    assert_eq!(outcome.steps, 2);
+    assert_eq!(outcome.tool_calls, 1);
+    assert_eq!(outcome.description, "inspect readme");
 }
 
 #[test]
@@ -170,7 +176,7 @@ fn subagent_child_request_carries_the_parent_effort_reasoning() {
     let control = Arc::new(AgentRunControl::new("high"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
 
-    let (_description, _answer) = subagent_child_answer(
+    let _answer = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -181,7 +187,8 @@ fn subagent_child_request_carries_the_parent_effort_reasoning() {
         None,
         &[],
         "high",
-    );
+    )
+    .answer;
 
     // The child's model request carries the parent tier's reasoning effort so
     // thinking-family providers apply the tier's thinking budget (audit: children
@@ -215,7 +222,7 @@ fn subagent_child_tool_calls_are_capped_per_child() {
     let control = Arc::new(AgentRunControl::new("fast"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
 
-    let (_description, answer) = subagent_child_answer(
+    let answer = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -226,7 +233,8 @@ fn subagent_child_tool_calls_are_capped_per_child() {
         None,
         &[],
         "default",
-    );
+    )
+    .answer;
 
     // The child stopped at the per-child tool-call cap after a single model call
     // rather than executing every requested call (P1-01 resource governance).
@@ -250,7 +258,7 @@ fn subagent_child_requests_streaming_mode() {
     let control = Arc::new(AgentRunControl::new("fast"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
 
-    let (_description, answer) = subagent_child_answer(
+    let answer = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -261,7 +269,8 @@ fn subagent_child_requests_streaming_mode() {
         None,
         &[],
         "default",
-    );
+    )
+    .answer;
 
     assert_eq!(answer, "README.md:1 says line one");
     assert_eq!(
@@ -283,7 +292,7 @@ fn subagent_loop_is_bounded_by_step_limit() {
     let control = Arc::new(AgentRunControl::new("fast"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
 
-    let (_description, answer) = subagent_child_answer(
+    let answer = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -294,7 +303,8 @@ fn subagent_loop_is_bounded_by_step_limit() {
         None,
         &[],
         "default",
-    );
+    )
+    .answer;
 
     // The loop never exceeds the step budget even with an infinite tool-call
     // stream, and the answer carries the step-limit marker.
@@ -366,7 +376,7 @@ fn subagent_aborts_before_any_model_call_when_cancelled() {
     control.request_cancel();
     let tools = subagent_tool_specs_for_mode(&registry, false);
 
-    let (_description, answer) = subagent_child_answer(
+    let outcome = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -379,8 +389,13 @@ fn subagent_aborts_before_any_model_call_when_cancelled() {
         "default",
     );
 
-    assert!(answer.contains("stopped"));
+    assert!(outcome.answer.contains("stopped"));
+    assert_eq!(outcome.stop_reason, SubagentStopReason::Cancelled);
     assert_eq!(provider.served(), 0);
+    // A child cancelled before its first turn did no work, so the record says so
+    // instead of reporting a turn that never happened.
+    assert_eq!(outcome.steps, 0);
+    assert_eq!(outcome.tool_calls, 0);
 }
 
 #[test]
@@ -403,7 +418,7 @@ fn subagent_model_calls_draw_from_the_shared_worker_stage_budget() {
 
     let provider = ScriptedProvider::new(vec![final_answer("should not run")]);
     let tools = subagent_tool_specs_for_mode(&registry, false);
-    let (_description, answer) = subagent_child_answer(
+    let outcome = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -416,8 +431,63 @@ fn subagent_model_calls_draw_from_the_shared_worker_stage_budget() {
         "default",
     );
 
-    assert!(answer.contains("budget"));
+    assert!(outcome.answer.contains("budget"));
     assert_eq!(provider.served(), 0);
+    // A genuine budget exhaustion keeps its own reason, so the durable record
+    // never blames the user's steering for it.
+    assert_eq!(outcome.stop_reason, SubagentStopReason::StageBudget);
+}
+
+/// A steer that supersedes a delegation stops the child with its own reason and
+/// its own answer text. Both used to be the stage-budget ones, so a run the user
+/// redirected was reported — to the parent model and to the durable record — as a
+/// child that ran out of budget.
+#[test]
+fn subagent_stopped_by_a_steer_is_not_reported_as_a_budget_exhaustion() {
+    let (_workspace, registry, task_id) = fixture();
+    let control = Arc::new(AgentRunControl::new("fast"));
+    assert!(
+        control
+            .request_steer("queue-steer-1")
+            .expect("steer request"),
+        "the steer stays pending until the parent run applies it"
+    );
+    assert!(
+        !agent_run_should_stop(&control),
+        "a steer is not a cancellation"
+    );
+
+    let provider = ScriptedProvider::new(vec![final_answer("should not run")]);
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+    let outcome = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        None,
+        &[],
+        "default",
+    );
+
+    assert_eq!(outcome.stop_reason, SubagentStopReason::Steered);
+    assert!(
+        outcome.answer.contains("steered"),
+        "answer was {:?}",
+        outcome.answer
+    );
+    assert!(
+        !outcome.answer.contains("budget"),
+        "a steered child must not claim a budget exhaustion: {:?}",
+        outcome.answer
+    );
+    assert_eq!(
+        provider.served(),
+        0,
+        "a superseded delegation spends no model call"
+    );
 }
 
 #[test]
@@ -495,7 +565,7 @@ fn subagent_fork_seeds_the_balanced_parent_prefix_before_the_contract() {
     let provider = ScriptedProvider::new(vec![final_answer("done")]);
     let control = Arc::new(AgentRunControl::new("fast"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
-    let (_description, answer) = subagent_child_answer(
+    let answer = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -506,7 +576,8 @@ fn subagent_fork_seeds_the_balanced_parent_prefix_before_the_contract() {
         None,
         &prefix,
         "default",
-    );
+    )
+    .answer;
 
     assert_eq!(answer, "done");
     let messages = provider.first_messages().expect("first call captured");
@@ -544,7 +615,7 @@ fn subagent_fork_excludes_an_in_flight_parent_round() {
     let provider = ScriptedProvider::new(vec![final_answer("done")]);
     let control = Arc::new(AgentRunControl::new("fast"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
-    let (_description, _answer) = subagent_child_answer(
+    let _answer = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -555,7 +626,8 @@ fn subagent_fork_excludes_an_in_flight_parent_round() {
         None,
         &prefix,
         "default",
-    );
+    )
+    .answer;
 
     let messages = provider.first_messages().expect("first call captured");
     assert!(
@@ -596,7 +668,7 @@ fn subagent_fork_without_parent_history_keeps_the_isolated_shape() {
     let provider = ScriptedProvider::new(vec![final_answer("done")]);
     let control = Arc::new(AgentRunControl::new("fast"));
     let tools = subagent_tool_specs_for_mode(&registry, false);
-    let (_description, _answer) = subagent_child_answer(
+    let _answer = subagent_child_answer(
         &provider,
         &delegation_input(),
         &control,
@@ -607,7 +679,8 @@ fn subagent_fork_without_parent_history_keeps_the_isolated_shape() {
         None,
         &prefix,
         "default",
-    );
+    )
+    .answer;
 
     let messages = provider.first_messages().expect("first call captured");
     assert_eq!(
