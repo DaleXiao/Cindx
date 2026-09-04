@@ -16,6 +16,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use tauri::Manager;
 
 const ATTACHMENT_UPLOAD_METADATA_HEADER: &str = "x-cindx-attachment-metadata";
 
@@ -155,8 +156,22 @@ pub(crate) fn stage_raw_agent_attachment(
     })
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn remove_agent_attachment(
+pub(crate) async fn remove_agent_attachment(
+    app: tauri::AppHandle,
+    input: RemoveAgentAttachmentInput,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        remove_agent_attachment_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("attachment removal failed to join: {error}"))?
+}
+
+fn remove_agent_attachment_blocking(
     state: tauri::State<'_, AppState>,
     input: RemoveAgentAttachmentInput,
 ) -> Result<(), String> {
@@ -165,8 +180,22 @@ pub(crate) fn remove_agent_attachment(
     fs::remove_file(path).map_err(|error| format!("failed to remove attachment: {error}"))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn abort_agent_attachment_batch(
+pub(crate) async fn abort_agent_attachment_batch(
+    app: tauri::AppHandle,
+    input: AbortAgentAttachmentBatchInput,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        abort_agent_attachment_batch_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("attachment batch abort failed to join: {error}"))?
+}
+
+fn abort_agent_attachment_batch_blocking(
     state: tauri::State<'_, AppState>,
     input: AbortAgentAttachmentBatchInput,
 ) -> Result<(), String> {

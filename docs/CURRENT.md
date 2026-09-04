@@ -787,17 +787,22 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   merge or retire one); the Tauri builder and command registration live in
   `app_bootstrap.rs`. Portable crates own substantial contracts, but desktop
   orchestration remains the primary coupling hotspot.
-- The commands whose bodies block for seconds to minutes, and the read-only
-  projections the UI polls on navigation, now run off the IPC thread, so the
-  window stays responsive during the Settings prompt test (one streamed model
-  call), a manual tool run and its permission resolution, a browser tool run and
-  its permission resolution, a sidecar health probe or configuration save, and
-  every panel, session, undo, skill, and custom-command state read. The remaining
-  synchronous commands are the mutating lifecycle ones — project/session create,
-  rename, delete, fork, archive, select, schedules, memory management, undo/redo
-  execution, context compaction, and trace export — so a slow disk or a large
-  session delete can still stall the UI briefly. `pick_workspace_folder` must stay
-  synchronous: its native folder panel needs the main thread.
+- The commands whose bodies block for seconds to minutes, the read-only
+  projections the UI polls on navigation, and the mutating commands outside the
+  project/session lifecycle now run off the IPC thread, so the window stays
+  responsive during the Settings prompt test (one streamed model call), a manual
+  tool run and its permission resolution, a browser tool run and its permission
+  resolution, a sidecar health probe or configuration save, every panel, session,
+  undo, skill, and custom-command state read, schedule changes, project memory
+  updates, undo/redo execution, context compaction, trace export, MCP and search
+  configuration saves, attachment removal, and run cancellation. The remaining
+  synchronous commands are enumerated by name in the structure gate: the project
+  and session lifecycle mutations (create, rename, delete, fork, archive, restore,
+  select, effort/model, activity acknowledgement, workspace root), so a slow disk
+  or a large session delete can still stall the UI briefly; the two skill
+  installers; `get_personalization_config`, whose non-`Result` return cannot
+  report a join failure; and `pick_workspace_folder`, whose native folder panel
+  needs the main thread, plus the window and pure in-memory commands.
 - The frontend has been split into components and style sheets. A top-level
   error boundary converts an uncaught render error into a visible recovery
   panel (with reload) and records the stack in the startup log, so the

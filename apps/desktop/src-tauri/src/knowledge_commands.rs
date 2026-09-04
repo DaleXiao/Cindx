@@ -831,8 +831,19 @@ pub(crate) async fn get_context_state(
     .map_err(|error| format!("context state load failed to join: {error}"))?
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn compact_context(state: tauri::State<'_, AppState>) -> Result<ContextState, String> {
+pub(crate) async fn compact_context(app: tauri::AppHandle) -> Result<ContextState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        compact_context_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("context compaction failed to join: {error}"))?
+}
+
+fn compact_context_blocking(state: tauri::State<'_, AppState>) -> Result<ContextState, String> {
     let run_context = project_session_metadata_for_session(&state, None)?;
     let root = run_context
         .get("project_root")

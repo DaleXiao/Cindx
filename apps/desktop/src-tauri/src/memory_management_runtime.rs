@@ -18,6 +18,7 @@ use agent_memory::{
 use agent_storage::{SqliteStore, StorageError};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tauri::Manager;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,8 +119,22 @@ impl RequestedMemoryAction {
     }
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn get_project_memory_state(
+pub(crate) async fn get_project_memory_state(
+    app: tauri::AppHandle,
+    project_id: String,
+) -> Result<ProjectMemoryStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_project_memory_state_blocking(state, project_id)
+    })
+    .await
+    .map_err(|error| format!("project memory state failed to join: {error}"))?
+}
+
+fn get_project_memory_state_blocking(
     state: tauri::State<'_, AppState>,
     project_id: String,
 ) -> Result<ProjectMemoryStateView, String> {
@@ -161,8 +176,22 @@ pub(crate) fn get_project_memory_state(
     Ok(project_memory_state_from_ledger(&ledger))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn update_project_memory(
+pub(crate) async fn update_project_memory(
+    app: tauri::AppHandle,
+    input: UpdateProjectMemoryInput,
+) -> Result<ProjectMemoryStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        update_project_memory_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("project memory update failed to join: {error}"))?
+}
+
+fn update_project_memory_blocking(
     state: tauri::State<'_, AppState>,
     input: UpdateProjectMemoryInput,
 ) -> Result<ProjectMemoryStateView, String> {

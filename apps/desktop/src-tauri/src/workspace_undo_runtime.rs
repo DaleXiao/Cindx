@@ -556,8 +556,22 @@ fn get_workspace_undo_state_blocking(
     get_workspace_undo_state_for_session(&store, &root, &session_id)
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn undo_workspace_change(
+pub(crate) async fn undo_workspace_change(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<WorkspaceUndoState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        undo_workspace_change_blocking(state, session_id)
+    })
+    .await
+    .map_err(|error| format!("workspace undo failed to join: {error}"))?
+}
+
+fn undo_workspace_change_blocking(
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<WorkspaceUndoState, String> {
@@ -569,8 +583,22 @@ pub(crate) fn undo_workspace_change(
     change_undo_stack(&mut store, &root, &session_id, false)
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn redo_workspace_change(
+pub(crate) async fn redo_workspace_change(
+    app: tauri::AppHandle,
+    session_id: String,
+) -> Result<WorkspaceUndoState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        redo_workspace_change_blocking(state, session_id)
+    })
+    .await
+    .map_err(|error| format!("workspace redo failed to join: {error}"))?
+}
+
+fn redo_workspace_change_blocking(
     state: tauri::State<'_, AppState>,
     session_id: String,
 ) -> Result<WorkspaceUndoState, String> {

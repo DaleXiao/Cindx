@@ -322,13 +322,21 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
 }
 
+/// Runs off the invoke thread: cancelling a run scans the session's events and
+/// commits a terminal transaction, and a sync command body would block the UI for
+/// all of it (P2-05). The shared `_blocking` path already existed for internal
+/// callers, so this only changes where it is called from.
 #[tauri::command]
-pub(crate) fn cancel_agent_task(
+pub(crate) async fn cancel_agent_task(
     app: tauri::AppHandle,
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
-    let state = app.state::<AppState>();
-    cancel_agent_task_blocking(&app, state, &input.session_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        cancel_agent_task_blocking(&app, state, &input.session_id)
+    })
+    .await
+    .map_err(|error| format!("agent task cancellation failed to join: {error}"))?
 }
 
 /// Shared cancellation path. A run parked at the plan-confirmation gate is

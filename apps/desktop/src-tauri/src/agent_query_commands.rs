@@ -238,8 +238,22 @@ pub(crate) async fn get_agent_session_outputs(
     .map_err(|error| format!("agent outputs load failed to join: {error}"))?
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn export_agent_trace_jsonl(
+pub(crate) async fn export_agent_trace_jsonl(
+    app: tauri::AppHandle,
+    session_id: Option<String>,
+) -> Result<AgentTraceState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        export_agent_trace_jsonl_blocking(state, session_id)
+    })
+    .await
+    .map_err(|error| format!("trace export failed to join: {error}"))?
+}
+
+fn export_agent_trace_jsonl_blocking(
     state: tauri::State<'_, AppState>,
     session_id: Option<String>,
 ) -> Result<AgentTraceState, String> {

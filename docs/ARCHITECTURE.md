@@ -132,14 +132,32 @@ skill catalog, and the custom commands. Those only read, and concurrent reads ar
 already the norm here — the async agent-state commands have always opened their
 own read-only connection — so converting them introduces no new concurrency class.
 
-The mutating lifecycle commands are still sync and are the next batch: project and
-session create, rename, delete, fork, archive, select, the schedule commands,
-memory management, undo/redo execution, context compaction, trace export, and the
-configuration savers. Each needs its own serialization argument before it moves,
-because the main thread currently provides one implicitly. Two are already
-resolved: `cancel_agent_task` has a `_blocking` sibling and one internal caller
-(`cancel_schedule_run`) to repoint at it, and `install_skill_url` waits on the
-skill install path's atomicity.
+The mutating commands moved in a third batch, once each had a serialization
+argument: the schedule commands (`get_schedule_state`, `upsert_schedule`,
+`set_schedule_enabled`, `delete_schedule`, `run_schedule_now`,
+`cancel_schedule_run`), project memory read and update, workspace undo and redo
+execution, context compaction, trace export, the MCP catalog savers, the web
+search and skill preference savers, skill refresh, the permission panel's mock
+request and resolution, personalization save, attachment removal and batch abort,
+artifact open and reveal, the frontend crash report, `cancel_agent_task`, and
+`set_session_sandbox_mode`. `cancel_agent_task` needed no new sibling — it was
+already a thin wrapper over `cancel_agent_task_blocking` — but its one internal
+caller, `cancel_schedule_run`, had to be repointed at that blocking path, since an
+async command cannot be called from a synchronous body.
+
+What is still synchronous is enumerated by name in the structure gate rather than
+left implicit. The project and session lifecycle mutations (create, rename,
+delete, fork, archive, restore, select, effort/model selection, activity
+acknowledgement, workspace root) wait on `project_commands.rs` being split first:
+it is at its cohesion budget, and fifteen wrappers would exceed it. The two skill
+installers wait on the install path's atomicity. `get_personalization_config`
+cannot report a join failure because its return type is not a `Result`. The rest
+are the main-thread and pure in-memory commands described above.
+
+The gate enforces both directions: a command that runs on the invoke thread must
+appear in the allowlist by name, and every `async` command must move its body into
+`spawn_blocking`, so an async command cannot simply relocate the block from the UI
+thread to the async executor.
 
 Two classes stay sync deliberately. `pick_workspace_folder` cannot move: it needs
 a `MainThreadMarker` for `NSOpenPanel::runModal`, which is `None` inside
@@ -158,15 +176,29 @@ execution. It is also why `install_skill_url` — a blocking `curl` download
 followed by extraction into `.cindx/skills` — waits for the install path's
 atomicity to be established before it moves.
 
-Lock discipline in this crate was audited rather than assumed. All 13 acquisitions
-of `session_lifecycle_gate` take it as the first lock in their scope, so it is
-always the outermost lock and no order can invert against it; the
-`provider_config_update` mutex has exactly one acquisition site, whose hold across
-the provider verification call is the serialization it exists for, with the
-configuration guard itself dropped after the clone. No production site unwraps or
-expects on a poisoned lock, no guard is held across an `.await` (the async
-commands hold guards only inside their synchronous closure), and read paths open a
-separate read-only connection instead of contending for the store mutex.
+Lock discipline in this crate was audited rather than assumed, because moving
+commands off the main thread removes the serialization it provided implicitly and
+would turn any latent lock-order inversion into a reachable deadlock. Every
+function that acquires two or more distinct `AppState` locks was enumerated — 23
+of them — and each apparent inversion was then checked against guard lifetimes
+rather than acquisition order alone. All of them are sequential, not nested:
+`fork_session` takes the store inside a closure that releases it before the
+lifecycle gate is acquired, `delete_session` releases the gate and the session
+config at the end of their block before it takes `provider_config`,
+`update_project_memory` clones the provider config so its guard is a temporary,
+and `dispatch_scheduled_session` and the schedule reconciliation each take the
+store and the schedule config in separate blocks. The genuinely nested orders are
+consistent: `session_lifecycle_gate` is outermost at all 13 of its acquisition
+sites, `workspace_config` precedes `project_session_config` at all six sites that
+take both, and `project_session_config` precedes the store. Configuration
+mutations are additionally safe against lost updates because the caller holds the
+`project_session_config` guard across the whole read-modify-write including
+`commit_project_session_config`, and `provider_config_update` has exactly one
+acquisition site, whose hold across provider verification is the serialization
+that mutex exists for. No production site unwraps or expects on a poisoned lock,
+no guard is held across an `.await` (async commands hold guards only inside their
+synchronous closure), and read paths open a separate read-only connection instead
+of contending for the store mutex.
 
 ## Interactive Run Flow
 

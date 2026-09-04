@@ -369,17 +369,36 @@ fn artifact_image_mime(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn open_artifact(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+pub(crate) async fn open_artifact(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        open_artifact_blocking(state, path)
+    })
+    .await
+    .map_err(|error| format!("artifact open failed to join: {error}"))?
+}
+
+fn open_artifact_blocking(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
     let canonical_path = validated_workspace_artifact_path(&state, &path)?;
     open_with_default_app(canonical_path.as_os_str())
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn reveal_artifact(
-    state: tauri::State<'_, AppState>,
-    path: String,
-) -> Result<(), String> {
+pub(crate) async fn reveal_artifact(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        reveal_artifact_blocking(state, path)
+    })
+    .await
+    .map_err(|error| format!("artifact reveal failed to join: {error}"))?
+}
+
+fn reveal_artifact_blocking(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
     let canonical_path = validated_workspace_artifact_path(&state, &path)?;
     #[cfg(target_os = "macos")]
     let mut command = {

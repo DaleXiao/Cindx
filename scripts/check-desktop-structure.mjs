@@ -866,7 +866,11 @@ const testsRsLineCount = desktopRustModules.find(
   ({ entry }) => entry === "tests.rs"
 )?.source.split("\n").length;
 const criticalDesktopAgentModuleBudgets = new Map([
-  ["attachment_commands.rs", 190],
+  // 190 -> 220: the two attachment removal commands became async IPC wrappers
+  // around a `_blocking` sibling (P2-05), so their filesystem work no longer runs
+  // on the invoke thread. The module's logic did not grow; the 30 lines are the
+  // wrapper boilerplate and its `use tauri::Manager;`.
+  ["attachment_commands.rs", 220],
   ["attachment_upload_batches.rs", 170],
   ["agent_run_engine.rs", 250],
   // 560 -> 610: the loop now hosts two bounded re-entry guards wired from the
@@ -4189,42 +4193,72 @@ assert(
     rustLib.includes("subagent_aborts_an_in_flight_model_call_when_the_run_is_steered"),
   "A delegated subagent must leave a bounded durable run record, persist its answer, report its real stop reason, stop promptly on a steer, and run only on a model the user configured"
 );
-// P2-05: a command whose body blocks — for seconds on a model call or a tool the
-// user picked, or for a store/filesystem scan the UI polls on every navigation —
-// must not run on the thread that delivered the invoke. Each converted command is
-// async, moves its body into spawn_blocking, and keeps that body in a `_blocking`
-// sibling so internal callers stay untouched. The sync form must be gone, or the
-// wait moves back onto the UI thread.
-const blockingIpcCommands = [
-  ["get_sidecar_state", "sidecar state failed to join"],
-  ["save_sidecar_config", "sidecar configuration save failed to join"],
-  ["run_tool", "tool run failed to join"],
-  ["resolve_tool_permission", "tool permission resolution failed to join"],
-  ["run_browser_tool", "browser tool run failed to join"],
-  [
-    "resolve_browser_permission",
-    "browser permission resolution failed to join",
-  ],
-  ["send_model_prompt", "model prompt failed to join"],
-  ["get_runtime_status", "runtime status failed to join"],
-  ["get_skill_state", "skill state failed to join"],
-  ["get_project_session_state", "project session state failed to join"],
-  ["get_phase3_state", "permission state failed to join"],
-  ["get_phase4_state", "provider state failed to join"],
-  ["get_phase5_state", "tool state failed to join"],
-  ["get_phase7_state", "knowledge state failed to join"],
-  ["get_phase8_state", "browser state failed to join"],
-  ["get_session_sandbox_mode", "sandbox mode failed to join"],
-  ["get_workspace_undo_state", "workspace undo state failed to join"],
-  ["get_custom_commands", "custom commands failed to join"],
-];
-for (const [name, joinMessage] of blockingIpcCommands) {
+// P2-05 ratchet: a command that runs on the thread that delivered the invoke must
+// be justified by name. Everything else is async and moves its body into a
+// blocking task, so a new sync command — or a converted one moved back — fails
+// here instead of silently returning its wait to the UI thread.
+const syncIpcCommandAllowlist = new Set([
+  // Native main-thread work: the folder panel needs a MainThreadMarker, and the
+  // window and sidebar commands only touch AppKit.
+  "pick_workspace_folder",
+  "reveal_main_window",
+  "set_sidebar_material_width",
+  // Pure in-memory reads with no blocking body to move.
+  "get_web_search_config",
+  "get_mcp_state",
+  "cancel_rag_operation",
+  "open_external_url",
+  "model_supports_thinking",
+  // A non-Result return type cannot report a join failure, and the body is one
+  // small file read.
+  "get_personalization_config",
+  // Not yet converted: the project/session lifecycle mutations, which need
+  // project_commands.rs split first because it is at its cohesion budget.
+  "create_project",
+  "create_session",
+  "rename_project",
+  "delete_project",
+  "rename_session",
+  "set_session_effort",
+  "set_session_model",
+  "fork_session",
+  "archive_session",
+  "restore_session",
+  "delete_session",
+  "select_project",
+  "select_session",
+  "acknowledge_session_activity",
+  "save_workspace_root",
+  // Blocked on the skill install path's atomicity: main-thread serialization is
+  // currently what keeps two concurrent installs out of one directory.
+  "install_skill_package",
+  "install_skill_url",
+]);
+const syncIpcCommands = [
+  ...rustLib.matchAll(/#\[tauri::command\]\npub\(crate\) fn (\w+)\(/g),
+].map((match) => match[1]);
+const unjustifiedSyncCommands = syncIpcCommands.filter(
+  (name) => !syncIpcCommandAllowlist.has(name)
+);
+assert(
+  unjustifiedSyncCommands.length === 0,
+  `A sync IPC command runs its body on the invoke thread and must be justified by name: ${unjustifiedSyncCommands.join(", ")}`
+);
+for (const name of syncIpcCommandAllowlist) {
   assert(
-    rustLib.includes(`pub(crate) async fn ${name}(`) &&
-      rustLib.includes(`fn ${name}_blocking(`) &&
-      rustLib.includes(joinMessage) &&
-      !rustLib.includes(`pub(crate) fn ${name}(`),
-    `${name} must run its blocking body off the IPC thread`
+    syncIpcCommands.includes(name),
+    `${name} is allowlisted as a sync IPC command but no longer exists in that form`
+  );
+}
+// The other half: an async command must not do its work on the async runtime
+// thread either, or it just moves the block from the UI thread to the executor.
+for (const match of rustLib.matchAll(
+  /#\[tauri::command\]\npub\(crate\) async fn (\w+)\(/g
+)) {
+  const body = rustLib.slice(match.index, match.index + 4000);
+  assert(
+    body.includes("spawn_blocking"),
+    `${match[1]} is an async IPC command but does not move its body to a blocking task`
   );
 }
 assert(

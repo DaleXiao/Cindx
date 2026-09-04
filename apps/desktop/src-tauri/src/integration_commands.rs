@@ -89,8 +89,22 @@ pub(crate) fn get_web_search_config(
     Ok(web_search_config_state(&config))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn save_web_search_config(
+pub(crate) async fn save_web_search_config(
+    app: tauri::AppHandle,
+    input: WebSearchConfigInput,
+) -> Result<WebSearchConfigState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        save_web_search_config_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("web search configuration save failed to join: {error}"))?
+}
+
+fn save_web_search_config_blocking(
     state: tauri::State<'_, AppState>,
     input: WebSearchConfigInput,
 ) -> Result<WebSearchConfigState, String> {
@@ -148,8 +162,22 @@ pub(crate) fn get_mcp_state(state: tauri::State<'_, AppState>) -> Result<McpStat
     Ok(mcp_state_view(&catalog, None))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn save_mcp_servers(
+pub(crate) async fn save_mcp_servers(
+    app: tauri::AppHandle,
+    input: McpServersInput,
+) -> Result<McpStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        save_mcp_servers_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("MCP server save failed to join: {error}"))?
+}
+
+fn save_mcp_servers_blocking(
     state: tauri::State<'_, AppState>,
     input: McpServersInput,
 ) -> Result<McpStateView, String> {
@@ -164,8 +192,22 @@ pub(crate) fn save_mcp_servers(
     Ok(mcp_state_view(&catalog, None))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn upsert_mcp_server(
+pub(crate) async fn upsert_mcp_server(
+    app: tauri::AppHandle,
+    input: McpServerInput,
+) -> Result<McpStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        upsert_mcp_server_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("MCP server upsert failed to join: {error}"))?
+}
+
+fn upsert_mcp_server_blocking(
     state: tauri::State<'_, AppState>,
     input: McpServerInput,
 ) -> Result<McpStateView, String> {
@@ -180,8 +222,21 @@ pub(crate) fn upsert_mcp_server(
     Ok(mcp_state_view(&catalog, None))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn import_external_mcp_servers(
+pub(crate) async fn import_external_mcp_servers(
+    app: tauri::AppHandle,
+) -> Result<McpStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        import_external_mcp_servers_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("external MCP import failed to join: {error}"))?
+}
+
+fn import_external_mcp_servers_blocking(
     state: tauri::State<'_, AppState>,
 ) -> Result<McpStateView, String> {
     let workspace_root = active_workspace_root(&state).ok();
@@ -214,8 +269,22 @@ pub(crate) fn import_external_mcp_servers(
     Ok(mcp_state_view(&catalog, None))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn update_mcp_server_policy(
+pub(crate) async fn update_mcp_server_policy(
+    app: tauri::AppHandle,
+    input: McpServerPolicyInput,
+) -> Result<McpStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        update_mcp_server_policy_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("MCP policy update failed to join: {error}"))?
+}
+
+fn update_mcp_server_policy_blocking(
     state: tauri::State<'_, AppState>,
     input: McpServerPolicyInput,
 ) -> Result<McpStateView, String> {
@@ -230,8 +299,22 @@ pub(crate) fn update_mcp_server_policy(
     Ok(mcp_state_view(&catalog, None))
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn remove_mcp_server(
+pub(crate) async fn remove_mcp_server(
+    app: tauri::AppHandle,
+    server_id: String,
+) -> Result<McpStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        remove_mcp_server_blocking(state, server_id)
+    })
+    .await
+    .map_err(|error| format!("MCP server removal failed to join: {error}"))?
+}
+
+fn remove_mcp_server_blocking(
     state: tauri::State<'_, AppState>,
     server_id: String,
 ) -> Result<McpStateView, String> {
@@ -338,8 +421,19 @@ fn get_skill_state_blocking(state: tauri::State<'_, AppState>) -> Result<SkillSt
     })
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn refresh_skills(state: tauri::State<'_, AppState>) -> Result<SkillStateView, String> {
+pub(crate) async fn refresh_skills(app: tauri::AppHandle) -> Result<SkillStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        refresh_skills_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("skill refresh failed to join: {error}"))?
+}
+
+fn refresh_skills_blocking(state: tauri::State<'_, AppState>) -> Result<SkillStateView, String> {
     let root = active_workspace_root(&state)?;
     let catalog = skill_catalog_for_root(&root);
     let skills = catalog.refresh()?;
@@ -350,8 +444,22 @@ pub(crate) fn refresh_skills(state: tauri::State<'_, AppState>) -> Result<SkillS
     })
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn save_skill_preference(
+pub(crate) async fn save_skill_preference(
+    app: tauri::AppHandle,
+    input: SkillPreferenceInput,
+) -> Result<SkillStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        save_skill_preference_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("skill preference save failed to join: {error}"))?
+}
+
+fn save_skill_preference_blocking(
     state: tauri::State<'_, AppState>,
     input: SkillPreferenceInput,
 ) -> Result<SkillStateView, String> {

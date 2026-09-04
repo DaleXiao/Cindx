@@ -42,8 +42,19 @@ pub(crate) async fn get_permission_review_state(
     .map_err(|error| format!("permission review load failed to join: {error}"))?
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn request_mock_permission(
+pub(crate) async fn request_mock_permission(app: tauri::AppHandle) -> Result<Phase3State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        request_mock_permission_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("mock permission request failed to join: {error}"))?
+}
+
+fn request_mock_permission_blocking(
     state: tauri::State<'_, AppState>,
 ) -> Result<Phase3State, String> {
     let mut store = state
@@ -54,8 +65,23 @@ pub(crate) fn request_mock_permission(
     request_mock_permission_in_store(&mut store).map_err(|error| error.to_string())
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn resolve_permission(
+pub(crate) async fn resolve_permission(
+    app: tauri::AppHandle,
+    request_id: String,
+    decision: String,
+) -> Result<Phase3State, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        resolve_permission_blocking(state, request_id, decision)
+    })
+    .await
+    .map_err(|error| format!("permission resolution failed to join: {error}"))?
+}
+
+fn resolve_permission_blocking(
     state: tauri::State<'_, AppState>,
     request_id: String,
     decision: String,
@@ -98,8 +124,18 @@ pub(crate) fn get_personalization_config() -> PersonalizationConfig {
     load_personalization_config()
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn save_personalization_config(
+pub(crate) async fn save_personalization_config(
+    input: PersonalizationConfig,
+) -> Result<PersonalizationConfig, String> {
+    tauri::async_runtime::spawn_blocking(move || save_personalization_config_blocking(input))
+        .await
+        .map_err(|error| format!("personalization configuration save failed to join: {error}"))?
+}
+
+fn save_personalization_config_blocking(
     input: PersonalizationConfig,
 ) -> Result<PersonalizationConfig, String> {
     let config = normalized_personalization_config(input);

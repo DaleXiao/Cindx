@@ -37,8 +37,21 @@ pub(crate) struct ScheduleQueueProgress {
     pub(crate) error: Option<String>,
 }
 
+/// Reconciles the schedule runs and projects the panel state, so it takes the
+/// store lock and may write the schedule configuration. That reconcile already
+/// runs concurrently with the background schedule runner, so moving it off the
+/// invoke thread adds no new concurrency (P2-05).
 #[tauri::command]
-pub(crate) fn get_schedule_state(
+pub(crate) async fn get_schedule_state(app: tauri::AppHandle) -> Result<ScheduleStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_schedule_state_blocking(state)
+    })
+    .await
+    .map_err(|error| format!("schedule state failed to join: {error}"))?
+}
+
+fn get_schedule_state_blocking(
     state: tauri::State<'_, AppState>,
 ) -> Result<ScheduleStateView, String> {
     if let Err(error) = reconcile_schedule_runs(&state) {
@@ -47,8 +60,22 @@ pub(crate) fn get_schedule_state(
     schedule_state_view(&state)
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn upsert_schedule(
+pub(crate) async fn upsert_schedule(
+    app: tauri::AppHandle,
+    input: UpsertScheduleInput,
+) -> Result<ScheduleStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        upsert_schedule_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("schedule upsert failed to join: {error}"))?
+}
+
+fn upsert_schedule_blocking(
     state: tauri::State<'_, AppState>,
     input: UpsertScheduleInput,
 ) -> Result<ScheduleStateView, String> {
@@ -198,8 +225,22 @@ pub(crate) fn upsert_schedule(
     schedule_state_view(&state)
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn set_schedule_enabled(
+pub(crate) async fn set_schedule_enabled(
+    app: tauri::AppHandle,
+    input: SetScheduleEnabledInput,
+) -> Result<ScheduleStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        set_schedule_enabled_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("schedule enable change failed to join: {error}"))?
+}
+
+fn set_schedule_enabled_blocking(
     state: tauri::State<'_, AppState>,
     input: SetScheduleEnabledInput,
 ) -> Result<ScheduleStateView, String> {
@@ -251,8 +292,22 @@ pub(crate) fn set_schedule_enabled(
     schedule_state_view(&state)
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn delete_schedule(
+pub(crate) async fn delete_schedule(
+    app: tauri::AppHandle,
+    input: ScheduleActionInput,
+) -> Result<ScheduleStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        delete_schedule_blocking(state, input)
+    })
+    .await
+    .map_err(|error| format!("schedule deletion failed to join: {error}"))?
+}
+
+fn delete_schedule_blocking(
     state: tauri::State<'_, AppState>,
     input: ScheduleActionInput,
 ) -> Result<ScheduleStateView, String> {
@@ -278,8 +333,19 @@ pub(crate) fn delete_schedule(
     schedule_state_view(&state)
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn run_schedule_now(
+pub(crate) async fn run_schedule_now(
+    app: tauri::AppHandle,
+    input: ScheduleActionInput,
+) -> Result<ScheduleStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || run_schedule_now_blocking(app, input))
+        .await
+        .map_err(|error| format!("immediate schedule run failed to join: {error}"))?
+}
+
+fn run_schedule_now_blocking(
     app: tauri::AppHandle,
     input: ScheduleActionInput,
 ) -> Result<ScheduleStateView, String> {
@@ -295,8 +361,19 @@ pub(crate) fn run_schedule_now(
     schedule_state_view(&state)
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn cancel_schedule_run(
+pub(crate) async fn cancel_schedule_run(
+    app: tauri::AppHandle,
+    input: ScheduleActionInput,
+) -> Result<ScheduleStateView, String> {
+    tauri::async_runtime::spawn_blocking(move || cancel_schedule_run_blocking(app, input))
+        .await
+        .map_err(|error| format!("schedule run cancellation failed to join: {error}"))?
+}
+
+fn cancel_schedule_run_blocking(
     app: tauri::AppHandle,
     input: ScheduleActionInput,
 ) -> Result<ScheduleStateView, String> {
@@ -338,12 +415,9 @@ pub(crate) fn cancel_schedule_run(
         if latest_unfinished_agent_queue_id(&events).as_deref() != Some(queue_id.as_str()) {
             return Err("the scheduled run is no longer the active agent run".to_string());
         }
-        cancel_agent_task(
-            app.clone(),
-            SessionActionInput {
-                session_id: session_id.clone(),
-            },
-        )?;
+        // Call the shared blocking path, not the command: `cancel_agent_task` is
+        // async, and this body is already on a blocking task.
+        cancel_agent_task_blocking(&app, state.clone(), &session_id)?;
     }
 
     let now = current_time_millis();

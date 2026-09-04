@@ -119,8 +119,23 @@ pub(crate) fn append_sandbox_mode_event(
     .map_err(|error| error.to_string())
 }
 
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn set_session_sandbox_mode(
+pub(crate) async fn set_session_sandbox_mode(
+    app: tauri::AppHandle,
+    session_id: String,
+    mode: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::app_state::AppState>();
+        set_session_sandbox_mode_blocking(state, session_id, mode)
+    })
+    .await
+    .map_err(|error| format!("sandbox mode change failed to join: {error}"))?
+}
+
+fn set_session_sandbox_mode_blocking(
     state: tauri::State<'_, crate::app_state::AppState>,
     session_id: String,
     mode: String,

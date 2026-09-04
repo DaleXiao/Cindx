@@ -195,8 +195,16 @@ pub(crate) fn schedule_macos_traffic_light_position_repair(
 /// is transparent, so an uncaught render error used to leave a blank window
 /// with no evidence. The boundary now renders a recovery panel and reports
 /// the stack here for the startup log.
+/// Runs off the invoke thread: a sync command body would block the UI for the
+/// whole operation (P2-05).
 #[tauri::command]
-pub(crate) fn report_frontend_crash(message: String) -> Result<(), String> {
+pub(crate) async fn report_frontend_crash(message: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || report_frontend_crash_blocking(message))
+        .await
+        .map_err(|error| format!("frontend crash report failed to join: {error}"))?
+}
+
+fn report_frontend_crash_blocking(message: String) -> Result<(), String> {
     append_startup_log(&format!("frontend crash boundary caught: {message}"));
     Ok(())
 }
