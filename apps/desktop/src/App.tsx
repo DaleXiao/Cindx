@@ -4,7 +4,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type CSSProperties
 } from "react";
@@ -17,6 +16,7 @@ import { Sidebar } from "./components/Sidebar";
 import { WorkspaceChrome } from "./components/WorkspaceChrome";
 import { providerReadinessMessage, providerStatusText } from "./providerReadinessModel";
 import { constrainPanelWidths } from "./appShellModel";
+import { useStartupWindowReveal } from "./controllers/useStartupWindowReveal";
 import { useAgentRunController } from "./controllers/useAgentRunController";
 import { useAppWorkspaceProjection } from "./controllers/useAppWorkspaceProjection";
 import { useAppShellController } from "./controllers/useAppShellController";
@@ -38,7 +38,7 @@ import {
   getAgentState,
   getProjectSessionState,
   getRuntimeStatus,
-  revealMainWindow,
+  reportFrontendCrash,
   resolvePermission,
   setSidebarMaterialWidth
 } from "./tauri";
@@ -73,9 +73,9 @@ export function App() {
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
-  const startupWindowRevealRequestedRef = useRef(false);
   const {
     activeView,
+    bootstrapFailed,
     debugAlwaysVisible,
     handleWorkspaceViewChange,
     inspectorOpen,
@@ -91,6 +91,7 @@ export function App() {
     setInspectorTab,
     setInspectorWidth,
     setSelectedScheduleId,
+    setBootstrapFailed,
     setSettingsCategory,
     setSidebarOpen,
     settingsCategory,
@@ -489,17 +490,31 @@ export function App() {
     let deferredLoadTimer: number | null = null;
     let deferredIdleCallback: number | null = null;
 
+    // A rejected initial-state request used to be swallowed by allSettled, leaving
+    // the reveal waiting on state that would never arrive. The two requests the
+    // reveal depends on now flag the failure (so the window still appears, showing
+    // an empty workspace rather than nothing), and every failure is written to
+    // startup.log with its cause.
+    const reportStartupFailure = (what: string, error: unknown) => {
+      void reportFrontendCrash(`startup ${what} failed: ${String(error)}`);
+    };
+    const failBootstrap = (what: string) => (error: unknown) => {
+      setBootstrapFailed(true);
+      reportStartupFailure(what, error);
+    };
     const coreRequests = [
-      getRuntimeStatus().then((state) => {
-        setRuntime(state);
-        setWorkspaceDraft(state.workspaceRoot);
-      }),
-      getProjectSessionState().then((state) => {
-        applyBootstrapProjectSessionState(state);
-      }),
-      getAgentState().then((state) => {
-        applyBootstrapAgentState(state);
-      }),
+      getRuntimeStatus()
+        .then((state) => {
+          setRuntime(state);
+          setWorkspaceDraft(state.workspaceRoot);
+        })
+        .catch(failBootstrap("runtime status")),
+      getProjectSessionState()
+        .then((state) => applyBootstrapProjectSessionState(state))
+        .catch(failBootstrap("project session state")),
+      getAgentState()
+        .then((state) => applyBootstrapAgentState(state))
+        .catch((error) => reportStartupFailure("agent state", error)),
       loadPersonalization()
     ];
 
@@ -527,32 +542,11 @@ export function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (startupWindowRevealRequestedRef.current || !runtime || !projectSessionState) return;
-    let disposed = false;
-    let fontWaitTimer: number | null = null;
-    const reveal = async () => {
-      try {
-        await Promise.race([
-          document.fonts.ready,
-          new Promise<void>((resolve) => {
-            fontWaitTimer = window.setTimeout(resolve, 120);
-          })
-        ]);
-      } catch {}
-      if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
-      // Timers fire while the window is hidden (rAF does not), so this never blocks reveal.
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
-      if (disposed || startupWindowRevealRequestedRef.current) return;
-      startupWindowRevealRequestedRef.current = true;
-      await revealMainWindow().catch(() => {});
-    };
-    void reveal();
-    return () => {
-      disposed = true;
-      if (fontWaitTimer !== null) window.clearTimeout(fontWaitTimer);
-    };
-  }, [projectSessionState, runtime]);
+  useStartupWindowReveal({
+    runtimeReady: Boolean(runtime),
+    projectSessionReady: Boolean(projectSessionState),
+    bootstrapFailed
+  });
 
   return (
     <main

@@ -10,6 +10,12 @@ export type InspectorOutputRequest = {
 
 export type AppShellState = {
   activeView: WorkspaceView;
+  /**
+   * One of the two initial-state requests the window reveal waits on rejected.
+   * The reveal must not wait for a success that will never arrive, or the app
+   * stays invisible with no window and no error.
+   */
+  bootstrapFailed: boolean;
   selectedScheduleId: string | null;
   workspaceViewBeforeSettings: Exclude<WorkspaceView, "settings">;
   sidebarOpen: boolean;
@@ -43,6 +49,7 @@ export type AppShellAction =
 export function createInitialAppShellState(debugAlwaysVisible = false): AppShellState {
   return {
     activeView: "timeline",
+    bootstrapFailed: false,
     selectedScheduleId: null,
     workspaceViewBeforeSettings: "timeline",
     sidebarOpen: true,

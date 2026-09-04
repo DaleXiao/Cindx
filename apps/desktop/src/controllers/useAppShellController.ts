@@ -32,6 +32,7 @@ export function useAppShellController() {
   const setters = useMemo(
     () => ({
       setSelectedScheduleId: fieldSetter(dispatch, "selectedScheduleId"),
+      setBootstrapFailed: fieldSetter(dispatch, "bootstrapFailed"),
       setSidebarOpen: fieldSetter(dispatch, "sidebarOpen"),
       setSettingsCategory: fieldSetter(dispatch, "settingsCategory"),
       setInspectorTab: fieldSetter(dispatch, "inspectorTab"),

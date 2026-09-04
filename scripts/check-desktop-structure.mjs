@@ -167,6 +167,10 @@ const sessionRuntimeModelSource = read(
 );
 const appShellModelSource = read("apps/desktop/src/appShellModel.ts");
 const appShellStateModelSource = read("apps/desktop/src/appShellStateModel.ts");
+const startupWindowRevealSource = read(
+  "apps/desktop/src/controllers/useStartupWindowReveal.ts"
+);
+const startupRevealModelSource = read("apps/desktop/src/startupRevealModel.ts");
 const appShellControllerSource = read(
   "apps/desktop/src/controllers/useAppShellController.ts"
 );
@@ -1529,18 +1533,26 @@ assert(
     !rustLib.includes("tauri::WindowEvent::Moved(_)") &&
     !rustLib.includes("tauri::WindowEvent::ThemeChanged(_)") &&
     tauriBridge.includes('invoke<void>("reveal_main_window")') &&
-    appSource.includes("startupWindowRevealRequestedRef") &&
-    appSource.includes("await Promise.race([") &&
-    appSource.includes("document.fonts.ready") &&
-    appSource.includes("window.setTimeout(resolve, 120)") &&
-    appSource.includes("await revealMainWindow()") &&
+    appSource.includes("useStartupWindowReveal({") &&
+    startupWindowRevealSource.includes("revealRequestedRef") &&
+    startupWindowRevealSource.includes("await Promise.race([") &&
+    startupWindowRevealSource.includes("document.fonts.ready") &&
+    startupWindowRevealSource.includes("window.setTimeout(resolve, 120)") &&
+    startupWindowRevealSource.includes("await revealMainWindow()") &&
+    // The reveal must not depend on the initial state loading *successfully*:
+    // one rejected request used to leave the app running with no window at all.
+    startupWindowRevealSource.includes("shouldRevealMainWindow(") &&
+    startupRevealModelSource.includes("bootstrapFailed") &&
+    appSource.includes("setBootstrapFailed(true)") &&
+    appSource.includes("reportStartupFailure") &&
     appCompositionSource.includes(
       "!sessionRuntimeCache.hasAgent(state.activeSessionId)"
     ) &&
     !appCompositionSource.includes(
       "agentState?.sessionId !== projectSessionState.activeSessionId"
     ) &&
-    !appSource.includes("revealAfterStableFrame"),
+    !appSource.includes("revealAfterStableFrame") &&
+    !startupWindowRevealSource.includes("revealAfterStableFrame"),
   "The native window must keep framework and custom traffic-light geometry aligned across size, scale, focus, and background redraws"
 );
 

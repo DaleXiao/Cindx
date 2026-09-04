@@ -156,10 +156,15 @@ The desktop app currently includes:
   forbids effects, a requested write delegation is refused without a model call.
   The subagent panel marks write subagents with a `write` badge, and the
   approval card names the delegating subagent.
-- The main window stays hidden until fonts and initial state are ready plus a short
-  timer, then reveals. The wait uses a timer (not requestAnimationFrame, which does
-  not fire while the window is hidden), so launch can never stall with no UI, and
-  the WebView gets a beat to paint before the window shows.
+- The main window stays hidden until fonts and the initial workspace/session state
+  are ready plus a short timer, then reveals. The wait uses a timer (not
+  requestAnimationFrame, which does not fire while the window is hidden), so the
+  WebView gets a beat to paint before the window shows. A *failed* initial-state
+  load reveals the window too: waiting only for success meant one rejected
+  `get_runtime_status` or `get_project_session_state` left the app running with no
+  window, no error, and nothing in `startup.log`, recoverable only by force-quitting
+  the process. The window now appears showing an empty workspace, and every rejected
+  startup request is written to `startup.log` with its cause.
 - Workspace file changes made by `file.write`, `file.patch`, and
   `file.patch_batch` preserve their prior content best-effort for recovery. A
   session can undo and redo its most recent file change through the
