@@ -187,6 +187,125 @@ pub(crate) fn direct_judge_execution_summary(
     }
 }
 
+/// How much cited workspace content the reviewer receives, and how much of it per
+/// citation. The reviewer needs the cited region, not the file: an answer that
+/// cites twenty files must not turn one review call into a full-file dump.
+const CITED_CONTENT_MAX_ENTRIES: usize = 6;
+const CITED_CONTENT_MAX_LINES: usize = 12;
+const CITED_CONTENT_MAX_BYTES_PER_ENTRY: usize = 900;
+
+/// One cited location paired with the lines the reviewer should read.
+struct CitedContentEntry {
+    citation: String,
+    lines: Vec<(u64, String)>,
+}
+
+/// Formats the cited-content block the reviewer reads to check *entailment*:
+/// whether what the answer says about a location follows from that location's
+/// content. The location-level binding facts above say the citation was really
+/// observed; this block is what lets the reviewer go further and read the lines.
+/// Empty when there is nothing to quote, so an answer with no quotable citation
+/// leaves the review prompt unchanged.
+fn cited_content_facts(entries: &[CitedContentEntry]) -> String {
+    let quoted: Vec<&CitedContentEntry> = entries
+        .iter()
+        .filter(|entry| !entry.lines.is_empty())
+        .take(CITED_CONTENT_MAX_ENTRIES)
+        .collect();
+    if quoted.is_empty() {
+        return String::new();
+    }
+    let mut block = String::from(
+        "\n\nCited workspace content (judge whether what the answer says about each location is entailed by these lines, not merely whether the location was observed):",
+    );
+    for entry in quoted {
+        block.push_str(&format!("\n- `{}`:", entry.citation));
+        let mut bytes = 0usize;
+        for (number, line_text) in &entry.lines {
+            let rendered = format!("\n  {number}| {line_text}");
+            bytes += rendered.len();
+            if bytes > CITED_CONTENT_MAX_BYTES_PER_ENTRY {
+                break;
+            }
+            block.push_str(&rendered);
+        }
+    }
+    block
+}
+
+/// The cited regions of the candidate, read from the workspace, for the review
+/// call that is about to happen.
+///
+/// Only citations that bound to a successfully observed location and name a line
+/// are read: a contradicted or unsupported citation is already decided by the
+/// binder, and a bare path has no region to quote. The path is model output, so
+/// it goes through the same canonical containment rule the file tools enforce
+/// (`canonical_workspace_file`): absolute paths, `..` components, and symlinks that
+/// leave the workspace yield nothing. Every other failure — unreadable file, range
+/// past the end — yields less text and never an error, so this block cannot turn a
+/// deliverable answer into an inconclusive review.
+pub(crate) fn direct_judge_cited_content(
+    root: &std::path::Path,
+    runtime: &agent_runtime::AgentLoopState,
+    candidate: &str,
+) -> String {
+    let observed = agent_runtime::observed_locations_from_messages(&runtime.messages);
+    let receipt = agent_runtime::bind_answer_citations(candidate, &observed);
+    if receipt.citations_checked == 0 {
+        return String::new();
+    }
+    let problematic: std::collections::BTreeSet<String> = receipt
+        .findings
+        .iter()
+        .map(|finding| finding.citation.display())
+        .collect();
+    let mut entries = Vec::new();
+    for citation in agent_runtime::answer_citations(candidate) {
+        if entries.len() >= CITED_CONTENT_MAX_ENTRIES {
+            break;
+        }
+        let Some(start) = citation.start_line else {
+            continue;
+        };
+        if problematic.contains(&citation.display()) {
+            continue;
+        }
+        let Some(lines) = read_cited_lines(root, &citation, start) else {
+            continue;
+        };
+        entries.push(CitedContentEntry {
+            citation: citation.display(),
+            lines,
+        });
+    }
+    cited_content_facts(&entries)
+}
+
+fn read_cited_lines(
+    root: &std::path::Path,
+    citation: &agent_runtime::AnswerCitation,
+    start: u64,
+) -> Option<Vec<(u64, String)>> {
+    let path = crate::tool_runtime_service::canonical_workspace_file(root, &citation.path)?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let end = citation
+        .end_line
+        .unwrap_or_else(|| start.saturating_add(2))
+        .min(start.saturating_add(CITED_CONTENT_MAX_LINES.saturating_sub(1) as u64));
+    let mut lines = Vec::new();
+    for (index, line_text) in content.lines().enumerate() {
+        let number = index as u64 + 1;
+        if number < start {
+            continue;
+        }
+        if number > end {
+            break;
+        }
+        lines.push((number, line_text.to_string()));
+    }
+    (!lines.is_empty()).then_some(lines)
+}
+
 pub(crate) fn direct_judge_prompt_with_facts(
     objective: &str,
     candidate: &str,
@@ -225,6 +344,8 @@ pub(crate) fn apply_direct_judge_gate(
         );
     };
 
+    let cited_root = crate::persistence_runtime::active_workspace_root(state).ok();
+
     let judge_output = match dispatch_direct_judge_call(
         state,
         config,
@@ -234,9 +355,13 @@ pub(crate) fn apply_direct_judge_gate(
         ModelRole::Reviewer,
         "direct_judge",
         format!(
-            "{prompt}\n\n{facts}",
+            "{prompt}\n\n{facts}{cited}",
             prompt = plan.prompt,
-            facts = direct_judge_execution_summary(runtime, &candidate.content)
+            facts = direct_judge_execution_summary(runtime, &candidate.content),
+            cited = cited_root
+                .as_deref()
+                .map(|root| direct_judge_cited_content(root, runtime, &candidate.content))
+                .unwrap_or_default()
         ),
     ) {
         Ok(output) => output,
@@ -314,7 +439,14 @@ pub(crate) fn apply_direct_judge_gate(
         );
     };
 
-    let recheck_prompt = direct_judge_prompt_with_facts(objective, &repaired_output, runtime);
+    let recheck_prompt = format!(
+        "{}{}",
+        direct_judge_prompt_with_facts(objective, &repaired_output, runtime),
+        cited_root
+            .as_deref()
+            .map(|root| direct_judge_cited_content(root, runtime, &repaired_output))
+            .unwrap_or_default()
+    );
     let recheck = dispatch_direct_judge_call(
         state,
         config,
@@ -592,5 +724,99 @@ mod tests {
             agent_core::DIRECT_JUDGE_RECEIPT_SCHEMA
         );
         assert!(resolve_direct_judge_output(&passing_with_findings).is_err());
+    }
+    /// The reviewer receives the cited region for a citation the run really
+    /// observed, and nothing for citations the binder already refuted or never saw.
+    #[test]
+    fn cited_content_quotes_observed_regions_and_skips_refuted_citations() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir_all(workspace.path().join("src")).expect("src dir");
+        std::fs::write(workspace.path().join("src/a.rs"), "one\ntwo\nthree\n").expect("seed");
+        let mut runtime = agent_runtime::start_agent_loop(
+            agent_core::TaskId("judge-cited".to_string()),
+            "objective",
+            agent_runtime::AgentRuntimeConfig::default(),
+        );
+        for (input, succeeded) in [
+            (r#"{"path":"src/a.rs"}"#, true),
+            (r#"{"path":"src/gone.rs"}"#, false),
+        ] {
+            let observed =
+                agent_runtime::observed_locations_for_call("file.read", input, succeeded);
+            let mut metadata = Metadata::new();
+            agent_runtime::insert_observed_locations(&mut metadata, &observed);
+            runtime.messages.push(agent_core::Message {
+                role: agent_core::MessageRole::Tool,
+                content: "observation".to_string(),
+                metadata,
+            });
+        }
+
+        let candidate = "See src/a.rs:2 for the bound; src/gone.rs:1 and src/never.rs:3 too.";
+        let block = direct_judge_cited_content(workspace.path(), &runtime, candidate);
+
+        assert!(block.contains("`src/a.rs:2`:"), "{block}");
+        assert!(block.contains("2| two"), "{block}");
+        assert!(block.contains("entailed by these lines"), "{block}");
+        assert!(
+            !block.contains("src/gone.rs"),
+            "a contradicted citation is already decided by the binder: {block}"
+        );
+        assert!(
+            !block.contains("src/never.rs"),
+            "an unobserved citation gets no content: {block}"
+        );
+    }
+
+    /// The path inside a citation is model output. A workspace-relative name that
+    /// resolves outside the root through a symbolic link must quote nothing: that
+    /// is the containment rule the file tools already enforce, applied to the
+    /// reviewer's evidence as well.
+    #[test]
+    fn cited_content_refuses_a_symlink_that_leaves_the_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret.txt"), "secret line\n").expect("seed");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            workspace.path().join("leak.md"),
+        )
+        .expect("symlink");
+        let mut runtime = agent_runtime::start_agent_loop(
+            agent_core::TaskId("judge-cited-escape".to_string()),
+            "objective",
+            agent_runtime::AgentRuntimeConfig::default(),
+        );
+        let observed =
+            agent_runtime::observed_locations_for_call("file.read", r#"{"path":"leak.md"}"#, true);
+        let mut metadata = Metadata::new();
+        agent_runtime::insert_observed_locations(&mut metadata, &observed);
+        runtime.messages.push(agent_core::Message {
+            role: agent_core::MessageRole::Tool,
+            content: "observation".to_string(),
+            metadata,
+        });
+
+        let block =
+            direct_judge_cited_content(workspace.path(), &runtime, "The secret is at leak.md:1.");
+        assert_eq!(
+            block, "",
+            "a symlink out of the workspace must quote nothing"
+        );
+    }
+
+    #[test]
+    fn cited_content_is_empty_for_an_answer_without_citations() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runtime = agent_runtime::start_agent_loop(
+            agent_core::TaskId("judge-cited-none".to_string()),
+            "objective",
+            agent_runtime::AgentRuntimeConfig::default(),
+        );
+        assert_eq!(
+            direct_judge_cited_content(workspace.path(), &runtime, "No citations here."),
+            "",
+            "an answer that cites nothing leaves the review prompt unchanged"
+        );
     }
 }

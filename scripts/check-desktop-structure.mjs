@@ -4246,6 +4246,23 @@ assert(
     !rustLib.includes("config.api_key = read_provider_api_key();"),
   "The startup keychain read must be bounded and degrade instead of blocking startup"
 );
+assert(
+  // P1-10: the reviewer's cited-content evidence must be bounded, and the cited
+  // path — model output — must pass the same canonical containment rule the file
+  // tools enforce before a single byte reaches the review prompt.
+  directJudgeRuntimeSource.includes("pub(crate) fn direct_judge_cited_content(") &&
+    directJudgeRuntimeSource.includes(
+      "canonical_workspace_file(root, &citation.path)"
+    ) &&
+    directJudgeRuntimeSource.includes("CITED_CONTENT_MAX_ENTRIES") &&
+    directJudgeRuntimeSource.includes("CITED_CONTENT_MAX_BYTES_PER_ENTRY") &&
+    directJudgeRuntimeSource.includes("{cited}") &&
+    directJudgeRuntimeSource.includes(
+      "cited_content_refuses_a_symlink_that_leaves_the_workspace"
+    ) &&
+    rustLib.includes("pub(crate) fn canonical_workspace_file("),
+  "The reviewer's cited-content evidence must be bounded and containment-checked"
+);
 // P2-05 ratchet: a command that runs on the thread that delivered the invoke must
 // be justified by name. Everything else is async and moves its body into a
 // blocking task, so a new sync command — or a converted one moved back — fails

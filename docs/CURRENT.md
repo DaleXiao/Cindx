@@ -850,7 +850,18 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   evidence-available-not-entailed. Tools outside the file whitelist contribute no
   observed locations, so a path seen only through, for example, a shell read is
   reported as unsupported. The receipt is additive judge evidence and never
-  blocks delivery by itself.
+  blocks delivery by itself. The judge and its recheck also receive the cited
+  regions themselves — up to six citations, twelve lines and 900 bytes each, quoted
+  as `line| text` — so the review checks whether what the answer *says* about a
+  location is entailed by that location's content, not merely whether the location
+  was observed. Only citations that bound to a successfully observed location and
+  name a line are quoted; contradicted and unsupported citations are already
+  decided by the binder. The cited path is model output, so it passes the same
+  canonical containment rule the file tools enforce (absolute paths, `..`
+  components, and symlinks leaving the workspace quote nothing), and every other
+  failure yields less text rather than an error, so the block cannot turn a
+  deliverable answer into an inconclusive review. An answer that cites nothing
+  leaves the review prompt byte-identical.
 - The same claim-evidence receipt now drives the delivery-verification contract
   (`cindx.agent.delivery-verification.v1`), which records a typed, digest-bound
   state — `passed`, `unverified`, or `unbound` with its reason — on every

@@ -284,7 +284,10 @@ fn workspace_file_effect_path(invocation: &ToolInvocation, expected_tool: &str) 
     effect_input.get("path")?.as_str().map(str::to_string)
 }
 
-fn canonical_workspace_file(workspace_root: &Path, path: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn canonical_workspace_file(
+    workspace_root: &Path,
+    path: &str,
+) -> Option<std::path::PathBuf> {
     let relative = Path::new(path);
     if relative.is_absolute()
         || relative.components().any(|component| {

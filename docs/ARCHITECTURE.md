@@ -619,6 +619,20 @@ receipt and the outcome ledger. It is additive and fail-open: an unbindable
 subject is recorded as `unbound` with its reason, never fails a commit, and never
 changes what the user receives.
 
+Location-level binding says a citation was really observed; it cannot say whether
+the prose about it is true. The review call therefore also carries the cited
+regions: `direct_judge_cited_content` reads, for up to six citations that bound to
+a successful observation and name a line, up to twelve lines and 900 bytes each,
+and appends them to the judge and recheck prompts with an instruction to judge
+entailment rather than observation. The path comes from model output, so it goes
+through `canonical_workspace_file` — the same canonical containment rule the file
+tools enforce — before a single byte is read: absolute paths, `..` components, and
+symlinks that leave the workspace quote nothing. Unreadable files and ranges past
+the end of file yield less text and never an error, because this block is additive
+evidence on a call the run already makes and must not be able to turn a deliverable
+answer into an inconclusive review. An answer with no quotable citation leaves the
+prompt byte-identical, so tiers and answers that cite nothing pay nothing.
+
 The completion transaction persists terminal event, result, artifacts,
 lifecycle, learning evidence, the observed-use measurement for recalled
 memories, and cleanup under one attempt/epoch identity.
