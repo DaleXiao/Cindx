@@ -102,11 +102,35 @@ changing product behavior:
   open/reveal operations.
 - Foreground orchestration glue and memory workers.
 
-This layer is not yet a thin adapter. `src/lib.rs` is a module index; the
-Tauri builder and command registration live in `app_bootstrap.rs`, and several
-workflows still cross desktop services by shared composition state. Future
-refactors should move a complete owner and its tests behind a narrow
-interface; merely creating more sibling files would not reduce coupling.
+`src/lib.rs` is a module index. `app_bootstrap::run` owns the decision about
+whether the app may start at all: the startup panic log, the process-level TLS
+crypto provider, legacy data migration, opening the persistent store and its
+fatal-startup dialog, one-time event redaction, and the headless startup probe.
+Everything after that decision belongs to `app_composition`, the composition root:
+`load_desktop_composition` reads every persisted input in the order its
+dependencies require, `compose_app_state` is the only constructor of the 26-field
+`AppState`, `resume_recovered_memory_refreshes` replays the project lifecycle
+operations that recovery found pending, and `start_background_workers` is the one
+list of session-long workers — the schedule runner, tool-event metadata
+compaction, and the `.cindx` retention sweep.
+
+That load order is a contract rather than a sequence of statements. The sidecar
+environment is applied before anything can spawn a sidecar. The project and session
+configuration is loaded from the *configured* workspace root, and only afterwards
+is the authoritative project root applied to the workspace configuration, so
+reversing those two would load every session against the wrong root. Lifecycle
+recovery needs both the store and that session configuration and is fatal, while
+interrupted-run reconciliation and the schedule load are not: a schedule file that
+will not parse degrades to the default and keeps its reason, because the panel has
+to be able to say why. `compose_app_state` is tested directly — the managed state
+serves exactly the values that were loaded, and the caches, registries, generation
+counter, and exit flags all provably start empty, so a composed state cannot
+inherit another run's leftovers.
+
+Several workflows still cross desktop services by shared composition state, so this
+layer is not yet a thin adapter. Future refactors should move a complete owner and
+its tests behind a narrow interface; merely creating more sibling files would not
+reduce coupling.
 
 ### IPC command threading
 

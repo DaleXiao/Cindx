@@ -1,7 +1,5 @@
 use super::*;
 use crate::integration_commands;
-use crate::session_output_cache_store::SessionOutputCache;
-use crate::suspended_run_runtime::SuspendedRunStore;
 
 const PERSISTENT_STORE_STARTUP_FAILURE: &str = "persistent state unavailable; startup aborted";
 
@@ -63,45 +61,16 @@ pub fn run() -> Result<(), String> {
             Err(error) => eprintln!("failed to redact persisted Cindx history: {error}"),
         }
     }
-    let provider_config = load_provider_config();
-    let mcp_catalog = McpCatalogService::load(mcp_config_path(), mcp_catalog_cache_path());
-    let mut workspace_config = load_workspace_config();
-    let sidecar_config = load_sidecar_config();
-    apply_sidecar_env(&sidecar_config);
-    let web_search_config = load_web_search_config();
-    let project_session_config = load_project_session_config(&workspace_config.root);
-    let recovered_memory_refreshes =
-        match recover_project_lifecycle_operations(&mut store, &project_session_config) {
-            Ok(refreshes) => refreshes,
-            Err(error) => {
-                let message =
-                    format!("project lifecycle recovery failed; startup aborted: {error}");
-                append_startup_log(&format!("fatal startup: {message}"));
-                if !startup_probe_requested() {
-                    show_native_startup_failure(&message);
-                }
-                return Err(message);
+    let mut composition = match load_desktop_composition(&mut store) {
+        Ok(composition) => composition,
+        Err(message) => {
+            append_startup_log(&format!("fatal startup: {message}"));
+            if !startup_probe_requested() {
+                show_native_startup_failure(&message);
             }
-        };
-    if let Err(error) = reconcile_interrupted_agent_runs(&mut store) {
-        append_startup_log(&format!("interrupted run recovery failed: {error}"));
-    }
-    let (schedule_config, schedule_last_error) = match schedule::load(&schedule_config_path()) {
-        Ok(config) => (config, None),
-        Err(error) => {
-            append_startup_log(&error);
-            (ScheduleConfig::default(), Some(error))
+            return Err(message);
         }
     };
-    apply_authoritative_project_root(&mut workspace_config, &project_session_config);
-    for path in [
-        context_checkpoint_path_for(&workspace_config.root),
-        agent_trace_export_path_for(&workspace_config.root),
-    ] {
-        if let Err(error) = redact_existing_text_artifact(&path) {
-            eprintln!("failed to redact {}: {error}", path.display());
-        }
-    }
     if startup_probe_requested() {
         append_startup_log(&format!(
             "startup probe completed (source revision: {})",
@@ -110,62 +79,22 @@ pub fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let lifecycle_refresh_provider_config = provider_config.clone();
+    let recovered_memory_refreshes = std::mem::take(&mut composition.recovered_memory_refreshes);
+    let lifecycle_refresh_provider_config = composition.provider_config.clone();
     let app = tauri::Builder::default()
-        .manage(AppState {
-            store: Mutex::new(store),
-            attachment_upload_batches: Mutex::new(AttachmentUploadBatches::default()),
-            manual_tool_execution_gate: Mutex::new(()),
-            provider_config: Mutex::new(provider_config),
-            provider_config_update: Mutex::new(()),
-            workspace_config: Mutex::new(workspace_config),
-            sidecar_config: Mutex::new(sidecar_config),
-            web_search_config: Mutex::new(web_search_config),
-            project_session_config: Mutex::new(project_session_config),
-            session_lifecycle_gate: Mutex::new(()),
-            schedule_config: Mutex::new(schedule_config),
-            schedule_last_error: Mutex::new(schedule_last_error),
-            mcp_catalog: Mutex::new(mcp_catalog),
-            suspended_agent_runs: SuspendedRunStore::default(),
-            session_output_cache: SessionOutputCache::default(),
-            agent_run_controls: agent_harness::RunRegistry::new("agent run control"),
-            prompt_evaluation_controls: agent_harness::RunRegistry::new(
-                "prompt evaluation control",
-            ),
-            rag_operation_controls: Mutex::new(BTreeMap::new()),
-            queue_dispatching_sessions: agent_harness::ExclusiveKeyRegistry::new("queue dispatch"),
-            session_title_refinement_sessions: agent_harness::ExclusiveKeyRegistry::new(
-                "session title refinement",
-            ),
-            workspace_knowledge_cache: Mutex::new(BTreeMap::new()),
-            process_manager: Arc::new(ProcessManager::new()),
-            tool_registry_cache: Mutex::new(ToolRegistryCache::default()),
-            tool_registry_generation: AtomicU64::new(0),
-            allow_exit: AtomicBool::new(false),
-            quit_prompt_active: AtomicBool::new(false),
-        })
+        .manage(compose_app_state(composition, store))
         .setup(move |app| {
-            for refresh in recovered_memory_refreshes {
-                schedule_project_memory_vector_refresh(
-                    refresh.project_root,
-                    lifecycle_refresh_provider_config.clone(),
-                    refresh.ledger,
-                );
-                if let Err(error) = complete_project_lifecycle_journal(&refresh.journal) {
-                    append_startup_log(&format!(
-                        "recovered project lifecycle journal remains pending: {error}"
-                    ));
-                }
-            }
+            resume_recovered_memory_refreshes(
+                recovered_memory_refreshes,
+                &lifecycle_refresh_provider_config,
+            );
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = install_macos_sidebar_material(&window) {
                     append_startup_log(&error);
                 }
             }
             schedule_main_window_reveal_fallback(app.handle().clone());
-            start_schedule_runner(app.handle().clone());
-            start_tool_event_metadata_compaction();
-            start_cindx_retention_sweep(app.handle().clone());
+            start_background_workers(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {

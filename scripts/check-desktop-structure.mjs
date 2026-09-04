@@ -545,6 +545,9 @@ const directJudgeRuntimeSource = read(
 const agentResultEvidenceSource = read(
   "apps/desktop/src-tauri/src/agent_result_evidence.rs"
 );
+const desktopCompositionSource = read(
+  "apps/desktop/src-tauri/src/app_composition.rs"
+);
 const subagentRuntimeSource = read(
   "apps/desktop/src-tauri/src/agent_subagent_runtime.rs"
 );
@@ -4139,7 +4142,7 @@ assert(
     rustLib.includes("pub(crate) fn measure_cindx_usage(") &&
     rustLib.includes("pub(crate) fn plan_cindx_retention(") &&
     rustLib.includes("pub(crate) fn apply_cindx_retention(") &&
-    rustLib.includes("start_cindx_retention_sweep(app.handle().clone())") &&
+    desktopCompositionSource.includes("start_cindx_retention_sweep(app.clone())") &&
     rustLib.includes("aged_regenerable_classes_expire_and_semantic_state_never_does") &&
     rustLib.includes("over_quota_trees_evict_the_oldest_candidates_first_and_stop_when_they_fit") &&
     rustLib.includes("a_symlink_is_neither_measured_as_content_nor_deleted_through") &&
@@ -4204,6 +4207,30 @@ assert(
     rustLib.includes("subagent_stopped_by_a_steer_is_not_reported_as_a_budget_exhaustion") &&
     rustLib.includes("subagent_aborts_an_in_flight_model_call_when_the_run_is_steered"),
   "A delegated subagent must leave a bounded durable run record, persist its answer, report its real stop reason, stop promptly on a steer, and run only on a model the user configured"
+);
+assert(
+  // P2-03: the composition root owns the load order and every AppState field.
+  // `run()` keeps only the decision about whether the app may start at all — the
+  // persistent store, its fatal-startup dialog, event redaction, and the probe.
+  appBootstrapSource.includes(
+    "let mut composition = match load_desktop_composition(&mut store)"
+  ) &&
+    appBootstrapSource.includes(".manage(compose_app_state(composition, store))") &&
+    appBootstrapSource.includes("start_background_workers(app.handle())") &&
+    appBootstrapSource.includes("resume_recovered_memory_refreshes(") &&
+    !appBootstrapSource.includes(".manage(AppState {") &&
+    desktopCompositionSource.includes("pub(crate) struct DesktopComposition") &&
+    desktopCompositionSource.includes("pub(crate) fn load_desktop_composition(") &&
+    desktopCompositionSource.includes("pub(crate) fn compose_app_state(") &&
+    desktopCompositionSource.includes("pub(crate) fn start_background_workers(") &&
+    desktopCompositionSource.includes(
+      "pub(crate) fn resume_recovered_memory_refreshes("
+    ) &&
+    rustLib.includes(
+      "compose_app_state_serves_the_loaded_values_and_starts_empty"
+    ) &&
+    rustLib.includes("resuming_no_recovered_lifecycle_operations_is_a_no_op"),
+  "The desktop composition root must own the load order and every AppState field, not the builder inside run()"
 );
 // P2-05 ratchet: a command that runs on the thread that delivered the invoke must
 // be justified by name. Everything else is async and moves its body into a
@@ -4660,7 +4687,8 @@ assert(
     scheduleSource.includes("legacy_schedule_targets_migrate_to_execution_sessions") &&
     scheduleSource.includes("file.sync_all()") &&
     scheduleSource.includes("Permissions::from_mode(0o600)") &&
-    rustLib.includes("start_schedule_runner(app.handle().clone())") &&
+    desktopCompositionSource.includes("start_schedule_runner(app.clone())") &&
+    desktopCompositionSource.includes("start_tool_event_metadata_compaction()") &&
     rustLib.includes("queue_dispatching_sessions") &&
     rustLib.includes("SCHEDULE_MAX_DISPATCH_ATTEMPTS") &&
     rustLib.includes("fn reconcile_schedule_runs(") &&
