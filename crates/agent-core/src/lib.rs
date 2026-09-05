@@ -22,7 +22,8 @@ mod sandbox;
 pub use agent_policy::AgentPolicy;
 pub use direct_judge::{
     direct_judge_eligible, direct_judge_model, direct_judge_prompt, direct_judge_repair_directive,
-    DirectJudgeReceipt, DirectJudgeVerdict, DIRECT_JUDGE_MAX_REPAIR_ROUNDS,
+    DirectJudgeClaim, DirectJudgeClaimStatus, DirectJudgeReceipt, DirectJudgeVerdict,
+    DIRECT_JUDGE_MAX_CLAIMS, DIRECT_JUDGE_MAX_CLAIM_SUMMARY_BYTES, DIRECT_JUDGE_MAX_REPAIR_ROUNDS,
     DIRECT_JUDGE_RECEIPT_SCHEMA,
 };
 pub use event_contract::{

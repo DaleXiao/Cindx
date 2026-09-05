@@ -4263,6 +4263,22 @@ assert(
     rustLib.includes("pub(crate) fn canonical_workspace_file("),
   "The reviewer's cited-content evidence must be bounded and containment-checked"
 );
+assert(
+  // P1-10 B: a model-backed review must produce the typed verdict through the
+  // shared builder (the model cannot compute the digests `from_json` requires),
+  // and the terminal record must say which producer judged the answer.
+  agentRuntimeSource.includes("pub fn model_reviewed_verdict(") &&
+    agentRuntimeSource.includes("pub fn verify_delivery_with_review(") &&
+    directJudgeRuntimeSource.includes("Vec<agent_core::DirectJudgeClaim>") &&
+    rustLib.includes("agent_core::DirectJudgeClaimStatus") &&
+    rustLib.includes("delivery_verification_producer") &&
+    rustLib.includes(
+      "a_model_backed_review_drives_the_record_and_names_its_producer"
+    ) &&
+    directJudgeRuntimeSource.includes("pub(crate) struct DirectJudgeReview") &&
+    directJudgeRuntimeSource.includes("Some(direct_judge_review(&receipt))"),
+  "A model-backed review must yield the typed delivery-verification verdict and name its producer"
+);
 // P2-05 ratchet: a command that runs on the thread that delivered the invoke must
 // be justified by name. Everything else is async and moves its body into a
 // blocking task, so a new sync command — or a converted one moved back — fails

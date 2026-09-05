@@ -12,12 +12,40 @@ pub enum DirectJudgeVerdict {
     Revise,
 }
 
+/// How the reviewer classified one cited location after reading its content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectJudgeClaimStatus {
+    Entailed,
+    Unsupported,
+    Contradicted,
+}
+
+/// One cited location the reviewer classified, with the reason in its own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectJudgeClaim {
+    pub citation: String,
+    pub status: DirectJudgeClaimStatus,
+    #[serde(default)]
+    pub summary: String,
+}
+
+/// Bounds on the optional typed block: the review is one call, not a report.
+pub const DIRECT_JUDGE_MAX_CLAIMS: usize = 8;
+pub const DIRECT_JUDGE_MAX_CLAIM_SUMMARY_BYTES: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectJudgeReceipt {
     pub schema: String,
     pub verdict: DirectJudgeVerdict,
     #[serde(default)]
     pub findings: Vec<String>,
+    /// Optional typed classification of the cited locations whose content the
+    /// review carried. Absent when the answer cites nothing or the reviewer
+    /// omitted it; either way the receipt stays valid, so a stricter contract can
+    /// never raise the inconclusive rate.
+    #[serde(default)]
+    pub claims: Vec<DirectJudgeClaim>,
 }
 
 impl DirectJudgeReceipt {
@@ -44,6 +72,26 @@ impl DirectJudgeReceipt {
         {
             return Err("a passing direct judge receipt cannot retain findings".to_string());
         }
+        if self.claims.len() > DIRECT_JUDGE_MAX_CLAIMS {
+            return Err("a direct judge receipt carries too many claims".to_string());
+        }
+        for claim in &self.claims {
+            if claim.citation.trim().is_empty()
+                || claim.summary.len() > DIRECT_JUDGE_MAX_CLAIM_SUMMARY_BYTES
+            {
+                return Err(
+                    "a direct judge claim must name its citation and stay bounded".to_string(),
+                );
+            }
+        }
+        if self.verdict == DirectJudgeVerdict::Pass
+            && self
+                .claims
+                .iter()
+                .any(|claim| claim.status != DirectJudgeClaimStatus::Entailed)
+        {
+            return Err("a passing direct judge receipt cannot retain refuted claims".to_string());
+        }
         Ok(())
     }
 }
@@ -66,7 +114,7 @@ pub fn direct_judge_eligible(effort: &str, verification_required: bool) -> bool 
 
 pub fn direct_judge_prompt(objective: &str, candidate_answer: &str) -> String {
     format!(
-        "You are an independent delivery judge for a Cindx direct-execution run. Audit the candidate answer against the objective only; you cannot use tools and must not invent new requirements. End with exactly one single-line receipt using this shape: CINDX_DIRECT_JUDGE: {{\"schema\":\"{}\",\"verdict\":\"pass|revise\",\"findings\":[]}}. Use revise only for concrete defects that block delivery; list each defect as one short actionable finding.",
+        "You are an independent delivery judge for a Cindx direct-execution run. Audit the candidate answer against the objective only; you cannot use tools and must not invent new requirements. End with exactly one single-line receipt using this shape: CINDX_DIRECT_JUDGE: {{\"schema\":\"{}\",\"verdict\":\"pass|revise\",\"findings\":[],\"claims\":[]}}. Use revise only for concrete defects that block delivery; list each defect as one short actionable finding. When the prompt carried cited workspace content, add one claims entry per cited location as {{\"citation\":\"path:line\",\"status\":\"entailed|unsupported|contradicted\",\"summary\":\"one short reason\"}}, classifying whether what the answer says about that location follows from the quoted lines; omit claims entirely when the answer cites nothing.",
         DIRECT_JUDGE_RECEIPT_SCHEMA
     )
     + &format!("\n\nObjective:\n{objective}\n\nCandidate answer:\n{candidate_answer}")
@@ -128,6 +176,7 @@ mod tests {
             schema: "wrong".to_string(),
             verdict: DirectJudgeVerdict::Pass,
             findings: Vec::new(),
+            claims: Vec::new(),
         };
         assert_eq!(
             bad_schema.validate(),
@@ -171,6 +220,7 @@ mod tests {
                 "missing edge case".to_string(),
                 "cite the evidence".to_string(),
             ],
+            claims: Vec::new(),
         };
         let directive = direct_judge_repair_directive(&receipt);
         assert!(directive.contains("missing edge case"));
@@ -180,6 +230,7 @@ mod tests {
             schema: DIRECT_JUDGE_RECEIPT_SCHEMA.to_string(),
             verdict: DirectJudgeVerdict::Revise,
             findings: Vec::new(),
+            claims: Vec::new(),
         };
         assert!(direct_judge_repair_directive(&empty).contains("no findings"));
     }

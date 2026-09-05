@@ -1,6 +1,6 @@
 # Current Product Baseline
 
-Current application version: `0.3.54`
+Current application version: `0.3.55`
 
 Last code-fact review: `2026-09-02`
 
@@ -861,7 +861,17 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   components, and symlinks leaving the workspace quote nothing), and every other
   failure yields less text rather than an error, so the block cannot turn a
   deliverable answer into an inconclusive review. An answer that cites nothing
-  leaves the review prompt byte-identical.
+  leaves the review prompt byte-identical. When a review call happens, its
+  typed claims (per cited location: entailed, unsupported, or contradicted, each
+  with a bounded reason) drive the delivery-verification record through the same
+  digest-bound verdict contract as the deterministic producer, and the record names
+  its producer (`model` or `locations`), so a revision the reviewer justified
+  outside the citations becomes one omitted-obligation finding and closes
+  unverified without a repair. The optional claims block is additive: absent or
+  malformed receipts stay valid, so the stricter contract cannot raise the
+  inconclusive rate. The outcome ledger's `AvailableNotEntailed` status is retained
+  on purpose: it is a dispatch-time, location-level fact, while entailment is a
+  review-time judgment, and the two answer different questions.
 - The same claim-evidence receipt now drives the delivery-verification contract
   (`cindx.agent.delivery-verification.v1`), which records a typed, digest-bound
   state — `passed`, `unverified`, or `unbound` with its reason — on every

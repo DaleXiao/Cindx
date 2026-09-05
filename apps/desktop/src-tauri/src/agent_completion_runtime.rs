@@ -140,13 +140,15 @@ pub(crate) fn finalize_agent_completion(
         )
         .map_err(|issue| format!("{} receipt validation failed: {issue:?}", delivery.label()))?;
     let judged_basis_label = grounded_completion_basis_label(grounded_completion_receipt.basis);
-    let (answer, mut grounded_completion_receipt, judge_disposition) = if delivery.used_fallback()
+    let (answer, mut grounded_completion_receipt, judge_disposition, judge_review) = if delivery
+        .used_fallback()
         || collaboration.is_some()
     {
         (
             answer,
             grounded_completion_receipt,
             "direct_judge_not_applicable".to_string(),
+            None,
         )
     } else {
         let judge_candidate = crate::agent_finalizer_runtime::GroundedFinalizerCandidate {
@@ -167,9 +169,11 @@ pub(crate) fn finalize_agent_completion(
             prompt,
             judge_candidate,
         ) {
-            crate::direct_judge_runtime::DirectJudgeGateOutcome::Delivered(judged, disposition) => {
-                (judged.content, judged.receipt, disposition)
-            }
+            crate::direct_judge_runtime::DirectJudgeGateOutcome::Delivered(
+                judged,
+                disposition,
+                review,
+            ) => (judged.content, judged.receipt, disposition, review),
             crate::direct_judge_runtime::DirectJudgeGateOutcome::Blocked {
                 disposition,
                 message,
@@ -538,6 +542,7 @@ pub(crate) fn finalize_agent_completion(
         &final_answer,
         &grounded_completion_receipt,
         &terminal_outcome_ledger,
+        judge_review.as_deref(),
         &mut terminal_metadata,
     );
     let memory_attribution_observation =

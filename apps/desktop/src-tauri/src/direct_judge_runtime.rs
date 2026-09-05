@@ -17,8 +17,29 @@ pub(crate) struct DirectJudgePlan {
 /// repaired) candidate and its recorded disposition; `Blocked` is the
 /// fail-closed exit: the run commits the ordinary failure terminal with the
 /// "verification failed + findings" message instead of delivering.
+/// What one review call decided, carried out of the gate so the terminal
+/// delivery-verification record can state which producer judged the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DirectJudgeReview {
+    pub(crate) verdict: agent_core::DirectJudgeVerdict,
+    pub(crate) claims: Vec<agent_core::DirectJudgeClaim>,
+    pub(crate) findings: Vec<String>,
+}
+
+fn direct_judge_review(receipt: &agent_core::DirectJudgeReceipt) -> DirectJudgeReview {
+    DirectJudgeReview {
+        verdict: receipt.verdict.clone(),
+        claims: receipt.claims.clone(),
+        findings: receipt.findings.clone(),
+    }
+}
+
 pub(crate) enum DirectJudgeGateOutcome {
-    Delivered(GroundedFinalizerCandidate, String),
+    Delivered(
+        GroundedFinalizerCandidate,
+        String,
+        Option<Box<DirectJudgeReview>>,
+    ),
     Blocked {
         disposition: String,
         message: String,
@@ -341,6 +362,7 @@ pub(crate) fn apply_direct_judge_gate(
         return DirectJudgeGateOutcome::Delivered(
             candidate,
             "direct_judge_not_eligible".to_string(),
+            None,
         );
     };
 
@@ -369,6 +391,7 @@ pub(crate) fn apply_direct_judge_gate(
             return DirectJudgeGateOutcome::Delivered(
                 candidate,
                 "direct_judge_unavailable".to_string(),
+                None,
             )
         }
     };
@@ -378,11 +401,16 @@ pub(crate) fn apply_direct_judge_gate(
             return DirectJudgeGateOutcome::Delivered(
                 candidate,
                 "direct_judge_inconclusive".to_string(),
+                None,
             )
         }
     };
     if receipt.verdict == agent_core::DirectJudgeVerdict::Pass {
-        return DirectJudgeGateOutcome::Delivered(candidate, "direct_judge_passed".to_string());
+        return DirectJudgeGateOutcome::Delivered(
+            candidate,
+            "direct_judge_passed".to_string(),
+            Some(Box::new(direct_judge_review(&receipt))),
+        );
     }
 
     let repair_prompt = format!(
@@ -406,6 +434,7 @@ pub(crate) fn apply_direct_judge_gate(
             return DirectJudgeGateOutcome::Delivered(
                 candidate,
                 "direct_judge_repair_unavailable".to_string(),
+                None,
             )
         }
     };
@@ -413,6 +442,7 @@ pub(crate) fn apply_direct_judge_gate(
         return DirectJudgeGateOutcome::Delivered(
             candidate,
             "direct_judge_repair_empty".to_string(),
+            None,
         );
     }
     let Some(repaired_receipt) = ground_repaired_answer(
@@ -436,6 +466,7 @@ pub(crate) fn apply_direct_judge_gate(
         return DirectJudgeGateOutcome::Delivered(
             candidate,
             "direct_judge_repair_ungrounded".to_string(),
+            None,
         );
     };
 
@@ -469,6 +500,7 @@ pub(crate) fn apply_direct_judge_gate(
             DirectJudgeGateOutcome::Delivered(
                 repaired_candidate,
                 "direct_judge_recheck_passed".to_string(),
+                Some(Box::new(direct_judge_review(&recheck))),
             )
         }
         Some(recheck) => {
@@ -492,11 +524,13 @@ pub(crate) fn apply_direct_judge_gate(
             DirectJudgeGateOutcome::Delivered(
                 repaired_candidate,
                 "direct_judge_recheck_exhausted".to_string(),
+                None,
             )
         }
         None => DirectJudgeGateOutcome::Delivered(
             repaired_candidate,
             "direct_judge_recheck_inconclusive".to_string(),
+            None,
         ),
     }
 }

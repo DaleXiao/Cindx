@@ -15,11 +15,13 @@
 //! still owns repair and fail-closed, and this state changes nothing about what
 //! the user receives.
 
+use crate::direct_judge_runtime::DirectJudgeReview;
 use agent_core::Metadata;
 use agent_runtime::{
     bind_answer_citations, observed_locations_from_messages, verify_delivery_against_claims,
-    DeliveryVerificationEvidence, DeliveryVerificationObligation, GroundedCompletionReceipt,
-    OutcomeLedgerShadow,
+    verify_delivery_with_review, DeliveryVerificationDecision, DeliveryVerificationEvidence,
+    DeliveryVerificationFinding, DeliveryVerificationFindingKind, DeliveryVerificationObligation,
+    GroundedCompletionReceipt, OutcomeLedgerShadow,
 };
 
 pub(crate) const DELIVERY_VERIFICATION_RECORD_SCHEMA: &str = "cindx.agent.delivery-verification.v1";
@@ -33,6 +35,7 @@ pub(crate) fn record_delivery_verification_state(
     final_answer: &str,
     receipt: &GroundedCompletionReceipt,
     ledger: &OutcomeLedgerShadow,
+    review: Option<&DirectJudgeReview>,
     metadata: &mut Metadata,
 ) {
     metadata.insert(
@@ -44,14 +47,36 @@ pub(crate) fn record_delivery_verification_state(
         &observed_locations_from_messages(&runtime.messages),
     );
     let (obligations, evidence) = delivery_verification_reference_context(runtime, receipt, ledger);
-    match verify_delivery_against_claims(
-        objective,
-        final_answer,
-        receipt,
-        &obligations,
-        &evidence,
-        &claims,
-    ) {
+    let reviewed = review.map(model_findings_from_review);
+    metadata.insert(
+        "delivery_verification_producer".to_string(),
+        if reviewed.is_some() {
+            "model"
+        } else {
+            "locations"
+        }
+        .to_string(),
+    );
+    let verification = match reviewed {
+        Some((decision, findings)) => verify_delivery_with_review(
+            objective,
+            final_answer,
+            receipt,
+            &obligations,
+            &evidence,
+            decision,
+            findings,
+        ),
+        None => verify_delivery_against_claims(
+            objective,
+            final_answer,
+            receipt,
+            &obligations,
+            &evidence,
+            &claims,
+        ),
+    };
+    match verification {
         Ok(state) => {
             metadata.insert(
                 "delivery_verification_status".to_string(),
@@ -90,7 +115,72 @@ pub(crate) fn record_delivery_verification_state(
     }
 }
 
-/// The reference context the subject binds: one entry per obligation the grounded
+/// Turns one model-backed review into the contract's decision and findings.
+///
+/// A refuted citation becomes the matching finding kind; a revision the reviewer
+/// justified outside the cited locations becomes one `OmittedObligation` finding,
+/// because `NeedsRevision` requires at least one finding and "the answer left
+/// something the objective required undone" is what a non-citation revision means.
+/// Summaries are bounded and control-free here because the contract validates them
+/// and a reviewer string is unbounded input.
+fn model_findings_from_review(
+    review: &DirectJudgeReview,
+) -> (
+    DeliveryVerificationDecision,
+    Vec<DeliveryVerificationFinding>,
+) {
+    let decision = match review.verdict {
+        agent_core::DirectJudgeVerdict::Pass => DeliveryVerificationDecision::Passed,
+        agent_core::DirectJudgeVerdict::Revise => DeliveryVerificationDecision::NeedsRevision,
+    };
+    let mut findings: Vec<DeliveryVerificationFinding> = review
+        .claims
+        .iter()
+        .filter(|claim| claim.status != agent_core::DirectJudgeClaimStatus::Entailed)
+        .map(|claim| DeliveryVerificationFinding {
+            kind: match claim.status {
+                agent_core::DirectJudgeClaimStatus::Contradicted => {
+                    DeliveryVerificationFindingKind::Contradiction
+                }
+                _ => DeliveryVerificationFindingKind::UnsupportedClaim,
+            },
+            summary: bounded_finding_text(&format!("{}: {}", claim.citation, claim.summary.trim())),
+            obligation_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+        })
+        .collect();
+    if decision == DeliveryVerificationDecision::NeedsRevision && findings.is_empty() {
+        findings.push(DeliveryVerificationFinding {
+            kind: DeliveryVerificationFindingKind::OmittedObligation,
+            summary: bounded_finding_text(
+                review
+                    .findings
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("the reviewer required revision"),
+            ),
+            obligation_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+        });
+    }
+    (decision, findings)
+}
+
+fn bounded_finding_text(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(180)
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        "the reviewer recorded a finding".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// The reference context the subject binds/// The reference context the subject binds: one entry per obligation the grounded
 /// receipt covered, in the receipt's order, and one per evidence sequence the
 /// model could see.
 ///
@@ -151,6 +241,84 @@ mod tests {
     /// with a receipt that does not bind the candidate, it records `unbound` plus
     /// the reason and leaves the rest of the metadata alone.
     #[test]
+    fn a_model_backed_review_drives_the_record_and_names_its_producer() {
+        let runtime = agent_runtime::start_agent_loop(
+            agent_core::TaskId("delivery-verification-model".to_string()),
+            "objective",
+            agent_runtime::AgentRuntimeConfig::default(),
+        );
+        let answer = "The committed answer cites src/x.rs:3.";
+        let receipt = agent_runtime::GroundedCompletionReceipt {
+            schema: agent_runtime::GROUNDED_COMPLETION_SCHEMA.to_string(),
+            steer_epoch: 0,
+            contract_epoch: 0,
+            model_turn: 1,
+            content_sha256: agent_core::sha256_hex(answer.as_bytes()),
+            content_bytes: answer.len() as u64,
+            obligation_digest: "b".repeat(64),
+            covered_obligation_ids: Vec::new(),
+            visible_evidence_sequences: Vec::new(),
+            constraint_codes: Vec::new(),
+            basis: agent_runtime::GroundedCompletionBasis::SelfContained,
+        };
+        let ledger = agent_runtime::OutcomeLedgerShadow {
+            schema: agent_runtime::OUTCOME_LEDGER_SCHEMA.to_string(),
+            steer_epoch: 0,
+            phase: agent_runtime::OutcomeLedgerPhase::Completed,
+            obligations: Vec::new(),
+            evidence: Vec::new(),
+            claims: Vec::new(),
+            postconditions: Vec::new(),
+            terminal: None,
+            failure: None,
+            truncation: agent_runtime::OutcomeTruncation::default(),
+        };
+        let review = crate::direct_judge_runtime::DirectJudgeReview {
+            verdict: agent_core::DirectJudgeVerdict::Revise,
+            claims: vec![agent_core::DirectJudgeClaim {
+                citation: "src/x.rs:3".to_string(),
+                status: agent_core::DirectJudgeClaimStatus::Contradicted,
+                summary: "the quoted lines say the opposite".to_string(),
+            }],
+            findings: Vec::new(),
+        };
+        let mut metadata = Metadata::new();
+        record_delivery_verification_state(
+            &runtime,
+            "objective",
+            answer,
+            &receipt,
+            &ledger,
+            Some(&review),
+            &mut metadata,
+        );
+
+        assert_eq!(
+            metadata
+                .get("delivery_verification_producer")
+                .map(String::as_str),
+            Some("model"),
+            "the record must say which producer judged the answer"
+        );
+        assert_eq!(
+            metadata
+                .get("delivery_verification_status")
+                .map(String::as_str),
+            Some("unverified"),
+            "a revise verdict with no repair closes unverified: status={:?} issue={:?}",
+            metadata.get("delivery_verification_status"),
+            metadata.get("delivery_verification_issue")
+        );
+        assert_eq!(
+            metadata
+                .get("delivery_verification_findings")
+                .map(String::as_str),
+            Some("1"),
+            "the contradicted claim became one typed finding: {metadata:?}"
+        );
+    }
+
+    #[test]
     fn an_unbindable_subject_is_recorded_as_unbound_and_never_fails_the_commit() {
         let runtime = start_agent_loop(
             agent_core::TaskId("delivery-verification-unbound".to_string()),
@@ -191,6 +359,7 @@ mod tests {
             "The committed answer cites src/x.rs:3.",
             &receipt,
             &ledger,
+            None,
             &mut metadata,
         );
 

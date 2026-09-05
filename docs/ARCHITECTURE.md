@@ -633,6 +633,18 @@ evidence on a call the run already makes and must not be able to turn a delivera
 answer into an inconclusive review. An answer with no quotable citation leaves the
 prompt byte-identical, so tiers and answers that cite nothing pay nothing.
 
+When a review call happens, its typed claims travel out of the gate as a
+`DirectJudgeReview` and drive the delivery-verification record through
+`verify_delivery_with_review`, which assembles the digest-bound verdict with
+`model_reviewed_verdict` — the model supplies the decision and the classified
+claims, and the contract supplies the digests and coverage it cannot compute, so a
+model-backed review can never be mistaken for a parsed one. The terminal record
+names its producer (`model` or `locations`), and the deterministic producer remains
+the fallback whenever no review happened, so an ineligible or inconclusive review
+degrades to exactly the v0.3.43 behavior. A revision justified outside the cited
+locations becomes one omitted-obligation finding, because `NeedsRevision` requires
+a finding and that is what a non-citation revision means.
+
 The completion transaction persists terminal event, result, artifacts,
 lifecycle, learning evidence, the observed-use measurement for recalled
 memories, and cleanup under one attempt/epoch identity.

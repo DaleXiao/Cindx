@@ -724,6 +724,17 @@ pub fn claim_evidence_verdict(
     } else {
         DeliveryVerificationDecision::NeedsRevision
     };
+    build_verdict(subject, decision, findings)
+}
+
+/// Assembles a digest-bound verdict with full review coverage of the subject's
+/// reference context. A model cannot compute the subject or objective digests, so a
+/// model-backed review must be assembled here rather than parsed with `from_json`.
+fn build_verdict(
+    subject: &DeliveryVerificationSubjectV1,
+    decision: DeliveryVerificationDecision,
+    findings: Vec<DeliveryVerificationFinding>,
+) -> Result<DeliveryVerificationVerdictV1, DeliveryVerificationIssue> {
     let mut verdict = DeliveryVerificationVerdictV1 {
         schema: DELIVERY_VERIFICATION_VERDICT_SCHEMA.to_string(),
         subject_sha256: subject.subject_sha256.clone(),
@@ -743,6 +754,16 @@ pub fn claim_evidence_verdict(
         .ok_or(DeliveryVerificationIssue::InvalidVerdictJson)
 }
 
+/// The typed verdict for a model-backed review: the reviewer's decision plus its
+/// classified claims, bound to the subject exactly as the deterministic verdict is.
+pub fn model_reviewed_verdict(
+    subject: &DeliveryVerificationSubjectV1,
+    decision: DeliveryVerificationDecision,
+    findings: Vec<DeliveryVerificationFinding>,
+) -> Result<DeliveryVerificationVerdictV1, DeliveryVerificationIssue> {
+    build_verdict(subject, decision, findings)
+}
+
 /// Binds the subject to the exact candidate bytes and reference context, records
 /// the deterministic claim verdict, and closes the state.
 ///
@@ -751,6 +772,29 @@ pub fn claim_evidence_verdict(
 /// attempts no repair of its own: the product's judge gate owns repair, and
 /// leaving the state open would report an unrepaired answer as still under review
 /// after the run has committed.
+/// Binds the subject and drives the state from a model-backed review instead of
+/// the deterministic claim binder: same binding, same coverage, same fail-closed
+/// close, different producer of the decision and findings.
+pub fn verify_delivery_with_review(
+    objective: &str,
+    candidate: &str,
+    receipt: &GroundedCompletionReceipt,
+    obligations: &[DeliveryVerificationObligation],
+    evidence: &[DeliveryVerificationEvidence],
+    decision: DeliveryVerificationDecision,
+    findings: Vec<DeliveryVerificationFinding>,
+) -> Result<DeliveryVerificationStateV1, DeliveryVerificationIssue> {
+    let subject =
+        DeliveryVerificationSubjectV1::bind(objective, candidate, receipt, obligations, evidence)?;
+    let verdict = model_reviewed_verdict(&subject, decision, findings)?;
+    let mut state = DeliveryVerificationStateV1::new(subject)?;
+    state.record_initial_verdict(verdict)?;
+    if !state.is_terminal() {
+        state.fail_closed()?;
+    }
+    Ok(state)
+}
+
 pub fn verify_delivery_against_claims(
     objective: &str,
     candidate: &str,
