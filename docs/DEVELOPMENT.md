@@ -438,10 +438,24 @@ in-memory substitute.
 
 The local build script requires a clean Git tree, advances the patch version,
 stamps all version sources including `docs/CURRENT.md` and `docs/HANDOFF.md`,
-builds an Apple Silicon bundle, ad-hoc signs it, probes clean startup and
+builds an Apple Silicon bundle, signs it, probes clean startup and
 fail-closed persistence,
 creates a zip, and installs `/Applications/Cindx.app` unless `--no-install` is
 used.
+
+Signing prefers the stable local identity `Cindx Local Dev` when it exists in
+the login keychain (override with `CINDX_CODESIGN_IDENTITY`) and falls back to
+ad-hoc otherwise. This matters beyond cosmetics: an ad-hoc signature's
+designated requirement is a per-build cdhash, so every rebuild invalidated the
+keychain ACL for the provider API key and macOS re-armed its authorization
+prompt after each build. A stable certificate anchor keeps one "Always Allow"
+decision valid across rebuilds, which is also what makes unattended runs
+(evaluations, schedules) safe from a blocking password prompt. Create the
+identity once — expect a single macOS authorization dialog:
+
+```sh
+node scripts/setup-local-codesign.mjs
+```
 
 Run all required checks first, then perform one formal build:
 

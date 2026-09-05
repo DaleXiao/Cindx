@@ -127,6 +127,12 @@ The desktop app currently includes:
   still in flight, so that approval stays actionable while the session is busy —
   in the Composer card and in the Settings permission review alike — while every
   other approval waits for an idle session.
+  A delegation's successful child tool calls return as structured facts
+  (`SubagentToolFact`, canonical tool name plus dispatched arguments) and the
+  parent folds them into its task contract through the same outcome path a
+  direct call uses, so a delegated write counts as the run's mutation for every
+  gate that reads `successful_mutations()` and delegated successes satisfy
+  required-tool evidence instead of living only in the answer text.
   A delegation is durable at its boundaries. Its terminal progress event carries
   a `cindx.agent.subagent-run.v1` record — the `task` call id, the description
   bounded to 80 characters, the write flag, the stop reason, the model turns

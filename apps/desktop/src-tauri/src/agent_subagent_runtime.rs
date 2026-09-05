@@ -16,11 +16,12 @@ use agent_core::{
     ToolOutcomeStatus, ToolSpec,
 };
 use agent_runtime::{
-    observation_from_agent_tool_result, observation_from_tool_result, prompt_completion_intent,
-    subagent_patch_tool_allowed, subagent_tool_allowed, subagent_write_system_prompt,
-    tool_input_fingerprint, tool_invocation_from_request, AgentRunControl, AgentToolRequest,
-    PromptEffectAuthority, RunStageClass, SubagentChildOutcome, SubagentRunRecord,
-    SubagentStopReason, SUBAGENT_MAX_STEPS, SUBAGENT_MAX_TOOL_CALLS,
+    observation_from_agent_tool_result, observation_from_tool_result, original_tool_name,
+    prompt_completion_intent, subagent_patch_tool_allowed, subagent_tool_allowed,
+    subagent_write_system_prompt, tool_input_fingerprint, tool_invocation_from_request,
+    AgentRunControl, AgentToolRequest, PromptEffectAuthority, RunStageClass, SubagentChildOutcome,
+    SubagentRunRecord, SubagentStopReason, SubagentToolFact, SUBAGENT_MAX_STEPS,
+    SUBAGENT_MAX_TOOL_CALLS,
 };
 use agent_storage::{PermissionStore, SqliteStore};
 use model_provider::{ModelCallMode, ModelRequest, StreamingModelProvider};
@@ -250,6 +251,13 @@ pub(crate) fn execute_subagent_delegations(
         if let Some(message) = runtime.messages.last() {
             persist_subagent_result_message(state, &runtime.task_id, run_context, message);
         }
+        // Fold the child's successful tool calls into the parent's task
+        // contract through the ordinary outcome path: a delegated write counts
+        // as this run's mutation and a delegated success satisfies required-tool
+        // evidence. The text answer alone left the contract blind to what the
+        // child actually did, so the parent could re-prove work already done or
+        // look mutation-free to gates that read successful_mutations().
+        merge_subagent_tool_facts(runtime, &outcome.tool_facts);
         let summary = match write_mode {
             SubagentWriteMode::ReadOnly => {
                 Some(format!("Subagent finished: {}", outcome.description))
@@ -420,6 +428,10 @@ pub(crate) fn subagent_child_answer(
     });
     let mut last_content = String::new();
     let mut child_tool_calls = 0usize;
+    // Structured facts of the child's successful tool calls; the parent folds
+    // them into its task contract after the join so delegated work counts as
+    // the run's own (mutation epochs, required-tool evidence).
+    let mut tool_facts: Vec<SubagentToolFact> = Vec::new();
     // Model turns actually attempted, for the durable run record. A turn the
     // cancel check skipped is not counted: it did no work.
     let mut steps = 0usize;
@@ -431,7 +443,8 @@ pub(crate) fn subagent_child_answer(
                 SubagentStopReason::Cancelled,
                 steps,
                 child_tool_calls,
-            );
+            )
+            .with_tool_facts(tool_facts);
         }
         // A steer supersedes this delegation, so the child stops at its step
         // boundary rather than charging another turn for an objective the user has
@@ -445,7 +458,8 @@ pub(crate) fn subagent_child_answer(
                 SubagentStopReason::Steered,
                 steps,
                 child_tool_calls,
-            );
+            )
+            .with_tool_facts(tool_facts);
         }
         steps += 1;
         // Charge the model call to the parent run's Worker stage budget; an
@@ -461,7 +475,8 @@ pub(crate) fn subagent_child_answer(
                 reason,
                 steps,
                 child_tool_calls,
-            );
+            )
+            .with_tool_facts(tool_facts);
         }
         // Propagate the parent run's effort tier so the child's model call honors
         // the tier's reasoning/thinking budget instead of defaulting to empty
@@ -522,7 +537,8 @@ pub(crate) fn subagent_child_answer(
                     reason,
                     steps,
                     child_tool_calls,
-                );
+                )
+                .with_tool_facts(tool_facts);
             }
             crate::model_resource_runtime::AuxModelCall::Stopped
             | crate::model_resource_runtime::AuxModelCall::ProviderError => {
@@ -545,7 +561,8 @@ pub(crate) fn subagent_child_answer(
                     }
                     stopped => subagent_stop_answer(stopped, &last_content),
                 };
-                return child_outcome(&description, answer, reason, steps, child_tool_calls);
+                return child_outcome(&description, answer, reason, steps, child_tool_calls)
+                    .with_tool_facts(tool_facts);
             }
         };
         last_content = response.message.content.clone();
@@ -556,7 +573,8 @@ pub(crate) fn subagent_child_answer(
                 SubagentStopReason::Completed,
                 steps,
                 child_tool_calls,
-            );
+            )
+            .with_tool_facts(tool_facts);
         }
         // Record the assistant turn (with its raw tool calls) so the next
         // request payload is well-formed, then execute each read-only call.
@@ -589,7 +607,8 @@ pub(crate) fn subagent_child_answer(
                     SubagentStopReason::ToolCallBudget,
                     steps,
                     child_tool_calls,
-                );
+                )
+                .with_tool_facts(tool_facts);
             }
             let observation = match &write {
                 Some(context) if subagent_patch_tool_allowed(&call.name) => {
@@ -610,6 +629,16 @@ pub(crate) fn subagent_child_answer(
                     cancellation,
                 ),
             };
+            // The durable observation format (the same one the resume path
+            // parses) decides success; a successful call becomes a structured
+            // fact under its canonical registry name so the parent contract
+            // records it exactly like a direct call.
+            if observation.lines().nth(1) == Some("status=succeeded") {
+                tool_facts.push(SubagentToolFact {
+                    tool_name: original_tool_name(&call.name, subagent_tools),
+                    input_json: call.arguments_json.clone(),
+                });
+            }
             messages.push(Message {
                 role: MessageRole::Tool,
                 content: observation,
@@ -630,6 +659,7 @@ pub(crate) fn subagent_child_answer(
         steps,
         child_tool_calls,
     )
+    .with_tool_facts(tool_facts)
 }
 
 /// The decision a write subagent's parked patch approval resolved to.
@@ -1194,6 +1224,26 @@ fn execute_worker_network_tool(
     tool.execute(invocation).unwrap_or_else(|error| {
         agent_core::ToolResult::failed(agent_core::ToolCallId(call_id.to_string()), error.message)
     })
+}
+
+/// Folds one delegation's successful child tool calls into the parent's task
+/// contract through the same recording path the kernel uses for direct calls
+/// (mutation epochs and targets, required-tool evidence, and the
+/// successful-mutation count the delivery gates read). The child already ran
+/// under the run's identity, budget, and durable event lineage; this brings
+/// the in-memory contract to parity with that lineage.
+pub(crate) fn merge_subagent_tool_facts(
+    runtime: &mut agent_runtime::AgentLoopState,
+    facts: &[SubagentToolFact],
+) {
+    for fact in facts {
+        runtime.task_contract.record_tool_outcome(
+            &fact.tool_name,
+            &fact.input_json,
+            &ToolOutcomeStatus::Succeeded,
+            None,
+        );
+    }
 }
 
 /// Remove a delegated `task` call id from the latest assistant message so the

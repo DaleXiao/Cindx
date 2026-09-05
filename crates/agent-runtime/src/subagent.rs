@@ -172,6 +172,19 @@ impl SubagentStopReason {
     }
 }
 
+/// One successful child tool call, carried back to the parent so the parent's
+/// task contract records the delegated work through the same outcome path a
+/// direct call uses: mutation epochs and targets, required-tool evidence, and
+/// the successful-mutation count the delivery gates read. Without these facts
+/// the parent contract saw delegated writes as text only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentToolFact {
+    /// Canonical tool name (the registry spelling, not the model's alias).
+    pub tool_name: String,
+    /// The child call's arguments JSON, exactly as dispatched.
+    pub input_json: String,
+}
+
 /// One delegated child's own report: what it was asked, what it answered, and how
 /// it stopped. The stop reason travels with the answer so a child that was
 /// steered, cancelled, crashed, or ran out of steps is never reported to the
@@ -186,6 +199,9 @@ pub struct SubagentChildOutcome {
     pub steps: usize,
     /// Child tool calls executed, at most [`SUBAGENT_MAX_TOOL_CALLS`].
     pub tool_calls: usize,
+    /// Structured facts of the child's successful tool calls, bounded by the
+    /// same per-child tool-call cap; empty for refused or crashed children.
+    pub tool_facts: Vec<SubagentToolFact>,
 }
 
 impl SubagentChildOutcome {
@@ -202,7 +218,14 @@ impl SubagentChildOutcome {
             stop_reason,
             steps,
             tool_calls,
+            tool_facts: Vec::new(),
         }
+    }
+
+    /// Attach the collected child tool facts to this outcome.
+    pub fn with_tool_facts(mut self, tool_facts: Vec<SubagentToolFact>) -> Self {
+        self.tool_facts = tool_facts;
+        self
     }
 }
 
@@ -492,6 +515,24 @@ mod tests {
         assert!(prompt.contains("expected_base_sha256"));
         assert!(prompt.contains("explicit user approval"));
         assert!(prompt.contains("denied"));
+    }
+
+    #[test]
+    fn child_outcome_carries_structured_tool_facts() {
+        let bare =
+            SubagentChildOutcome::new("inspect", "answer", SubagentStopReason::Completed, 2, 1);
+        assert!(bare.tool_facts.is_empty());
+
+        let with_facts = bare.with_tool_facts(vec![SubagentToolFact {
+            tool_name: "file.write".to_string(),
+            input_json: r#"{"path":"a.md"}"#.to_string(),
+        }]);
+        assert_eq!(with_facts.tool_facts.len(), 1);
+        assert_eq!(with_facts.tool_facts[0].tool_name, "file.write");
+        // The rest of the report travels unchanged.
+        assert_eq!(with_facts.answer, "answer");
+        assert_eq!(with_facts.steps, 2);
+        assert_eq!(with_facts.tool_calls, 1);
     }
 
     /// The durable record carries a delegation's bounded identity and the digest

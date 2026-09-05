@@ -174,11 +174,30 @@ try {
     ["build", "--target", targetTriple, "--bundles", "app"],
     { cwd: desktopRoot }
   );
+  // A stable local signing identity keeps the login-keychain ACL for the
+  // provider API key valid across rebuilds: ad-hoc signatures carry a
+  // per-build cdhash requirement, which re-arms the keychain authorization
+  // prompt after every build. `scripts/setup-local-codesign.mjs` creates the
+  // identity once; CINDX_CODESIGN_IDENTITY overrides the choice.
+  const codesignIdentity = (() => {
+    const configured = process.env.CINDX_CODESIGN_IDENTITY?.trim();
+    if (configured) return configured;
+    const identities = spawnSync("security", ["find-identity", "-v", "-p", "codesigning"], {
+      encoding: "utf8"
+    });
+    if ((identities.stdout ?? "").includes("Cindx Local Dev")) return "Cindx Local Dev";
+    return "-";
+  })();
+  console.log(
+    codesignIdentity === "-"
+      ? "Signing ad-hoc (no stable local identity; run scripts/setup-local-codesign.mjs to stop keychain re-prompts)"
+      : `Signing with stable local identity "${codesignIdentity}"`
+  );
   run("codesign", [
     "--force",
     "--deep",
     "--sign",
-    "-",
+    codesignIdentity,
     "--identifier",
     "app.cindx.desktop",
     builtApp

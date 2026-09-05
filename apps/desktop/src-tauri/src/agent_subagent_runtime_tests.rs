@@ -168,6 +168,44 @@ fn subagent_runs_read_only_loop_to_a_final_answer() {
     assert_eq!(outcome.steps, 2);
     assert_eq!(outcome.tool_calls, 1);
     assert_eq!(outcome.description, "inspect readme");
+    // The successful child call travels back as a structured fact under its
+    // canonical registry name so the parent contract can record it exactly
+    // like a direct call.
+    assert_eq!(outcome.tool_facts.len(), 1);
+    assert_eq!(outcome.tool_facts[0].tool_name, "file.read");
+    assert_eq!(outcome.tool_facts[0].input_json, r#"{"path":"README.md"}"#);
+}
+
+#[test]
+fn merged_subagent_facts_count_as_parent_contract_mutations() {
+    let mut runtime = agent_runtime::start_agent_loop(
+        TaskId("parent-contract".to_string()),
+        "delegate and deliver",
+        agent_runtime::AgentRuntimeConfig::default(),
+    );
+    assert_eq!(runtime.task_contract.successful_mutations(), 0);
+
+    merge_subagent_tool_facts(
+        &mut runtime,
+        &[SubagentToolFact {
+            tool_name: "file.write".to_string(),
+            input_json: r#"{"path":"notes.md","content":"done"}"#.to_string(),
+        }],
+    );
+
+    // The delegated write is this run's mutation for every gate that reads
+    // the contract, exactly as if the parent had executed it directly.
+    assert_eq!(runtime.task_contract.successful_mutations(), 1);
+
+    // A delegated read records without touching the mutation count.
+    merge_subagent_tool_facts(
+        &mut runtime,
+        &[SubagentToolFact {
+            tool_name: "file.read".to_string(),
+            input_json: r#"{"path":"notes.md"}"#.to_string(),
+        }],
+    );
+    assert_eq!(runtime.task_contract.successful_mutations(), 1);
 }
 
 #[test]
