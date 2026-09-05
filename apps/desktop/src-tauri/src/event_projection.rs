@@ -183,6 +183,15 @@ pub(crate) fn permission_review_item(
         .map(|value| redact_sensitive_text(value))
         .unwrap_or_default();
     let can_allow_session = source == "agent" && permission_can_allow_session(&record.request);
+    // Same origin marker the thread's approval card uses: a write subagent's
+    // request parks its parent run, so the review must stay actionable while
+    // the session is busy.
+    let subagent = record
+        .request
+        .metadata
+        .get(crate::agent_subagent_runtime::SUBAGENT_PERMISSION_ORIGIN_KEY)
+        .map(String::as_str)
+        == Some(crate::agent_subagent_runtime::SUBAGENT_PERMISSION_ORIGIN_VALUE);
 
     PermissionReviewItem {
         request_id: record.request.id.0,
@@ -198,6 +207,7 @@ pub(crate) fn permission_review_item(
         input,
         requested_at_ms: record.requested_at_ms,
         can_allow_session,
+        subagent,
     }
 }
 

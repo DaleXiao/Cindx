@@ -8,7 +8,11 @@ import {
   XCircle
 } from "lucide-react";
 import type { ApprovalPolicy, PermissionReviewItem } from "../tauri";
-import { APPROVAL_POLICY_OPTIONS, normalizeApprovalPolicy } from "../approvalPolicyModel";
+import {
+  APPROVAL_POLICY_OPTIONS,
+  approvalBlockedBySessionBusy,
+  normalizeApprovalPolicy
+} from "../approvalPolicyModel";
 
 type PermissionDecision = "allow_once" | "allow_for_session" | "deny";
 
@@ -101,8 +105,11 @@ export function SettingsPermissionsPanel({
       ) : (
         <div className="permission-review-list" aria-label="Pending permission reviews">
           {activeReviews.map((review) => {
-            const sessionBusy = Boolean(
-              review.sessionId && busySessionIds.has(review.sessionId)
+            // A write subagent's review parks its parent run, so the session
+            // stays busy by design; that decision must remain clickable (R1).
+            const sessionBusy = approvalBlockedBySessionBusy(
+              review.subagent,
+              Boolean(review.sessionId && busySessionIds.has(review.sessionId))
             );
             return (
               <article className="permission-review-row" key={review.requestId}>

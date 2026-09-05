@@ -42,7 +42,11 @@ The desktop app currently includes:
   local processes when configured and permitted.
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed
   from opencode/deepseek-harness), and the loop never executes a tool-call batch that
-  the provider truncated at its output limit (borrowed from pi), re-asking instead.
+  the provider cut off before completion — at its output limit, or by a stream that
+  ended without any completion marker (neither a `finish_reason` chunk nor the
+  protocol's `[DONE]` sentinel) — re-asking instead; a text answer from such a
+  truncated stream continues from the preserved partial instead of being delivered
+  as final.
 - Before the hard repeated-action stop, the loop injects an advisory reminder
   into the model context when the same tool with identical canonical arguments
   repeats consecutively (thresholds 3 and 5): the notice never vetoes or
@@ -119,6 +123,10 @@ The desktop app currently includes:
   header shows a per-subagent panel (one row each, orb while running, check when
   done) plus a "Running subagents done/total" status; the panel collapses when
   every delegation completes.
+  A write delegation's patch approval parks the child while the parent run is
+  still in flight, so that approval stays actionable while the session is busy —
+  in the Composer card and in the Settings permission review alike — while every
+  other approval waits for an idle session.
   A delegation is durable at its boundaries. Its terminal progress event carries
   a `cindx.agent.subagent-run.v1` record — the `task` call id, the description
   bounded to 80 characters, the write flag, the stop reason, the model turns
@@ -182,7 +190,11 @@ The desktop app currently includes:
   The controls are guarded by content-hash conflict checks. A
   `file.patch_batch` call is one undo entry, so undoing it restores every file
   in the batch together and any externally edited member blocks the whole
-  group restore. Shell, browser, computer, and process effects remain
+  group restore. Restores publish through a temporary-file rename, a group
+  operation that fails partway rolls its already-written files back, and the
+  registry commit retries without re-running file effects and rolls them back
+  if it cannot land — so the panel and the workspace can never disagree about
+  a half-undone group. Shell, browser, computer, and process effects remain
   irreversible.
 - Project instruction files: `AGENTS.md` discovered from the workspace root up
   to the Git root, plus `.cindx/instructions/*.md` files, are loaded under
@@ -324,7 +336,11 @@ returns one typed single-line receipt (`pass` or `revise` with findings). A
 `revise` verdict permits at most one repair round and one recheck; Fast runs are
 never judged. Judge unavailability, inconclusive receipts, empty or ungrounded
 repairs, and fallback candidates keep the original answer and record a
-`direct_judge_disposition` instead of blocking delivery. An opt-in
+`direct_judge_disposition` instead of blocking delivery. When delivery proceeds
+after a negative review — an exhausted recheck, or a repair that failed, came
+back empty, or could not be grounded — that review still feeds the
+delivery-verification record, so the record can never read `passed` over a
+reviewer that demanded revision. An opt-in
 `direct_judge_fail_closed` provider setting (default off, exposed as a
 Settings toggle) narrows two of those outcomes for runs that recorded at
 least one successful workspace mutation: when the judge required revision and
@@ -508,7 +524,10 @@ Tool visibility does not grant authority.
   bounded to 200 results with a truncated flag; hidden entries, symlinks, and
   local credential files are skipped. `web.fetch` retrieves the body of one
   HTTP/HTTPS URL through curl (at most five redirects, an 8 MiB byte bound, and
-  a clamped timeout) and wraps the body in an explicit untrusted-provenance
+  a clamped timeout), parses status and headers strictly apart from the body
+  (`tools::http_wire`, so body text quoting `HTTP/` status lines or `Location:`
+  headers can never change the fetch status or the redirect target), and wraps
+  the body in an explicit untrusted-provenance
   boundary; it shares the `web.search` Network permission and risk level. Both
   tools are on the subagent and plan-mode read-only whitelist.
 - Outbound HTTP has one policy owner (`agent_core::http_policy`), so every egress
@@ -827,7 +846,11 @@ See [EVALUATION.md](EVALUATION.md) for the retained numbers and interpretation.
   responses (`NativeAgentState` / `NativeAgentStateDelta`) are
   runtime-validated at the boundary (`tauriAgentStateContract`), and the
   optimistic queue reconciliation invariant lives in the node-tested
-  `sessionRuntimeModel` (`reconcileOptimisticQueuedMessages`). `tauri.ts`,
+  `sessionRuntimeModel` (`reconcileOptimisticQueuedMessages`). Queue receipts
+  merge only the visible state (`mergeQueuedMessageReceipt` /
+  `mergeQueuedMessageActionReceipt`) and never advance the applied-event
+  cursor, so a delta poll can not skip events produced before an enqueue.
+  `tauri.ts`,
   settings, inspector, and thread styling remain large change surfaces.
 - The `realworld-eval` feature and the `orchestrator`/`orchestrator-eval`
   crates are physically removed; there is no provider evaluation surface in the

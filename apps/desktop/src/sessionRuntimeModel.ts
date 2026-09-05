@@ -9,6 +9,7 @@ import type {
   ProjectSessionState,
   QueuedAgentMessage,
   QueuedAgentMessageActionReceipt,
+  QueuedAgentMessageReceipt,
   SessionView
 } from "./tauri";
 
@@ -356,6 +357,51 @@ export function mergeQueuedAgentMessage(
     return left.createdAtMs - right.createdAtMs || left.id.localeCompare(right.id);
   });
   return next;
+}
+
+/**
+ * Merges a queue receipt into the visible state.
+ *
+ * Deliberately pure and cursor-free: the receipt reports the session's newest
+ * server revision, but only the queued-message change has actually been
+ * applied here. The polling cursor (the client's applied-event position) must
+ * not advance to the receipt revision, or the next delta poll would skip
+ * every event — tool activity, messages — produced between the last poll and
+ * the enqueue (R4).
+ */
+export function mergeQueuedMessageReceipt(
+  current: AgentState,
+  receipt: QueuedAgentMessageReceipt
+): AgentState {
+  return {
+    ...current,
+    eventCount: Math.max(current.eventCount, receipt.eventCount),
+    latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
+    queuedMessages: mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
+  };
+}
+
+/**
+ * Merges a queue action receipt (steer/edit/delete) under the same cursor
+ * rule as {@link mergeQueuedMessageReceipt}: state counters advance for
+ * display, the applied-event cursor stays where the client actually is.
+ */
+export function mergeQueuedMessageActionReceipt(
+  current: AgentState,
+  receipt: QueuedAgentMessageActionReceipt
+): AgentState {
+  const queuedMessages = receipt.message
+    ? mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
+    : current.queuedMessages.filter((message) => message.id !== receipt.queueId);
+  return {
+    ...current,
+    status: receipt.cancelledActiveRun ? "cancelled" : current.status,
+    canCancel: receipt.cancelledActiveRun ? false : current.canCancel,
+    canRetry: receipt.cancelledActiveRun ? true : current.canRetry,
+    eventCount: Math.max(current.eventCount, receipt.eventCount),
+    latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
+    queuedMessages
+  };
 }
 
 /**

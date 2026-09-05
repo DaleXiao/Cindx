@@ -431,18 +431,20 @@ pub(crate) fn apply_direct_judge_gate(
     ) {
         Ok(output) => sanitize_assistant_content(&output),
         Err(_) => {
+            // The first-pass review demanded revision; keep that negative
+            // review on the delivery record even though no repair exists.
             return DirectJudgeGateOutcome::Delivered(
                 candidate,
                 "direct_judge_repair_unavailable".to_string(),
-                None,
-            )
+                Some(Box::new(direct_judge_review(&receipt))),
+            );
         }
     };
     if repaired_output.trim().is_empty() {
         return DirectJudgeGateOutcome::Delivered(
             candidate,
             "direct_judge_repair_empty".to_string(),
-            None,
+            Some(Box::new(direct_judge_review(&receipt))),
         );
     }
     let Some(repaired_receipt) = ground_repaired_answer(
@@ -466,7 +468,7 @@ pub(crate) fn apply_direct_judge_gate(
         return DirectJudgeGateOutcome::Delivered(
             candidate,
             "direct_judge_repair_ungrounded".to_string(),
-            None,
+            Some(Box::new(direct_judge_review(&receipt))),
         );
     };
 
@@ -524,13 +526,26 @@ pub(crate) fn apply_direct_judge_gate(
             DirectJudgeGateOutcome::Delivered(
                 repaired_candidate,
                 "direct_judge_recheck_exhausted".to_string(),
-                None,
+                // Preserve the negative recheck as the delivery-verification
+                // producer; fall back to the first-pass findings when the
+                // recheck itself recorded none.
+                Some(Box::new(DirectJudgeReview {
+                    verdict: recheck.verdict.clone(),
+                    claims: recheck.claims.clone(),
+                    findings: if recheck.findings.is_empty() {
+                        receipt.findings.clone()
+                    } else {
+                        recheck.findings.clone()
+                    },
+                })),
             )
         }
         None => DirectJudgeGateOutcome::Delivered(
             repaired_candidate,
             "direct_judge_recheck_inconclusive".to_string(),
-            None,
+            // The recheck call produced nothing parsable; the first-pass
+            // negative review is still the best available evidence.
+            Some(Box::new(direct_judge_review(&receipt))),
         ),
     }
 }

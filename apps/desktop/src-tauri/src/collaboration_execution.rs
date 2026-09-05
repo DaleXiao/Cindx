@@ -606,7 +606,7 @@ fn no_tool_collaboration_content(
             return Err(AgentFailure::model_output(
                 "incomplete_output",
                 format!(
-                    "collaboration {role_name} response reached its output limit before completion"
+                    "collaboration {role_name} response ended before completion (output limit or an interrupted stream)"
                 ),
             ));
         }

@@ -413,6 +413,11 @@ pub(crate) struct PermissionReviewItem {
     pub(crate) input: String,
     pub(crate) requested_at_ms: u64,
     pub(crate) can_allow_session: bool,
+    /// True when a write subagent raised the request from inside its parent
+    /// run. The parent stays busy until the decision lands, so these reviews
+    /// must remain actionable while every other review waits for an idle
+    /// session.
+    pub(crate) subagent: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

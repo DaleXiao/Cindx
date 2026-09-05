@@ -21,6 +21,7 @@ mod file_patch;
 mod file_query_contract_v3;
 mod file_search;
 mod file_tools;
+mod http_wire;
 mod image_generation;
 mod meta_invoke;
 mod meta_tools;

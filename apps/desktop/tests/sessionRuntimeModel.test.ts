@@ -9,6 +9,8 @@ import {
   messagesWithOptimisticUserMessages,
   mergeAgentStateSnapshot,
   mergeQueuedAgentMessage,
+  mergeQueuedMessageActionReceipt,
+  mergeQueuedMessageReceipt,
   mergeSequencedItems,
   projectSessionResultAsRead,
   readSessionState,
@@ -376,4 +378,69 @@ test("reconciliation drops a committed steer bubble but keeps a pending one", ()
   reconcileOptimisticQueuedMessages("session-a", inFlight, pending);
   assert.equal(pending.steeredQueueIds.has("q2"), true);
   assert.equal(pending.optimisticUserMessages.get("session-a")?.length, 1);
+});
+
+test("queue receipt merges state without claiming unapplied events", () => {
+  const current = {
+    sessionId: "session-a",
+    eventCount: 10,
+    latestSequence: 10,
+    status: "running",
+    canCancel: true,
+    canRetry: false,
+    queuedMessages: []
+  } as any;
+  const receipt = {
+    message: { id: "queue-1", mode: "queue", createdAtMs: 5, updatedAtMs: 5 },
+    eventCount: 12,
+    latestSequence: 12,
+    latestTimestampMs: 60
+  } as any;
+
+  const merged = mergeQueuedMessageReceipt(current, receipt);
+
+  // Visible counters and the queued list advance...
+  assert.equal(merged.eventCount, 12);
+  assert.equal(merged.latestSequence, 12);
+  assert.deepEqual(merged.queuedMessages.map((message: any) => message.id), ["queue-1"]);
+  // ...and nothing else about the run state is rewritten.
+  assert.equal(merged.status, "running");
+  assert.equal(merged.canCancel, true);
+});
+
+test("queue action receipt removes deleted messages and records cancellation", () => {
+  const current = {
+    sessionId: "session-a",
+    eventCount: 10,
+    latestSequence: 10,
+    status: "running",
+    canCancel: true,
+    canRetry: false,
+    queuedMessages: [{ id: "queue-1", mode: "queue", createdAtMs: 5, updatedAtMs: 5 }]
+  } as any;
+
+  const deleted = mergeQueuedMessageActionReceipt(current, {
+    queueId: "queue-1",
+    message: null,
+    eventCount: 11,
+    latestSequence: 11,
+    latestTimestampMs: 70,
+    cancelledActiveRun: false,
+    steerCommitted: false
+  } as any);
+  assert.deepEqual(deleted.queuedMessages, []);
+  assert.equal(deleted.status, "running");
+
+  const cancelled = mergeQueuedMessageActionReceipt(current, {
+    queueId: "queue-2",
+    message: null,
+    eventCount: 11,
+    latestSequence: 11,
+    latestTimestampMs: 70,
+    cancelledActiveRun: true,
+    steerCommitted: false
+  } as any);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.canCancel, false);
+  assert.equal(cancelled.canRetry, true);
 });

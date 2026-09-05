@@ -54,6 +54,17 @@ pub struct ModelResponseAssessment {
 }
 
 impl ModelResponse {
+    /// True when a recognized streaming response ended at EOF without any
+    /// completion marker (neither a finish_reason chunk nor the protocol's
+    /// `[DONE]` sentinel). The payload may be truncated mid-answer or
+    /// mid-tool-batch, so it must not be treated as a normal completion.
+    pub fn stream_truncated_eof(&self) -> bool {
+        self.metadata
+            .get("stream_truncated_eof")
+            .map(String::as_str)
+            == Some("true")
+    }
+
     pub fn assessment(&self) -> ModelResponseAssessment {
         let finish_reason = self
             .metadata
@@ -84,6 +95,12 @@ impl ModelResponse {
             ModelResponseTermination::Complete | ModelResponseTermination::Unknown => {
                 if self.message.content.trim().is_empty() {
                     ModelResponseDisposition::Empty
+                } else if termination == ModelResponseTermination::Unknown
+                    && self.stream_truncated_eof()
+                {
+                    // The stream never confirmed completion: keep the partial
+                    // text for continuation instead of delivering it as final.
+                    ModelResponseDisposition::IncompleteOutput
                 } else {
                     ModelResponseDisposition::Usable
                 }
@@ -96,12 +113,17 @@ impl ModelResponse {
         }
     }
 
-    /// True when the response both carries tool calls and was cut off by the
-    /// output limit. Such a batch has possibly-truncated arguments and must not
-    /// be executed; the loop re-asks the model instead.
+    /// True when the response both carries tool calls and was cut off before
+    /// the batch was confirmed complete — either by the output limit or by a
+    /// stream that ended at EOF without any completion marker. Such a batch has
+    /// possibly-truncated arguments (and possibly missing later calls) and must
+    /// not be executed; the loop re-asks the model instead.
     pub fn truncated_tool_call_batch(&self) -> bool {
         if self.tool_calls.is_empty() {
             return false;
+        }
+        if self.stream_truncated_eof() {
+            return true;
         }
         matches!(
             self.metadata

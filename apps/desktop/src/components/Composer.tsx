@@ -33,6 +33,7 @@ import {
   type ProviderReadiness
 } from "../providerReadinessModel";
 import { applyCustomCommandTemplate } from "../customCommandsModel";
+import { approvalBlockedBySessionBusy } from "../approvalPolicyModel";
 import { presentFailure } from "../failurePresentation";
 import { composerTextareaSizing } from "../composerSizingModel";
 import type { CustomCommandView, SessionSandboxMode } from "../tauriTypes";
@@ -339,6 +340,12 @@ export function Composer({
     onResolvePermission(pendingApproval.requestId, decision, grantCommandPrefix);
   }
 
+  // A write subagent's approval parks its parent run, so the session stays
+  // busy by design; those decisions must remain clickable (R1).
+  const approvalLocked = pendingApproval
+    ? approvalBlockedBySessionBusy(pendingApproval.subagent, permissionBusy)
+    : false;
+
   return (
     <form
       className="composer"
@@ -377,7 +384,7 @@ export function Composer({
               <button
                 className="permission-once"
                 type="button"
-                disabled={permissionBusy}
+                disabled={approvalLocked}
                 onClick={() => resolvePendingPermission("allow_once")}
               >
                 <CircleCheck aria-hidden="true" />
@@ -387,7 +394,7 @@ export function Composer({
                 <button
                   className="permission-session"
                   type="button"
-                  disabled={permissionBusy}
+                  disabled={approvalLocked}
                   onClick={() => resolvePendingPermission("allow_for_session")}
                   title={
                     pendingApproval.toolName === "shell.run"
@@ -409,7 +416,7 @@ export function Composer({
                   <button
                     className="permission-session"
                     type="button"
-                    disabled={permissionBusy}
+                    disabled={approvalLocked}
                     onClick={() => resolvePendingPermission("allow_for_session", true)}
                     title="Reuse commands that start with this exact command in this session. Dangerous commands always prompt."
                   >
@@ -420,7 +427,7 @@ export function Composer({
               <button
                 className="permission-deny"
                 type="button"
-                disabled={permissionBusy}
+                disabled={approvalLocked}
                 onClick={() => resolvePendingPermission("deny")}
               >
                 <X aria-hidden="true" />

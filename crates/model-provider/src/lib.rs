@@ -920,6 +920,132 @@ mod tests {
     }
 
     #[test]
+    fn stream_ending_at_eof_without_completion_marker_is_flagged_truncated() {
+        let response = consume_test_stream(
+            vec![(
+                Duration::ZERO,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial answer\"}}]}\n\n",
+            )],
+            Duration::from_secs(1),
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("an EOF-truncated stream still returns its partial payload");
+
+        assert_eq!(response.message.content, "partial answer");
+        assert_eq!(
+            response
+                .metadata
+                .get("stream_truncated_eof")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(!response.metadata.contains_key("finish_reason"));
+        assert_eq!(
+            response.assessment().disposition,
+            ModelResponseDisposition::IncompleteOutput
+        );
+    }
+
+    #[test]
+    fn stream_completion_markers_prevent_the_truncation_flag() {
+        // The protocol's [DONE] sentinel alone confirms completion.
+        let done_only = consume_test_stream(
+            vec![
+                (
+                    Duration::ZERO,
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+                ),
+                (Duration::ZERO, "data: [DONE]\n\n"),
+            ],
+            Duration::from_secs(1),
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("[DONE] terminates the stream");
+        assert!(!done_only.metadata.contains_key("stream_truncated_eof"));
+        assert_eq!(
+            done_only.assessment().disposition,
+            ModelResponseDisposition::Usable
+        );
+
+        // A finish_reason chunk alone confirms completion.
+        let finish_only = consume_test_stream(
+            vec![(
+                Duration::ZERO,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            )],
+            Duration::from_secs(1),
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("finish_reason terminates the stream");
+        assert!(!finish_only.metadata.contains_key("stream_truncated_eof"));
+        assert_eq!(
+            finish_only
+                .metadata
+                .get("finish_reason")
+                .map(String::as_str),
+            Some("stop")
+        );
+    }
+
+    #[test]
+    fn eof_truncated_tool_call_batch_is_marked_unsafe_to_execute() {
+        let response = consume_test_stream(
+            vec![
+                (
+                    Duration::ZERO,
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n",
+                ),
+                (
+                    Duration::ZERO,
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"file_write\",\"arguments\":\"{\\\"path\\\":\\\"b.t\"}}]}}]}\n\n",
+                ),
+            ],
+            Duration::from_secs(1),
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("the partial batch still parses");
+
+        assert_eq!(
+            response
+                .metadata
+                .get("stream_truncated_eof")
+                .map(String::as_str),
+            Some("true")
+        );
+        // The batch was never confirmed complete, so it must not execute even
+        // though the first call's arguments happen to be parseable.
+        assert!(response.truncated_tool_call_batch());
+    }
+
+    #[test]
+    fn complete_tool_call_batch_without_eof_flag_stays_executable() {
+        let response = consume_test_stream(
+            vec![
+                (
+                    Duration::ZERO,
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                ),
+                (Duration::ZERO, "data: [DONE]\n\n"),
+            ],
+            Duration::from_secs(1),
+            &mut |_| {},
+            &mut || false,
+        )
+        .expect("the complete batch parses");
+
+        assert!(!response.metadata.contains_key("stream_truncated_eof"));
+        assert!(!response.truncated_tool_call_batch());
+        assert_eq!(
+            response.assessment().disposition,
+            ModelResponseDisposition::ToolCalls
+        );
+    }
+
+    #[test]
     fn chat_url_trims_base_url_slashes() {
         let config = OpenAiCompatibleConfig {
             base_url: "https://example.test/v1/".to_string(),
@@ -1664,6 +1790,7 @@ mod tests {
                 answer: String::new(),
                 streamed_tool_calls: BTreeMap::new(),
                 finish_reason: None,
+                eof_without_finish: false,
                 usage: Metadata::new(),
             },
             "test-model",
@@ -1704,6 +1831,7 @@ mod tests {
                 answer: dsml.to_string(),
                 streamed_tool_calls: BTreeMap::new(),
                 finish_reason: None,
+                eof_without_finish: false,
                 usage: Metadata::new(),
             },
             "test-model",
@@ -1795,6 +1923,7 @@ mod tests {
                 answer: "<｜DSML｜tool_calls><｜DSML｜invoke name=\"shell_run\">".to_string(),
                 streamed_tool_calls: BTreeMap::new(),
                 finish_reason: None,
+                eof_without_finish: false,
                 usage: Metadata::new(),
             },
             "test-model",

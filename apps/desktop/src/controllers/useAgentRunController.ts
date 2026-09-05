@@ -26,7 +26,9 @@ import type {
 import {
   committedSteerUserMessage,
   mergeAgentStateSnapshot,
-  mergeQueuedAgentMessage
+  mergeQueuedAgentMessage,
+  mergeQueuedMessageActionReceipt,
+  mergeQueuedMessageReceipt
 } from "../sessionRuntimeModel";
 import { planModeForSubmission } from "../planModeModel";
 import type { useSessionRuntimeController } from "./useSessionRuntimeController";
@@ -67,7 +69,6 @@ export function useAgentRunController({
   const {
     activeSessionIdRef,
     agentState,
-    agentStateRevisionsRef,
     addOptimisticUserMessage,
     acknowledgeOptimisticUserMessage,
     applyAgentStateForSession,
@@ -125,27 +126,19 @@ export function useAgentRunController({
     sessionId: string,
     receipt: QueuedAgentMessageReceipt
   ) {
-    const revision = agentStateRevisionsRef.current.get(sessionId);
-    agentStateRevisionsRef.current.set(sessionId, {
-      eventCount: Math.max(revision?.eventCount ?? 0, receipt.eventCount),
-      latestSequence: Math.max(revision?.latestSequence ?? 0, receipt.latestSequence),
-      latestTimestampMs: Math.max(
-        revision?.latestTimestampMs ?? 0,
-        receipt.latestTimestampMs
-      )
-    });
-    const mergeReceipt = (current: AgentState) => ({
-      ...current,
-      eventCount: Math.max(current.eventCount, receipt.eventCount),
-      latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
-      queuedMessages: mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
-    });
+    // Deliberately does NOT advance agentStateRevisionsRef: the receipt reports
+    // the session's newest server revision, but only the queued-message change
+    // has been applied here. Advancing the applied-event cursor would make the
+    // next delta poll skip every event (tool activity, messages) produced
+    // between the last poll and this enqueue (R4).
     const cached = sessionRuntimeCache.peekAgent(sessionId);
-    if (cached) sessionRuntimeCache.rememberAgent(sessionId, mergeReceipt(cached));
+    if (cached) {
+      sessionRuntimeCache.rememberAgent(sessionId, mergeQueuedMessageReceipt(cached, receipt));
+    }
     if (activeSessionIdRef.current === sessionId) {
       setAgentState((current) => {
         if (!current || current.sessionId !== sessionId) return current;
-        const next = mergeReceipt(current);
+        const next = mergeQueuedMessageReceipt(current, receipt);
         sessionRuntimeCache.rememberAgent(sessionId, next);
         return next;
       });
@@ -156,35 +149,19 @@ export function useAgentRunController({
     sessionId: string,
     receipt: QueuedAgentMessageActionReceipt
   ) {
-    const revision = agentStateRevisionsRef.current.get(sessionId);
-    agentStateRevisionsRef.current.set(sessionId, {
-      eventCount: Math.max(revision?.eventCount ?? 0, receipt.eventCount),
-      latestSequence: Math.max(revision?.latestSequence ?? 0, receipt.latestSequence),
-      latestTimestampMs: Math.max(
-        revision?.latestTimestampMs ?? 0,
-        receipt.latestTimestampMs
-      )
-    });
-    const applyReceipt = (current: AgentState) => {
-      const queuedMessages = receipt.message
-        ? mergeQueuedAgentMessage(current.queuedMessages, receipt.message)
-        : current.queuedMessages.filter((message) => message.id !== receipt.queueId);
-      return {
-        ...current,
-        status: receipt.cancelledActiveRun ? "cancelled" : current.status,
-        canCancel: receipt.cancelledActiveRun ? false : current.canCancel,
-        canRetry: receipt.cancelledActiveRun ? true : current.canRetry,
-        eventCount: Math.max(current.eventCount, receipt.eventCount),
-        latestSequence: Math.max(current.latestSequence, receipt.latestSequence),
-        queuedMessages
-      };
-    };
+    // Same cursor rule as the queue receipt above: merge the visible state,
+    // leave the applied-event cursor where the client actually is (R4).
     const cached = sessionRuntimeCache.peekAgent(sessionId);
-    if (cached) sessionRuntimeCache.rememberAgent(sessionId, applyReceipt(cached));
+    if (cached) {
+      sessionRuntimeCache.rememberAgent(
+        sessionId,
+        mergeQueuedMessageActionReceipt(cached, receipt)
+      );
+    }
     if (activeSessionIdRef.current === sessionId) {
       setAgentState((current) => {
         if (!current || current.sessionId !== sessionId) return current;
-        const next = applyReceipt(current);
+        const next = mergeQueuedMessageActionReceipt(current, receipt);
         sessionRuntimeCache.rememberAgent(sessionId, next);
         return next;
       });
@@ -496,21 +473,26 @@ export function useAgentRunController({
     requestId: string,
     decision: "allow_once" | "allow_for_session" | "deny",
     targetSessionId = activeSession?.id,
-    grantCommandPrefix = false
+    grantCommandPrefix = false,
+    subagentHint = false
   ) {
     const sessionId = targetSessionId;
     if (!sessionId) return;
     // A write subagent's patch approval arrives while its parent run is still
     // in flight: only those approvals may resolve without waiting for the run
     // command to return, and resolving one must not disturb the run's busy
-    // bookkeeping.
+    // bookkeeping. The cached agent state of a busy *background* session can
+    // lag behind the review list (nothing polls it while its run command is in
+    // flight), so the backend-provided review flag is an authoritative
+    // fallback — a lookup miss must not silently inert the click (R1).
     const runCommandInFlight = busySessionIds.has(sessionId);
     const pendingApproval = (
       activeAgentState?.sessionId === sessionId
         ? activeAgentState
         : sessionRuntimeCache.peekAgent(sessionId)
     )?.pendingApprovals.find((approval) => approval.requestId === requestId);
-    if (runCommandInFlight && !pendingApproval?.subagent) return;
+    const subagentApproval = pendingApproval?.subagent ?? subagentHint;
+    if (runCommandInFlight && !subagentApproval) return;
     if (!runCommandInFlight) markSessionBusy(sessionId, true);
     setComposerError(null);
     if (activeSessionIdRef.current === sessionId) {

@@ -526,7 +526,12 @@ transport stack. The public-address audit (loopback, RFC1918, link-local
 including the cloud-metadata range, CGNAT, broadcast, multicast, reserved, and
 their IPv6 and IPv4-bearing-IPv6 forms, rejected fail-closed) moved there with the
 policy, and `web.fetch` still pins the audited IPs with `--resolve` so the
-connection cannot drift between audit and use.
+connection cannot drift between audit and use. The raw `--include` transcript
+is split into (status, headers, body) by `tools::http_wire`, a module that
+owns nothing but that separation: it walks header blocks from the first status
+line, skips interim `1xx` responses block by block, and reads `Location` only
+inside the final header block, so body text quoting `HTTP/` or `Location:`
+examples can never change the fetch outcome or a redirect target.
 
 Two postures are deliberate and asymmetric. Only `PublicFetch` refuses ambient
 proxies (`--noproxy '*'`), because a proxy would connect on its behalf and bypass

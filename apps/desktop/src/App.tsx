@@ -448,7 +448,7 @@ export function App() {
       if (review.source === "agent") {
         const sessionId = review.sessionId ?? activeSession?.id;
         if (!sessionId) throw new Error("The related session is no longer available.");
-        await handleResolveAgentPermission(review.requestId, decision, sessionId);
+        await handleResolveAgentPermission(review.requestId, decision, sessionId, false, review.subagent);
       } else if (review.source === "tool") {
         await handleResolveToolPermission(review.requestId, decision);
       } else if (review.source === "browser") {

@@ -54,6 +54,10 @@ pub(super) struct StreamEvent {
     pub(super) finish_reason: Option<String>,
     pub(super) usage: BTreeMap<String, String>,
     pub(super) provider_identity: BTreeMap<String, String>,
+    /// The protocol's explicit end-of-stream sentinel (`data: [DONE]`). A
+    /// stream that ends at EOF without either this or a finish_reason never
+    /// confirmed completion, so the response is flagged as possibly truncated.
+    pub(super) done_sentinel: bool,
 }
 
 pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, ModelError> {
@@ -64,7 +68,10 @@ pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, Mode
 
     let payload = line.trim_start_matches("data:").trim();
     if payload == "[DONE]" {
-        return Ok(None);
+        return Ok(Some(StreamEvent {
+            done_sentinel: true,
+            ..StreamEvent::default()
+        }));
     }
 
     if let Some(message) = parse_provider_error(payload) {
@@ -132,6 +139,7 @@ pub(super) fn parse_stream_event(line: &str) -> Result<Option<StreamEvent>, Mode
             .map(str::to_string),
         usage,
         provider_identity,
+        done_sentinel: false,
     }))
 }
 

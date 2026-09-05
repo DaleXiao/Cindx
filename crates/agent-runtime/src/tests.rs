@@ -658,6 +658,72 @@ fn model_tool_call_advances_to_tool_request() {
 }
 
 #[test]
+fn eof_truncated_tool_batch_retries_instead_of_executing() {
+    let tools = vec![tool("file.read", "path=<workspace-relative-path>")];
+    let mut state = start_agent_loop(
+        TaskId("task-eof".to_string()),
+        "read README",
+        AgentRuntimeConfig::default(),
+    );
+    let response = ModelResponse {
+        message: Message {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            metadata: Metadata::new(),
+        },
+        raw_tool_calls_json: None,
+        tool_calls: vec![ModelToolCall {
+            id: "call-1".to_string(),
+            name: "file_read".to_string(),
+            arguments_json: r#"{"input":"path=README.md"}"#.to_string(),
+        }],
+        metadata: Metadata::from([("stream_truncated_eof".to_string(), "true".to_string())]),
+    };
+
+    let advance = advance_with_model_response(&mut state, response, &tools);
+
+    match advance {
+        AgentAdvance::Retry { instruction } => {
+            assert!(instruction.contains("interrupted stream"));
+        }
+        other => panic!("unexpected advance: {other:?}"),
+    }
+    // The unconfirmed batch must not leak its call ids into the transcript.
+    assert!(!state
+        .messages
+        .iter()
+        .any(|message| message.metadata.contains_key("tool_call_ids")));
+}
+
+#[test]
+fn eof_truncated_text_answer_continues_instead_of_completing() {
+    let mut state = start_agent_loop(
+        TaskId("task-eof-text".to_string()),
+        "answer the question",
+        AgentRuntimeConfig::default(),
+    );
+    let response = ModelResponse {
+        message: Message {
+            role: MessageRole::Assistant,
+            content: "partial answer that was cut".to_string(),
+            metadata: Metadata::new(),
+        },
+        raw_tool_calls_json: None,
+        tool_calls: Vec::new(),
+        metadata: Metadata::from([("stream_truncated_eof".to_string(), "true".to_string())]),
+    };
+
+    let advance = advance_with_model_response(&mut state, response, &[]);
+
+    match advance {
+        AgentAdvance::Retry { instruction } => {
+            assert!(instruction.contains("interrupted stream"));
+        }
+        other => panic!("unexpected advance: {other:?}"),
+    }
+}
+
+#[test]
 fn observations_resume_as_user_context() {
     let mut state = resume_agent_loop(
         TaskId("task-1".to_string()),

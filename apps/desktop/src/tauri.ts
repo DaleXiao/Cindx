@@ -1119,7 +1119,8 @@ export async function getPermissionReviewState(): Promise<PermissionReviewState>
       ...context,
       input: approval.input,
       requestedAtMs: approval.requestedAtMs,
-      canAllowSession: false
+      canAllowSession: false,
+      subagent: false
     }));
     const browserReviews = browserPhase8State.pendingApprovals.map((approval) => ({
       requestId: approval.requestId,
@@ -1131,7 +1132,8 @@ export async function getPermissionReviewState(): Promise<PermissionReviewState>
       ...context,
       input: approval.input,
       requestedAtMs: approval.requestedAtMs,
-      canAllowSession: false
+      canAllowSession: false,
+      subagent: false
     }));
     const agentReviews = browserAgentState.pendingApprovals.map((approval) => ({
       requestId: approval.requestId,
@@ -1143,7 +1145,8 @@ export async function getPermissionReviewState(): Promise<PermissionReviewState>
       ...context,
       input: approval.input,
       requestedAtMs: approval.requestedAtMs,
-      canAllowSession: approval.canAllowSession
+      canAllowSession: approval.canAllowSession,
+      subagent: approval.subagent
     }));
     const testReviews = browserPhase3State.permissions
       .filter((permission) => permission.status === "pending")
@@ -1160,7 +1163,8 @@ export async function getPermissionReviewState(): Promise<PermissionReviewState>
         sessionName: null,
         input: "",
         requestedAtMs: permission.requestedAtMs,
-        canAllowSession: false
+        canAllowSession: false,
+        subagent: false
       }));
     return {
       pending: [...agentReviews, ...toolReviews, ...browserReviews, ...testReviews].sort(

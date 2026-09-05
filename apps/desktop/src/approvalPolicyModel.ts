@@ -30,3 +30,13 @@ export function normalizeApprovalPolicy(value: string | null | undefined): Appro
 export function approvalPolicyIsAutomatic(policy: ApprovalPolicy): boolean {
   return policy === "session" || policy === "all";
 }
+
+/**
+ * A write subagent's approval arrives while its parent run keeps the session
+ * busy — the parent is parked waiting for exactly this decision. Blocking the
+ * buttons on the run finishing would deadlock the flow, so subagent approvals
+ * stay actionable while every other approval waits for an idle session (R1).
+ */
+export function approvalBlockedBySessionBusy(subagent: boolean, sessionBusy: boolean): boolean {
+  return sessionBusy && !subagent;
+}

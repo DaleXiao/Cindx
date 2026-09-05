@@ -1,3 +1,4 @@
+use crate::runtime_constants::{SCHEDULE_DISPATCH_RETRY_MS, SCHEDULE_MAX_DISPATCH_ATTEMPTS};
 use chrono::{Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -337,6 +338,87 @@ pub fn save(path: &Path, config: &ScheduleConfig) -> Result<(), io::Error> {
     }
     fs::rename(&temporary, path)?;
     Ok(())
+}
+
+/// What one scheduled-session dispatch poll should do, decided from the
+/// persisted config and the real queue head alone so the recovery rules are
+/// testable without an app handle.
+#[derive(Debug)]
+pub(crate) enum ScheduledDispatchDecision {
+    /// The recorded queued run matches the real queue head: dispatch it.
+    Dispatch {
+        schedule_id: String,
+        queue_id: String,
+    },
+    /// The head is an orphan — queued in SQLite by a trigger that crashed
+    /// before its run record was saved — and the active run was never
+    /// dispatched: adopt the head so the schedule cannot stall behind a queue
+    /// item no record knows about.
+    AdoptOrphanHead {
+        schedule_id: String,
+        run_id: String,
+        queue_id: String,
+    },
+    /// The head mismatches a run that was already touched: count a bounded
+    /// attempt so the existing cap and backoff retire the run instead of
+    /// silently re-entering this path forever.
+    CountMismatchAttempt { schedule_id: String, run_id: String },
+    /// Nothing dispatchable right now.
+    Skip,
+}
+
+pub(crate) fn decide_scheduled_dispatch(
+    schedules: &[ScheduleRecord],
+    session_id: &str,
+    first_queue_id: &str,
+    now: u64,
+) -> ScheduledDispatchDecision {
+    let Some((schedule, run)) = schedules.iter().find_map(|schedule| {
+        if schedule.execution_session_id != session_id {
+            return None;
+        }
+        schedule
+            .active_run()
+            .filter(|run| run.status == "queued")
+            .map(|run| (schedule, run))
+    }) else {
+        return ScheduledDispatchDecision::Skip;
+    };
+    // The cap and backoff guard every poll — including mismatched heads — so a
+    // stuck run retires through the existing bound instead of rewriting the
+    // config on every poll forever.
+    if run.dispatch_attempts >= SCHEDULE_MAX_DISPATCH_ATTEMPTS
+        || run
+            .last_dispatch_at_ms
+            .is_some_and(|last| now.saturating_sub(last) < SCHEDULE_DISPATCH_RETRY_MS)
+    {
+        return ScheduledDispatchDecision::Skip;
+    }
+    if run.queue_id.as_deref() != Some(first_queue_id) {
+        let untouched = run.dispatch_attempts == 0
+            && run.last_dispatch_at_ms.is_none()
+            && run.started_at_ms.is_none()
+            && run.queued_at_ms.is_some();
+        return if untouched {
+            ScheduledDispatchDecision::AdoptOrphanHead {
+                schedule_id: schedule.id.clone(),
+                run_id: run.id.clone(),
+                queue_id: first_queue_id.to_string(),
+            }
+        } else {
+            ScheduledDispatchDecision::CountMismatchAttempt {
+                schedule_id: schedule.id.clone(),
+                run_id: run.id.clone(),
+            }
+        };
+    }
+    let Some(queue_id) = run.queue_id.clone() else {
+        return ScheduledDispatchDecision::Skip;
+    };
+    ScheduledDispatchDecision::Dispatch {
+        schedule_id: schedule.id.clone(),
+        queue_id,
+    }
 }
 
 #[cfg(test)]

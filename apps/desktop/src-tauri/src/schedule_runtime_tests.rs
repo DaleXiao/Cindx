@@ -134,3 +134,137 @@ fn schedule_execution_sessions_stay_out_of_the_task_sidebar() {
         .iter()
         .any(|session| { session.id == replacement && !is_schedule_execution_session(session) }));
 }
+
+fn dispatch_test_schedule(run: ScheduleRunRecord) -> ScheduleRecord {
+    ScheduleRecord {
+        id: "schedule-1".to_string(),
+        name: "Nightly report".to_string(),
+        project_id: None,
+        session_id: None,
+        execution_session_id: "session-a".to_string(),
+        prompt: "run the report".to_string(),
+        effort: "default".to_string(),
+        timezone: "UTC".to_string(),
+        cadence: ScheduleCadence::Daily,
+        anchor_at_ms: 0,
+        weekly_days: Vec::new(),
+        ends_at_ms: None,
+        catch_up: true,
+        enabled: true,
+        next_run_at_ms: None,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        runs: vec![run],
+    }
+}
+
+fn queued_test_run(id: &str, queue_id: Option<&str>) -> ScheduleRunRecord {
+    ScheduleRunRecord {
+        id: id.to_string(),
+        queue_id: queue_id.map(str::to_string),
+        source: "scheduled".to_string(),
+        scheduled_for_ms: 0,
+        queued_at_ms: queue_id.map(|_| 1_000),
+        dispatch_attempts: 0,
+        last_dispatch_at_ms: None,
+        started_at_ms: None,
+        finished_at_ms: None,
+        status: "queued".to_string(),
+        error: None,
+    }
+}
+
+#[test]
+fn scheduled_dispatch_matches_the_recorded_queue_head() {
+    let schedules = vec![dispatch_test_schedule(queued_test_run("run-1", Some("q1")))];
+
+    match decide_scheduled_dispatch(&schedules, "session-a", "q1", 5_000) {
+        ScheduledDispatchDecision::Dispatch {
+            schedule_id,
+            queue_id,
+        } => {
+            assert_eq!(schedule_id, "schedule-1");
+            assert_eq!(queue_id, "q1");
+        }
+        other => panic!("unexpected decision: {other:?}"),
+    }
+}
+
+#[test]
+fn scheduled_dispatch_adopts_an_untouched_orphan_queue_head() {
+    // Crash window: q1 was committed to SQLite by a trigger that died before
+    // saving its run record; the next trigger recorded q2 while the real head
+    // is still q1. The never-dispatched run adopts the head instead of
+    // stalling forever on a queue item the config does not know.
+    let schedules = vec![dispatch_test_schedule(queued_test_run("run-2", Some("q2")))];
+
+    match decide_scheduled_dispatch(&schedules, "session-a", "q1", 5_000) {
+        ScheduledDispatchDecision::AdoptOrphanHead {
+            schedule_id,
+            run_id,
+            queue_id,
+        } => {
+            assert_eq!(schedule_id, "schedule-1");
+            assert_eq!(run_id, "run-2");
+            assert_eq!(queue_id, "q1");
+        }
+        other => panic!("unexpected decision: {other:?}"),
+    }
+}
+
+#[test]
+fn scheduled_dispatch_counts_bounded_attempts_for_a_touched_mismatched_run() {
+    let mut run = queued_test_run("run-2", Some("q2"));
+    run.dispatch_attempts = 1;
+    let schedules = vec![dispatch_test_schedule(run)];
+
+    match decide_scheduled_dispatch(&schedules, "session-a", "q1", 5_000) {
+        ScheduledDispatchDecision::CountMismatchAttempt {
+            schedule_id,
+            run_id,
+        } => {
+            assert_eq!(schedule_id, "schedule-1");
+            assert_eq!(run_id, "run-2");
+        }
+        other => panic!("unexpected decision: {other:?}"),
+    }
+}
+
+#[test]
+fn scheduled_dispatch_retires_capped_runs_and_honors_the_backoff_window() {
+    // A mismatched run at the attempt cap retires through the existing bound
+    // instead of rewriting the config on every poll forever.
+    let mut capped = queued_test_run("run-2", Some("q2"));
+    capped.dispatch_attempts = SCHEDULE_MAX_DISPATCH_ATTEMPTS;
+    let schedules = vec![dispatch_test_schedule(capped)];
+    assert!(matches!(
+        decide_scheduled_dispatch(&schedules, "session-a", "q1", 5_000),
+        ScheduledDispatchDecision::Skip
+    ));
+
+    // Inside the retry window even a matching head waits.
+    let mut recent = queued_test_run("run-1", Some("q1"));
+    recent.last_dispatch_at_ms = Some(4_500);
+    let schedules = vec![dispatch_test_schedule(recent)];
+    assert!(matches!(
+        decide_scheduled_dispatch(&schedules, "session-a", "q1", 5_000),
+        ScheduledDispatchDecision::Skip
+    ));
+}
+
+#[test]
+fn scheduled_dispatch_skips_sessions_without_a_queued_active_run() {
+    let mut finished = queued_test_run("run-1", Some("q1"));
+    finished.status = "completed".to_string();
+    finished.finished_at_ms = Some(2_000);
+    let schedules = vec![dispatch_test_schedule(finished)];
+
+    assert!(matches!(
+        decide_scheduled_dispatch(&schedules, "session-a", "q1", 5_000),
+        ScheduledDispatchDecision::Skip
+    ));
+    assert!(matches!(
+        decide_scheduled_dispatch(&[], "session-a", "q1", 5_000),
+        ScheduledDispatchDecision::Skip
+    ));
+}

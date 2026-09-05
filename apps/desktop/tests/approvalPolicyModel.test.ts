@@ -4,7 +4,8 @@ import { createInitialPhase4State } from "../src/browserPreviewFallbackState.ts"
 import {
   APPROVAL_POLICY_OPTIONS,
   approvalPolicyIsAutomatic,
-  normalizeApprovalPolicy
+  normalizeApprovalPolicy,
+  approvalBlockedBySessionBusy
 } from "../src/approvalPolicyModel.ts";
 
 test("the approval policy dropdown renders exactly the three tiers", () => {
@@ -35,4 +36,14 @@ test("only session and all policies auto-approve; strict always prompts", () => 
 
 test("the approval policy defaults to strict", () => {
   assert.equal(createInitialPhase4State().provider.approvalPolicy, "strict");
+});
+
+test("subagent approvals stay actionable while the parent run is busy", () => {
+  // A normal approval waits for an idle session...
+  assert.equal(approvalBlockedBySessionBusy(false, true), true);
+  // ...but a write subagent's approval parks its parent run, so blocking it
+  // on the session busy state would deadlock the decision (R1).
+  assert.equal(approvalBlockedBySessionBusy(true, true), false);
+  assert.equal(approvalBlockedBySessionBusy(false, false), false);
+  assert.equal(approvalBlockedBySessionBusy(true, false), false);
 });

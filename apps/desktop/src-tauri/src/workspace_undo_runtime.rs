@@ -283,7 +283,101 @@ fn require_applied_file_state(
     Ok(())
 }
 
-fn apply_undo(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> Result<(), WorkspaceUndoError> {
+/// How to reverse one already-applied file operation, so a failure later in
+/// the group (or a registry commit failure) can restore the exact pre-call
+/// state instead of leaving a half-undone group behind.
+struct AppliedFileInverse {
+    target: std::path::PathBuf,
+    /// Bytes source restoring the pre-call content, or `None` when reversing
+    /// means removing the file again (redo of a recorded creation).
+    restore_from: Option<std::path::PathBuf>,
+}
+
+/// Publishes file bytes atomically for concurrent readers: write a sibling
+/// temporary file, flush its content to disk, mirror the existing target's
+/// permissions, then rename over the target, so readers never observe a
+/// partially written file and a failed write never damages the previous
+/// content. No directory fsync is attempted: a power-loss crash may lose the
+/// rename itself but can never expose partial bytes. The temp name is
+/// process-unique and never hidden, so a snapshot of the containing directory
+/// can neither collide with a parallel process nor silently capture a temp
+/// file as a dotfile.
+fn write_target_durable(target: &Path, bytes: &[u8]) -> Result<(), WorkspaceUndoError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let unique = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp = target.with_file_name(format!(
+        "{file_name}.cindx-undo-{}-{unique}.tmp",
+        std::process::id()
+    ));
+    let published = fs::File::create(&temp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        // Flush before the rename so a published file is never empty content.
+        file.sync_all()
+    });
+    if let Err(error) = published {
+        let _ = fs::remove_file(&temp);
+        return Err(WorkspaceUndoError::Io(format!(
+            "failed to restore {target:?}: {error}"
+        )));
+    }
+    // A rollback that recreates a removed file finds no target metadata and
+    // publishes with default permissions; the normal path mirrors the target.
+    if let Ok(metadata) = fs::metadata(target) {
+        let _ = fs::set_permissions(&temp, metadata.permissions());
+    }
+    if let Err(error) = fs::rename(&temp, target) {
+        let _ = fs::remove_file(&temp);
+        return Err(WorkspaceUndoError::Io(format!(
+            "failed to restore {target:?}: {error}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reverses already-applied file operations best-effort, newest first, and
+/// reports the first failure. Only used on error paths: the goal is to leave
+/// the workspace exactly as it was before the undo/redo call.
+fn rollback_applied_files(inverses: &[AppliedFileInverse]) -> Result<(), WorkspaceUndoError> {
+    let mut first_error: Option<WorkspaceUndoError> = None;
+    for inverse in inverses.iter().rev() {
+        let result = match &inverse.restore_from {
+            Some(source) => fs::read(source)
+                .map_err(|error| {
+                    WorkspaceUndoError::Io(format!(
+                        "failed to read rollback source {source:?}: {error}"
+                    ))
+                })
+                .and_then(|bytes| write_target_durable(&inverse.target, &bytes)),
+            None => fs::remove_file(&inverse.target).map_err(|error| {
+                WorkspaceUndoError::Io(format!(
+                    "failed to remove {:?} during rollback: {error}",
+                    inverse.target
+                ))
+            }),
+        };
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn apply_undo(
+    workspace_root: &Path,
+    entry: &WorkspaceUndoEntry,
+) -> Result<Vec<AppliedFileInverse>, WorkspaceUndoError> {
     if !entry_is_undoable(workspace_root, entry) {
         return Err(WorkspaceUndoError::Unsupported(format!(
             "The change to {} has no undo snapshot and cannot be undone.",
@@ -295,14 +389,38 @@ fn apply_undo(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> Result<(), W
     for file in &files {
         require_applied_file_state(workspace_root, file)?;
     }
+    let mut applied: Vec<AppliedFileInverse> = Vec::new();
     for file in &files {
-        let target = file_target(workspace_root, file);
-        if entry.action == "created" {
-            fs::remove_file(&target).map_err(|error| {
-                WorkspaceUndoError::Io(format!("failed to remove {target:?}: {error}"))
-            })?;
-            continue;
+        match undo_one_file(workspace_root, entry, file) {
+            Ok(inverse) => applied.push(inverse),
+            Err(error) => {
+                // A half-restored group would fail its own validation on
+                // retry, so put every already-restored file back first.
+                let _ = rollback_applied_files(&applied);
+                return Err(error);
+            }
         }
+    }
+    Ok(applied)
+}
+
+/// Restores one file of an undo group and returns its inverse. Every failure
+/// mode (artifact resolution, snapshot read, removal, publish) returns through
+/// the caller's single rollback arm, so no partial group is ever left behind.
+fn undo_one_file(
+    workspace_root: &Path,
+    entry: &WorkspaceUndoEntry,
+    file: &WorkspaceUndoFile,
+) -> Result<AppliedFileInverse, WorkspaceUndoError> {
+    let target = file_target(workspace_root, file);
+    // Reversing an undo always means writing the after-state back, for a
+    // recorded creation as much as for a modification.
+    let artifact = file_after_artifact(workspace_root, file)?;
+    let result = if entry.action == "created" {
+        fs::remove_file(&target).map_err(|error| {
+            WorkspaceUndoError::Io(format!("failed to remove {target:?}: {error}"))
+        })
+    } else {
         let snapshot = file_undo_snapshot(workspace_root, file).ok_or_else(|| {
             WorkspaceUndoError::Unsupported(format!(
                 "The change to {} has no undo snapshot and cannot be undone.",
@@ -310,22 +428,28 @@ fn apply_undo(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> Result<(), W
             ))
         })?;
         if !snapshot.is_file() {
-            return Err(WorkspaceUndoError::MissingArtifact(format!(
+            Err(WorkspaceUndoError::MissingArtifact(format!(
                 "The undo snapshot for {} is missing.",
                 file.path
-            )));
+            )))
+        } else {
+            fs::read(&snapshot)
+                .map_err(|error| {
+                    WorkspaceUndoError::Io(format!("failed to read {snapshot:?}: {error}"))
+                })
+                .and_then(|before| write_target_durable(&target, &before))
         }
-        let before = fs::read(&snapshot).map_err(|error| {
-            WorkspaceUndoError::Io(format!("failed to read {snapshot:?}: {error}"))
-        })?;
-        fs::write(&target, &before).map_err(|error| {
-            WorkspaceUndoError::Io(format!("failed to restore {target:?}: {error}"))
-        })?;
-    }
-    Ok(())
+    };
+    result.map(|()| AppliedFileInverse {
+        target,
+        restore_from: Some(artifact),
+    })
 }
 
-fn apply_redo(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> Result<(), WorkspaceUndoError> {
+fn apply_redo(
+    workspace_root: &Path,
+    entry: &WorkspaceUndoEntry,
+) -> Result<Vec<AppliedFileInverse>, WorkspaceUndoError> {
     let files = entry_files(entry);
     // Validate the whole group before replaying any file.
     for file in &files {
@@ -367,22 +491,55 @@ fn apply_redo(workspace_root: &Path, entry: &WorkspaceUndoEntry) -> Result<(), W
             }
         }
     }
+    let mut applied: Vec<AppliedFileInverse> = Vec::new();
     for file in &files {
-        let artifact = file_after_artifact(workspace_root, file)?;
-        let after = fs::read(&artifact).map_err(|error| {
-            WorkspaceUndoError::Io(format!("failed to read {artifact:?}: {error}"))
-        })?;
-        let target = file_target(workspace_root, file);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                WorkspaceUndoError::Io(format!("failed to create {parent:?}: {error}"))
-            })?;
+        match redo_one_file(workspace_root, entry, file) {
+            Ok(inverse) => applied.push(inverse),
+            Err(error) => {
+                // A half-replayed group would fail its own validation on
+                // retry, so put every already-replayed file back first.
+                let _ = rollback_applied_files(&applied);
+                return Err(error);
+            }
         }
-        fs::write(&target, &after).map_err(|error| {
-            WorkspaceUndoError::Io(format!("failed to write {target:?}: {error}"))
+    }
+    Ok(applied)
+}
+
+/// Replays one file of a redo group and returns its inverse. Every failure
+/// mode (artifact read, parent creation, publish) returns through the caller's
+/// single rollback arm, so no partial group is ever left behind.
+fn redo_one_file(
+    workspace_root: &Path,
+    entry: &WorkspaceUndoEntry,
+    file: &WorkspaceUndoFile,
+) -> Result<AppliedFileInverse, WorkspaceUndoError> {
+    let artifact = file_after_artifact(workspace_root, file)?;
+    let after = fs::read(&artifact)
+        .map_err(|error| WorkspaceUndoError::Io(format!("failed to read {artifact:?}: {error}")))?;
+    let target = file_target(workspace_root, file);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            WorkspaceUndoError::Io(format!("failed to create {parent:?}: {error}"))
         })?;
     }
-    Ok(())
+    // Reversing a redo restores the before-state; for a recorded creation
+    // there is no before-state, so reversing removes the file again.
+    let restore_from = if entry.action == "created" {
+        None
+    } else {
+        Some(file_undo_snapshot(workspace_root, file).ok_or_else(|| {
+            WorkspaceUndoError::Unsupported(format!(
+                "The change to {} has no undo snapshot and cannot be redone.",
+                file.path
+            ))
+        })?)
+    };
+    write_target_durable(&target, &after)?;
+    Ok(AppliedFileInverse {
+        target,
+        restore_from,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -470,48 +627,68 @@ fn change_undo_stack(
     session_id: &str,
     redo: bool,
 ) -> Result<WorkspaceUndoState, String> {
-    for _attempt in 0..3 {
+    // Phase 1: select the target entry and apply the file effects exactly
+    // once, keeping the inverses that restore the pre-call workspace state.
+    let (tool_call_id, inverses) = {
         let events = agent_events_for_session(store, &phase16_task_id(), Some(session_id))
             .map_err(|error| error.to_string())?;
         let entries = project_workspace_undo_entries(&events);
-        let (stored, undone) = load_registry(store, session_id).map_err(|error| error.message())?;
-        let result = if redo {
-            let Some(tool_call_id) = undone.last().cloned() else {
+        let (_, undone) = load_registry(store, session_id).map_err(|error| error.message())?;
+        let entry = if redo {
+            let Some(tool_call_id) = undone.last() else {
                 return Err(WorkspaceUndoError::NothingToRedo.message());
             };
-            let entry = entries
+            entries
                 .iter()
-                .find(|entry| entry.tool_call_id == tool_call_id)
+                .find(|entry| &entry.tool_call_id == tool_call_id)
                 .ok_or_else(|| {
                     WorkspaceUndoError::Conflict(
                         "The recorded redo target no longer exists in this session.".to_string(),
                     )
                     .message()
-                })?;
-            apply_redo(workspace_root, entry).map(|()| {
-                let mut next = undone.clone();
-                next.pop();
-                next
-            })
+                })?
         } else {
-            let entry = entries
+            entries
                 .iter()
                 .rev()
                 .find(|entry| !undone.iter().any(|id| id == &entry.tool_call_id))
-                .ok_or_else(|| WorkspaceUndoError::NothingToUndo.message())?;
-            apply_undo(workspace_root, entry).map(|()| {
-                let mut next = undone.clone();
-                next.push(entry.tool_call_id.clone());
-                next
-            })
+                .ok_or_else(|| WorkspaceUndoError::NothingToUndo.message())?
         };
-        let next_undone = match result {
-            Ok(next) => next,
-            Err(error) => return Err(error.message()),
+        let tool_call_id = entry.tool_call_id.clone();
+        let applied = if redo {
+            apply_redo(workspace_root, entry)
+        } else {
+            apply_undo(workspace_root, entry)
+        }
+        .map_err(|error| error.message())?;
+        (tool_call_id, applied)
+    };
+
+    // Phase 2: commit the registry. A CAS retry only re-attempts the commit
+    // against the fresh registry revision; it never re-runs the file effects
+    // (they are already on disk and a re-run would fail group validation). If
+    // the commit cannot land — including the registry reads it needs — the
+    // file effects are rolled back so workspace and registry can never
+    // disagree about this entry.
+    for _attempt in 0..3 {
+        let events = match agent_events_for_session(store, &phase16_task_id(), Some(session_id)) {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = rollback_applied_files(&inverses);
+                return Err(error.to_string());
+            }
         };
-        let committed = persist_registry(store, session_id, stored.as_ref(), next_undone.clone())
-            .map_err(|error| error.message())?;
-        if committed {
+        let entries = project_workspace_undo_entries(&events);
+        let (stored, undone) = match load_registry(store, session_id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                let _ = rollback_applied_files(&inverses);
+                return Err(error.message());
+            }
+        };
+        let next_undone = desired_undone_stack(&undone, &tool_call_id, redo);
+        if next_undone == undone {
+            // A concurrent writer already committed this exact transition.
             return Ok(build_state(
                 workspace_root,
                 session_id,
@@ -519,12 +696,47 @@ fn change_undo_stack(
                 &next_undone,
             ));
         }
+        match persist_registry(store, session_id, stored.as_ref(), next_undone.clone()) {
+            Ok(true) => {
+                return Ok(build_state(
+                    workspace_root,
+                    session_id,
+                    &entries,
+                    &next_undone,
+                ));
+            }
+            Ok(false) => continue,
+            Err(error) => {
+                let _ = rollback_applied_files(&inverses);
+                return Err(error.message());
+            }
+        }
     }
+    let _ = rollback_applied_files(&inverses);
     Err(WorkspaceUndoError::Persistence(
         "The undo registry could not be committed because its revision changed concurrently."
             .to_string(),
     )
     .message())
+}
+
+/// Applies this call's transition to a freshly loaded registry stack: undo
+/// appends the entry once, redo removes exactly the entry whose after-state
+/// was re-applied — even if a concurrent writer moved the stack top.
+fn desired_undone_stack(undone: &[String], tool_call_id: &str, redo: bool) -> Vec<String> {
+    if redo {
+        undone
+            .iter()
+            .filter(|id| id.as_str() != tool_call_id)
+            .cloned()
+            .collect()
+    } else {
+        let mut next = undone.to_vec();
+        if !next.iter().any(|id| id == tool_call_id) {
+            next.push(tool_call_id.to_string());
+        }
+        next
+    }
 }
 
 /// Scans the session's events and stats every undo entry's target file.

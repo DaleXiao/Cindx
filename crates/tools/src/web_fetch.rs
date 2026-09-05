@@ -8,6 +8,7 @@ use agent_core::{
     HTTP_PUBLIC_FETCH_MAX_REDIRECTS, HTTP_WEB_MAX_TIMEOUT_SECONDS, HTTP_WEB_TIMEOUT_SECONDS,
 };
 
+use super::http_wire::parse_http_response;
 use super::web_search::{
     run_command_with_limited_output, WEB_RESPONSE_MAX_BYTES, WEB_STDERR_MAX_BYTES,
 };
@@ -176,33 +177,6 @@ fn fetch_hop(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Split one raw `--include` response into (status, Location, body). Interim
-/// responses such as `100 Continue` are skipped by anchoring on the last
-/// status line, which is also the one that owns the trailing header block.
-fn parse_http_response(raw: &str) -> Result<(u16, Option<String>, String), ToolError> {
-    let status_line_start = raw.rfind("\nHTTP/").map(|index| index + 1).unwrap_or(0);
-    let status_block = &raw[status_line_start..];
-    let (head, body) = status_block
-        .split_once("\r\n\r\n")
-        .or_else(|| status_block.split_once("\n\n"))
-        .ok_or_else(|| ToolError::new("web fetch returned no response headers"))?;
-    let status_line = head.lines().next().unwrap_or_default();
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| ToolError::new("web fetch returned no parseable status line"))?;
-    let mut location = None;
-    for line in status_block.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("location") {
-                location = Some(value.trim().trim_end_matches('\r').to_string());
-            }
-        }
-    }
-    Ok((status, location, body.to_string()))
-}
-
 /// Wrap the fetched body in an explicit untrusted-provenance boundary, the
 /// same "untrusted" annotation convention used when retrieval results are
 /// injected into context.
@@ -326,26 +300,6 @@ mod tests {
             args.last().map(String::as_str),
             Some("https://93.184.216.34/x")
         );
-    }
-
-    #[test]
-    fn parse_http_response_extracts_status_location_and_body() {
-        let redirect = "HTTP/1.1 301 Moved Permanently\r\nLocation: https://example.com/next\r\nContent-Length: 0\r\n\r\n";
-        let (status, location, body) = parse_http_response(redirect).expect("redirect parses");
-        assert_eq!(status, 301);
-        assert_eq!(location.as_deref(), Some("https://example.com/next"));
-        assert_eq!(body, "");
-
-        let ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\npage body";
-        let (status, location, body) = parse_http_response(ok).expect("200 parses");
-        assert_eq!(status, 200);
-        assert!(location.is_none());
-        assert_eq!(body, "page body");
-
-        let interim = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\ndone";
-        let (status, _, body) = parse_http_response(interim).expect("interim skipped");
-        assert_eq!(status, 200);
-        assert_eq!(body, "done");
     }
 
     #[test]

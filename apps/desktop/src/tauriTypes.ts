@@ -314,6 +314,12 @@ export type PermissionReviewItem = {
   input: string;
   requestedAtMs: number;
   canAllowSession: boolean;
+  /**
+   * True when a write subagent raised the request inside its live parent run.
+   * The parent stays busy until the decision lands, so these reviews must
+   * remain actionable while every other review waits for an idle session.
+   */
+  subagent: boolean;
 };
 
 export type PermissionReviewState = {

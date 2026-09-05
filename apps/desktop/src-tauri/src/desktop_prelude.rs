@@ -109,8 +109,9 @@ pub(crate) use crate::queue_service::{
 };
 pub(crate) use crate::runtime_values::truncate_for_collaboration;
 pub(crate) use crate::schedule::{
-    initial_next_run_at_ms, next_occurrence_after_ms, normalized_weekly_days,
-    timestamp_ms_from_local, ScheduleCadence, ScheduleConfig, ScheduleRecord, ScheduleRunRecord,
+    decide_scheduled_dispatch, initial_next_run_at_ms, next_occurrence_after_ms,
+    normalized_weekly_days, timestamp_ms_from_local, ScheduleCadence, ScheduleConfig,
+    ScheduleRecord, ScheduleRunRecord, ScheduledDispatchDecision,
 };
 pub(crate) use crate::session_projection::{
     agent_session_audits, agent_state_from_read_model, empty_agent_state_for_session,

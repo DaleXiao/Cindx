@@ -697,3 +697,167 @@ fn projection_carries_the_run_attribution_for_thread_attachment() {
         "legacy events without attribution stay unattributed"
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn undo_group_write_failure_rolls_back_already_restored_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = MutationFixture::new("batch-rollback");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_batch_mutation(
+        &mut store,
+        &fixture,
+        1,
+        "call-batch",
+        &[
+            BatchFileSpec {
+                path: "a.txt",
+                prior: b"a-original",
+                after: b"a-patched",
+            },
+            BatchFileSpec {
+                path: "dir/b.txt",
+                prior: b"b-original",
+                after: b"b-patched",
+            },
+        ],
+    );
+
+    // Make the second file's directory unwritable: group validation still
+    // passes (reads and hashes work), but restoring b.txt fails mid-group.
+    let dir = fixture.workspace.join("dir");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("dir should chmod");
+    let result = change_undo_stack(&mut store, &fixture.workspace, SESSION, false);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("dir should restore");
+
+    let error = result.expect_err("group undo should fail on the unwritable file");
+    assert!(
+        error.contains("failed to restore"),
+        "unexpected error: {error}"
+    );
+
+    // The rollback leaves the whole group in its applied state...
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-patched"
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
+        b"b-patched"
+    );
+    // ...and the registry never recorded the failed undo, so a retry works.
+    let state = get_workspace_undo_state_for_session(&store, &fixture.workspace, SESSION)
+        .expect("state should load");
+    assert!(state.can_undo);
+    assert!(!state.can_redo);
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false)
+        .expect("retry after rollback should succeed");
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-original"
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
+        b"b-original"
+    );
+}
+
+#[test]
+fn undo_publishes_files_without_leaving_temp_artifacts() {
+    let fixture = MutationFixture::new("atomic-undo");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_mutation(
+        &mut store,
+        &fixture,
+        1,
+        MutationSpec {
+            tool_call_id: "call-atomic",
+            tool: "file.patch",
+            path: "notes.md",
+            action: "patched",
+            prior: Some(b"before"),
+            after: b"after",
+        },
+    );
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false).expect("undo should succeed");
+
+    assert_eq!(
+        fs::read(fixture.workspace.join("notes.md")).unwrap(),
+        b"before"
+    );
+    let leftovers: Vec<_> = fs::read_dir(&fixture.workspace)
+        .expect("workspace should list")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn redo_group_write_failure_rolls_back_reapplied_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = MutationFixture::new("batch-redo-rollback");
+    let mut store = event_sequence_store(&fixture.database);
+    seed_batch_mutation(
+        &mut store,
+        &fixture,
+        1,
+        "call-batch",
+        &[
+            BatchFileSpec {
+                path: "a.txt",
+                prior: b"a-original",
+                after: b"a-patched",
+            },
+            BatchFileSpec {
+                path: "dir/b.txt",
+                prior: b"b-original",
+                after: b"b-patched",
+            },
+        ],
+    );
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, false).expect("undo should succeed");
+
+    let dir = fixture.workspace.join("dir");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("dir should chmod");
+    let result = change_undo_stack(&mut store, &fixture.workspace, SESSION, true);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("dir should restore");
+
+    let error = result.expect_err("group redo should fail on the unwritable file");
+    assert!(
+        error.contains("failed to restore"),
+        "unexpected error: {error}"
+    );
+
+    // The rollback leaves the whole group in its undone state...
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-original"
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
+        b"b-original"
+    );
+    // ...and the registry still lists the entry as undone, so redo retries.
+    let state = get_workspace_undo_state_for_session(&store, &fixture.workspace, SESSION)
+        .expect("state should load");
+    assert!(!state.can_undo);
+    assert!(state.can_redo);
+
+    change_undo_stack(&mut store, &fixture.workspace, SESSION, true)
+        .expect("redo retry after rollback should succeed");
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"a-patched"
+    );
+    assert_eq!(
+        fs::read(fixture.workspace.join("dir/b.txt")).unwrap(),
+        b"b-patched"
+    );
+}

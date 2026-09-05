@@ -11,6 +11,9 @@ pub(crate) struct StreamingResponseParts {
     pub(crate) answer: String,
     pub(crate) streamed_tool_calls: BTreeMap<usize, StreamingToolCall>,
     pub(crate) finish_reason: Option<String>,
+    /// The recognized stream ended at EOF with no finish_reason and no `[DONE]`
+    /// sentinel, so completion was never confirmed by the provider.
+    pub(crate) eof_without_finish: bool,
     pub(crate) usage: Metadata,
 }
 
@@ -25,6 +28,7 @@ pub(crate) fn finish_streaming_response(
         mut answer,
         streamed_tool_calls,
         mut finish_reason,
+        eof_without_finish,
         usage,
     } = parts;
     let mut metadata = Metadata::new();
@@ -75,6 +79,9 @@ pub(crate) fn finish_streaming_response(
     metadata.insert("tool_calls".to_string(), tool_calls.len().to_string());
     if let Some(finish_reason) = finish_reason.filter(|value| !value.trim().is_empty()) {
         metadata.insert("finish_reason".to_string(), finish_reason);
+    }
+    if eof_without_finish && !metadata.contains_key("finish_reason") {
+        metadata.insert("stream_truncated_eof".to_string(), "true".to_string());
     }
     if raw_tool_calls_json.is_none() && !tool_calls.is_empty() {
         raw_tool_calls_json = Some(serialize_tool_calls(&tool_calls));

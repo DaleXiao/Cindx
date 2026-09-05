@@ -196,6 +196,7 @@ fn permission_values() -> Vec<Value> {
                 input: "echo contract".to_string(),
                 requested_at_ms: 30,
                 can_allow_session: true,
+                subagent: true,
             },
             PermissionReviewItem {
                 request_id: "permission-b".to_string(),
@@ -211,6 +212,7 @@ fn permission_values() -> Vec<Value> {
                 input: String::new(),
                 requested_at_ms: 31,
                 can_allow_session: false,
+                subagent: false,
             },
         ],
     })]

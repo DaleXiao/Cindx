@@ -1099,36 +1099,66 @@ pub(crate) fn dispatch_scheduled_session(
         queue_id
     };
     let (schedule_id, queue_id) = {
-        let config = state
+        let mut config = state
             .schedule_config
             .lock()
             .map_err(|error| format!("schedule config lock poisoned: {error}"))?;
-        let Some((schedule, run)) = config.schedules.iter().find_map(|schedule| {
-            (schedule.execution_session_id == session_id).then(|| {
-                schedule
-                    .active_run()
-                    .filter(|run| {
-                        run.status == "queued"
-                            && run.queue_id.as_deref() == Some(first_queue_id.as_str())
+        match decide_scheduled_dispatch(&config.schedules, session_id, &first_queue_id, now) {
+            ScheduledDispatchDecision::Dispatch {
+                schedule_id,
+                queue_id,
+            } => (schedule_id, queue_id),
+            ScheduledDispatchDecision::AdoptOrphanHead {
+                schedule_id,
+                run_id,
+                queue_id,
+            } => {
+                let adopted = config
+                    .schedules
+                    .iter_mut()
+                    .find(|schedule| schedule.id == schedule_id)
+                    .and_then(|schedule| {
+                        schedule.runs.iter_mut().rev().find(|run| run.id == run_id)
+                    });
+                let Some(run) = adopted else {
+                    return Ok(());
+                };
+                run.queue_id = Some(queue_id.clone());
+                run.queued_at_ms = run.queued_at_ms.or(Some(now));
+                save_schedule_config(&config)?;
+                (schedule_id, queue_id)
+            }
+            ScheduledDispatchDecision::CountMismatchAttempt {
+                schedule_id,
+                run_id,
+            } => {
+                if let Some(run) = config
+                    .schedules
+                    .iter_mut()
+                    .find(|schedule| schedule.id == schedule_id)
+                    .and_then(|schedule| {
+                        schedule.runs.iter_mut().rev().find(|run| run.id == run_id)
                     })
-                    .map(|run| (schedule, run))
-            })?
-        }) else {
-            return Ok(());
-        };
-        if run.dispatch_attempts >= SCHEDULE_MAX_DISPATCH_ATTEMPTS
-            || run
-                .last_dispatch_at_ms
-                .is_some_and(|last| now.saturating_sub(last) < SCHEDULE_DISPATCH_RETRY_MS)
-        {
-            return Ok(());
+                {
+                    run.dispatch_attempts = run.dispatch_attempts.saturating_add(1);
+                    run.last_dispatch_at_ms = Some(now);
+                    if run.dispatch_attempts >= SCHEDULE_MAX_DISPATCH_ATTEMPTS {
+                        // Retire the run at the cap so the schedule is freed:
+                        // the mismatched head stays queued for a future run to
+                        // adopt, but this record stops holding the session.
+                        run.status = "failed".to_string();
+                        run.finished_at_ms = Some(now);
+                        run.error = Some(
+                            "The session's queue head never matched the scheduled run's queue item"
+                                .to_string(),
+                        );
+                    }
+                    save_schedule_config(&config)?;
+                }
+                return Ok(());
+            }
+            ScheduledDispatchDecision::Skip => return Ok(()),
         }
-        (
-            schedule.id.clone(),
-            run.queue_id
-                .clone()
-                .ok_or_else(|| "scheduled queue id is missing".to_string())?,
-        )
     };
 
     let Some(dispatch_lease) = begin_queue_dispatch(&state, session_id)? else {

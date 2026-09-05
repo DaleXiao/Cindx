@@ -137,7 +137,8 @@
               "sessionName": "Session A",
               "input": "echo contract",
               "requestedAtMs": 30,
-              "canAllowSession": true
+              "canAllowSession": true,
+              "subagent": true
             },
             {
               "requestId": "permission-b",
@@ -152,7 +153,8 @@
               "sessionName": null,
               "input": "",
               "requestedAtMs": 31,
-              "canAllowSession": false
+              "canAllowSession": false,
+              "subagent": false
             }
           ]
         }

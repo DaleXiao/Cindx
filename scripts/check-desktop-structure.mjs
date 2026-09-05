@@ -790,7 +790,10 @@ const extractedDesktopBoundaryBudgets = [
   ["providerReadinessModel.ts", providerReadinessModelSource, 80],
   ["SettingsMemoryPanel.tsx", settingsMemoryPanelSource, 400],
   ["useMemorySettingsController.ts", memorySettingsControllerSource, 180],
-  ["SettingsPermissionsPanel.tsx", settingsPermissionsPanelSource, 220],
+  // 220 -> 228: a write subagent's review must stay actionable while its
+  // parent run keeps the session busy, so the panel now routes the busy gate
+  // through the shared approvalBlockedBySessionBusy helper (review R1).
+  ["SettingsPermissionsPanel.tsx", settingsPermissionsPanelSource, 228],
   ["SettingsToolsPanel.tsx", settingsToolsPanelSource, 420],
   ["SessionThreadArtifacts.tsx", sessionThreadArtifactsSource, 260],
   ["SessionThreadNavigation.tsx", sessionThreadNavigationSource, 260],
@@ -1084,6 +1087,10 @@ const toolsModuleBudgets = new Map([
   // 180 -> 240: audited-per-hop public-web fetch (SSRF gate, IP pinning,
   // manual redirect loop, status/Location parsing) replaced the `-L` curl
   // shortcut (audit E1/P0).
+  // HTTP wire-response parsing (status/headers/body separation) split out of
+  // web_fetch.rs so the fetch policy file stays inside its ownership budget
+  // and the parser can never be entangled with policy concerns (review R7).
+  ["http_wire.rs", 80],
   ["web_fetch.rs", 240],
   ["web_search.rs", 420],
   // The public-web URL policy moved out of this crate to
@@ -3683,6 +3690,25 @@ assert(
     sessionThreadSource.includes("const RunProgressStatus = memo") &&
     styles.includes("content-visibility: auto"),
   "Long sessions must avoid full-state polling and repeated offscreen rendering"
+);
+assert(
+  !agentRunControllerSource.includes("agentStateRevisionsRef.current.set"),
+  // A queue receipt reports the session's newest server revision while only
+  // the queued-message change has been applied; advancing the applied-event
+  // cursor there would make the next delta poll skip every event en route to
+  // the enqueue (R4).
+  "Queue receipts must merge visible state without advancing the applied-event cursor"
+);
+assert(
+  composerSource.includes(
+    "approvalBlockedBySessionBusy(pendingApproval.subagent, permissionBusy)"
+  ) &&
+    settingsPermissionsPanelSource.includes("approvalBlockedBySessionBusy(") &&
+    !composerSource.includes("disabled={permissionBusy}"),
+  // A write subagent's approval parks its parent run, so the session stays
+  // busy by design; blocking the decision buttons on that busy state would
+  // deadlock the approval flow (R1).
+  "Subagent approvals must stay actionable while the parent run is busy"
 );
 assert(
   rustLib.includes('AGENT_RECOVERY_SCHEMA: &str = "cindx.agent-recovery.v1"') &&

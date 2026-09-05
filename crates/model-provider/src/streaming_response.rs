@@ -15,17 +15,23 @@ use std::time::{Duration, Instant};
 const MAX_STREAMING_FALLBACK_BYTES: usize = 1024 * 1024;
 const MAX_STREAM_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
+#[allow(clippy::too_many_arguments)]
 fn apply_stream_line(
     line: &str,
     answer: &mut String,
     streamed_tool_calls: &mut BTreeMap<usize, StreamingToolCall>,
     finish_reason: &mut Option<String>,
+    done_seen: &mut bool,
     usage: &mut Metadata,
     on_delta: &mut impl FnMut(&str),
     on_activity: &mut impl FnMut(),
 ) -> Result<bool, ModelError> {
     if let Some(event) = parse_stream_event(line)? {
         on_activity();
+        if event.done_sentinel {
+            *done_seen = true;
+            return Ok(true);
+        }
         if event.finish_reason.is_some() {
             *finish_reason = event.finish_reason;
         }
@@ -146,6 +152,7 @@ where
     let mut answer = String::new();
     let mut streamed_tool_calls = BTreeMap::<usize, StreamingToolCall>::new();
     let mut finish_reason = None;
+    let mut stream_done_seen = false;
     let mut usage = Metadata::new();
     let mut last_activity = Instant::now();
     let mut delta_stream = FilteredStreamDeltaEmitter::new(on_delta);
@@ -181,6 +188,7 @@ where
                         &mut answer,
                         &mut streamed_tool_calls,
                         &mut finish_reason,
+                        &mut stream_done_seen,
                         &mut usage,
                         &mut |delta| delta_stream.push(delta, Instant::now()),
                         on_activity,
@@ -215,12 +223,18 @@ where
             &mut answer,
             &mut streamed_tool_calls,
             &mut finish_reason,
+            &mut stream_done_seen,
             &mut usage,
             &mut |delta| delta_stream.push(delta, Instant::now()),
             on_activity,
         )
     })?;
     delta_stream.finish(Instant::now());
+    // A recognized stream that ends at EOF without any completion marker
+    // (neither a finish_reason chunk nor the protocol's [DONE] sentinel) may be
+    // truncated mid-answer or mid-tool-batch; the contract layer treats such a
+    // response as incomplete instead of a normal finish.
+    let eof_without_finish = stream_protocol_seen && finish_reason.is_none() && !stream_done_seen;
     finish_streaming_response(
         StreamingResponseParts {
             fallback_response: if stream_protocol_seen {
@@ -232,6 +246,7 @@ where
             answer,
             streamed_tool_calls,
             finish_reason,
+            eof_without_finish,
             usage,
         },
         model,
@@ -297,6 +312,9 @@ pub(super) async fn consume_streaming_response(
                 answer: String::new(),
                 streamed_tool_calls: BTreeMap::new(),
                 finish_reason: None,
+                // The JSON path is self-validating: a truncated body fails
+                // parsing instead of yielding a response, so no EOF flag.
+                eof_without_finish: false,
                 usage: Metadata::new(),
             },
             model,
@@ -488,6 +506,7 @@ mod tests {
         let mut visible = String::new();
         let mut tool_calls = BTreeMap::new();
         let mut finish_reason = None;
+        let mut done_seen = false;
         let mut usage = Metadata::new();
         let mut parsed_event = false;
         let mut activity_count = 0usize;
@@ -500,6 +519,7 @@ mod tests {
                         &mut answer,
                         &mut tool_calls,
                         &mut finish_reason,
+                        &mut done_seen,
                         &mut usage,
                         &mut |delta| visible.push_str(delta),
                         &mut || activity_count += 1,
@@ -514,6 +534,7 @@ mod tests {
                     &mut answer,
                     &mut tool_calls,
                     &mut finish_reason,
+                    &mut done_seen,
                     &mut usage,
                     &mut |delta| visible.push_str(delta),
                     &mut || activity_count += 1,

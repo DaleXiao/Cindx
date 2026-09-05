@@ -750,12 +750,12 @@ pub fn advance_with_model_response(
 
     let retry_instruction = if truncated_batch {
         Some(
-            "The previous tool-call batch was cut off by the output limit and was NOT executed, because truncated arguments are unsafe. Re-issue the needed tool calls with complete, valid arguments (prefer fewer or smaller calls), or provide a complete final answer instead.",
+            "The previous tool-call batch was cut off before completion (output limit or an interrupted stream) and was NOT executed, because truncated arguments are unsafe. Re-issue the needed tool calls with complete, valid arguments (prefer fewer or smaller calls), or provide a complete final answer instead.",
         )
     } else {
         match assessment.disposition {
         ModelResponseDisposition::IncompleteOutput => Some(
-            "The previous response reached its output limit before completion. Continue from the preserved partial response without repeating it. Finish the pending reasoning or make the next necessary tool call, then provide a complete answer."
+            "The previous response ended before completion (output limit or an interrupted stream). Continue from the preserved partial response without repeating it. Finish the pending reasoning or make the next necessary tool call, then provide a complete answer."
         ),
         ModelResponseDisposition::Filtered => Some(
             "The previous response was blocked by the provider safety filter. Reformulate the next step in a policy-compliant way while preserving the user's legitimate goal. Do not repeat the blocked wording."

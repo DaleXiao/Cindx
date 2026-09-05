@@ -27,7 +27,8 @@ function sameReviews(left: PermissionReviewItem[], right: PermissionReviewItem[]
         candidate.sessionName === review.sessionName &&
         candidate.input === review.input &&
         candidate.requestedAtMs === review.requestedAtMs &&
-        candidate.canAllowSession === review.canAllowSession
+        candidate.canAllowSession === review.canAllowSession &&
+        candidate.subagent === review.subagent
       );
     })
   );
