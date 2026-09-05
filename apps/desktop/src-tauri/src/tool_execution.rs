@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn phase8_state_with_error(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     message: impl Into<String>,
 ) -> Result<Phase8State, String> {
     let message = message.into();
@@ -24,7 +24,7 @@ pub(crate) fn phase8_state_with_error(
 }
 
 pub(crate) fn phase5_state_with_error(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     message: impl Into<String>,
 ) -> Result<Phase5State, String> {
     let message = message.into();
@@ -99,7 +99,7 @@ impl AgentToolEpochGuard {
 }
 
 pub(crate) fn execute_agent_tool_invocation_for_epoch(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     registry: &ToolRegistry,
     invocation: ToolInvocation,
     workspace_root: &Path,
@@ -121,7 +121,7 @@ pub(crate) fn execute_agent_tool_invocation_for_epoch(
 }
 
 pub(crate) fn execute_agent_tool_invocation_for_objective_epoch(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     registry: &ToolRegistry,
     invocation: ToolInvocation,
     workspace_root: &Path,
@@ -143,7 +143,7 @@ pub(crate) fn execute_agent_tool_invocation_for_objective_epoch(
 }
 
 fn execute_agent_tool_invocation_inner(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     registry: &ToolRegistry,
     mut invocation: ToolInvocation,
     workspace_root: &Path,
@@ -720,7 +720,7 @@ pub(crate) fn append_tool_finished_event(
 }
 
 pub(crate) fn phase4_state_with_error(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     config: &ProviderConfig,
     message: &str,
 ) -> Result<Phase4State, String> {
@@ -732,10 +732,7 @@ pub(crate) fn phase4_state_with_error(
     phase4_state(&mut store, config, Some(message.to_string())).map_err(|error| error.to_string())
 }
 
-pub(crate) fn record_phase4_error(
-    state: &tauri::State<'_, AppState>,
-    message: &str,
-) -> Result<(), String> {
+pub(crate) fn record_phase4_error(state: &AppState, message: &str) -> Result<(), String> {
     let mut store = state
         .store
         .lock()

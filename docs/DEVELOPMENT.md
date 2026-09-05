@@ -154,6 +154,26 @@ successful restores publish through a temporary-file rename without leaking
 temp artifacts. It is
 included in `quick`, `ci-contract`, `control-plane`, and `full`.
 
+`agent-product-path-contract` runs two provider-free desktop tests that drive
+the shipping run path headlessly through the `AgentRunHost` seam: a composed
+`AppState`, a local fake OpenAI-compatible server (serving both SSE and JSON
+shapes), and no Tauri runtime. The run test drives the real entry (fresh runs;
+the retry/resume/cancel/plan-confirmation/queue-dispatch entries share the
+same seam-typed path) and asserts the completed run status,
+the delivered answer in the projected state, the durable tool
+started/finished lineage and terminal event, the stream-close emission
+and post-run semantic-memory scheduling through the host sink, and exactly
+two scripted provider calls; the second test pins the detached-state-job
+channel contract (the guardian-review shape). Known machine-dependent inputs
+the harness does not yet isolate: the user's personalization file, the
+project-instructions config, and the `~/.cindx` skill catalog can vary the
+prepared prompt and tool inventory — the assertions are insensitive to all
+three, and a hermetic composition for them is tracked as harness follow-up.
+This gate is the
+Phase 4 product-path fidelity clause's standing proof: any change that breaks
+the headless drivability of the real run path fails this gate. It is included
+in `quick`, `ci-contract`, `control-plane`, and `full`.
+
 `project-instructions-contract` runs 17 provider-free desktop tests covering
 bounded discovery of workspace instruction files (`AGENTS.md` from the
 workspace root up to the Git root and `.cindx/instructions/*.md`), per-file

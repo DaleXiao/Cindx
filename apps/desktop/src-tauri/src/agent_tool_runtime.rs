@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent_runtime_snapshot::persist_runtime_append_and_snapshot;
 use crate::agent_runtime_snapshot_cursor::AgentRuntimeSnapshotCursor;
+use crate::desktop_event_sink::AgentRunHost;
 use crate::suspended_run_runtime::{remember_suspended_agent_run, SuspendedAgentRun};
 use agent_application::{insert_run_objectives, merge_persistable_run_context};
 
@@ -229,7 +230,7 @@ pub(super) fn evaluate_agent_tool_permission(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn commit_agent_tool_observation(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     runtime: &mut agent_runtime::AgentLoopState,
     run_context: &Metadata,
     cancellation: &Arc<AgentRunControl>,
@@ -331,8 +332,8 @@ pub(super) fn commit_agent_tool_observation(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn agent_tool_batch_outcome_after_commit(
     commit: agent_runtime::RunExecutionStepCommit<AgentToolObservationCommit>,
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &agent_runtime::AgentLoopState,
     prompt: &str,
@@ -364,7 +365,7 @@ pub(super) fn agent_tool_batch_outcome_after_commit(
         }
         agent_runtime::RunExecutionStepCommit::Stopped(_) => {
             Ok(Some(paused_agent_tools(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 runtime,
@@ -379,8 +380,8 @@ pub(super) fn agent_tool_batch_outcome_after_commit(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_agent_tool_batch(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut agent_runtime::AgentLoopState,
     prompt: &str,
@@ -398,7 +399,7 @@ pub(crate) fn execute_agent_tool_batch(
     if !contains_active_denial {
         if let Some(outcome) =
             crate::agent_parallel_tool_runtime::try_execute_parallel_agent_tool_batch(
-                app,
+                host,
                 state,
                 workspace_root,
                 runtime,
@@ -417,7 +418,7 @@ pub(crate) fn execute_agent_tool_batch(
         }
     }
     execute_agent_tool_batch_serial(
-        app,
+        host,
         state,
         workspace_root,
         runtime,
@@ -435,8 +436,8 @@ pub(crate) fn execute_agent_tool_batch(
 
 #[allow(clippy::too_many_arguments)]
 fn execute_agent_tool_batch_serial(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut agent_runtime::AgentLoopState,
     prompt: &str,
@@ -470,7 +471,7 @@ fn execute_agent_tool_batch_serial(
         }
         if agent_run_should_stop(cancellation) {
             return Ok(paused_agent_tools(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 &*runtime,
@@ -554,7 +555,7 @@ fn execute_agent_tool_batch_serial(
                 )?;
                 if let Some(outcome) = agent_tool_batch_outcome_after_commit(
                     commit,
-                    app,
+                    host,
                     state,
                     workspace_root,
                     runtime,
@@ -617,7 +618,7 @@ fn execute_agent_tool_batch_serial(
             )?;
             if let Some(outcome) = agent_tool_batch_outcome_after_commit(
                 commit,
-                app,
+                host,
                 state,
                 workspace_root,
                 runtime,
@@ -633,7 +634,8 @@ fn execute_agent_tool_batch_serial(
         }
 
         if completed_result.is_none() {
-            if let Some(host) = AgentKernel::new(&mut *runtime, tools).stuck_target_block_for(&call)
+            if let Some(stuck_host) =
+                AgentKernel::new(&mut *runtime, tools).stuck_target_block_for(&call)
             {
                 let denial = agent_runtime::AgentActionDenialFeedback::runtime_policy(
                     agent_runtime::STUCK_TARGET_BLOCKED_CODE,
@@ -642,7 +644,7 @@ fn execute_agent_tool_batch_serial(
                 let observation = observation_from_tool_result(
                     &call.tool_name,
                     "denied",
-                    &agent_runtime::stuck_target_blocked_observation(&host),
+                    &agent_runtime::stuck_target_blocked_observation(&stuck_host),
                 );
                 append_tool_finished_event(
                     &mut store,
@@ -678,7 +680,7 @@ fn execute_agent_tool_batch_serial(
                 )?;
                 if let Some(outcome) = agent_tool_batch_outcome_after_commit(
                     commit,
-                    app,
+                    host,
                     state,
                     workspace_root,
                     runtime,
@@ -737,7 +739,7 @@ fn execute_agent_tool_batch_serial(
             )?;
             if let Some(outcome) = agent_tool_batch_outcome_after_commit(
                 commit,
-                app,
+                host,
                 state,
                 workspace_root,
                 runtime,
@@ -777,7 +779,7 @@ fn execute_agent_tool_batch_serial(
                         crate::guardian_runtime::guardian_context_excerpt(&runtime.messages);
                     let guardian_approved =
                         crate::guardian_runtime::guardian_auto_approve_pending_permission(
-                            app,
+                            host,
                             state,
                             run_context,
                             &guardian_request,
@@ -815,7 +817,7 @@ fn execute_agent_tool_batch_serial(
                 AgentToolInvocationOutcome::RestartAfterSteer => {
                     if agent_run_should_stop(cancellation) {
                         return Ok(paused_agent_tools(pause_agent_loop_for_control_stop(
-                            app,
+                            host,
                             state,
                             workspace_root,
                             &*runtime,
@@ -852,7 +854,7 @@ fn execute_agent_tool_batch_serial(
         )?;
         if let Some(outcome) = agent_tool_batch_outcome_after_commit(
             commit,
-            app,
+            host,
             state,
             workspace_root,
             runtime,
@@ -868,7 +870,7 @@ fn execute_agent_tool_batch_serial(
     if !cancellation.execution_epoch_lease_is_current(epoch_lease) {
         if agent_run_should_stop(cancellation) {
             return Ok(paused_agent_tools(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 &*runtime,
@@ -931,7 +933,7 @@ fn execute_agent_tool_batch_serial(
             }
             agent_runtime::RunExecutionStepCommit::Stopped(_) => {
                 Ok(paused_agent_tools(pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     &*runtime,

@@ -2,6 +2,7 @@ use super::*;
 use crate::agent_failure_terminal_runtime::{
     commit_agent_failure_terminal, AgentFailureTerminalOutcome,
 };
+use crate::desktop_event_sink::AgentRunHost;
 use model_provider::ModelError;
 
 fn prepared_streaming_request_once<'a>(
@@ -161,8 +162,8 @@ fn stop_parent_run_for_model_call_failure(cancellation: &AgentRunControl, reason
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_agent_model_turn(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &agent_runtime::AgentLoopState,
     prompt: &str,
@@ -183,7 +184,7 @@ pub(crate) fn execute_agent_model_turn(
         }
         agent_runtime::RunEpochLeaseOutcome::Stopped(_) => {
             return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 runtime,
@@ -224,7 +225,7 @@ pub(crate) fn execute_agent_model_turn(
         Err(reason) => {
             stop_parent_run_for_model_call_failure(cancellation, reason);
             return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 runtime,
@@ -239,7 +240,7 @@ pub(crate) fn execute_agent_model_turn(
         cancellation.finish_model_call_at(epoch_lease.epoch());
         if agent_run_should_stop(cancellation) {
             return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 runtime,
@@ -362,7 +363,7 @@ pub(crate) fn execute_agent_model_turn(
             Err(_) => {
                 cancellation.finish_model_call_at(epoch_lease.epoch());
                 return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     runtime,
@@ -411,7 +412,7 @@ pub(crate) fn execute_agent_model_turn(
             }
             if visible_stream && !delta.is_empty() {
                 streamed_output = true;
-                emit_agent_stream_delta(app, &request_id, session_id, delta, false, false, None);
+                emit_agent_stream_delta(host, &request_id, session_id, delta, false, false, None);
             }
         };
         let mut should_cancel = || {
@@ -456,7 +457,7 @@ pub(crate) fn execute_agent_model_turn(
                 {
                     if visible_stream && streamed_output {
                         emit_agent_stream_delta(
-                            app,
+                            host,
                             &request_id,
                             session_id,
                             "",
@@ -474,7 +475,7 @@ pub(crate) fn execute_agent_model_turn(
                 {
                     if visible_stream && streamed_output {
                         emit_agent_stream_delta(
-                            app,
+                            host,
                             &request_id,
                             session_id,
                             "",
@@ -487,10 +488,10 @@ pub(crate) fn execute_agent_model_turn(
                     return Ok(AgentModelTurnOutcome::RestartAfterSteer);
                 }
                 if error.is_cancelled() || agent_run_should_stop(cancellation) {
-                    emit_agent_stream_delta(app, &request_id, session_id, "", true, true, None);
+                    emit_agent_stream_delta(host, &request_id, session_id, "", true, true, None);
                     cancellation.finish_model_call_at(epoch_lease.epoch());
                     return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                        app,
+                        host,
                         state,
                         workspace_root,
                         runtime,
@@ -512,7 +513,7 @@ pub(crate) fn execute_agent_model_turn(
                 {
                     if visible_stream && streamed_output {
                         emit_agent_stream_delta(
-                            app,
+                            host,
                             &request_id,
                             session_id,
                             "",
@@ -564,7 +565,7 @@ pub(crate) fn execute_agent_model_turn(
                 if let Some(reason) = exhausted_model_transport_error_stop_reason(&error) {
                     cancellation.request_stop(reason);
                     return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                        app,
+                        host,
                         state,
                         workspace_root,
                         runtime,
@@ -589,7 +590,7 @@ pub(crate) fn execute_agent_model_turn(
                     AgentFailureTerminalOutcome::RestartAfterSteer => {
                         if visible_stream && streamed_output {
                             emit_agent_stream_delta(
-                                app,
+                                host,
                                 &request_id,
                                 session_id,
                                 "",
@@ -602,7 +603,7 @@ pub(crate) fn execute_agent_model_turn(
                     }
                     AgentFailureTerminalOutcome::Stopped => {
                         Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                            app,
+                            host,
                             state,
                             workspace_root,
                             runtime,
@@ -622,7 +623,7 @@ pub(crate) fn execute_agent_model_turn(
         && !agent_run_should_stop(cancellation)
     {
         if visible_stream && streamed_output {
-            emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+            emit_agent_stream_delta(host, &request_id, session_id, "", false, true, None);
         }
         return Ok(AgentModelTurnOutcome::RestartAfterSteer);
     }
@@ -631,7 +632,7 @@ pub(crate) fn execute_agent_model_turn(
             Ok(Some(_)) => {}
             Ok(None) => {
                 if visible_stream && streamed_output {
-                    emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+                    emit_agent_stream_delta(host, &request_id, session_id, "", false, true, None);
                 }
                 return Ok(AgentModelTurnOutcome::RestartAfterSteer);
             }
@@ -640,7 +641,7 @@ pub(crate) fn execute_agent_model_turn(
                     cancellation.record_partial_output_at(epoch_lease.epoch(), &partial_stream);
                 }
                 return Ok(finished_agent_turn(pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     runtime,
@@ -657,7 +658,7 @@ pub(crate) fn execute_agent_model_turn(
     response.message.content = sanitize_assistant_content(&raw_response_content);
     let reasoning_markup_removed = response.message.content != raw_response_content.trim();
     if visible_stream && streamed_output && reasoning_markup_removed {
-        emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+        emit_agent_stream_delta(host, &request_id, session_id, "", false, true, None);
         streamed_output = false;
     }
     if !response.message.content.trim().is_empty() {
@@ -689,7 +690,7 @@ pub(crate) fn execute_agent_model_turn(
     let output_length = response.message.content.len();
     let tool_call_count = response.tool_calls.len();
     if visible_stream && streamed_output && tool_call_count > 0 {
-        emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+        emit_agent_stream_delta(host, &request_id, session_id, "", false, true, None);
         streamed_output = false;
     }
     let progress = cancellation.progress();

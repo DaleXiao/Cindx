@@ -159,7 +159,7 @@ pub(crate) fn index_workspace_rag_blocking(
 }
 
 fn index_workspace_rag_operation(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     cancellation: &Arc<RagOperationControl>,
     progress: &mut RagOperationProgressReporter<'_>,
 ) -> Result<Phase7State, String> {
@@ -343,7 +343,7 @@ fn search_rag_blocking(
 }
 
 fn prepare_manual_rag_snapshot(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     root: &Path,
     config: &ProviderConfig,
     cancellation: &Arc<RagOperationControl>,
@@ -383,7 +383,7 @@ fn empty_manual_rag_error(snapshot: &WorkspaceKnowledgeSnapshot) -> Option<&'sta
 }
 
 fn phase7_state_with_operation_error(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     operation: &RagOperationControl,
     message: impl Into<String>,
     sources: Vec<RagSourceView>,
@@ -430,7 +430,7 @@ fn phase7_state_with_operation_error(
 }
 
 fn search_rag_operation(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     input: RagSearchInput,
     cancellation: &Arc<RagOperationControl>,
     progress: &mut RagOperationProgressReporter<'_>,
@@ -529,7 +529,7 @@ fn answer_with_rag_blocking(
 }
 
 fn answer_with_rag_operation(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     input: RagSearchInput,
     cancellation: &Arc<RagOperationControl>,
     progress: &mut RagOperationProgressReporter<'_>,

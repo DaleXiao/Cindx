@@ -1,3 +1,4 @@
+use crate::desktop_event_sink::AgentRunHost;
 use crate::desktop_prelude::*;
 use crate::{
     agent_completion_runtime::{
@@ -39,8 +40,8 @@ use crate::{
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pause_agent_loop_for_control_stop(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &agent_runtime::AgentLoopState,
     prompt: &str,
@@ -67,7 +68,7 @@ pub(crate) fn pause_agent_loop_for_control_stop(
     }
     let task_state = capture_persistable_agent_task_state(runtime);
     finish_agent_run_for_control_stop_with_task_state(
-        app,
+        host,
         state,
         run_context,
         cancellation,
@@ -97,8 +98,8 @@ pub(crate) enum AgentLoopExecutionOutcome {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_agent_loop_epoch_with_provider(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     config: &ProviderConfig,
     workspace_root: &Path,
     mut runtime: agent_runtime::AgentLoopState,
@@ -190,7 +191,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             }
             AgentSteerApplication::Stopped(_) => {
                 return pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     &runtime,
@@ -231,7 +232,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             match execute_terminal_finalizer(
                 &mut runtime,
                 TerminalFinalizerContext {
-                    app,
+                    host,
                     state,
                     config,
                     workspace_root,
@@ -256,7 +257,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 }
                 TerminalFinalizerOutcome::Pause => {
                     return pause_agent_loop_for_control_stop(
-                        app,
+                        host,
                         state,
                         workspace_root,
                         &runtime,
@@ -309,7 +310,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 }
                 cancellation.request_stop(RunStopReason::TurnBudgetExhausted);
                 return pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     &runtime,
@@ -332,7 +333,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             max_output_tokens.to_string(),
         );
         let model_turn = execute_agent_model_turn(
-            app,
+            host,
             state,
             workspace_root,
             &runtime,
@@ -428,7 +429,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             agent_runtime::RunExecutionStepCommit::RestartAfterSteer => {
                 runtime.messages.truncate(previous_message_count);
                 if visible_stream && streamed_output {
-                    emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+                    emit_agent_stream_delta(host, &request_id, session_id, "", false, true, None);
                 }
                 active_collaboration = None;
                 continue 'agent_loop;
@@ -436,7 +437,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             agent_runtime::RunExecutionStepCommit::Stopped(_) => {
                 runtime.messages.truncate(previous_message_count);
                 return pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     &runtime,
@@ -462,7 +463,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             streamed_output,
             completion_rejection,
         ) {
-            emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+            emit_agent_stream_delta(host, &request_id, session_id, "", false, true, None);
         }
         if verification_required {
             cancellation.mark_progress_at(
@@ -479,7 +480,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     "completed agent response is missing a grounded completion receipt".to_string()
                 })?;
                 match finalize_agent_completion(
-                    app,
+                    host,
                     state,
                     config,
                     workspace_root,
@@ -514,7 +515,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                 }
                 cancellation.request_stop(RunStopReason::TurnBudgetExhausted);
                 return pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     &runtime,
@@ -527,7 +528,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             }
             AgentAdvance::Retry { .. } => {
                 if visible_stream && streamed_output {
-                    emit_agent_stream_delta(app, &request_id, session_id, "", false, true, None);
+                    emit_agent_stream_delta(host, &request_id, session_id, "", false, true, None);
                 }
                 cancellation.mark_progress_at(
                     run_context_steer_epoch(&run_context),
@@ -538,7 +539,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
             }
             AgentAdvance::Failed { failure } => {
                 match resolve_loop_failure(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     &runtime,
@@ -576,7 +577,7 @@ pub(crate) fn execute_agent_loop_epoch_with_provider(
                     continue 'agent_loop;
                 }
                 match execute_agent_tool_batch(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     &mut runtime,

@@ -4,7 +4,7 @@ use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
 
 pub(crate) fn wait_for_foreground_agent_idle(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     control: &Arc<AgentRunControl>,
     idle_grace: Duration,
 ) -> Result<bool, String> {
@@ -23,7 +23,7 @@ pub(crate) fn wait_for_foreground_agent_idle(
     }
 }
 
-pub(crate) fn foreground_agent_active(state: &tauri::State<'_, AppState>) -> Result<bool, String> {
+pub(crate) fn foreground_agent_active(state: &AppState) -> Result<bool, String> {
     state
         .agent_run_controls
         .is_empty()
@@ -31,6 +31,6 @@ pub(crate) fn foreground_agent_active(state: &tauri::State<'_, AppState>) -> Res
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn foreground_agent_should_preempt(state: &tauri::State<'_, AppState>) -> bool {
+pub(crate) fn foreground_agent_should_preempt(state: &AppState) -> bool {
     state.allow_exit.load(Ordering::Relaxed) || foreground_agent_active(state).unwrap_or(true)
 }

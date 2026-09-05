@@ -48,7 +48,7 @@ pub(crate) fn semantic_memory_model_is_warranted(run_context: &Metadata, events:
 }
 
 pub(crate) fn refresh_deterministic_memory_projection(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     config: &ProviderConfig,
     run_context: &Metadata,
@@ -72,7 +72,7 @@ pub(crate) fn refresh_deterministic_memory_projection(
 }
 
 pub(crate) fn generate_semantic_memory(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     config: &ProviderConfig,
     run_context: &Metadata,
@@ -184,7 +184,7 @@ pub(crate) fn generate_semantic_memory(
 }
 
 pub(crate) fn recover_semantic_memory_without_model(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: PathBuf,
     config: ProviderConfig,
     run_context: &Metadata,

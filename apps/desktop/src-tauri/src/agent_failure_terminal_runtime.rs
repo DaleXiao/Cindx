@@ -1,3 +1,4 @@
+use crate::desktop_event_sink::AgentRunHost;
 use crate::{
     agent_loop_runtime::pause_agent_loop_for_control_stop,
     agent_query_commands::emit_agent_stream_delta,
@@ -39,7 +40,7 @@ pub(crate) enum AgentPreparationFailureTerminalOutcome {
 }
 
 pub(crate) fn commit_agent_preparation_failure_terminal(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     run_context: &Metadata,
     cancellation: &AgentRunControl,
     display_message: String,
@@ -90,8 +91,8 @@ fn commit_preparation_failure_with<T, E>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_loop_failure(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &AgentLoopState,
     prompt: &str,
@@ -118,12 +119,12 @@ pub(crate) fn resolve_loop_failure(
         }
         AgentFailureTerminalOutcome::RestartAfterSteer => {
             if streamed_output {
-                emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
+                emit_agent_stream_delta(host, request_id, session_id, "", false, true, None);
             }
             Ok(AgentFailureLoopOutcome::RestartAfterSteer)
         }
         AgentFailureTerminalOutcome::Stopped => pause_agent_loop_for_control_stop(
-            app,
+            host,
             state,
             workspace_root,
             runtime,
@@ -137,7 +138,7 @@ pub(crate) fn resolve_loop_failure(
 }
 
 pub(crate) fn commit_agent_failure_terminal(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     runtime: &AgentLoopState,
     run_context: &Metadata,
     cancellation: &AgentRunControl,

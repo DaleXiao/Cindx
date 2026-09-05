@@ -410,7 +410,7 @@ pub(crate) fn show_native_workspace_folder_picker(
     Err("native workspace folder selection is not available on this platform".to_string())
 }
 
-pub(crate) fn runtime_status(state: &tauri::State<'_, AppState>) -> Result<RuntimeStatus, String> {
+pub(crate) fn runtime_status(state: &AppState) -> Result<RuntimeStatus, String> {
     let root = active_workspace_root(state)?;
     let mut status = runtime_status_for_root(root.clone());
     status.provider_ready = clone_provider_config(state)?.is_ready();

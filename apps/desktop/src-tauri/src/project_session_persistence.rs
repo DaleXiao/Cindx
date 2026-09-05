@@ -225,7 +225,7 @@ pub(crate) fn unique_fork_name(config: &ProjectSessionConfig, source: &SessionRe
 }
 
 pub(crate) fn project_session_state_with_error(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     message: impl Into<String>,
 ) -> Result<ProjectSessionState, String> {
     let config = state
@@ -237,7 +237,7 @@ pub(crate) fn project_session_state_with_error(
 }
 
 pub(crate) fn project_session_metadata_for_session(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: Option<&str>,
 ) -> Result<Metadata, String> {
     let config = state

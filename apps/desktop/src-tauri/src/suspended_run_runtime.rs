@@ -118,7 +118,7 @@ impl SuspendedRunStore {
 }
 
 pub(crate) fn remember_suspended_agent_run(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     run: SuspendedAgentRun,
 ) -> Result<(), String> {
     state
@@ -127,7 +127,7 @@ pub(crate) fn remember_suspended_agent_run(
 }
 
 pub(crate) fn take_suspended_agent_run(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
 ) -> Result<Option<SuspendedAgentRun>, String> {
     state
@@ -136,7 +136,7 @@ pub(crate) fn take_suspended_agent_run(
 }
 
 pub(crate) fn suspended_agent_run_control_snapshot(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
 ) -> Result<Option<RunControlSnapshot>, String> {
     state
@@ -145,7 +145,7 @@ pub(crate) fn suspended_agent_run_control_snapshot(
 }
 
 pub(crate) fn suspended_agent_run_policy(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
 ) -> Result<Option<AgentPolicy>, String> {
     state
@@ -153,16 +153,13 @@ pub(crate) fn suspended_agent_run_policy(
         .agent_policy(session_id, current_time_millis())
 }
 
-pub(crate) fn clear_suspended_agent_run(
-    state: &tauri::State<'_, AppState>,
-    session_id: &str,
-) -> Result<(), String> {
+pub(crate) fn clear_suspended_agent_run(state: &AppState, session_id: &str) -> Result<(), String> {
     let _ = take_suspended_agent_run(state, session_id)?;
     Ok(())
 }
 
 pub(crate) fn clear_suspended_agent_run_for_context(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     run_context: &Metadata,
 ) -> Result<(), String> {
     if let Some(session_id) = run_context.get("session_id") {
@@ -172,7 +169,7 @@ pub(crate) fn clear_suspended_agent_run_for_context(
 }
 
 pub(crate) fn append_observations_to_suspended_run(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     observations: &[ResolvedToolObservation],
 ) -> Result<(), String> {

@@ -417,7 +417,7 @@ fn cancel_schedule_run_blocking(
         }
         // Call the shared blocking path, not the command: `cancel_agent_task` is
         // async, and this body is already on a blocking task.
-        cancel_agent_task_blocking(&app, state.clone(), &session_id)?;
+        cancel_agent_task_blocking(&app, state.inner(), &session_id)?;
     }
 
     let now = current_time_millis();
@@ -447,7 +447,7 @@ fn cancel_schedule_run_blocking(
 }
 
 pub(crate) fn validate_schedule_target(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     project_id: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<(), String> {
@@ -485,7 +485,7 @@ pub(crate) fn validate_schedule_target(
 }
 
 pub(crate) fn ensure_schedule_execution_session(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     _schedule_id: &str,
     schedule_name: &str,
     effort: &str,
@@ -562,9 +562,7 @@ pub(crate) fn ensure_schedule_execution_session(
     Ok(execution_session_id)
 }
 
-pub(crate) fn schedule_state_view(
-    state: &tauri::State<'_, AppState>,
-) -> Result<ScheduleStateView, String> {
+pub(crate) fn schedule_state_view(state: &AppState) -> Result<ScheduleStateView, String> {
     let config = state
         .schedule_config
         .lock()
@@ -646,7 +644,7 @@ pub(crate) fn schedule_state_view(
     })
 }
 
-pub(crate) fn set_schedule_last_error(state: &tauri::State<'_, AppState>, error: Option<String>) {
+pub(crate) fn set_schedule_last_error(state: &AppState, error: Option<String>) {
     if let Ok(mut last_error) = state.schedule_last_error.lock() {
         *last_error = error;
     }
@@ -748,7 +746,7 @@ pub(crate) fn latest_unfinished_agent_queue_id(events: &[Event]) -> Option<Strin
     active
 }
 
-pub(crate) fn reconcile_schedule_runs(state: &tauri::State<'_, AppState>) -> Result<(), String> {
+pub(crate) fn reconcile_schedule_runs(state: &AppState) -> Result<(), String> {
     let active_runs = {
         let config = state
             .schedule_config
@@ -844,7 +842,7 @@ pub(crate) fn reconcile_schedule_runs(state: &tauri::State<'_, AppState>) -> Res
 }
 
 pub(crate) fn trigger_schedule_run(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     schedule_id: &str,
     source: &str,
     scheduled_for_ms: u64,
@@ -932,7 +930,7 @@ pub(crate) fn trigger_schedule_run(
 }
 
 pub(crate) fn delete_queue_message_by_id(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     queue_id: &str,
 ) -> Result<(), String> {
@@ -1187,7 +1185,7 @@ pub(crate) fn dispatch_scheduled_session(
         drop(config);
         run_next_queued_agent_message_blocking_inner(
             app,
-            state.clone(),
+            state.inner(),
             SessionActionInput {
                 session_id: session_id.to_string(),
             },

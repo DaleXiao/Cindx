@@ -259,7 +259,7 @@ pub(crate) fn agent_state_from_events(
 }
 
 pub(crate) fn agent_state_with_error_in_context(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     run_context: &Metadata,
     message: impl Into<String>,
 ) -> Result<AgentState, String> {
@@ -267,7 +267,7 @@ pub(crate) fn agent_state_with_error_in_context(
 }
 
 pub(crate) fn agent_state_with_error_metadata_in_context(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     run_context: &Metadata,
     message: impl Into<String>,
     terminal_metadata: Metadata,

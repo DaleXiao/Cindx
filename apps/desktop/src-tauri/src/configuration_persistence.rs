@@ -15,9 +15,7 @@ use std::collections::HashSet;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{fs, io::Write};
 
-pub(crate) fn clone_provider_config(
-    state: &tauri::State<'_, AppState>,
-) -> Result<ProviderConfig, String> {
+pub(crate) fn clone_provider_config(state: &AppState) -> Result<ProviderConfig, String> {
     let mut config = state
         .provider_config
         .lock()

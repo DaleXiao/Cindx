@@ -785,7 +785,7 @@ fn delete_session_blocking(
 }
 
 fn abort_unpublished_fork(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     journal: &ProjectLifecycleJournal,
     project_root: &Path,
     session_id: &str,

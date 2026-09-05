@@ -1,3 +1,4 @@
+use crate::desktop_event_sink::AgentRunHost;
 use crate::{
     agent_completion_runtime::{
         finalize_agent_completion, AgentCompletionDelivery, AgentCompletionOutcome,
@@ -43,9 +44,9 @@ fn finalizer_attempt_is_retryable(
         && matches!(resolution, Err(failure) if failure.code == "finalizer_no_grounded_candidate")
 }
 
-pub(crate) struct TerminalFinalizerContext<'a, 'state> {
-    pub(crate) app: &'a tauri::AppHandle,
-    pub(crate) state: &'a tauri::State<'state, AppState>,
+pub(crate) struct TerminalFinalizerContext<'a> {
+    pub(crate) host: &'a dyn AgentRunHost,
+    pub(crate) state: &'a AppState,
     pub(crate) config: &'a ProviderConfig,
     pub(crate) workspace_root: &'a Path,
     pub(crate) prompt: &'a str,
@@ -70,7 +71,7 @@ pub(crate) enum TerminalFinalizerOutcome {
 #[allow(clippy::too_many_arguments)]
 fn resolve_internal_finalizer_failure(
     runtime: &agent_runtime::AgentLoopState,
-    context: &TerminalFinalizerContext<'_, '_>,
+    context: &TerminalFinalizerContext<'_>,
     epoch_lease: RunEpochLease,
     code: &'static str,
     message: String,
@@ -79,11 +80,11 @@ fn resolve_internal_finalizer_failure(
 ) -> Result<TerminalFinalizerOutcome, String> {
     let session_id = context.run_context.get("session_id").map(String::as_str);
     if reset_stream {
-        emit_agent_stream_delta(context.app, request_id, session_id, "", false, true, None);
+        emit_agent_stream_delta(context.host, request_id, session_id, "", false, true, None);
     }
     let failure = AgentFailure::internal(code, message);
     match resolve_loop_failure(
-        context.app,
+        context.host,
         context.state,
         context.workspace_root,
         runtime,
@@ -108,7 +109,7 @@ fn resolve_internal_finalizer_failure(
 
 pub(crate) fn execute_terminal_finalizer(
     runtime: &mut agent_runtime::AgentLoopState,
-    context: TerminalFinalizerContext<'_, '_>,
+    context: TerminalFinalizerContext<'_>,
 ) -> Result<TerminalFinalizerOutcome, String> {
     let epoch_lease = match context.cancellation.execution_epoch_lease() {
         agent_runtime::RunEpochLeaseOutcome::Acquired(lease) => lease,
@@ -267,7 +268,7 @@ pub(crate) fn execute_terminal_finalizer(
             );
         }
         let model_turn = execute_agent_model_turn(
-            context.app,
+            context.host,
             context.state,
             context.workspace_root,
             runtime,
@@ -339,7 +340,7 @@ pub(crate) fn execute_terminal_finalizer(
         finalizer_retries += 1;
         if attempt.2 {
             emit_agent_stream_delta(
-                context.app,
+                context.host,
                 &attempt.1,
                 context.run_context.get("session_id").map(String::as_str),
                 "",
@@ -354,7 +355,7 @@ pub(crate) fn execute_terminal_finalizer(
         Ok(resolution) => {
             if resolution.used_fallback && streamed_output {
                 emit_agent_stream_delta(
-                    context.app,
+                    context.host,
                     &request_id,
                     session_id,
                     "",
@@ -372,7 +373,7 @@ pub(crate) fn execute_terminal_finalizer(
             }
             let completion_run_context = context.run_context.clone();
             let completion = finalize_agent_completion(
-                context.app,
+                context.host,
                 context.state,
                 context.config,
                 context.workspace_root,
@@ -419,7 +420,7 @@ pub(crate) fn execute_terminal_finalizer(
         Err(failure) => {
             if streamed_output {
                 emit_agent_stream_delta(
-                    context.app,
+                    context.host,
                     &request_id,
                     session_id,
                     "",
@@ -429,7 +430,7 @@ pub(crate) fn execute_terminal_finalizer(
                 );
             }
             match resolve_loop_failure(
-                context.app,
+                context.host,
                 context.state,
                 context.workspace_root,
                 runtime,

@@ -132,7 +132,7 @@ impl ProjectLifecycleJournal {
 }
 
 pub(crate) fn session_deletion_block_reason(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_ids: &[String],
 ) -> Result<Option<String>, String> {
     if state
@@ -188,7 +188,7 @@ pub(crate) fn session_deletion_block_reason(
 }
 
 pub(crate) fn clear_session_runtime_state(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_ids: &[String],
 ) -> Result<(), String> {
     if session_ids.is_empty() {
@@ -868,7 +868,7 @@ fn remove_file_if_present(path: &Path, label: &str) -> Result<(), String> {
 /// cleanup itself. Owned here rather than in either command module so the two
 /// never depend on each other.
 pub(crate) fn cleanup_published_delete_with_managed_artifacts(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     project_id: &str,
     project_root: &Path,
     session_ids: &[String],

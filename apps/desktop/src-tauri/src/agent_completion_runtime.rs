@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
+use crate::desktop_event_sink::AgentRunHost;
 use crate::suspended_run_runtime::clear_suspended_agent_run_for_context;
 
 pub(crate) enum AgentCompletionOutcome {
@@ -105,8 +106,8 @@ fn grounded_completion_basis_label(basis: agent_runtime::GroundedCompletionBasis
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_agent_completion(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     config: &ProviderConfig,
     workspace_root: &Path,
     runtime: &agent_runtime::AgentLoopState,
@@ -123,7 +124,7 @@ pub(crate) fn finalize_agent_completion(
     epoch_lease: agent_runtime::RunEpochLease,
 ) -> Result<AgentCompletionOutcome, String> {
     if !cancellation.execution_epoch_lease_is_current(epoch_lease) {
-        emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
+        emit_agent_stream_delta(host, request_id, session_id, "", false, true, None);
         return Ok(AgentCompletionOutcome::RestartAfterSteer);
     }
     let receipt_sequences = grounded_completion_receipt
@@ -189,7 +190,7 @@ pub(crate) fn finalize_agent_completion(
                     judged_basis_label,
                 );
                 if streamed_output {
-                    emit_agent_stream_delta(app, request_id, session_id, "", false, true, None);
+                    emit_agent_stream_delta(host, request_id, session_id, "", false, true, None);
                 }
                 let failure = agent_runtime::AgentFailure::contract(
                     "direct_judge_fail_closed",
@@ -213,7 +214,7 @@ pub(crate) fn finalize_agent_completion(
                         crate::agent_failure_terminal_runtime::AgentFailureTerminalOutcome::Stopped => {
                             Ok(AgentCompletionOutcome::Paused(
                                 pause_agent_loop_for_control_stop(
-                                    app,
+                                    host,
                                     state,
                                     workspace_root,
                                     runtime,
@@ -255,7 +256,7 @@ pub(crate) fn finalize_agent_completion(
     );
 
     if !streamed_output && !answer.trim().is_empty() {
-        emit_agent_stream_delta(app, request_id, session_id, &answer, false, false, None);
+        emit_agent_stream_delta(host, request_id, session_id, &answer, false, false, None);
     }
     let mut final_answer = answer.clone();
     let delivery_request_id = request_id.to_string();
@@ -306,9 +307,17 @@ pub(crate) fn finalize_agent_completion(
         .filter(|_| terminal_selection_override)
     {
         final_answer = selected.content.clone();
-        emit_agent_stream_delta(app, &delivery_request_id, session_id, "", false, true, None);
         emit_agent_stream_delta(
-            app,
+            host,
+            &delivery_request_id,
+            session_id,
+            "",
+            false,
+            true,
+            None,
+        );
+        emit_agent_stream_delta(
+            host,
             &delivery_request_id,
             session_id,
             &final_answer,
@@ -654,13 +663,21 @@ pub(crate) fn finalize_agent_completion(
             (persisted.state, persisted.inserted)
         }
         agent_runtime::RunTerminalCommit::RestartAfterSteer => {
-            emit_agent_stream_delta(app, &delivery_request_id, session_id, "", false, true, None);
+            emit_agent_stream_delta(
+                host,
+                &delivery_request_id,
+                session_id,
+                "",
+                false,
+                true,
+                None,
+            );
             return Ok(AgentCompletionOutcome::RestartAfterSteer);
         }
         agent_runtime::RunTerminalCommit::Stopped(_) => {
             return Ok(AgentCompletionOutcome::Paused(
                 pause_agent_loop_for_control_stop(
-                    app,
+                    host,
                     state,
                     workspace_root,
                     runtime,
@@ -702,10 +719,17 @@ pub(crate) fn finalize_agent_completion(
     if let Err(error) = clear_suspended_agent_run_for_context(state, run_context) {
         eprintln!("completed agent suspended-run cleanup unavailable: {error}");
     }
-    emit_agent_stream_delta(app, &delivery_request_id, session_id, "", true, false, None);
+    emit_agent_stream_delta(
+        host,
+        &delivery_request_id,
+        session_id,
+        "",
+        true,
+        false,
+        None,
+    );
     if inserted_terminal {
-        crate::semantic_memory_worker::schedule_semantic_memory_refresh(
-            app.clone(),
+        host.schedule_semantic_memory_refresh(
             workspace_root.to_path_buf(),
             config.clone(),
             run_context.clone(),

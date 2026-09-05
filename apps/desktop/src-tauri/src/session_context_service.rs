@@ -260,7 +260,7 @@ pub(super) fn context_events_for_covered_history_prefix(
 }
 
 pub(super) fn prepare_session_history_context(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     run_context: &Metadata,
     history: Vec<Message>,

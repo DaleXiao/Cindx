@@ -1,4 +1,5 @@
 use super::task::run_agent_task_blocking;
+use crate::desktop_event_sink::AgentRunHost;
 use crate::*;
 
 #[tauri::command]
@@ -15,7 +16,7 @@ pub(crate) async fn queue_agent_message(
 }
 
 pub(crate) fn enqueue_agent_message_inner(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     input: QueueAgentMessageInput,
 ) -> Result<(QueuedAgentMessageReceipt, String), String> {
     let _lifecycle = state
@@ -174,7 +175,7 @@ pub(crate) async fn edit_queued_agent_message(
 }
 
 pub(crate) fn edit_queued_agent_message_blocking(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     input: EditQueuedAgentMessageInput,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
     let _lifecycle = state
@@ -249,7 +250,7 @@ pub(crate) async fn delete_queued_agent_message(
 }
 
 pub(crate) fn delete_queued_agent_message_blocking(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     input: QueuedAgentMessageActionInput,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
     let _lifecycle = state
@@ -307,7 +308,7 @@ pub(crate) async fn steer_queued_agent_message(
 
 pub(crate) fn steer_queued_agent_message_blocking(
     _app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     input: QueuedAgentMessageActionInput,
 ) -> Result<QueuedAgentMessageActionReceipt, String> {
     let _lifecycle = state
@@ -390,25 +391,25 @@ pub(crate) async fn run_next_queued_agent_message(
 ) -> Result<Option<AgentState>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        run_next_queued_agent_message_blocking(&app, state, input)
+        run_next_queued_agent_message_blocking(&app, state.inner(), input)
     })
     .await
     .map_err(|error| format!("queued agent task failed to join: {error}"))?
 }
 
 pub(crate) fn run_next_queued_agent_message_blocking(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     input: SessionActionInput,
 ) -> Result<Option<AgentState>, String> {
-    let Some(_dispatch_lease) = begin_queue_dispatch(&state, &input.session_id)? else {
+    let Some(_dispatch_lease) = begin_queue_dispatch(state, &input.session_id)? else {
         return Ok(None);
     };
-    run_next_queued_agent_message_blocking_inner(app, state.clone(), input)
+    run_next_queued_agent_message_blocking_inner(host, state, input)
 }
 
 pub(crate) fn begin_queue_dispatch(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
 ) -> Result<Option<agent_harness::ExclusiveKeyLease>, String> {
     let _lifecycle = state
@@ -423,8 +424,8 @@ pub(crate) fn begin_queue_dispatch(
 }
 
 pub(crate) fn run_next_queued_agent_message_blocking_inner(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     input: SessionActionInput,
 ) -> Result<Option<AgentState>, String> {
     if !state
@@ -434,7 +435,7 @@ pub(crate) fn run_next_queued_agent_message_blocking_inner(
     {
         return Err("queue dispatch lease is required".to_string());
     }
-    let run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    let run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     let queued = {
         let mut store = state
             .store
@@ -465,7 +466,7 @@ pub(crate) fn run_next_queued_agent_message_blocking_inner(
         attachments: queued.payload.attachments.clone(),
         plan_mode: queued.payload.plan_mode,
     };
-    match run_agent_task_blocking(app, state.clone(), task_input) {
+    match run_agent_task_blocking(host, state, task_input) {
         Ok(next) => {
             let mut store = state
                 .store

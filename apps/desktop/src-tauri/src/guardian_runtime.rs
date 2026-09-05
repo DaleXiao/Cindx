@@ -1,6 +1,7 @@
 use crate::app_state::AppState;
 use crate::configuration_models::ProviderConfig;
 use crate::configuration_persistence::clone_provider_config;
+use crate::desktop_event_sink::AgentRunHost;
 use crate::direct_judge_runtime::guardian_or_verifier_attribution;
 use crate::event_persistence::append_event;
 use crate::project_session_persistence::metadata_with_context;
@@ -314,7 +315,7 @@ fn guardian_disposition_event_rows(
 }
 
 fn record_guardian_disposition_event(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     request: &PermissionRequest,
     run_context: &Metadata,
     disposition: &str,
@@ -368,7 +369,7 @@ fn persist_guardian_approval_rows(
 }
 
 fn persist_guardian_approval(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     request: &PermissionRequest,
     run_context: &Metadata,
     reason: &str,
@@ -382,28 +383,27 @@ fn persist_guardian_approval(
 }
 
 fn dispatch_guardian_review(
-    app: &tauri::AppHandle,
+    host: &dyn AgentRunHost,
     config: &ProviderConfig,
     request: &PermissionRequest,
     run_context: &Metadata,
     plan: &GuardianReviewPlan,
 ) -> Result<GuardianReview, GuardianReviewFailure> {
-    let (sender, receiver) = std::sync::mpsc::channel::<Result<String, String>>();
-    let thread_app = app.clone();
     let thread_config = config.clone();
     let thread_task_id = request.task_id.clone();
     let thread_run_context = run_context.clone();
     let thread_model = plan.model.clone();
     let thread_prompt = plan.prompt.clone();
-    std::thread::spawn(move || {
-        use tauri::Manager as _;
-        let state = thread_app.state::<AppState>();
+    // The detached review runs through the host so the shipping path and the
+    // headless product-path harness share this code; the timeout semantics are
+    // unchanged: the receiver gives up while the job thread finishes on its own.
+    let receiver = host.spawn_detached_state_job(Box::new(move |state| {
         let limits = crate::collaboration_execution::CollaborationCallLimits {
             no_progress_timeout: Some(GUARDIAN_REVIEW_TIMEOUT),
             ..Default::default()
         };
-        let result = crate::collaboration_stage_runtime::run_collaboration_stage_with_limits(
-            &state,
+        crate::collaboration_stage_runtime::run_collaboration_stage_with_limits(
+            state,
             &thread_config,
             &thread_task_id,
             &thread_run_context,
@@ -414,9 +414,8 @@ fn dispatch_guardian_review(
             thread_prompt,
             guardian_or_verifier_attribution(ModelRole::Reviewer),
             limits,
-        );
-        let _ = sender.send(result);
-    });
+        )
+    }));
     let output = match receiver.recv_timeout(GUARDIAN_REVIEW_TIMEOUT) {
         Ok(Ok(output)) => output,
         Ok(Err(_)) => return Err(GuardianReviewFailure::Unavailable),
@@ -432,8 +431,8 @@ fn dispatch_guardian_review(
 /// ordinary user prompt. With the toggle off this performs no model call and
 /// records nothing.
 pub(crate) fn guardian_auto_approve_pending_permission(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     run_context: &Metadata,
     request: &PermissionRequest,
     objective: &str,
@@ -461,7 +460,7 @@ pub(crate) fn guardian_auto_approve_pending_permission(
             return Ok(false);
         }
     };
-    let review = dispatch_guardian_review(app, &config, request, run_context, &plan);
+    let review = dispatch_guardian_review(host, &config, request, run_context, &plan);
     match guardian_gate_outcome(review) {
         GuardianGateOutcome::AutoApprove { review } => {
             persist_guardian_approval(state, request, run_context, &review.reason)?;

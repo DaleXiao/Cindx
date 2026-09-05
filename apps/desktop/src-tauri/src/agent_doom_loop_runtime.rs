@@ -149,7 +149,7 @@ pub(crate) fn persist_doom_loop_confirmation_cancel(
 /// doom loop. Returns `None` when the loop may continue.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_loop_observer_checkpoint(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut agent_runtime::AgentLoopState,
     prompt: &str,
@@ -189,7 +189,7 @@ pub(crate) fn agent_loop_observer_checkpoint(
 /// until the user explicitly allows one continuation or cancels.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pause_agent_loop_for_doom_loop_confirmation(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     runtime: &agent_runtime::AgentLoopState,
     prompt: &str,
     run_context: &Metadata,

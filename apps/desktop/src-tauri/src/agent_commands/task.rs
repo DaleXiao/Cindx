@@ -10,6 +10,7 @@ use crate::agent_run_engine::{
     prepare_agent_execution, AgentRunPreparationError, PreparedAgentExecution,
 };
 use crate::agent_terminal_commit_runtime::persist_agent_terminal_once;
+use crate::desktop_event_sink::AgentRunHost;
 use crate::suspended_run_runtime::{
     clear_suspended_agent_run, suspended_agent_run_control_snapshot, suspended_agent_run_policy,
     take_suspended_agent_run, SuspendedAgentRun,
@@ -58,15 +59,15 @@ pub(crate) async fn run_agent_task(
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        run_agent_task_blocking(&app, state, input)
+        run_agent_task_blocking(&app, state.inner(), input)
     })
     .await
     .map_err(|error| format!("agent task failed to join: {error}"))?
 }
 
 pub(crate) fn run_agent_task_blocking(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     input: AgentTaskInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
@@ -75,8 +76,8 @@ pub(crate) fn run_agent_task_blocking(
         .session_lifecycle_gate
         .lock()
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
-    cancel_background_prompt_evaluations(&state)?;
-    project_session_metadata_for_session(&state, Some(&session_id))?;
+    cancel_background_prompt_evaluations(state)?;
+    project_session_metadata_for_session(state, Some(&session_id))?;
     let run_control_lease = state
         .agent_run_controls
         .register(&session_id, Arc::new(AgentRunControl::new(effort.label())))
@@ -85,8 +86,8 @@ pub(crate) fn run_agent_task_blocking(
     let cancellation = run_control_lease.control();
     let mut start_gate = Some(lifecycle);
     let result = run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate(
-        app,
-        state.clone(),
+        host,
+        state,
         input,
         &cancellation,
         AgentExecutionConstraint::Native,
@@ -101,9 +102,9 @@ pub(crate) fn run_agent_task_blocking(
     if let Ok(agent) = result.as_ref() {
         if agent.status == "completed" {
             if let Ok(Some(refinement)) =
-                persist_completed_conversation_title(&state, &session_id, &agent.messages)
+                persist_completed_conversation_title(state, &session_id, &agent.messages)
             {
-                spawn_semantic_session_title_refinement(app.clone(), refinement);
+                host.spawn_session_title_refinement(refinement);
             }
         }
     }
@@ -112,8 +113,8 @@ pub(crate) fn run_agent_task_blocking(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     input: AgentTaskInput,
     cancellation: &Arc<AgentRunControl>,
     execution_constraint: AgentExecutionConstraint,
@@ -125,16 +126,16 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     let user_prompt = input.prompt.trim().to_string();
     let queue_id = input.queue_id.clone();
     let session_id = input.session_id;
-    clear_suspended_agent_run(&state, &session_id)?;
-    let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
-    let mut config = clone_provider_config(&state)?;
+    clear_suspended_agent_run(state, &session_id)?;
+    let mut run_context = project_session_metadata_for_session(state, Some(&session_id))?;
+    let mut config = clone_provider_config(state)?;
     config.agent_system_prompt = personalized_agent_instructions(
         &load_personalization_config(),
         &config.agent_system_prompt,
     );
     if !config.is_ready() {
         return agent_state_with_error_in_context(
-            &state,
+            state,
             &run_context,
             "Provider config is incomplete",
         );
@@ -143,10 +144,10 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     let root = run_context
         .get("project_root")
         .map(PathBuf::from)
-        .unwrap_or(active_workspace_root(&state)?);
+        .unwrap_or(active_workspace_root(state)?);
     let attachments = validate_agent_attachments(&root, input.attachments)?;
     if user_prompt.is_empty() && attachments.is_empty() {
-        return agent_state_with_error_in_context(&state, &run_context, "agent prompt is empty");
+        return agent_state_with_error_in_context(state, &run_context, "agent prompt is empty");
     }
     let display_prompt = if user_prompt.is_empty() {
         format!(
@@ -161,7 +162,7 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
         user_prompt
     };
     let prompt = prompt_with_attachments(&display_prompt, &attachments);
-    run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+    run_context = project_session_metadata_for_session(state, Some(&session_id))?;
     assign_initial_agent_run_identity(&mut run_context)?;
     execution_constraint.write_to_context(&mut run_context);
     if matched_route_plan_anchor_present {
@@ -280,7 +281,7 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
     // decision before any preparation or execution. Plan drafting is charged to
     // the Worker stage budget; a drafting failure proceeds without a plan.
     match crate::agent_plan_mode_runtime::run_plan_mode_gate(
-        &state,
+        state,
         &config,
         &root,
         &task_id,
@@ -293,13 +294,13 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
             return Ok(*state)
         }
         crate::agent_plan_mode_runtime::PlanModeGateOutcome::Stopped => {
-            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
+            return finish_agent_run_for_control_stop(host, state, &run_context, cancellation);
         }
         crate::agent_plan_mode_runtime::PlanModeGateOutcome::Proceed => {}
     }
     let prepared = match prepare_agent_execution(
-        app,
-        &state,
+        host,
+        state,
         &config,
         &task_id,
         &root,
@@ -313,13 +314,13 @@ pub(crate) fn run_agent_task_blocking_inner_with_evaluation_constraints_and_star
         Ok(prepared) => prepared,
         Err(AgentRunPreparationError::Finished(result)) => return *result,
         Err(AgentRunPreparationError::ControlStop(run_context)) => {
-            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
+            return finish_agent_run_for_control_stop(host, state, &run_context, cancellation);
         }
         Err(AgentRunPreparationError::Runtime { error, run_context }) => {
-            return agent_state_with_error_in_context(&state, &run_context, error)
+            return agent_state_with_error_in_context(state, &run_context, error)
         }
     };
-    continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
+    continue_agent_loop(host, state, &config, &root, prepared, effort, cancellation)
 }
 
 /// Runs off the invoke thread: cancelling a run scans the session's events and
@@ -333,7 +334,7 @@ pub(crate) async fn cancel_agent_task(
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        cancel_agent_task_blocking(&app, state, &input.session_id)
+        cancel_agent_task_blocking(&app, state.inner(), &input.session_id)
     })
     .await
     .map_err(|error| format!("agent task cancellation failed to join: {error}"))?
@@ -343,18 +344,18 @@ pub(crate) async fn cancel_agent_task(
 /// nonterminal and holds no active run control, so the ordinary can-cancel
 /// guard is extended to admit exactly that paused plan wait.
 pub(crate) fn cancel_agent_task_blocking(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     session_id: &str,
 ) -> Result<AgentState, String> {
     let _lifecycle = state
         .session_lifecycle_gate
         .lock()
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
-    let telemetry_control = active_agent_run_control(&state, Some(session_id))?;
-    let active_run_cancelled = request_agent_run_cancel(&state, session_id)?;
-    clear_suspended_agent_run(&state, session_id)?;
-    let mut run_context = project_session_metadata_for_session(&state, Some(session_id))?;
+    let telemetry_control = active_agent_run_control(state, Some(session_id))?;
+    let active_run_cancelled = request_agent_run_cancel(state, session_id)?;
+    clear_suspended_agent_run(state, session_id)?;
+    let mut run_context = project_session_metadata_for_session(state, Some(session_id))?;
     let session_id = run_context.get("session_id").cloned();
     let mut store = state
         .store
@@ -485,7 +486,7 @@ pub(crate) fn cancel_agent_task_blocking(
     }
 
     emit_agent_stream_delta(
-        app,
+        host,
         "agent-cancelled",
         session_id.as_deref(),
         "",
@@ -504,15 +505,15 @@ pub(crate) async fn retry_agent_task(
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        retry_agent_task_blocking(&app, state, input)
+        retry_agent_task_blocking(&app, state.inner(), input)
     })
     .await
     .map_err(|error| format!("agent retry failed to join: {error}"))?
 }
 
 pub(crate) fn retry_agent_task_blocking(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     input: SessionActionInput,
 ) -> Result<AgentState, String> {
     let session_id = input.session_id.clone();
@@ -520,8 +521,8 @@ pub(crate) fn retry_agent_task_blocking(
         .session_lifecycle_gate
         .lock()
         .map_err(|error| format!("session lifecycle gate poisoned: {error}"))?;
-    cancel_background_prompt_evaluations(&state)?;
-    let recovery_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+    cancel_background_prompt_evaluations(state)?;
+    let recovery_context = project_session_metadata_for_session(state, Some(&session_id))?;
     let (persisted_effort, applied_steer_epoch, durable_recovery) = {
         let store = state
             .store
@@ -539,12 +540,12 @@ pub(crate) fn retry_agent_task_blocking(
             recovery,
         )
     };
-    let suspended_effort = suspended_agent_run_policy(&state, &session_id)?;
+    let suspended_effort = suspended_agent_run_policy(state, &session_id)?;
     if suspended_effort.is_some_and(|effort| effort != persisted_effort) {
         return Err("suspended agent policy does not match the active run".to_string());
     }
     let effort = suspended_effort.unwrap_or(persisted_effort);
-    let suspended_snapshot = suspended_agent_run_control_snapshot(&state, &session_id)?;
+    let suspended_snapshot = suspended_agent_run_control_snapshot(state, &session_id)?;
     let control = if let Some(snapshot) = suspended_snapshot {
         AgentRunControl::from_snapshot_for_continuation(snapshot)
             .map_err(|reason| format!("agent run cannot continue after {}", reason.code()))?
@@ -578,12 +579,12 @@ pub(crate) fn retry_agent_task_blocking(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "agent run is already active for this session".to_string())?;
     let cancellation = run_control_lease.control();
-    let suspended = take_suspended_agent_run(&state, &session_id)?;
+    let suspended = take_suspended_agent_run(state, &session_id)?;
     let mut start_gate = Some(lifecycle);
     let result = if let Some(suspended) = suspended {
-        resume_suspended_agent_run(app, &state, suspended, &cancellation, &mut start_gate)
+        resume_suspended_agent_run(host, state, suspended, &cancellation, &mut start_gate)
     } else {
-        retry_agent_task_blocking_inner(app, state.clone(), input, &cancellation, &mut start_gate)
+        retry_agent_task_blocking_inner(host, state, input, &cancellation, &mut start_gate)
     };
     if start_gate.is_some() {
         drop(run_control_lease);
@@ -593,8 +594,8 @@ pub(crate) fn retry_agent_task_blocking(
 }
 
 pub(crate) fn resume_suspended_agent_run(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     suspended: SuspendedAgentRun,
     cancellation: &Arc<AgentRunControl>,
     start_gate: &mut Option<std::sync::MutexGuard<'_, ()>>,
@@ -734,7 +735,7 @@ pub(crate) fn resume_suspended_agent_run(
         collaboration,
     };
     continue_agent_loop(
-        app,
+        host,
         state,
         &config,
         &workspace_root,
@@ -745,22 +746,22 @@ pub(crate) fn resume_suspended_agent_run(
 }
 
 pub(crate) fn retry_agent_task_blocking_inner(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     input: SessionActionInput,
     cancellation: &Arc<AgentRunControl>,
     start_gate: &mut Option<std::sync::MutexGuard<'_, ()>>,
 ) -> Result<AgentState, String> {
-    clear_suspended_agent_run(&state, &input.session_id)?;
-    let mut run_context = project_session_metadata_for_session(&state, Some(&input.session_id))?;
+    clear_suspended_agent_run(state, &input.session_id)?;
+    let mut run_context = project_session_metadata_for_session(state, Some(&input.session_id))?;
     run_context.insert(
         "current_time".to_string(),
         normalized_current_time_context(""),
     );
-    let config = clone_provider_config(&state)?;
+    let config = clone_provider_config(state)?;
     if !config.is_ready() {
         return agent_state_with_error_in_context(
-            &state,
+            state,
             &run_context,
             "Provider config is incomplete",
         );
@@ -768,7 +769,7 @@ pub(crate) fn retry_agent_task_blocking_inner(
     let root = run_context
         .get("project_root")
         .map(PathBuf::from)
-        .unwrap_or(active_workspace_root(&state)?);
+        .unwrap_or(active_workspace_root(state)?);
     let session_id = run_context.get("session_id").cloned();
     let task_id = phase16_task_id();
     let (
@@ -1054,8 +1055,8 @@ pub(crate) fn retry_agent_task_blocking_inner(
             .insert("model_content".to_string(), prompt.clone());
     }
     let prepared = match prepare_agent_execution(
-        app,
-        &state,
+        host,
+        state,
         &config,
         &task_id,
         &root,
@@ -1069,13 +1070,13 @@ pub(crate) fn retry_agent_task_blocking_inner(
         Ok(prepared) => prepared,
         Err(AgentRunPreparationError::Finished(result)) => return *result,
         Err(AgentRunPreparationError::ControlStop(run_context)) => {
-            return finish_agent_run_for_control_stop(app, &state, &run_context, cancellation);
+            return finish_agent_run_for_control_stop(host, state, &run_context, cancellation);
         }
         Err(AgentRunPreparationError::Runtime { error, run_context }) => {
-            return agent_state_with_error_in_context(&state, &run_context, error)
+            return agent_state_with_error_in_context(state, &run_context, error)
         }
     };
-    continue_agent_loop(app, &state, &config, &root, prepared, effort, cancellation)
+    continue_agent_loop(host, state, &config, &root, prepared, effort, cancellation)
 }
 
 /// Resolve a run parked at the plan-then-confirm gate. `approve` resumes the
@@ -1093,15 +1094,21 @@ pub(crate) async fn resolve_agent_plan_confirmation(
 ) -> Result<AgentState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        resolve_agent_plan_confirmation_blocking(&app, state, session_id, decision, resolved_by)
+        resolve_agent_plan_confirmation_blocking(
+            &app,
+            state.inner(),
+            session_id,
+            decision,
+            resolved_by,
+        )
     })
     .await
     .map_err(|error| format!("agent plan confirmation failed to join: {error}"))?
 }
 
 pub(crate) fn resolve_agent_plan_confirmation_blocking(
-    app: &tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     session_id: String,
     decision: String,
     resolved_by: String,
@@ -1113,12 +1120,12 @@ pub(crate) fn resolve_agent_plan_confirmation_blocking(
         // strict approval policy still gates every effect individually. Under
         // session/all policies the run trends fully automatic, so the plan
         // gate must stay an explicit user decision there (fail-closed).
-        let config = clone_provider_config(&state)?;
+        let config = clone_provider_config(state)?;
         if config.approval_policy != "strict" {
             return Err("automatic plan approval requires the strict approval policy".to_string());
         }
     }
-    let mut run_context = project_session_metadata_for_session(&state, Some(&session_id))?;
+    let mut run_context = project_session_metadata_for_session(state, Some(&session_id))?;
     {
         let mut store = state
             .store
@@ -1161,7 +1168,11 @@ pub(crate) fn resolve_agent_plan_confirmation_blocking(
         .map_err(|error| error.to_string())?;
     }
     if decision == crate::agent_plan_mode_runtime::PlanConfirmationDecision::Cancelled {
-        return cancel_agent_task_blocking(app, state, &session_id);
+        return cancel_agent_task_blocking(host, state, &session_id);
     }
-    retry_agent_task_blocking(app, state, SessionActionInput { session_id })
+    retry_agent_task_blocking(host, state, SessionActionInput { session_id })
 }
+
+#[cfg(test)]
+#[path = "../agent_product_path_tests.rs"]
+mod product_path_tests;

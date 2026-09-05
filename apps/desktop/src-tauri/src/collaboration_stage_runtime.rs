@@ -195,7 +195,7 @@ pub(crate) fn collaboration_stage_finished_metadata(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_collaboration_stage_finished(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     task_id: &TaskId,
     run_context: &Metadata,
     collaboration_id: &str,
@@ -233,7 +233,7 @@ pub(crate) fn record_collaboration_stage_finished(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_collaboration_stage(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,
@@ -266,7 +266,7 @@ pub(crate) fn run_collaboration_stage(
 /// no-progress timeout) instead of inheriting the default limits.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_collaboration_stage_with_limits(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,
@@ -297,7 +297,7 @@ pub(crate) fn run_collaboration_stage_with_limits(
 
 #[allow(clippy::too_many_arguments)]
 fn run_collaboration_stage_typed(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,

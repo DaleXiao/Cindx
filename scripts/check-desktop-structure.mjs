@@ -929,7 +929,11 @@ const oversizedCriticalDesktopAgentModules = criticalDesktopAgentModules
   }))
   .filter(({ lines, budget }) => lines > budget);
 const desktopAdapterModuleBudgets = new Map([
-  ["desktop_event_sink.rs", 220],
+  // 220 -> 250: the module now also owns AgentRunHost — the run path's single
+  // shell seam (emission + detached background work) whose headless
+  // implementation makes the shipping run path product-path-testable
+  // (Phase 4 fidelity clause, agent-product-path-contract).
+  ["desktop_event_sink.rs", 250],
 ]);
 const desktopAdapterModules = desktopRustModules.filter(({ entry }) =>
   desktopAdapterModuleBudgets.has(entry)
@@ -4416,8 +4420,8 @@ assert(
     rustLib.includes("let (completed_state, inserted_terminal) = match terminal_commit") &&
     rustLib.includes("RunTerminalCommit::Committed(persisted) =>") &&
     rustLib.includes("(persisted.state, persisted.inserted)") &&
-    rustLib.includes(
-      'emit_agent_stream_delta(app, &delivery_request_id, session_id, "", true, false, None);'
+    /emit_agent_stream_delta\(\s*host,\s*&delivery_request_id,\s*session_id,\s*"",\s*true,\s*false,\s*None,?\s*\)/.test(
+      rustLib
     ) &&
     rustLib.includes("Ok(AgentCompletionOutcome::Completed(completed_state))") &&
     /AgentCompletionOutcome::Completed\(agent_state\)\s*=>\s*\{\s*return Ok\(AgentLoopExecutionOutcome::Finished\(agent_state\)\)/.test(

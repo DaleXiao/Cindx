@@ -44,7 +44,7 @@ pub(crate) fn persist_permission_resolution_rows(
 /// Returns `None` when the request is not subagent-originated so the caller
 /// falls through to the ordinary suspended-run resolution path.
 pub(super) fn resolve_subagent_permission_if_pending(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     request_id: &str,
     decision: &str,
     session_id: &str,
@@ -180,7 +180,7 @@ pub(super) fn persist_denied_permission_resolution_rows(
 }
 
 pub(crate) fn resolve_agent_permission_request(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     request: &PermissionRequest,
     decision: &PermissionDecision,
     resolved_by: &str,

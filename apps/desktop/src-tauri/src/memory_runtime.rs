@@ -91,9 +91,7 @@ fn refresh_project_memory_ledger_revision(
     Ok(())
 }
 
-pub(crate) fn active_project_id_for_memory(
-    state: &tauri::State<'_, AppState>,
-) -> Result<Option<String>, String> {
+pub(crate) fn active_project_id_for_memory(state: &AppState) -> Result<Option<String>, String> {
     Ok(state
         .project_session_config
         .lock()
@@ -180,7 +178,7 @@ pub(crate) fn append_prepared_memory_context(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_run_knowledge_contexts(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     task_id: &TaskId,
     run_context: &Metadata,
     workspace_root: &Path,
@@ -398,7 +396,7 @@ pub(crate) fn project_memory_semantic_scores(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recall_project_memory_for_prompt(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     _task_id: &TaskId,
     run_context: &Metadata,
     workspace_root: &Path,

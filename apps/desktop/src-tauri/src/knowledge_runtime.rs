@@ -34,7 +34,7 @@ pub(crate) fn knowledge_preparation_should_interrupt(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_agent_knowledge_context(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,

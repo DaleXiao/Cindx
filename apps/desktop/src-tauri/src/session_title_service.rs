@@ -56,7 +56,7 @@ pub(super) fn meaningful_session_title_turns(
 }
 
 pub(super) fn persist_completed_conversation_title(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     messages: &[ChatMessageView],
 ) -> Result<Option<SessionTitleRefinement>, String> {

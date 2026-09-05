@@ -8,6 +8,7 @@ use crate::agent_read_model::agent_state_with_error_in_context;
 use crate::app_state::AppState;
 use crate::collaboration_service::AgentCollaboration;
 use crate::configuration_models::ProviderConfig;
+use crate::desktop_event_sink::AgentRunHost;
 use crate::view_models::AgentState;
 use agent_application::{execute_agent_run, AgentRunEpoch, AgentRunExecutor, AgentRunPreparation};
 use agent_core::AgentPolicy;
@@ -37,15 +38,15 @@ pub(crate) struct PreparedAgentExecution {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn continue_agent_loop(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     config: &ProviderConfig,
     workspace_root: &Path,
     prepared: PreparedAgentExecution,
     effort: AgentPolicy,
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
-    AgentExecutionService::new(app, state).execute_prepared(
+    AgentExecutionService::new(host, state).execute_prepared(
         config,
         workspace_root,
         prepared,
@@ -54,17 +55,14 @@ pub(crate) fn continue_agent_loop(
     )
 }
 
-pub(crate) struct AgentExecutionService<'app, 'state> {
-    app: &'app tauri::AppHandle,
-    state: &'app tauri::State<'state, AppState>,
+pub(crate) struct AgentExecutionService<'host> {
+    host: &'host dyn AgentRunHost,
+    state: &'host AppState,
 }
 
-impl<'app, 'state> AgentExecutionService<'app, 'state> {
-    pub(crate) fn new(
-        app: &'app tauri::AppHandle,
-        state: &'app tauri::State<'state, AppState>,
-    ) -> Self {
-        Self { app, state }
+impl<'host> AgentExecutionService<'host> {
+    pub(crate) fn new(host: &'host dyn AgentRunHost, state: &'host AppState) -> Self {
+        Self { host, state }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -80,7 +78,7 @@ impl<'app, 'state> AgentExecutionService<'app, 'state> {
             effort.generation_temperature().map(str::to_string);
         prepared.runtime.reasoning_effort = Some(effort.label().to_string());
         let mut executor = DesktopAgentRunExecutor {
-            app: self.app,
+            host: self.host,
             state: self.state,
             config,
             workspace_root,
@@ -105,9 +103,9 @@ struct AgentRunReprepare {
     prompt: String,
 }
 
-struct DesktopAgentRunExecutor<'a, 'state> {
-    app: &'a tauri::AppHandle,
-    state: &'a tauri::State<'state, AppState>,
+struct DesktopAgentRunExecutor<'a> {
+    host: &'a dyn AgentRunHost,
+    state: &'a AppState,
     config: &'a ProviderConfig,
     workspace_root: &'a Path,
     effort: AgentPolicy,
@@ -115,7 +113,7 @@ struct DesktopAgentRunExecutor<'a, 'state> {
     base_run_context: Metadata,
 }
 
-impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
+impl AgentRunExecutor for DesktopAgentRunExecutor<'_> {
     type Prepared = PreparedAgentExecution;
     type Reprepare = AgentRunReprepare;
     type Output = AgentState;
@@ -129,7 +127,7 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
         let providers =
             build_agent_execution_providers(self.config, &agent_model, self.cancellation);
         match execute_agent_loop_epoch_with_provider(
-            self.app,
+            self.host,
             self.state,
             self.config,
             self.workspace_root,
@@ -160,7 +158,7 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
     ) -> Result<AgentRunPreparation<Self::Prepared, Self::Output>, Self::Error> {
         let task_id = handoff.runtime.task_id.clone();
         match prepare_agent_execution(
-            self.app,
+            self.host,
             self.state,
             self.config,
             &task_id,
@@ -178,7 +176,7 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
             }
             Err(AgentRunPreparationError::ControlStop(run_context)) => {
                 finish_agent_run_for_control_stop_with_task_state(
-                    self.app,
+                    self.host,
                     self.state,
                     &run_context,
                     self.cancellation,
@@ -196,8 +194,8 @@ impl AgentRunExecutor for DesktopAgentRunExecutor<'_, '_> {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_agent_execution(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     workspace_root: &Path,
@@ -209,7 +207,7 @@ pub(crate) fn prepare_agent_execution(
     cancellation: &Arc<AgentRunControl>,
 ) -> Result<PreparedAgentExecution, AgentRunPreparationError> {
     prepare_agent_execution_replay(
-        app,
+        host,
         state,
         config,
         task_id,

@@ -60,7 +60,7 @@ const SUBAGENT_DESCRIPTION_MAX_CHARS: usize = agent_runtime::SUBAGENT_RECORD_DES
 pub(crate) fn execute_subagent_delegations(
     runtime: &mut agent_runtime::AgentLoopState,
     actor_provider: &dyn StreamingModelProvider,
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     run_context: &Metadata,
     cancellation: &Arc<AgentRunControl>,
     registry: &ToolRegistry,
@@ -356,7 +356,7 @@ fn subagent_tool_specs_for_mode(registry: &ToolRegistry, write: bool) -> Vec<Too
 /// each patch call is persisted under the parent run identity and waits for
 /// an explicit per-call user decision.
 pub(crate) struct SubagentWriteContext<'a> {
-    pub(crate) state: &'a tauri::State<'a, AppState>,
+    pub(crate) state: &'a AppState,
     pub(crate) run_context: &'a Metadata,
     pub(crate) workspace_root: &'a Path,
     /// The parent batch's `task` call id; namespaces the child's tool call
@@ -372,7 +372,7 @@ pub(crate) struct SubagentWriteContext<'a> {
 /// decision becomes the inherited capability for later calls. Without this
 /// context, network tools fail closed.
 pub(crate) struct SubagentNetworkContext<'a> {
-    pub(crate) state: &'a tauri::State<'a, AppState>,
+    pub(crate) state: &'a AppState,
     pub(crate) run_context: &'a Metadata,
 }
 

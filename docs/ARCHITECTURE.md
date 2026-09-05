@@ -252,6 +252,16 @@ of contending for the store mutex.
 
 ## Interactive Run Flow
 
+The run path below is Tauri-independent: it speaks to the shell through the
+`AgentRunHost` seam (`desktop_event_sink`) — event emission, post-run
+background scheduling, and detached state jobs — and to the composed
+`AppState` by plain reference. The `#[tauri::command]` layer passes the real
+`AppHandle` (which implements the seam); a headless host drives the exact same
+shipping entry (`run_agent_task_blocking_inner_with_evaluation_constraints_and_start_gate`)
+without a window, which the `agent-product-path-contract` gate proves on every
+change: a composed state, a local fake OpenAI-compatible provider, real
+transport, loop, tool execution, durable lineage, and terminal delivery.
+
 ### 1. Admission and identity
 
 The task command validates provider, session, workspace, attachments, and model

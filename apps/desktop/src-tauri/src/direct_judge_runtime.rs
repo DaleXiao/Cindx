@@ -129,7 +129,7 @@ pub(crate) fn guardian_or_verifier_attribution(role: ModelRole) -> AgentModelAtt
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_direct_judge_call(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,
@@ -341,7 +341,7 @@ pub(crate) fn direct_judge_prompt_with_facts(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_direct_judge_gate(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     run_context: &Metadata,

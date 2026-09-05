@@ -20,6 +20,7 @@
       "desktop-layout",
       "desktop-structure",
       "workspace-undo-contract",
+      "agent-product-path-contract",
       "project-instructions-contract",
       "custom-commands-contract",
       "plan-mode-contract"
@@ -48,6 +49,7 @@
       "memory-contract",
       "custom-commands-contract",
       "workspace-undo-contract",
+      "agent-product-path-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
@@ -73,6 +75,7 @@
       "memory-contract",
       "custom-commands-contract",
       "workspace-undo-contract",
+      "agent-product-path-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
@@ -136,6 +139,7 @@
       "memory-contract",
       "custom-commands-contract",
       "workspace-undo-contract",
+      "agent-product-path-contract",
       "memory-attribution-contract",
       "memory-attribution-atomicity-contract",
       "project-instructions-contract",
@@ -479,6 +483,24 @@
       "required_output": [
         "test result: ok. 18 passed; 0 failed",
         "cindx.workspace-undo-registry.v1"
+      ]
+    },
+    {
+      "id": "agent-product-path-contract",
+      "category": "correctness_and_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "apps/desktop/src-tauri/Cargo.toml",
+        "agent_commands::task::product_path_tests",
+        "--lib",
+        "--",
+        "--nocapture"
+      ],
+      "required_output": [
+        "test result: ok. 2 passed; 0 failed"
       ]
     },
     {

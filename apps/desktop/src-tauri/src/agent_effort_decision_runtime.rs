@@ -12,7 +12,7 @@ use agent_runtime::{AgentRunControl, RunPreparationCheckpoint};
 /// atomically behind the preparation epoch checkpoint. The receipt binds the
 /// effort plan digest in place of the retired execution-plan semantic digest.
 pub(crate) fn record_effort_plan_decision(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     task_id: &TaskId,
     run_context: &mut Metadata,
     plan: &EffortRunPlan,

@@ -261,7 +261,7 @@ fn persist_pending_agent_steer_batch(
 }
 
 pub(crate) fn apply_pending_agent_steers(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut AgentLoopState,
     run_context: &Metadata,
@@ -280,7 +280,7 @@ pub(crate) fn apply_pending_agent_steers(
 }
 
 pub(crate) fn apply_pending_agent_steers_with_cursor(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut AgentLoopState,
     run_context: &Metadata,

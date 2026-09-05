@@ -28,7 +28,7 @@ pub(crate) fn validate_workspace_root(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-pub(crate) fn active_workspace_root(state: &tauri::State<'_, AppState>) -> Result<PathBuf, String> {
+pub(crate) fn active_workspace_root(state: &AppState) -> Result<PathBuf, String> {
     state
         .workspace_config
         .lock()
@@ -37,7 +37,7 @@ pub(crate) fn active_workspace_root(state: &tauri::State<'_, AppState>) -> Resul
 }
 
 pub(crate) fn project_root_for_session(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
 ) -> Result<PathBuf, String> {
     let config = state
@@ -124,7 +124,7 @@ pub(crate) fn validated_attachment_path(
 }
 
 pub(crate) fn tool_registry_for_state(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
 ) -> Result<ToolRegistry, String> {
     let generation = state.tool_registry_generation.load(Ordering::Acquire);
@@ -149,7 +149,7 @@ pub(crate) fn tool_registry_for_state(
 }
 
 pub(crate) fn build_tool_registry_for_state(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
 ) -> Result<ToolRegistry, String> {
     let web_search_config = state
@@ -611,7 +611,7 @@ pub(crate) fn workspace_knowledge_cache_entry(
 }
 
 pub(crate) fn cached_workspace_knowledge_snapshot_for(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
 ) -> Result<WorkspaceKnowledgeSnapshot, String> {
     let key = workspace_knowledge_cache_key(workspace_root);
@@ -638,7 +638,7 @@ pub(crate) fn cached_workspace_knowledge_snapshot_for(
 }
 
 pub(crate) fn active_workspace_knowledge_state_snapshot_for(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
 ) -> Result<WorkspaceKnowledgeStateSnapshot, String> {
     active_workspace_knowledge_state_snapshot_in(&state.workspace_knowledge_cache, workspace_root)
@@ -680,7 +680,7 @@ pub(crate) fn active_workspace_knowledge_state_snapshot_in(
 }
 
 pub(crate) fn cache_rag_adapter(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     adapter: &FileRagAdapter,
 ) -> Result<(), String> {
@@ -717,7 +717,7 @@ pub(crate) fn cache_rag_adapter_in(
 }
 
 pub(crate) fn invalidate_workspace_knowledge_cache(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
 ) -> Result<(), String> {
     state

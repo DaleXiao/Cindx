@@ -86,7 +86,7 @@ pub(crate) fn effective_sandbox_mode_for_session(
 /// the live event log so a mid-run mode change takes effect immediately. A
 /// context without a session stays unconfined.
 pub(crate) fn effective_sandbox_mode_before_tool_execution(
-    state: &tauri::State<'_, crate::app_state::AppState>,
+    state: &crate::app_state::AppState,
     run_context: &Metadata,
 ) -> Result<SandboxMode, String> {
     let Some(session_id) = run_context.get("session_id").map(String::as_str) else {

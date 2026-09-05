@@ -578,7 +578,7 @@ pub(super) fn permission_recovery_run_context(
 }
 
 fn commit_permission_recovery_claim(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     request: &PermissionRequest,
     request_id: &PermissionRequestId,
     decision: &PermissionDecision,

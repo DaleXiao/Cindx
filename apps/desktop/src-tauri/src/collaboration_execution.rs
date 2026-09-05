@@ -157,7 +157,7 @@ pub(crate) fn collaboration_stage_started_metadata(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_collaboration_stage_started(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     task_id: &TaskId,
     run_context: &Metadata,
     collaboration_id: &str,

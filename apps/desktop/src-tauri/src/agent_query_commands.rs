@@ -1,5 +1,5 @@
 use super::*;
-use crate::desktop_event_sink::DesktopEventSink;
+use crate::desktop_event_sink::{AgentRunHost, DesktopEventSink};
 use crate::session_output_cache::cached_agent_output_artifacts;
 use crate::suspended_run_runtime::clear_suspended_agent_run_for_context;
 use agent_harness::RegisteredRun;
@@ -272,7 +272,7 @@ fn export_agent_trace_jsonl_blocking(
 }
 
 pub(crate) fn begin_agent_run_control_for_effort(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     effort: &str,
     snapshot: Option<RunControlSnapshot>,
@@ -287,7 +287,7 @@ pub(crate) fn begin_agent_run_control_for_effort(
 }
 
 pub(crate) fn begin_agent_run_control_from_persisted_resources(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     effort: &str,
     applied_epoch: u64,
@@ -308,7 +308,7 @@ pub(crate) fn begin_agent_run_control_from_persisted_resources(
 }
 
 fn register_agent_run_control_for_session(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     control: Arc<AgentRunControl>,
 ) -> Result<RegisteredRun, String> {
@@ -324,9 +324,7 @@ fn register_agent_run_control_for_session(
         .ok_or_else(|| "agent run is already active for this session".to_string())
 }
 
-pub(crate) fn cancel_background_prompt_evaluations(
-    state: &tauri::State<'_, AppState>,
-) -> Result<(), String> {
+pub(crate) fn cancel_background_prompt_evaluations(state: &AppState) -> Result<(), String> {
     state
         .prompt_evaluation_controls
         .cancel_all()
@@ -334,7 +332,7 @@ pub(crate) fn cancel_background_prompt_evaluations(
 }
 
 pub(crate) fn active_agent_run_control(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: Option<&str>,
 ) -> Result<Option<Arc<AgentRunControl>>, String> {
     let Some(session_id) = session_id else {
@@ -346,10 +344,7 @@ pub(crate) fn active_agent_run_control(
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn request_agent_run_cancel(
-    state: &tauri::State<'_, AppState>,
-    session_id: &str,
-) -> Result<bool, String> {
+pub(crate) fn request_agent_run_cancel(state: &AppState, session_id: &str) -> Result<bool, String> {
     if let Some(control) = active_agent_run_control(state, Some(session_id))? {
         return Ok(control.request_cancel());
     }
@@ -413,7 +408,7 @@ pub(crate) fn add_agent_run_budget_metadata(metadata: &mut Metadata, control: &A
 }
 
 pub(crate) fn append_agent_progress_event(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     task_id: &TaskId,
     run_context: &Metadata,
     summary: &str,
@@ -434,7 +429,7 @@ pub(crate) fn append_agent_progress_event(
 }
 
 pub(crate) fn cancelled_agent_state(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     session_id: Option<&str>,
 ) -> Result<AgentState, String> {
     let store = state
@@ -488,17 +483,17 @@ pub(crate) fn append_agent_queue_event(
 }
 
 pub(crate) fn finish_agent_run_for_control_stop(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     run_context: &Metadata,
     control: &Arc<AgentRunControl>,
 ) -> Result<AgentState, String> {
-    finish_agent_run_for_control_stop_with_task_state(app, state, run_context, control, None)
+    finish_agent_run_for_control_stop_with_task_state(host, state, run_context, control, None)
 }
 
 pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     run_context: &Metadata,
     control: &Arc<AgentRunControl>,
     task_state: Option<&AgentTaskStateSnapshot>,
@@ -635,7 +630,7 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
     }
     drop(store);
     emit_agent_stream_delta(
-        app,
+        host,
         "agent-budget-stop",
         session_id,
         &answer,
@@ -643,7 +638,7 @@ pub(crate) fn finish_agent_run_for_control_stop_with_task_state(
         true,
         None,
     );
-    emit_agent_stream_delta(app, "agent-budget-stop", session_id, "", true, false, None);
+    emit_agent_stream_delta(host, "agent-budget-stop", session_id, "", true, false, None);
     let store = state
         .store
         .lock()
@@ -727,7 +722,7 @@ fn persist_paused_agent_run_with(
 }
 
 pub(crate) fn emit_agent_stream_delta(
-    events: &impl DesktopEventSink,
+    events: &(dyn DesktopEventSink + '_),
     request_id: &str,
     session_id: Option<&str>,
     delta: &str,

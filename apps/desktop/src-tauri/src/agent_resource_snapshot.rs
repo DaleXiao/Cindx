@@ -89,7 +89,7 @@ pub(super) fn persist_agent_resource_snapshot(
 }
 
 pub(super) fn checkpoint_agent_run_resources(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     run_context: &Metadata,
     control: &AgentRunControl,
 ) -> Result<(), String> {

@@ -78,7 +78,7 @@ pub(crate) fn subagent_steered_answer(partial: &str) -> String {
 /// Best-effort like the progress events: a store failure must not lose the
 /// in-memory result the parent is about to reason over.
 pub(crate) fn persist_subagent_result_message(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     task_id: &TaskId,
     run_context: &Metadata,
     message: &Message,

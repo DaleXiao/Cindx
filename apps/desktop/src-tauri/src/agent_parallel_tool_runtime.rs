@@ -4,6 +4,7 @@ use crate::agent_tool_runtime::{
     agent_tool_batch_outcome_after_commit, commit_agent_tool_observation, paused_agent_tools,
     AgentToolBatchOutcome,
 };
+use crate::desktop_event_sink::AgentRunHost;
 
 #[derive(Clone)]
 struct PreparedParallelToolCall {
@@ -97,7 +98,7 @@ fn parallel_tool_batch_contracts<'a>(
 }
 
 fn prepare_parallel_tool_batch(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     runtime: &mut agent_runtime::AgentLoopState,
     run_context: &Metadata,
     workspace_root: &Path,
@@ -260,8 +261,8 @@ fn append_parallel_tool_started_events(
 
 #[allow(clippy::too_many_arguments)]
 fn execute_prepared_parallel_tool_batch(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut agent_runtime::AgentLoopState,
     prompt: &str,
@@ -303,7 +304,7 @@ fn execute_prepared_parallel_tool_batch(
         }
         agent_runtime::RunToolCallBatchStart::Stopped(_) => {
             return Ok(Some(paused_agent_tools(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 &*runtime,
@@ -385,7 +386,7 @@ fn execute_prepared_parallel_tool_batch(
     if !cancellation.execution_epoch_lease_is_current(epoch_lease) {
         if agent_run_should_stop(cancellation) {
             return Ok(Some(paused_agent_tools(pause_agent_loop_for_control_stop(
-                app,
+                host,
                 state,
                 workspace_root,
                 &*runtime,
@@ -424,7 +425,7 @@ fn execute_prepared_parallel_tool_batch(
         )?;
         if let Some(outcome) = agent_tool_batch_outcome_after_commit(
             commit,
-            app,
+            host,
             state,
             workspace_root,
             runtime,
@@ -442,8 +443,8 @@ fn execute_prepared_parallel_tool_batch(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_execute_parallel_agent_tool_batch(
-    app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    host: &dyn AgentRunHost,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut agent_runtime::AgentLoopState,
     prompt: &str,
@@ -469,7 +470,7 @@ pub(crate) fn try_execute_parallel_agent_tool_batch(
         return Ok(None);
     };
     execute_prepared_parallel_tool_batch(
-        app,
+        host,
         state,
         workspace_root,
         runtime,

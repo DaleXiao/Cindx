@@ -42,7 +42,7 @@ enum PreparationFailureAction {
 }
 
 fn settle_preparation_failure(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     cancellation: &AgentRunControl,
     error: AgentRunPreparationError,
 ) -> PreparationFailureAction {
@@ -231,8 +231,8 @@ pub(crate) fn reset_preparation_run_context(run_context: &mut Metadata) {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_agent_execution_replay(
-    _app: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
+    _host: &dyn crate::desktop_event_sink::AgentRunHost,
+    state: &AppState,
     config: &ProviderConfig,
     task_id: &TaskId,
     workspace_root: &Path,
@@ -625,7 +625,7 @@ pub(crate) fn prepare_agent_execution_replay(
 }
 
 fn apply_preparation_steer(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     workspace_root: &Path,
     runtime: &mut AgentLoopState,
     run_context: &Metadata,

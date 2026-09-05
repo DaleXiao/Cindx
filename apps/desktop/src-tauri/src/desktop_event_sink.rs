@@ -1,4 +1,7 @@
+use crate::configuration_models::ProviderConfig;
 use crate::view_models::{ModelStreamDelta, RagOperationProgress};
+use agent_core::Metadata;
+use std::path::PathBuf;
 use tauri::Emitter;
 
 const MODEL_STREAM_DELTA_EVENT: &str = "model-stream-delta";
@@ -13,6 +16,46 @@ pub(crate) trait DesktopEventSink: Send + Sync {
     fn emit_session_title_updated(&self, session_id: String);
 }
 
+/// One detached review job: reads the composed app state and returns the
+/// stage output (or its error) over the host's result channel.
+pub(crate) type DetachedStateJob =
+    Box<dyn FnOnce(&crate::app_state::AppState) -> Result<String, String> + Send + 'static>;
+
+/// The desktop-shell side effects the agent run path needs beyond event
+/// emission. Splitting this seam from `tauri::AppHandle` is what makes the
+/// shipping run path drivable headlessly (the Phase 4 product-path fidelity
+/// requirement): the run path talks to `&dyn AgentRunHost`, the Tauri command
+/// shell passes the real handle, and a headless host records events and no-ops
+/// the desktop-only background scheduling.
+pub(crate) trait AgentRunHost: DesktopEventSink {
+    /// Post-completion semantic-memory refresh: a background desktop worker
+    /// keyed on the run context. Headless hosts no-op it; the run itself is
+    /// complete and durable without it.
+    fn schedule_semantic_memory_refresh(
+        &self,
+        workspace_root: PathBuf,
+        config: ProviderConfig,
+        run_context: Metadata,
+    );
+
+    /// Runs one detached review job with app-state access and returns its
+    /// result channel, preserving the caller's timeout semantics: the desktop
+    /// host spawns against the managed state through its handle, a headless
+    /// host spawns against its own owned state.
+    fn spawn_detached_state_job(
+        &self,
+        job: DetachedStateJob,
+    ) -> std::sync::mpsc::Receiver<Result<String, String>>;
+
+    /// Post-completion semantic session-title refinement: a detached desktop
+    /// worker (aux model call + title event). Headless hosts no-op it; the run
+    /// is already complete and durable without its title.
+    fn spawn_session_title_refinement(
+        &self,
+        refinement: crate::session_title_service::SessionTitleRefinement,
+    );
+}
+
 impl DesktopEventSink for tauri::AppHandle {
     fn emit_model_stream_delta(&self, payload: ModelStreamDelta) {
         let _ = self.emit(MODEL_STREAM_DELTA_EVENT, payload);
@@ -24,6 +67,46 @@ impl DesktopEventSink for tauri::AppHandle {
 
     fn emit_session_title_updated(&self, session_id: String) {
         let _ = self.emit(SESSION_TITLE_UPDATED_EVENT, session_id);
+    }
+}
+
+impl AgentRunHost for tauri::AppHandle {
+    fn schedule_semantic_memory_refresh(
+        &self,
+        workspace_root: PathBuf,
+        config: ProviderConfig,
+        run_context: Metadata,
+    ) {
+        crate::semantic_memory_worker::schedule_semantic_memory_refresh(
+            self.clone(),
+            workspace_root,
+            config,
+            run_context,
+        );
+    }
+
+    fn spawn_detached_state_job(
+        &self,
+        job: DetachedStateJob,
+    ) -> std::sync::mpsc::Receiver<Result<String, String>> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread_app = self.clone();
+        std::thread::spawn(move || {
+            use tauri::Manager as _;
+            let state = thread_app.state::<crate::app_state::AppState>();
+            let _ = sender.send(job(&state));
+        });
+        receiver
+    }
+
+    fn spawn_session_title_refinement(
+        &self,
+        refinement: crate::session_title_service::SessionTitleRefinement,
+    ) {
+        crate::session_title_service::spawn_semantic_session_title_refinement(
+            self.clone(),
+            refinement,
+        );
     }
 }
 

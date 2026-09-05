@@ -129,7 +129,7 @@ pub(crate) fn config_for_disk(config: &ProviderConfig) -> ProviderConfig {
 /// unlocking the session heal the next run without the user re-entering anything.
 /// When the key is present it does nothing, so the common path costs no read.
 pub(crate) fn refresh_missing_api_key(
-    state: &tauri::State<'_, crate::app_state::AppState>,
+    state: &crate::app_state::AppState,
     config: &mut ProviderConfig,
 ) {
     if !config.api_key.is_empty() {

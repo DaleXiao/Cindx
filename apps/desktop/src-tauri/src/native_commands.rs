@@ -481,7 +481,7 @@ pub(crate) fn open_with_default_app(target: &OsStr) -> Result<(), String> {
 }
 
 pub(crate) fn validated_workspace_artifact_path(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     value: &str,
 ) -> Result<PathBuf, String> {
     let workspace_root = active_workspace_root(state)?;

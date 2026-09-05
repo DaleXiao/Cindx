@@ -13,7 +13,7 @@ use agent_storage::SqliteStore;
 use std::collections::BTreeMap;
 
 pub(crate) fn cached_agent_output_artifacts(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     store: &SqliteStore,
     session_id: &str,
 ) -> Result<Vec<AgentOutputArtifactView>, String> {

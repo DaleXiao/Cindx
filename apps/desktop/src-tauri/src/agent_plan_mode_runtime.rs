@@ -679,7 +679,7 @@ pub(crate) enum PlanModeGateOutcome {
 /// is recorded and the run proceeds without a plan.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_plan_mode_gate(
-    state: &tauri::State<'_, crate::app_state::AppState>,
+    state: &crate::app_state::AppState,
     config: &crate::configuration_models::ProviderConfig,
     workspace_root: &Path,
     task_id: &TaskId,
