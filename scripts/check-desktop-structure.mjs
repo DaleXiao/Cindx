@@ -4276,7 +4276,7 @@ assert(
       "a_model_backed_review_drives_the_record_and_names_its_producer"
     ) &&
     directJudgeRuntimeSource.includes("pub(crate) struct DirectJudgeReview") &&
-    directJudgeRuntimeSource.includes("Some(direct_judge_review(&receipt))"),
+    directJudgeRuntimeSource.includes("Some(Box::new(direct_judge_review(&receipt)))"),
   "A model-backed review must yield the typed delivery-verification verdict and name its producer"
 );
 // P2-05 ratchet: a command that runs on the thread that delivered the invoke must
