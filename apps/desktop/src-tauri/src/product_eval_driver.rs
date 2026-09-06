@@ -33,8 +33,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const PREFLIGHT_RECEIPT_SCHEMA: &str = "cindx.phase4-preflight.v1";
 pub const RUN_RECEIPT_SCHEMA: &str = "cindx.phase4-run-receipt.v1";
 
-/// The frozen owner-confirmed budget (EVALUATION.md, 2026-09-04).
-pub const PROTOCOL_MAX_PROVIDER_CALLS: u64 = 200;
+/// The frozen owner-confirmed budget (EVALUATION.md: confirmed 2026-09-04;
+/// the provider-call cap was amended 200 → 700 on 2026-09-06 against the
+/// measured 64-cell rehearsal floor of 256 HTTP calls and the judge-eligible
+/// provider binding; tokens and wall clock unchanged).
+pub const PROTOCOL_MAX_PROVIDER_CALLS: u64 = 700;
 pub const PROTOCOL_MAX_TOTAL_TOKENS: u64 = 2_000_000;
 pub const PROTOCOL_WALL_BUDGET_MS: u64 = 4 * 60 * 60 * 1000;
 
