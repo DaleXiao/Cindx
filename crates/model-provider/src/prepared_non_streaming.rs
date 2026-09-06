@@ -90,6 +90,7 @@ impl OpenAiCompatibleProvider {
             generation_temperature,
             reasoning_effort,
             thinking_budget_override,
+            self.thinking_suppressed(),
         )?;
         Ok(PreparedNonStreamingModelRequest::encoded(
             request_body,
@@ -106,6 +107,37 @@ impl OpenAiCompatibleProvider {
         }
         let (request_body, estimated_prompt_tokens, request_payload_sha256) =
             request.into_encoded_parts();
+        let result = self.dispatch_prepared_non_streaming(
+            request_body.clone(),
+            estimated_prompt_tokens,
+            request_payload_sha256,
+        );
+        match result {
+            Err(error) if self.note_thinking_parameter_rejection(&error) => {
+                // Same narrow fallback as the streaming path: strip the
+                // rejected thinking params, retry once, and let the recorded
+                // flag suppress them at prepare time from now on.
+                match crate::thinking_fallback::non_streaming_body_without_thinking_params(
+                    &request_body,
+                ) {
+                    Some((stripped_body, stripped_sha)) => self.dispatch_prepared_non_streaming(
+                        stripped_body,
+                        estimated_prompt_tokens,
+                        stripped_sha,
+                    ),
+                    None => Err(error),
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn dispatch_prepared_non_streaming(
+        &self,
+        request_body: Bytes,
+        estimated_prompt_tokens: u64,
+        request_payload_sha256: String,
+    ) -> Result<ModelResponse, ModelError> {
         let output = execute_http_bytes_cancellable(
             &self.config.chat_completions_url(),
             &self.config.api_key,

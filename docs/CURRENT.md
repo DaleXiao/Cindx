@@ -402,13 +402,22 @@ copying it to every profile is an explicit action. The legacy configuration and
 wire keys remain unchanged for saved-provider compatibility, and Actor and
 Stage attribution is still selected at each call site.
 
-Chat completion requests and the credential verification probe explicitly set
-`enable_thinking: false` for model families whose provider builds enable
-reasoning by default (`qwen`, `qwq`, `glm`, `kimi`, `deepseek`). This keeps
+Chat completion requests and the credential verification probe set explicit
+thinking parameters for model families whose provider builds enable reasoning
+by default (`qwen`, `qwq`, `glm`, `kimi`, `deepseek`): Fast keeps thinking
+off, while Default/High/Xhigh enable it with growing token budgets
+(4096/8192/16384, clamped by any adaptive per-turn override). This keeps
 bounded output budgets spent on the answer instead of provider-side reasoning
 traces, the failure class behind the empty-content responses observed in the
 consumed Delivery Verification v3 and v4 Reviewer calls. Other model families
-keep their provider defaults. There is no runtime or per-effort toggle yet.
+keep their provider defaults. Because model support for these parameters is a
+provider×model fact no family predicate can know (the consumed Phase 4 run
+measured dashscope-hosted `kimi-k3` rejecting `thinking_budget` with a 400 on
+every High/Xhigh call), a provider whose model answers with exactly that
+rejection strips the thinking parameters from the — possibly pre-prepared —
+request body, retries once, and omits them from every later request it
+prepares; all other errors surface unchanged. There is no runtime or
+per-effort toggle yet.
 
 ## Run Lifecycle
 

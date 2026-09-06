@@ -30,6 +30,7 @@ mod stream_delta_aggregator;
 mod streaming_finish;
 mod streaming_response;
 mod streaming_wire;
+mod thinking_fallback;
 mod usage;
 
 use redirect_policy::{api_key_safe_redirect_policy, provider_redirect_policy};
@@ -220,6 +221,29 @@ impl OpenAiCompatibleConfig {
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
     image_cache: ImageDataUrlCache,
+    /// Set once this provider's model rejected the thinking params with the
+    /// precise 400 the fallback recognizes; every later prepare omits them.
+    thinking_params_rejected: std::sync::atomic::AtomicBool,
+}
+
+impl OpenAiCompatibleProvider {
+    /// True once the thinking-parameter rejection was observed for this
+    /// provider's model.
+    pub(crate) fn thinking_suppressed(&self) -> bool {
+        self.thinking_params_rejected
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Records the rejection when the error is exactly the thinking-parameter
+    /// 400; returns whether the fallback retry should run.
+    pub(crate) fn note_thinking_parameter_rejection(&self, error: &ModelError) -> bool {
+        if !thinking_fallback::is_thinking_parameter_rejection(error) {
+            return false;
+        }
+        self.thinking_params_rejected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
 }
 
 fn streaming_hard_timeout_seconds(idle_timeout_seconds: u64) -> u64 {
@@ -551,6 +575,7 @@ impl OpenAiCompatibleProvider {
         Self {
             config,
             image_cache: ImageDataUrlCache::new(),
+            thinking_params_rejected: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1045,6 +1070,168 @@ mod tests {
         );
     }
 
+    /// A local server that answers connections in order and records every
+    /// request body, so a rejection/retry sequence can be asserted precisely.
+    fn serve_sequential_chat_responses(
+        responses: Vec<(u16, String)>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("sequential server should bind");
+        let address = listener.local_addr().expect("sequential server address");
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = bodies.clone();
+        let handle = thread::spawn(move || {
+            for (index, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { continue };
+                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                let mut reader = std::io::BufReader::new(match stream.try_clone() {
+                    Ok(clone) => clone,
+                    Err(_) => continue,
+                });
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let trimmed = line.trim_end();
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if let Some(value) =
+                        trimmed.to_ascii_lowercase().strip_prefix("content-length:")
+                    {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                if std::io::Read::read_exact(&mut reader, &mut body).is_err() {
+                    continue;
+                }
+                recorded
+                    .lock()
+                    .expect("recorded bodies")
+                    .push(String::from_utf8_lossy(&body).to_string());
+                let (status, payload) = responses
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| (500, "{}".to_string()));
+                let status_line = if status == 200 {
+                    "HTTP/1.1 200 OK"
+                } else {
+                    "HTTP/1.1 400 Bad Request"
+                };
+                let content_type = if payload.starts_with("data:") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                let response = format!(
+                    "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                if std::io::Write::write_all(&mut stream, response.as_bytes()).is_err() {
+                    continue;
+                }
+                let _ = std::io::Write::flush(&mut stream);
+            }
+        });
+        (format!("http://{address}/v1"), bodies, handle)
+    }
+
+    fn thinking_provider(base_url: String) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url,
+            api_key: "key".to_string(),
+            model: "kimi-k3".to_string(),
+            embedding_model: "embed".to_string(),
+            timeout_seconds: 10,
+        })
+    }
+
+    fn high_effort_request(mode: ModelCallMode) -> ModelRequest {
+        ModelRequest {
+            role: ModelRole::Executor,
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: "hi".to_string(),
+                metadata: Metadata::new(),
+            }],
+            tools: Vec::new(),
+            mode,
+            metadata: Metadata::from([(
+                agent_core::REASONING_EFFORT_KEY.to_string(),
+                "high".to_string(),
+            )]),
+        }
+    }
+
+    const THINKING_REJECTION_BODY: &str =
+        "{\"error\":{\"message\":\"InternalError.Algo.InvalidParameter: Parameter thinking_budget is not supported.\",\"type\":\"invalid_request_error\"}}";
+
+    #[test]
+    fn thinking_rejection_retries_once_stripped_and_suppresses_thereafter() {
+        let ok_body = r#"{"id":"r1","model":"kimi-k3","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#;
+        let (base_url, bodies, _server) = serve_sequential_chat_responses(vec![
+            (400, THINKING_REJECTION_BODY.to_string()),
+            (200, ok_body.to_string()),
+            (200, ok_body.to_string()),
+        ]);
+        let provider = thinking_provider(base_url);
+
+        let response = provider
+            .complete_once(high_effort_request(ModelCallMode::NonStreaming))
+            .expect("the stripped retry should recover");
+        assert_eq!(response.message.content, "done");
+        {
+            let bodies = bodies.lock().expect("recorded bodies");
+            assert_eq!(bodies.len(), 2, "one rejection plus one stripped retry");
+            assert!(
+                bodies[0].contains("thinking_budget"),
+                "the first body carries the tier's thinking params"
+            );
+            assert!(
+                !bodies[1].contains("enable_thinking") && !bodies[1].contains("thinking_budget"),
+                "the retry body must not carry thinking params"
+            );
+        }
+
+        // The recorded rejection now suppresses at prepare time: the next
+        // call is a single request with no thinking params and no 400.
+        provider
+            .complete_once(high_effort_request(ModelCallMode::NonStreaming))
+            .expect("suppressed call succeeds");
+        let bodies = bodies.lock().expect("recorded bodies");
+        assert_eq!(bodies.len(), 3);
+        assert!(!bodies[2].contains("enable_thinking"));
+    }
+
+    #[test]
+    fn streaming_thinking_rejection_retries_the_prepared_body_stripped() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, bodies, _server) = serve_sequential_chat_responses(vec![
+            (400, THINKING_REJECTION_BODY.to_string()),
+            (200, sse.to_string()),
+        ]);
+        let provider = thinking_provider(base_url);
+
+        let response = provider
+            .complete_streaming(high_effort_request(ModelCallMode::Streaming), |_| {})
+            .expect("the streaming stripped retry should recover");
+        assert_eq!(response.message.content, "answer");
+        let bodies = bodies.lock().expect("recorded bodies");
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("thinking_budget"));
+        assert!(!bodies[1].contains("enable_thinking") && !bodies[1].contains("thinking_budget"));
+    }
+
     #[test]
     fn chat_url_trims_base_url_slashes() {
         let config = OpenAiCompatibleConfig {
@@ -1276,6 +1463,7 @@ mod tests {
                 None,
                 reasoning_effort,
                 None,
+                false,
             )
             .expect("body should encode");
             serde_json::from_str::<serde_json::Value>(&body).expect("valid request JSON")
@@ -1307,6 +1495,7 @@ mod tests {
             None,
             Some("high"),
             None,
+            false,
         )
         .expect("body should encode");
         let value: serde_json::Value = serde_json::from_str(&body).expect("valid request JSON");
@@ -1353,6 +1542,7 @@ mod tests {
             Some(0.0),
             None,
             None,
+            false,
         )
         .expect("body should encode");
 
@@ -1377,6 +1567,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .expect("body should encode");
 
@@ -1401,6 +1592,7 @@ mod tests {
             Some(9.0),
             None,
             None,
+            false,
         )
         .expect("body should encode");
 

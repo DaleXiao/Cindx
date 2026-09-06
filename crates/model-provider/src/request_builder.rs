@@ -125,6 +125,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
         None,
         None,
         None,
+        false,
     )
 }
 
@@ -140,6 +141,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
     temperature: Option<f64>,
     reasoning_effort: Option<&str>,
     thinking_budget_override: Option<u32>,
+    suppress_thinking: bool,
 ) -> Result<String, ModelError> {
     let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
@@ -198,7 +200,12 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
         .filter(|value| *value > 0)
         .map(|value| format!(",\"max_tokens\":{value}"))
         .unwrap_or_default();
-    let thinking_json = thinking_json_for(model, reasoning_effort, thinking_budget_override);
+    let thinking_json = thinking_json_for(
+        model,
+        reasoning_effort,
+        thinking_budget_override,
+        suppress_thinking,
+    );
     let temperature_json = temperature
         .map(|value| value.clamp(0.0, 2.0))
         .map(|value| format!(",\"temperature\":{value}"))
@@ -243,31 +250,26 @@ fn thinking_json_for(
     model: &str,
     reasoning_effort: Option<&str>,
     thinking_budget_override: Option<u32>,
+    suppressed: bool,
 ) -> String {
-    if !model_disables_thinking_by_default(model) {
+    // A provider that rejected the thinking params for this model suppresses
+    // them for good (thinking_fallback); the family predicate alone cannot
+    // know provider×model support.
+    if suppressed || !model_disables_thinking_by_default(model) {
         return String::new();
     }
-    match reasoning_effort {
-        Some("default") => {
-            format!(
-                ",\"enable_thinking\":true,\"thinking_budget\":{}",
-                thinking_budget_override.unwrap_or(4096).min(4096)
-            )
-        }
-        Some("high") => {
-            format!(
-                ",\"enable_thinking\":true,\"thinking_budget\":{}",
-                thinking_budget_override.unwrap_or(8192).min(8192)
-            )
-        }
-        Some("xhigh") => {
-            format!(
-                ",\"enable_thinking\":true,\"thinking_budget\":{}",
-                thinking_budget_override.unwrap_or(16384).min(16384)
-            )
-        }
-        _ => ",\"enable_thinking\":false".to_string(),
-    }
+    let tier_budget = match reasoning_effort {
+        Some("high") => 8192u32,
+        Some("xhigh") => 16_384,
+        Some("default") => 4096,
+        _ => return ",\"enable_thinking\":false".to_string(),
+    };
+    format!(
+        ",\"enable_thinking\":true,\"thinking_budget\":{}",
+        thinking_budget_override
+            .unwrap_or(tier_budget)
+            .min(tier_budget)
+    )
 }
 
 fn message_content_json(

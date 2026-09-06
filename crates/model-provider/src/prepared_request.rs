@@ -37,7 +37,8 @@ impl OpenAiCompatibleProvider {
             generation_temperature,
             reasoning_effort,
             thinking_budget_override,
-        )?;
+
+            self.thinking_suppressed(),)?;
         Ok(PreparedStreamingModelRequest::encoded(
             request_body,
             estimated_prompt_tokens,
@@ -61,13 +62,47 @@ impl OpenAiCompatibleProvider {
     pub(super) fn complete_prepared_streaming_model_request_with_activity(
         &self,
         request: &PreparedStreamingModelRequest,
-        mut on_delta: &mut dyn FnMut(&str),
-        mut on_activity: &mut dyn FnMut(),
-        mut should_cancel: &mut dyn FnMut() -> bool,
+        on_delta: &mut dyn FnMut(&str),
+        on_activity: &mut dyn FnMut(),
+        should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<ModelResponse, ModelError> {
         if !self.config.is_ready() {
             return Err(ModelError::new("provider config is incomplete"));
         }
+        let result = self.dispatch_prepared_streaming(
+            request,
+            &mut *on_delta,
+            &mut *on_activity,
+            &mut *should_cancel,
+        );
+        match result {
+            Err(error) if self.note_thinking_parameter_rejection(&error) => {
+                // The endpoint rejected the thinking params this (possibly
+                // pre-prepared) body carries: strip them and retry once. A 400
+                // arrives before any body byte is consumed, so no delta was
+                // emitted and the retry is side-effect-free.
+                match crate::thinking_fallback::streaming_prepared_without_thinking_params(request)
+                {
+                    Some(stripped) => self.dispatch_prepared_streaming(
+                        &stripped,
+                        on_delta,
+                        on_activity,
+                        should_cancel,
+                    ),
+                    None => Err(error),
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn dispatch_prepared_streaming(
+        &self,
+        request: &PreparedStreamingModelRequest,
+        mut on_delta: &mut dyn FnMut(&str),
+        mut on_activity: &mut dyn FnMut(),
+        mut should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
         let (request_body, estimated_prompt_tokens, request_payload_sha256) = request
             .encoded_parts()
             .ok_or_else(|| ModelError::new("prepared model request did not include a body"))?;
@@ -305,6 +340,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .expect("text request should encode");
 
@@ -342,6 +378,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .expect("vision request should encode");
 
