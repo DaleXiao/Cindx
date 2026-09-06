@@ -11,6 +11,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["lancedb-store"]
 lancedb-store = ["agent-rag/lancedb-store"]
+# The Phase 4 one-shot product-path evaluation driver. Never enabled in a
+# shipping build: `tauri build` uses default features, and the driver binary
+# is `required-features` gated so it cannot be bundled by accident.
+product-eval = ["dep:agent-eval"]
+
+[[bin]]
+name = "product-eval"
+path = "src/bin/product_eval.rs"
+required-features = ["product-eval"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -18,6 +27,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 agent-application = { path = "../../../crates/agent-application" }
 agent-core = { path = "../../../crates/agent-core" }
+agent-eval = { path = "../../../crates/agent-eval", optional = true }
 agent-graph = { path = "../../../crates/agent-graph" }
 agent-harness = { path = "../../../crates/agent-harness" }
 agent-memory = { path = "../../../crates/agent-memory" }

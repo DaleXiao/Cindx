@@ -5,7 +5,9 @@
 //! queue of assistant messages and tool calls so suites are replayable
 //! byte-for-byte. Cases run in an isolated per-case workspace, execute only
 //! the case's `allowed_tools` through the portable `tools` registry, and are
-//! judged by pure postcondition checks. The crate has no production consumer.
+//! judged by pure postcondition checks. Its only consumer is the desktop
+//! crate's `product-eval` feature (the Phase 4 product-path driver), which is
+//! never part of a shipping build.
 
 mod case;
 mod matched;
@@ -14,7 +16,10 @@ mod report;
 mod runner;
 
 pub use case::{parse_suite, CaseBudget, CaseCategory, EvalCase, FixtureFile, Postcondition};
-pub use matched::{run_matched_arms, ArmRun, MatchedArmReport, MatchedCaseReport};
+pub use matched::{
+    run_matched_arms, run_matched_cells, ArmRun, MatchedArmReport, MatchedCaseReport,
+    MatchedCellContext,
+};
 pub use postcondition::{check_postconditions, CheckResult, CHECK_OUTPUT_LIMIT};
 pub use report::SuiteReport;
 pub use runner::{

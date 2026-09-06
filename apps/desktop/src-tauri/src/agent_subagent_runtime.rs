@@ -67,6 +67,14 @@ pub(crate) fn execute_subagent_delegations(
     workspace_root: &Path,
     calls: Vec<agent_runtime::AgentToolRequest>,
 ) -> Vec<agent_runtime::AgentToolRequest> {
+    // Matched single-agent eval arm: deny delegations in context instead of
+    // dispatching children. The tool-surface filter normally keeps `task` out
+    // of this arm entirely; this gate at the one delegation entry is the belt
+    // behind that suspenders, so no path can dispatch a child under the
+    // marker.
+    if crate::agent_execution_constraint::eval_delegation_disabled(run_context) {
+        return deny_delegations_for_eval(runtime, calls);
+    }
     let (task_calls, normal_calls): (Vec<_>, Vec<_>) =
         calls.into_iter().partition(|call| call.tool_name == "task");
     if task_calls.is_empty() {
@@ -1244,6 +1252,35 @@ pub(crate) fn merge_subagent_tool_facts(
             None,
         );
     }
+}
+
+/// The matched eval arm without delegation: `task` calls are denied in-context
+/// (steering the model to do the work directly) and every other call passes
+/// through untouched. Reachable only when the run carries the eval
+/// no-delegation marker; the surface filter normally keeps `task` out entirely,
+/// and this router gate is the belt behind that suspenders.
+///
+/// The denial is deliberately not persisted as a durable message (unlike the
+/// Refused write path): the eval driver is a single process with no resume
+/// lifecycle, so an in-context instruction is the whole audience.
+pub(crate) fn deny_delegations_for_eval(
+    runtime: &mut agent_runtime::AgentLoopState,
+    calls: Vec<AgentToolRequest>,
+) -> Vec<AgentToolRequest> {
+    let mut normal_calls = Vec::new();
+    for call in calls {
+        if call.tool_name == "task" {
+            strip_subagent_call_id(runtime, &call.call_id.0);
+            agent_runtime::append_internal_instruction(
+                runtime,
+                "subagent_result",
+                "Delegation is unavailable in this run. Complete the work directly with your own tools.",
+            );
+        } else {
+            normal_calls.push(call);
+        }
+    }
+    normal_calls
 }
 
 /// Remove a delegated `task` call id from the latest assistant message so the

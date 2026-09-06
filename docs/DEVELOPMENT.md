@@ -325,6 +325,34 @@ Do not rerun the frozen Workflow GEPA V12 attempt. Its one-shot evidence is
 invalid; a successor requires a corrected lifecycle instrument and a new frozen
 protocol. See [EVALUATION.md](EVALUATION.md).
 
+The Phase 4 product-path driver is the `product-eval` feature of the desktop
+crate — a non-default feature that no shipping build enables:
+
+```sh
+cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --features product-eval --bin product-eval
+# 1. provider-free preflight: binds HEAD/tree, suite digest, frozen matrix
+#    digest, driver binary digest, and the redacted provider authority
+./apps/desktop/src-tauri/target/debug/product-eval preflight \
+  --suite crates/agent-eval/suite/general_v1.json --out <private-dir>
+# 2. provider-free rehearsal: the full 64-cell matrix against a local fake
+#    provider; validates instrumentation and prices the real budget
+./apps/desktop/src-tauri/target/debug/product-eval rehearse \
+  --suite crates/agent-eval/suite/general_v1.json --out <private-dir>
+# 3. the authorized one-shot execute (refuses unless the preflight receipt
+#    matches the current tree and binary; holds caffeinate; enforces the
+#    frozen budget live; no-retry)
+./apps/desktop/src-tauri/target/debug/product-eval execute \
+  --suite crates/agent-eval/suite/general_v1.json --out <private-dir> \
+  --preflight <private-dir>/preflight-receipt.json
+```
+
+Outputs (report, receipts) stay in the private out directory, never in Git.
+The driver binary is unsigned, so its first keychain read raises one
+authorization prompt; the driver retries the bounded read five times over a
+minute at startup so the operator can approve, and execute fails closed
+without the key.
+
 The Goal 3D preflight was provider-free. Its `cindx-collaboration-successor-preflight`
 binary (and the Goal 3E authorize/execute and Delivery Verification binaries)
 were removed in the phase-3 effort-tier rebuild along with the `realworld-eval`

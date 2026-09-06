@@ -1414,3 +1414,62 @@ fn honored_model_choices_get_one_provider_each_and_the_run_model_gets_none() {
     // Without the configuration nothing is honored, so nothing is built.
     assert!(subagent_model_providers(None, &choices, "run-model", &control).is_empty());
 }
+
+#[test]
+fn eval_denial_keeps_the_transcript_well_formed() {
+    let mut runtime = agent_runtime::start_agent_loop(
+        TaskId("eval-deny".to_string()),
+        "objective",
+        agent_runtime::AgentRuntimeConfig::default(),
+    );
+    runtime.messages.push(Message {
+        role: MessageRole::Assistant,
+        content: String::new(),
+        metadata: [
+            (
+                "tool_call_ids".to_string(),
+                "call-task,call-read".to_string(),
+            ),
+            ("raw_tool_calls_json".to_string(), "[]".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let calls = vec![
+        agent_runtime::AgentToolRequest {
+            call_id: ToolCallId("call-task".to_string()),
+            tool_name: "task".to_string(),
+            input: "{}".to_string(),
+        },
+        agent_runtime::AgentToolRequest {
+            call_id: ToolCallId("call-read".to_string()),
+            tool_name: "file.read".to_string(),
+            input: "{}".to_string(),
+        },
+    ];
+
+    let normal = deny_delegations_for_eval(&mut runtime, calls);
+
+    // The non-delegation call passes through untouched.
+    assert_eq!(normal.len(), 1);
+    assert_eq!(normal[0].tool_name, "file.read");
+    // The denied call's id is stripped from the assistant turn, so the
+    // transcript has no dangling tool call...
+    let assistant = runtime
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::Assistant)
+        .expect("assistant turn");
+    assert_eq!(
+        assistant.metadata.get("tool_call_ids").map(String::as_str),
+        Some("call-read")
+    );
+    // ...and the model is told, in context, to do the work directly.
+    assert!(runtime.messages.iter().any(|message| message
+        .metadata
+        .get("kind")
+        .map(String::as_str)
+        == Some("subagent_result")
+        && message.content.contains("Delegation is unavailable")));
+}

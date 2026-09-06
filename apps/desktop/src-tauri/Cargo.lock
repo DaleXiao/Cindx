@@ -37,6 +37,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-eval"
+version = "0.1.0"
+dependencies = [
+ "agent-application",
+ "agent-core",
+ "agent-runtime",
+ "serde",
+ "serde_json",
+ "tools",
+]
+
+[[package]]
 name = "agent-graph"
 version = "0.1.0"
 dependencies = [
@@ -996,6 +1008,7 @@ version = "0.3.60"
 dependencies = [
  "agent-application",
  "agent-core",
+ "agent-eval",
  "agent-graph",
  "agent-harness",
  "agent-mcp",

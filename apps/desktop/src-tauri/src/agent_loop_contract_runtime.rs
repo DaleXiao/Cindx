@@ -26,6 +26,11 @@ pub(crate) fn planned_agent_tools(
         .exposure_plan_with_intent(prompt, context_window, &intent)
         .inline;
     pin_evidence_scope_tools(&completion_intent.evidence_scopes, &catalog, &mut tools);
+    if crate::agent_execution_constraint::eval_delegation_disabled(run_context) {
+        // Matched single-agent eval arm: the delegation surface must be
+        // absent after every inclusion step, not just before it.
+        tools.retain(|spec| spec.name != "task");
+    }
     (tools, completion_intent)
 }
 
@@ -44,6 +49,16 @@ pub(crate) fn deferred_tool_index(
         completion_intent.tool_requirement,
     );
     let plan = registry.exposure_plan_with_intent(prompt, context_window, &intent);
+    if crate::agent_execution_constraint::eval_delegation_disabled(run_context) {
+        // Keep the deferred index consistent with the planned surface: the
+        // single-agent eval arm must not advertise delegation either.
+        let deferred = plan
+            .deferred
+            .into_iter()
+            .filter(|spec| spec.name != "task")
+            .collect::<Vec<_>>();
+        return tools::render_deferred_tool_index(&deferred);
+    }
     tools::render_deferred_tool_index(&plan.deferred)
 }
 
@@ -567,3 +582,51 @@ pub(super) fn synchronize_noop_control_epoch_context(
 #[cfg(test)]
 #[path = "agent_loop_contract_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod eval_delegation_surface_tests {
+    use super::*;
+    use crate::agent_execution_constraint::AgentExecutionConstraint;
+
+    fn registry() -> ToolRegistry {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        ToolRegistry::with_workspace_tools_and_services_and_process_manager(
+            workspace.path(),
+            tools::WebSearchConfig::default(),
+            None,
+            std::sync::Arc::new(tools::ProcessManager::new()),
+        )
+    }
+
+    fn context(constraint: AgentExecutionConstraint) -> Metadata {
+        let mut run_context = Metadata::new();
+        constraint.write_to_context(&mut run_context);
+        run_context
+    }
+
+    #[test]
+    fn the_eval_marker_removes_the_delegation_surface_from_both_exposures() {
+        let registry = registry();
+        let native = context(AgentExecutionConstraint::Native);
+        let marked = context(AgentExecutionConstraint::EvalNoDelegation);
+
+        let (native_tools, _) =
+            planned_agent_tools(&registry, &native, "summarize the repo", 64_000);
+        let (marked_tools, _) =
+            planned_agent_tools(&registry, &marked, "summarize the repo", 64_000);
+        let native_deferred = deferred_tool_index(&registry, &native, "summarize the repo", 64_000);
+        let marked_deferred = deferred_tool_index(&registry, &marked, "summarize the repo", 64_000);
+
+        // A native run exposes `task` on exactly one of the two surfaces.
+        let native_exposes = native_tools.iter().any(|spec| spec.name == "task")
+            || native_deferred.contains("\n- task: ");
+        assert!(
+            native_exposes,
+            "native runs must expose the delegation tool"
+        );
+
+        // The matched single-agent arm exposes it on neither.
+        assert!(!marked_tools.iter().any(|spec| spec.name == "task"));
+        assert!(!marked_deferred.contains("\n- task: "));
+    }
+}

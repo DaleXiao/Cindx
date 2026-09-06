@@ -89,19 +89,31 @@ impl MatchedArmReport {
     }
 }
 
-/// Run every case across every arm with position balancing. For case index `i`
-/// the arm order is rotated by `i`, so each arm runs in each position across the
-/// suite. `make_provider` builds a fresh provider for the named arm; each
-/// `(case, arm)` runs in an isolated workspace so runs never share state.
-pub fn run_matched_arms<P, F>(
+/// Everything one `(case, arm)` cell needs to run: the case, the arm label,
+/// the cell's isolated workspace root, and the position-balancing bookkeeping.
+pub struct MatchedCellContext<'a> {
+    pub case: &'a EvalCase,
+    pub case_index: usize,
+    pub arm: &'a str,
+    pub arm_index: usize,
+    pub position: usize,
+    /// Per-cell isolated root: `<workspace_root>/case-<i>/<arm>`.
+    pub cell_root: std::path::PathBuf,
+}
+
+/// The matched/position-balanced core with a caller-supplied cell executor.
+/// Rotation and denominator semantics are identical to [`run_matched_arms`]:
+/// for case index `i` the arm order rotates by `i`, and every cell — pass,
+/// fail, or error — is retained. Product-path drivers plug in here (Phase 4
+/// fidelity); the provider-shaped convenience wrapper stays for kernel runs.
+pub fn run_matched_cells<E>(
     cases: &[EvalCase],
     arms: &[String],
     workspace_root: &Path,
-    mut make_provider: F,
+    mut run_cell: E,
 ) -> MatchedArmReport
 where
-    P: EvalModelProvider,
-    F: FnMut(&str) -> P,
+    E: FnMut(MatchedCellContext<'_>) -> CaseReport,
 {
     let arm_count = arms.len();
     let mut case_reports = Vec::new();
@@ -110,9 +122,17 @@ where
         for position in 0..arm_count {
             let arm_index = (case_index + position) % arm_count.max(1);
             let arm = &arms[arm_index];
-            let arm_root = workspace_root.join(format!("arm-{arm_index}"));
-            let mut provider = make_provider(arm);
-            let report = run_case(case, &mut provider, &arm_root);
+            let cell_root = workspace_root
+                .join(format!("case-{case_index}"))
+                .join(arm.as_str());
+            let report = run_cell(MatchedCellContext {
+                case,
+                case_index,
+                arm,
+                arm_index,
+                position,
+                cell_root,
+            });
             arm_runs.push(ArmRun {
                 arm: arm.clone(),
                 position,
@@ -130,10 +150,34 @@ where
     }
 }
 
+/// Run every case across every arm with position balancing. For case index `i`
+/// the arm order is rotated by `i`, so each arm runs in each position across the
+/// suite. `make_provider` builds a fresh provider for the named arm; each
+/// arm reuses its historical `arm-<index>` workspace root (the kernel-runner
+/// layout, kept for the crate's contract tests; product-path drivers use
+/// [`run_matched_cells`], which isolates every `(case, arm)` cell in its own
+/// root).
+pub fn run_matched_arms<P, F>(
+    cases: &[EvalCase],
+    arms: &[String],
+    workspace_root: &Path,
+    mut make_provider: F,
+) -> MatchedArmReport
+where
+    P: EvalModelProvider,
+    F: FnMut(&str) -> P,
+{
+    run_matched_cells(cases, arms, workspace_root, |cell| {
+        let arm_root = workspace_root.join(format!("arm-{}", cell.arm_index));
+        let mut provider = make_provider(cell.arm);
+        run_case(cell.case, &mut provider, &arm_root)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::{ScriptedProvider, ScriptedStep};
+    use crate::runner::{CaseReport, ScriptedProvider, ScriptedStep};
     use crate::{CaseBudget, CaseCategory};
 
     fn case(id: &str) -> EvalCase {
@@ -186,5 +230,51 @@ mod tests {
         // Case 0 starts with arm a; case 1 starts with arm b (rotation).
         assert_eq!(report.cases[0].arms[0].arm, "a");
         assert_eq!(report.cases[1].arms[0].arm, "b");
+    }
+
+    #[test]
+    fn matched_cells_isolate_every_case_arm_pair_and_keep_rotation() {
+        let root = temp_root("cells");
+        let cases = vec![case("c1"), case("c2"), case("c3")];
+        let arms = vec!["single-fast".to_string(), "subagent-fast".to_string()];
+        let mut seen_roots = Vec::new();
+        let report = run_matched_cells(&cases, &arms, &root, |cell| {
+            seen_roots.push(cell.cell_root.clone());
+            // The cell root is per (case, arm): it carries both identities.
+            assert!(cell.cell_root.starts_with(&root));
+            assert!(cell.cell_root.ends_with(cell.arm));
+            if cell.case.id == "c2" && cell.arm == "single-fast" {
+                CaseReport {
+                    id: cell.case.id.clone(),
+                    passed: false,
+                    checks: vec![],
+                    tool_calls: 0,
+                    turns: 0,
+                    error: Some("cell failure retained".to_string()),
+                    receipts: Default::default(),
+                }
+            } else {
+                CaseReport {
+                    id: cell.case.id.clone(),
+                    passed: true,
+                    checks: vec![],
+                    tool_calls: 0,
+                    turns: 0,
+                    error: None,
+                    receipts: Default::default(),
+                }
+            }
+        });
+
+        // Every (case, arm) cell ran exactly once in its own root.
+        assert_eq!(seen_roots.len(), 6);
+        let unique: std::collections::BTreeSet<_> = seen_roots.iter().collect();
+        assert_eq!(unique.len(), 6, "cell roots must not be shared");
+        // A failing cell stays in the denominator.
+        assert_eq!(report.pass_rate("single-fast"), Some((2, 3)));
+        assert_eq!(report.pass_rate("subagent-fast"), Some((3, 3)));
+        assert!(report.is_position_balanced());
+        assert_eq!(report.cases[0].arms[0].arm, "single-fast");
+        assert_eq!(report.cases[1].arms[0].arm, "subagent-fast");
     }
 }

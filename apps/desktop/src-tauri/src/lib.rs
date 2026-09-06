@@ -82,6 +82,7 @@ mod personalization_persistence;
 mod platform_runtime;
 mod prepared_task_state_metadata;
 mod private_files;
+mod product_path_eval;
 mod project_commands;
 mod project_config_persistence;
 mod project_instructions_runtime;
@@ -149,6 +150,8 @@ use native_commands::*;
 use persistence_runtime::*;
 use personalization_persistence::*;
 use platform_runtime::*;
+#[cfg(feature = "product-eval")]
+pub use product_path_eval::driver::product_eval_main;
 use project_commands::*;
 use project_config_persistence::*;
 use project_lifecycle_runtime::*;

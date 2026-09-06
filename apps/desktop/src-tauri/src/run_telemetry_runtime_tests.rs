@@ -253,13 +253,19 @@ fn run_telemetry_journal_has_no_production_reader_or_consumer() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
     // The journal path and its reader stay confined to the shadow module and
-    // its tests; no production code can address or read the journal.
+    // its tests; no production code can address or read the journal. The one
+    // addition is the Phase 4 product-path harness/driver, which reads
+    // receipts as its per-run evidence: `product_path_eval.rs` is compiled
+    // only under `cfg(any(test, feature = "product-eval"))`, and `product-eval`
+    // is a non-default feature excluded from every shipping build, so the
+    // no-production-reader invariant is unchanged.
     let mut journal_files = Vec::new();
     collect_source_references(&source_root, "run_telemetry_journal", &mut journal_files);
     for file in &journal_files {
         assert!(
             file.ends_with("run_telemetry_runtime.rs")
-                || file.ends_with("run_telemetry_runtime_tests.rs"),
+                || file.ends_with("run_telemetry_runtime_tests.rs")
+                || file.ends_with("product_path_eval.rs"),
             "unexpected telemetry journal reference in {}",
             file.display()
         );
@@ -273,7 +279,8 @@ fn run_telemetry_journal_has_no_production_reader_or_consumer() {
     for file in &reader_files {
         assert!(
             file.ends_with("run_telemetry_runtime.rs")
-                || file.ends_with("run_telemetry_runtime_tests.rs"),
+                || file.ends_with("run_telemetry_runtime_tests.rs")
+                || file.ends_with("product_path_eval.rs"),
             "production file {} must not read the telemetry journal",
             file.display()
         );

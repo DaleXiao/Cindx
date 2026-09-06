@@ -116,9 +116,10 @@ fn read_run_telemetry_journal_lines(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Reads the telemetry journal back. Test-only: production records the
-/// journal but never reads it (inert measurement plumbing).
-#[cfg(test)]
+/// Reads the telemetry journal back. Test and `product-eval` only: production
+/// records the journal but never reads it (inert measurement plumbing); the
+/// feature-gated Phase 4 driver reads it as its per-run receipt source.
+#[cfg(any(test, feature = "product-eval"))]
 pub(crate) fn load_run_telemetry_receipts(
     path: &Path,
 ) -> Result<Vec<agent_application::RunTelemetryReceiptV1>, String> {
