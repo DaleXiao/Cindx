@@ -224,6 +224,9 @@ pub struct OpenAiCompatibleProvider {
     /// Set once this provider's model rejected the thinking params with the
     /// precise 400 the fallback recognizes; every later prepare omits them.
     thinking_params_rejected: std::sync::atomic::AtomicBool,
+    /// Set once this provider's endpoint rejected the `stream_options` usage
+    /// extension with the precise 400 the fallback recognizes.
+    stream_options_rejected: std::sync::atomic::AtomicBool,
 }
 
 impl OpenAiCompatibleProvider {
@@ -241,6 +244,23 @@ impl OpenAiCompatibleProvider {
             return false;
         }
         self.thinking_params_rejected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// True once the endpoint rejected the `stream_options` usage extension.
+    pub(crate) fn stream_options_suppressed(&self) -> bool {
+        self.stream_options_rejected
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Records the rejection when the error is exactly the stream-options 400;
+    /// returns whether that fallback retry should run.
+    pub(crate) fn note_stream_options_rejection(&self, error: &ModelError) -> bool {
+        if !thinking_fallback::is_stream_options_rejection(error) {
+            return false;
+        }
+        self.stream_options_rejected
             .store(true, std::sync::atomic::Ordering::Relaxed);
         true
     }
@@ -576,6 +596,7 @@ impl OpenAiCompatibleProvider {
             config,
             image_cache: ImageDataUrlCache::new(),
             thinking_params_rejected: std::sync::atomic::AtomicBool::new(false),
+            stream_options_rejected: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1233,6 +1254,99 @@ mod tests {
     }
 
     #[test]
+    fn streaming_requests_carry_the_usage_extension_unless_suppressed() {
+        let build = |stream: bool, suppress: bool| {
+            build_chat_request_json_with_tools_output_limit_vision_and_images(
+                "model-a",
+                &[Message {
+                    role: MessageRole::User,
+                    content: "hi".to_string(),
+                    metadata: Metadata::new(),
+                }],
+                stream,
+                &[],
+                None,
+                false,
+                &mut |_| None,
+                None,
+                None,
+                None,
+                false,
+                suppress,
+            )
+            .expect("body builds")
+        };
+        assert!(build(true, false).contains(crate::thinking_fallback::STREAM_OPTIONS_SEGMENT));
+        assert!(!build(true, true).contains("stream_options"));
+        assert!(!build(false, false).contains("stream_options"));
+    }
+
+    #[test]
+    fn stream_options_rejection_retries_once_without_the_usage_extension() {
+        let rejection = "{\"error\":{\"message\":\"InvalidParameter: stream_options is not supported.\",\"type\":\"invalid_request_error\"}}";
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, bodies, _server) = serve_sequential_chat_responses(vec![
+            (400, rejection.to_string()),
+            (200, sse.to_string()),
+            (200, sse.to_string()),
+        ]);
+        let provider = thinking_provider(base_url);
+
+        let response = provider
+            .complete_streaming(high_effort_request(ModelCallMode::Streaming), |_| {})
+            .expect("the stripped streaming retry should recover");
+        assert_eq!(response.message.content, "done");
+        {
+            let bodies = bodies.lock().expect("recorded bodies");
+            assert_eq!(bodies.len(), 2);
+            assert!(bodies[0].contains("stream_options"));
+            assert!(!bodies[1].contains("stream_options"));
+        }
+
+        // The recorded rejection suppresses the extension at prepare time.
+        provider
+            .complete_streaming(high_effort_request(ModelCallMode::Streaming), |_| {})
+            .expect("suppressed streaming call succeeds");
+        let bodies = bodies.lock().expect("recorded bodies");
+        assert_eq!(bodies.len(), 3);
+        assert!(!bodies[2].contains("stream_options"));
+    }
+
+    #[test]
+    fn a_dual_naming_rejection_chains_both_fallbacks_to_a_clean_retry() {
+        let dual = "{\"error\":{\"message\":\"InvalidParameter: thinking_budget and stream_options are not supported.\",\"type\":\"invalid_request_error\"}}";
+        let stream_only =
+            "{\"error\":{\"message\":\"InvalidParameter: stream_options is not supported.\",\"type\":\"invalid_request_error\"}}";
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, bodies, _server) = serve_sequential_chat_responses(vec![
+            (400, dual.to_string()),
+            (400, stream_only.to_string()),
+            (200, sse.to_string()),
+        ]);
+        let provider = thinking_provider(base_url);
+
+        let response = provider
+            .complete_streaming(high_effort_request(ModelCallMode::Streaming), |_| {})
+            .expect("the chained fallbacks should recover");
+        assert_eq!(response.message.content, "done");
+
+        let bodies = bodies.lock().expect("recorded bodies");
+        assert_eq!(bodies.len(), 3, "both families strip in sequence");
+        assert!(bodies[0].contains("thinking_budget") && bodies[0].contains("stream_options"));
+        assert!(!bodies[1].contains("enable_thinking") && bodies[1].contains("stream_options"));
+        assert!(!bodies[2].contains("enable_thinking") && !bodies[2].contains("stream_options"));
+        // Both rejections were learned for future prepares.
+        assert!(provider.thinking_suppressed());
+        assert!(provider.stream_options_suppressed());
+    }
+
+    #[test]
     fn chat_url_trims_base_url_slashes() {
         let config = OpenAiCompatibleConfig {
             base_url: "https://example.test/v1/".to_string(),
@@ -1464,6 +1578,7 @@ mod tests {
                 reasoning_effort,
                 None,
                 false,
+                false,
             )
             .expect("body should encode");
             serde_json::from_str::<serde_json::Value>(&body).expect("valid request JSON")
@@ -1495,6 +1610,7 @@ mod tests {
             None,
             Some("high"),
             None,
+            false,
             false,
         )
         .expect("body should encode");
@@ -1543,6 +1659,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         )
         .expect("body should encode");
 
@@ -1568,6 +1685,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         )
         .expect("body should encode");
 
@@ -1592,6 +1710,7 @@ mod tests {
             Some(9.0),
             None,
             None,
+            false,
             false,
         )
         .expect("body should encode");

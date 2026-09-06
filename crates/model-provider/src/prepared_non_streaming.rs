@@ -91,6 +91,7 @@ impl OpenAiCompatibleProvider {
             reasoning_effort,
             thinking_budget_override,
             self.thinking_suppressed(),
+            self.stream_options_suppressed(),
         )?;
         Ok(PreparedNonStreamingModelRequest::encoded(
             request_body,
@@ -105,31 +106,24 @@ impl OpenAiCompatibleProvider {
         if !self.config.is_ready() {
             return Err(ModelError::new("provider config is incomplete"));
         }
-        let (request_body, estimated_prompt_tokens, request_payload_sha256) =
+        let (request_body, estimated_prompt_tokens, _request_payload_sha256) =
             request.into_encoded_parts();
-        let result = self.dispatch_prepared_non_streaming(
-            request_body.clone(),
-            estimated_prompt_tokens,
-            request_payload_sha256,
-        );
-        match result {
-            Err(error) if self.note_thinking_parameter_rejection(&error) => {
-                // Same narrow fallback as the streaming path: strip the
-                // rejected thinking params, retry once, and let the recorded
-                // flag suppress them at prepare time from now on.
-                match crate::thinking_fallback::non_streaming_body_without_thinking_params(
-                    &request_body,
-                ) {
-                    Some((stripped_body, stripped_sha)) => self.dispatch_prepared_non_streaming(
-                        stripped_body,
-                        estimated_prompt_tokens,
-                        stripped_sha,
-                    ),
-                    None => Err(error),
-                }
-            }
-            other => other,
-        }
+        // Same chained fallback as the streaming stage; the digest is
+        // recomputed per dispatch so receipts reflect the body actually sent.
+        // (The builder emits stream_options only for streaming bodies, so that
+        // family's strip always answers None here — the arm is symmetry-only,
+        // but its guard still records a genuine endpoint rejection.)
+        let body_text = String::from_utf8_lossy(&request_body).into_owned();
+        crate::thinking_fallback::dispatch_with_parameter_fallbacks(
+            body_text,
+            |body| {
+                let bytes = Bytes::from(body.to_string());
+                let sha = crate::provider_receipt::request_payload_sha256(&bytes);
+                self.dispatch_prepared_non_streaming(bytes, estimated_prompt_tokens, sha)
+            },
+            |error| self.note_thinking_parameter_rejection(error),
+            |error| self.note_stream_options_rejection(error),
+        )
     }
 
     fn dispatch_prepared_non_streaming(

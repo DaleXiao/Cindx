@@ -170,6 +170,12 @@ pub struct CaseReceipts {
     /// Tool calls with network-egress semantics (`web.search` / `web.fetch`).
     pub network_tool_calls: usize,
     pub wall_clock_ms: u64,
+    /// `task` delegations the run actually executed. The kernel runner never
+    /// delegates (0); the product-path driver counts the durable delegation
+    /// records, so a "subagent" arm's report can prove the contrast it claims
+    /// to measure instead of leaving the evidence in per-cell event stores.
+    #[serde(default)]
+    pub delegations: usize,
 }
 
 impl CaseReceipts {

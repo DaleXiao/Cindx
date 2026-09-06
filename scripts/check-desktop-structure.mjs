@@ -984,29 +984,32 @@ const modelProviderModuleBudgets = new Map([
   ["image_provider.rs", 430],
   ["json_wire.rs", 320],
   ["lib.rs", 900],
-  // 140 -> 175 / 140 -> 155: the prepared dispatch stages now own the narrow
-  // thinking-parameter fallback (exact-400 detect, strip from the encoded
-  // body, retry once, suppress at prepare time) — the in-vivo defect the
-  // consumed Phase 4 run measured on dashscope-hosted kimi-k3. The fallback
-  // belongs where the dispatch and the encoded body live.
-  ["prepared_non_streaming.rs", 175],
+  // 140 -> 175 -> 190 / 140 -> 155 -> 170 / 340 -> 355: the prepared dispatch
+  // stages own the narrow parameter-rejection fallbacks — first thinking
+  // params (the in-vivo kimi-k3 defect from the consumed Phase 4 run), then
+  // the stream_options usage extension (fast-tier token receipts). Each
+  // family is an exact-400 detect + strip-from-encoded-body + retry-once +
+  // prepare-time suppression, and belongs where the encoded body lives.
+  ["prepared_non_streaming.rs", 190],
   ["prepared_payload.rs", 70],
-  ["prepared_request.rs", 155],
+  ["prepared_request.rs", 170],
   ["provider_receipt.rs", 150],
   ["provider_validation.rs", 220],
   ["realtime_provider.rs", 190],
   ["redirect_policy.rs", 100],
-  ["request_builder.rs", 340],
+  ["request_builder.rs", 355],
   ["request_tool_calls.rs", 80],
   ["request_vision.rs", 400],
   ["response_parser.rs", 380],
   ["stream_delta_aggregator.rs", 150],
   ["streaming_finish.rs", 120],
   ["streaming_response.rs", 380],
-  // Provider-side thinking-parameter rejection fallback (400 strip-and-retry
-  // plus prepare-time suppression); born from the consumed Phase 4 run's
-  // in-vivo kimi-k3 finding.
-  ["thinking_fallback.rs", 130],
+  // Provider-side parameter-rejection fallbacks: the thinking params (the
+  // consumed Phase 4 run's in-vivo kimi-k3 finding) and the stream_options
+  // usage extension — exact-400 detect, strip-from-encoded-body, retry-once,
+  // prepare-time suppression, with both segment shapes owned beside their
+  // strippers.
+  ["thinking_fallback.rs", 145],
   ["streaming_wire.rs", 160],
   ["usage.rs", 220],
 ]);

@@ -1,0 +1,184 @@
+[
+  {
+    "id": "delegation-audit-pair",
+    "category": "multi_step",
+    "prompt": "Use the task tool to delegate two subagents in one batch: the first reviews src/config.py and lists every hardcoded constant it finds, the second reviews src/api.py and lists every duplicated logic block it finds. Then write audit.md containing a section headed '## Config findings' that lists the constants and a section headed '## API findings' that lists the duplications. End your final answer with the exact line: AUDIT WRITTEN.",
+    "fixture": [
+      {
+        "path": "src/config.py",
+        "content": "MAX_RETRIES = 7\nTIMEOUT_SECONDS = 90\nCACHE_LIMIT_MB = 256\n\n\ndef describe():\n    return f\"retries={MAX_RETRIES} timeout={TIMEOUT_SECONDS} cache={CACHE_LIMIT_MB}\"\n"
+      },
+      {
+        "path": "src/api.py",
+        "content": "def fetch_user(db, user_id):\n    row = db.query(\"users\", user_id)\n    if row is None:\n        return {\"error\": \"not found\"}\n    return row\n\n\ndef fetch_order(db, order_id):\n    row = db.query(\"orders\", order_id)\n    if row is None:\n        return {\"error\": \"not found\"}\n    return row\n"
+      }
+    ],
+    "allowed_tools": [
+      "file.read",
+      "file.write",
+      "task"
+    ],
+    "postconditions": [
+      {
+        "type": "file_contains",
+        "path": "audit.md",
+        "needle": "## Config findings"
+      },
+      {
+        "type": "file_contains",
+        "path": "audit.md",
+        "needle": "## API findings"
+      },
+      {
+        "type": "file_contains",
+        "path": "audit.md",
+        "needle": "MAX_RETRIES"
+      },
+      {
+        "type": "file_contains",
+        "path": "audit.md",
+        "needle": "fetch_user"
+      },
+      {
+        "type": "output_contains",
+        "needle": "AUDIT WRITTEN"
+      }
+    ],
+    "budget": {
+      "max_turns": 12,
+      "max_tool_calls": 24
+    }
+  },
+  {
+    "id": "delegation-cross-file-rename",
+    "category": "code_edit",
+    "prompt": "Delegate to one subagent, with the task tool, the mechanical rename of the function legacy_compute to normalized_compute across all three files under src/. Afterwards verify yourself that no occurrence of legacy_compute remains anywhere in src/, and write rename-report.md whose lines name every file that was changed. End your final answer with the exact line: RENAME COMPLETE.",
+    "fixture": [
+      {
+        "path": "src/mathx.py",
+        "content": "def legacy_compute(value):\n    return value * 2 + 1\n"
+      },
+      {
+        "path": "src/pipeline.py",
+        "content": "from mathx import legacy_compute\n\n\ndef run(values):\n    return [legacy_compute(value) for value in values]\n"
+      },
+      {
+        "path": "src/report.py",
+        "content": "from mathx import legacy_compute\n\n\ndef line(value):\n    return f\"{value} -> {legacy_compute(value)}\"\n"
+      }
+    ],
+    "allowed_tools": [
+      "file.read",
+      "file.patch",
+      "file.write",
+      "task"
+    ],
+    "postconditions": [
+      {
+        "type": "command_exit_code",
+        "cmd": "! grep -rq legacy_compute src",
+        "code": 0
+      },
+      {
+        "type": "file_contains",
+        "path": "src/mathx.py",
+        "needle": "def normalized_compute"
+      },
+      {
+        "type": "file_contains",
+        "path": "src/pipeline.py",
+        "needle": "normalized_compute"
+      },
+      {
+        "type": "file_contains",
+        "path": "rename-report.md",
+        "needle": "pipeline.py"
+      },
+      {
+        "type": "output_contains",
+        "needle": "RENAME COMPLETE"
+      }
+    ],
+    "budget": {
+      "max_turns": 12,
+      "max_tool_calls": 24
+    }
+  },
+  {
+    "id": "organic-totals-pipeline",
+    "category": "multi_step",
+    "prompt": "Compute the sum of all numbers written in data/a.txt, data/b.txt and data/c.txt. Write totals.md containing exactly one line of the form grand_total=<N> with the correct sum, then end your final answer with the exact line GRAND TOTAL: <N>.",
+    "fixture": [
+      {
+        "path": "data/a.txt",
+        "content": "3\n4\n5\n"
+      },
+      {
+        "path": "data/b.txt",
+        "content": "6\n7\n"
+      },
+      {
+        "path": "data/c.txt",
+        "content": "17\n"
+      }
+    ],
+    "allowed_tools": [
+      "file.read",
+      "file.write"
+    ],
+    "postconditions": [
+      {
+        "type": "file_contains",
+        "path": "totals.md",
+        "needle": "grand_total=42"
+      },
+      {
+        "type": "output_contains",
+        "needle": "GRAND TOTAL: 42"
+      }
+    ],
+    "budget": {
+      "max_turns": 10,
+      "max_tool_calls": 20
+    }
+  },
+  {
+    "id": "organic-repair-verifier",
+    "category": "recovery",
+    "prompt": "The script src/total.py should print the sum of the numbers in data/numbers.txt, but it currently prints the wrong value. Fix the bug, verify your fix by running `sh verify.sh` from the workspace root until it succeeds, and end your final answer with the exact line SUM IS: 42.",
+    "fixture": [
+      {
+        "path": "src/total.py",
+        "content": "from pathlib import Path\n\nlines = Path(\"data/numbers.txt\").read_text().splitlines()\ntotal = 0\nfor index in range(len(lines) - 1):\n    total += int(lines[index])\nprint(total)\n"
+      },
+      {
+        "path": "data/numbers.txt",
+        "content": "10\n20\n12\n"
+      },
+      {
+        "path": "verify.sh",
+        "content": "#!/bin/sh\nset -e\n[ \"$(python3 src/total.py)\" = \"42\" ]\nmkdir -p .probe/data .probe/src\ncp src/total.py .probe/src/total.py\nprintf '1\\n2\\n3\\n4\\n' > .probe/data/numbers.txt\n[ \"$(cd .probe && python3 src/total.py)\" = \"10\" ]\n"
+      }
+    ],
+    "allowed_tools": [
+      "file.read",
+      "file.patch",
+      "shell.run"
+    ],
+    "postconditions": [
+      {
+        "type": "command_exit_code",
+        "cmd": "sh verify.sh",
+        "code": 0
+      },
+      {
+        "type": "output_contains",
+        "needle": "SUM IS: 42"
+      }
+    ],
+    "budget": {
+      "max_turns": 10,
+      "max_tool_calls": 20
+    }
+  }
+]

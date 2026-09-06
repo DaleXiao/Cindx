@@ -339,19 +339,35 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
 #    provider; validates instrumentation and prices the real budget
 ./apps/desktop/src-tauri/target/debug/product-eval rehearse \
   --suite crates/agent-eval/suite/general_v1.json --out <private-dir>
-# 3. the authorized one-shot execute (refuses unless the preflight receipt
-#    matches the current tree and binary; holds caffeinate; enforces the
-#    frozen budget live; no-retry)
-./apps/desktop/src-tauri/target/debug/product-eval execute \
-  --suite crates/agent-eval/suite/general_v1.json --out <private-dir> \
-  --preflight <private-dir>/preflight-receipt.json
+# 3. the authorized one-shot execute (refuses unless BOTH the rehearsal
+#    receipt is green for this suite/matrix AND the preflight receipt matches
+#    the current tree, binary, provider binding, skills catalog and host
+#    toolchain; holds caffeinate; enforces the frozen budget live; no-retry)
+./apps/desktop/src-tauri/target/release/product-eval execute \
+  --suite crates/agent-eval/suite/delegation_v1.json --out <private-dir> \
+  --preflight <private-dir>/preflight-receipt.json \
+  --rehearsal <rehearsal-dir>/rehearsal-receipt.json
 ```
 
 Outputs (report, receipts) stay in the private out directory, never in Git.
-The driver binary is unsigned, so its first keychain read raises one
-authorization prompt; the driver retries the bounded read five times over a
-minute at startup so the operator can approve, and execute fails closed
-without the key.
+The frozen successor suite is `crates/agent-eval/suite/delegation_v1.json`
+(four cases, two of them explicitly delegation-inducing; digest recorded in
+EVALUATION.md). The driver binary must be signed with the stable local
+identity so one keychain "Always Allow" persists across rebuilds and an
+unattended execute never blocks on a password:
+
+```sh
+cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --features product-eval --bin product-eval --release
+codesign --force --sign "Cindx Local Dev" \
+  --identifier app.cindx.product-eval \
+  apps/desktop/src-tauri/target/release/product-eval
+```
+
+The keychain read is bounded (1.5s) and cannot wait out an authorization
+prompt, so the driver retries on a `--key-wait <seconds>` window (default 60
+preflight / 900 execute); every failed attempt is provider-call-free and the
+mode fails closed without the key.
 
 The Goal 3D preflight was provider-free. Its `cindx-collaboration-successor-preflight`
 binary (and the Goal 3E authorize/execute and Delivery Verification binaries)

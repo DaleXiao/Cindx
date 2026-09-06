@@ -193,6 +193,29 @@ fn skills_catalog_digest() -> String {
     sha256_bytes(entries.join("\n").as_bytes())
 }
 
+/// The suite's command oracles run through the host toolchain; the frozen
+/// identity binds what preflight saw and execute refuses on drift or absence.
+fn host_toolchain_binding() -> serde_json::Value {
+    let python3 = std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+    let sh = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("echo ok")
+        .output()
+        .ok()
+        .filter(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "ok"
+        })
+        .map(|_| "present".to_string())
+        .unwrap_or_default();
+    serde_json::json!({ "python3": python3, "sh": sh })
+}
+
 fn preflight(
     args: &[String],
     provider_authority: &crate::configuration_models::ProviderConfig,
@@ -256,6 +279,7 @@ fn preflight(
         "binary": { "path": binary_path.display().to_string(), "sha256": binary_digest },
         "provider_binding": redacted_provider_binding(provider_authority),
         "skills_catalog_sha256": skills_catalog_digest(),
+        "host_toolchain": host_toolchain_binding(),
         "eval_normalization": {
             "approval_policy": "all",
             "plan_first_enabled": false,
@@ -364,6 +388,36 @@ fn run_eval_cell(
     let drift_ms = outcome.wall_ms.saturating_sub(outcome.monotonic_ms);
     let slept_ms = outcome.host_slept_ms.max(drift_ms);
     let censored = slept_ms > SUSPENSION_DRIFT_CENSOR_MS;
+    // Count the delegations the run actually executed from its durable
+    // events, so a subagent-arm report can prove the contrast it measures.
+    let delegations = outcome
+        .state
+        .as_ref()
+        .map(|state| {
+            let store = state.store.lock().expect("store lock");
+            crate::agent_read_model::agent_events_for_session(
+                &store,
+                &crate::runtime_values::phase16_task_id(),
+                Some(&outcome.session_id),
+            )
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|event| {
+                        event
+                            .summary
+                            .to_ascii_lowercase()
+                            .contains("subagent finished")
+                            || event
+                                .metadata
+                                .values()
+                                .any(|value| value.contains("cindx.agent.subagent-run.v1"))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+        })
+        .unwrap_or(0);
     let telemetry = outcome.telemetry.as_ref();
     let receipts = CaseReceipts {
         model_calls: telemetry
@@ -392,6 +446,7 @@ fn run_eval_cell(
             .unwrap_or(0),
         network_tool_calls: outcome.network_tool_calls,
         wall_clock_ms: outcome.wall_ms,
+        delegations,
     };
     let checks = check_postconditions(&workspace, &outcome.final_answer, &cell.case.postconditions);
     let mut error = outcome.run_error.clone();
@@ -515,6 +570,7 @@ fn per_arm_summary(report: &agent_eval::MatchedArmReport) -> serde_json::Value {
     for arm in &report.arms {
         let (mut cells, mut passed, mut calls, mut tokens, mut wall) =
             (0u64, 0u64, 0u64, 0u64, 0u64);
+        let mut delegations = 0u64;
         for case in &report.cases {
             for run in &case.arms {
                 if &run.arm != arm {
@@ -525,6 +581,7 @@ fn per_arm_summary(report: &agent_eval::MatchedArmReport) -> serde_json::Value {
                 calls += run.report.receipts.model_calls as u64;
                 tokens += run.report.receipts.total_tokens;
                 wall += run.report.receipts.wall_clock_ms;
+                delegations += run.report.receipts.delegations as u64;
             }
         }
         arms.insert(
@@ -535,6 +592,7 @@ fn per_arm_summary(report: &agent_eval::MatchedArmReport) -> serde_json::Value {
                 "model_calls": calls,
                 "total_tokens": tokens,
                 "wall_ms": wall,
+                "delegations": delegations,
             }),
         );
     }
@@ -563,8 +621,10 @@ fn rehearse(args: &[String]) -> i32 {
     let (report, _ledger) = run_matrix(&cases, &workspace_root, &config, false);
     let counters = server.counters();
     let report_path = out_dir.join("rehearsal-report.json");
-    if let Err(error) = std::fs::create_dir_all(&out_dir)
-        .and_then(|()| std::fs::write(&report_path, report.to_json()))
+    let report_json = report.to_json();
+    let report_digest = sha256_bytes(report_json.as_bytes());
+    if let Err(error) =
+        std::fs::create_dir_all(&out_dir).and_then(|()| std::fs::write(&report_path, report_json))
     {
         eprintln!("cannot write {report_path:?}: {error}");
         return 2;
@@ -577,6 +637,7 @@ fn rehearse(args: &[String]) -> i32 {
         "provider_calls_performed": 0,
         "suite_sha256": suite_digest,
         "matrix_sha256": matrix_digest(&case_ids),
+        "report_sha256": report_digest,
         "cells": report.cases.len() * FROZEN_ARMS.len(),
         "position_balanced": report.is_position_balanced(),
         "wall_ms": started.elapsed().as_millis() as u64,
@@ -616,6 +677,13 @@ fn execute(
         eprintln!("execute: --preflight <receipt.json> is required");
         return 2;
     };
+    let rehearsal_path = flag_value(args, "--rehearsal");
+    let Some(rehearsal_path) = rehearsal_path else {
+        eprintln!(
+            "execute: --rehearsal <receipt.json> is required — the frozen authorization's condition (a) is a green provider-free rehearsal of THIS suite/matrix on THIS revision"
+        );
+        return 2;
+    };
     let preflight: serde_json::Value = match std::fs::read_to_string(&preflight_path)
         .map_err(|error| error.to_string())
         .and_then(|raw| serde_json::from_str(&raw).map_err(|error| error.to_string()))
@@ -639,6 +707,70 @@ fn execute(
         }
     };
     let case_ids: Vec<String> = cases.iter().map(|case| case.id.clone()).collect();
+
+    // Condition (a) of the frozen authorization: a green rehearsal of this
+    // exact suite and matrix. Green means every cell's run completed (report
+    // errors null — postcondition failures are expected against the fake
+    // provider), the matrix was position-balanced, and the receipt digests
+    // match what is about to be executed.
+    let rehearsal: serde_json::Value = match std::fs::read_to_string(&rehearsal_path)
+        .map_err(|error| error.to_string())
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|error| error.to_string()))
+    {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("execute: rehearsal receipt unreadable: {error}");
+            return 2;
+        }
+    };
+    let rehearsal_report_path = rehearsal_path.with_file_name("rehearsal-report.json");
+    let rehearsal_report: agent_eval::MatchedArmReport =
+        match std::fs::read_to_string(&rehearsal_report_path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| serde_json::from_str(&raw).map_err(|error| error.to_string()))
+        {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!("execute: rehearsal report unreadable: {error}");
+                return 2;
+            }
+        };
+    let mut rehearsal_problems = Vec::new();
+    if rehearsal["schema"] != RUN_RECEIPT_SCHEMA || rehearsal["mode"] != "rehearse" {
+        rehearsal_problems.push("not a rehearsal receipt");
+    }
+    if rehearsal["suite_sha256"] != suite_digest {
+        rehearsal_problems.push("rehearsal ran a different suite digest");
+    }
+    if rehearsal["matrix_sha256"] != matrix_digest(&case_ids) {
+        rehearsal_problems.push("rehearsal ran a different matrix digest");
+    }
+    if rehearsal["cells"].as_u64() != Some((cases.len() * FROZEN_ARMS.len()) as u64) {
+        rehearsal_problems.push("rehearsal cell count does not match the frozen matrix");
+    }
+    if rehearsal["position_balanced"] != true {
+        rehearsal_problems.push("rehearsal was not position-balanced");
+    }
+    if rehearsal["report_sha256"] != sha256_file(&rehearsal_report_path).unwrap_or_default() {
+        rehearsal_problems.push("rehearsal report digest does not match its receipt");
+    }
+    let errored_cells = rehearsal_report
+        .cases
+        .iter()
+        .flat_map(|case| case.arms.iter())
+        .filter(|run| run.report.error.is_some())
+        .count();
+    if errored_cells > 0 {
+        rehearsal_problems.push("rehearsal cells did not all complete");
+    }
+    if !rehearsal_problems.is_empty() {
+        eprintln!(
+            "execute refuses: rehearsal not green ({})",
+            rehearsal_problems.join("; ")
+        );
+        return 2;
+    }
+
     let head = git_output(&["rev-parse", "HEAD"]).unwrap_or_default();
     let binary_path = std::env::current_exe().expect("driver binary path");
     let binary_digest = sha256_file(&binary_path).unwrap_or_default();
@@ -692,6 +824,9 @@ fn execute(
     if preflight["skills_catalog_sha256"] != skills_catalog_digest() {
         mismatch.push("skills catalog drifted since preflight");
     }
+    if preflight["host_toolchain"] != host_toolchain_binding() {
+        mismatch.push("host toolchain drifted or is unavailable since preflight");
+    }
     if !mismatch.is_empty() {
         eprintln!("execute refuses: {}", mismatch.join("; "));
         return 2;
@@ -729,6 +864,11 @@ fn execute(
         "preflight": {
             "path": preflight_path.display().to_string(),
             "sha256": sha256_file(&preflight_path).unwrap_or_default(),
+        },
+        "rehearsal": {
+            "path": rehearsal_path.display().to_string(),
+            "sha256": sha256_file(&rehearsal_path).unwrap_or_default(),
+            "report_sha256": sha256_file(&rehearsal_report_path).unwrap_or_default(),
         },
         // Lower bound: telemetry-charged model attempts only. Embedding calls
         // (workspace indexing/retrieval on default/high/xhigh) are real
@@ -792,19 +932,30 @@ pub fn product_eval_main(argv: Vec<String>) -> i32 {
     let provider_authority = matches!(mode.as_str(), "preflight" | "execute").then(|| {
         let mut config = crate::configuration_persistence::load_provider_config();
         crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
-        // The driver binary is unsigned, so its first keychain read raises an
-        // authorization prompt that a 1.5s bounded read cannot wait out. The
-        // driver is interactive at startup by design: retry with pauses so the
-        // operator has a real chance to approve, and fail closed in the mode's
-        // own config check if the key never arrives.
-        for attempt in 1..6u32 {
-            if !config.api_key.trim().is_empty() {
-                break;
-            }
+        // The bounded keychain read (1.5s) cannot wait out an authorization
+        // prompt, so the driver retries on a pace the operator can meet. The
+        // window is --key-wait seconds (default 60 preflight / 900 execute):
+        // a signed driver identity makes one "Always Allow" persist forever,
+        // and a long execute window lets an unattended chain survive until the
+        // operator returns and approves — every failed attempt stays
+        // provider-call-free, and the mode's own config check fails closed if
+        // the key never arrives.
+        // --key-wait <seconds> bounds the whole window (default 60 preflight /
+        // 900 execute). Pace: five quick 12s retries for an operator at the
+        // screen, then 5-minute pacing so an overnight wait cannot stack a
+        // dialog every few seconds. Every attempt is provider-call-free.
+        let key_wait_seconds = flag_value(args, "--key-wait")
+            .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+            .unwrap_or(if mode == "execute" { 900 } else { 60 });
+        let deadline = Instant::now() + std::time::Duration::from_secs(key_wait_seconds);
+        let mut attempt = 0u32;
+        while config.api_key.trim().is_empty() && Instant::now() < deadline {
+            attempt += 1;
+            let pace_secs = if attempt <= 5 { 12 } else { 300 };
             eprintln!(
-                "provider key not readable yet (attempt {attempt}/5) — approve the keychain prompt if one is showing; retrying in 12s"
+                "provider key not readable yet (attempt {attempt}, window {key_wait_seconds}s) — approve the keychain prompt if one is showing; retrying in {pace_secs}s"
             );
-            std::thread::sleep(std::time::Duration::from_secs(12));
+            std::thread::sleep(std::time::Duration::from_secs(pace_secs));
             crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
         }
         config

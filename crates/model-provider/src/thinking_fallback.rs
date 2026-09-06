@@ -10,10 +10,6 @@
 //! (possibly pre-prepared) request body, retries once, and suppresses the
 //! params at prepare time for the rest of the provider instance's life.
 
-use bytes::Bytes;
-
-use crate::prepared_payload::PreparedStreamingModelRequest;
-use crate::provider_receipt::request_payload_sha256;
 use crate::ModelError;
 
 /// True only for the precise provider rejection this fallback addresses: an
@@ -58,28 +54,70 @@ pub(crate) fn strip_thinking_params(body: &str) -> Option<String> {
     Some(stripped)
 }
 
-/// The streaming prepared request rebuilt without thinking params (fresh
-/// payload digest, same prompt estimate), or `None` when there is nothing to
-/// strip.
-pub(crate) fn streaming_prepared_without_thinking_params(
-    request: &PreparedStreamingModelRequest,
-) -> Option<PreparedStreamingModelRequest> {
-    let (body, estimated_prompt_tokens, _sha) = request.encoded_parts()?;
-    let text = std::str::from_utf8(body).ok()?;
-    let stripped = strip_thinking_params(text)?;
-    Some(PreparedStreamingModelRequest::encoded(
-        stripped,
-        estimated_prompt_tokens,
-    ))
+/// The exact `stream_options` segment the request builder emits. One owner
+/// for the shape so the stripper can never drift from the producer.
+pub(crate) const STREAM_OPTIONS_SEGMENT: &str = ",\"stream_options\":{\"include_usage\":true}";
+
+/// True only for an HTTP 400 whose message names `stream_options` — an
+/// endpoint that does not implement the OpenAI usage-chunk extension.
+pub(crate) fn is_stream_options_rejection(error: &ModelError) -> bool {
+    error.status_code == Some(400)
+        && error
+            .message
+            .to_ascii_lowercase()
+            .contains("stream_options")
 }
 
-/// The non-streaming encoded body rebuilt without thinking params (fresh
-/// payload digest), or `None` when there is nothing to strip.
-pub(crate) fn non_streaming_body_without_thinking_params(body: &Bytes) -> Option<(Bytes, String)> {
-    let text = std::str::from_utf8(body).ok()?;
-    let stripped = strip_thinking_params(text)?;
-    let digest = request_payload_sha256(stripped.as_bytes());
-    Some((Bytes::from(stripped), digest))
+/// Removes the exact `stream_options` segment, or `None` when absent.
+pub(crate) fn strip_stream_options(body: &str) -> Option<String> {
+    let start = body.find(STREAM_OPTIONS_SEGMENT)?;
+    let mut stripped = String::with_capacity(body.len());
+    stripped.push_str(&body[..start]);
+    stripped.push_str(&body[start + STREAM_OPTIONS_SEGMENT.len()..]);
+    Some(stripped)
+}
+
+/// The shared chained parameter-rejection fallback for both dispatch stages.
+/// Dispatches the current body; on an exact 400 naming the thinking params or
+/// the `stream_options` extension, strips that family (each at most once) and
+/// re-dispatches. The loop bound plus strip-returns-None-when-absent guarantee
+/// termination after at most two extra requests, in any rejection order —
+/// including one 400 naming both families.
+pub(crate) fn dispatch_with_parameter_fallbacks<Response>(
+    body: String,
+    mut dispatch: impl FnMut(&str) -> Result<Response, ModelError>,
+    note_thinking: impl Fn(&ModelError) -> bool,
+    note_stream_options: impl Fn(&ModelError) -> bool,
+) -> Result<Response, ModelError> {
+    let mut body = body;
+    let mut thinking_stripped = false;
+    let mut stream_options_stripped = false;
+    for _pass in 0..2 {
+        match dispatch(&body) {
+            Err(error) if !thinking_stripped && note_thinking(&error) => {
+                match strip_thinking_params(&body) {
+                    Some(stripped) => {
+                        body = stripped;
+                        thinking_stripped = true;
+                        continue;
+                    }
+                    None => return Err(error),
+                }
+            }
+            Err(error) if !stream_options_stripped && note_stream_options(&error) => {
+                match strip_stream_options(&body) {
+                    Some(stripped) => {
+                        body = stripped;
+                        stream_options_stripped = true;
+                        continue;
+                    }
+                    None => return Err(error),
+                }
+            }
+            other => return other,
+        }
+    }
+    dispatch(&body)
 }
 
 #[cfg(test)]
@@ -104,6 +142,29 @@ mod tests {
         assert!(strip_thinking_params(r#"{"model":"a","messages":[]}"#).is_none());
         // A malformed shape is refused rather than guessed at.
         assert!(strip_thinking_params(r#"{"enable_thinking":true}"#).is_none());
+    }
+
+    #[test]
+    fn stream_options_rejection_strips_only_its_own_segment() {
+        let body = format!(
+            r#"{{"model":"m","stream":true,"messages":[]{},"temperature":0.2}}"#,
+            STREAM_OPTIONS_SEGMENT
+        );
+        let stripped = strip_stream_options(&body).expect("segment strips");
+        assert_eq!(
+            stripped,
+            r#"{"model":"m","stream":true,"messages":[],"temperature":0.2}"#
+        );
+        assert!(strip_stream_options(&stripped).is_none());
+
+        let rejection =
+            ModelError::with_status(400, "InvalidParameter: stream_options is not supported");
+        assert!(is_stream_options_rejection(&rejection));
+        let other =
+            ModelError::with_status(400, "InvalidParameter: thinking_budget is not supported");
+        assert!(!is_stream_options_rejection(&other));
+        let server = ModelError::with_status(500, "stream_options exploded");
+        assert!(!is_stream_options_rejection(&server));
     }
 
     #[test]

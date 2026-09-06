@@ -37,8 +37,9 @@ impl OpenAiCompatibleProvider {
             generation_temperature,
             reasoning_effort,
             thinking_budget_override,
-
-            self.thinking_suppressed(),)?;
+            self.thinking_suppressed(),
+            self.stream_options_suppressed(),
+        )?;
         Ok(PreparedStreamingModelRequest::encoded(
             request_body,
             estimated_prompt_tokens,
@@ -69,31 +70,34 @@ impl OpenAiCompatibleProvider {
         if !self.config.is_ready() {
             return Err(ModelError::new("provider config is incomplete"));
         }
-        let result = self.dispatch_prepared_streaming(
-            request,
-            &mut *on_delta,
-            &mut *on_activity,
-            &mut *should_cancel,
-        );
-        match result {
-            Err(error) if self.note_thinking_parameter_rejection(&error) => {
-                // The endpoint rejected the thinking params this (possibly
-                // pre-prepared) body carries: strip them and retry once. A 400
-                // arrives before any body byte is consumed, so no delta was
-                // emitted and the retry is side-effect-free.
-                match crate::thinking_fallback::streaming_prepared_without_thinking_params(request)
-                {
-                    Some(stripped) => self.dispatch_prepared_streaming(
-                        &stripped,
-                        on_delta,
-                        on_activity,
-                        should_cancel,
-                    ),
-                    None => Err(error),
-                }
-            }
-            other => other,
-        }
+        // The chained parameter-rejection fallback lives in thinking_fallback
+        // (one owner for both dispatch stages): re-encode the stripped body as
+        // a fresh prepared request so its receipt digest reflects what was
+        // actually sent. A 400 arrives before any body byte is consumed, so no
+        // delta was emitted and retrying is side-effect-free.
+        let Some((body, estimated_prompt_tokens, _request_payload_sha256)) =
+            request.encoded_parts()
+        else {
+            return self.dispatch_prepared_streaming(request, on_delta, on_activity, should_cancel);
+        };
+        let body_text = String::from_utf8_lossy(body).into_owned();
+        crate::thinking_fallback::dispatch_with_parameter_fallbacks(
+            body_text,
+            |body| {
+                let prepared = PreparedStreamingModelRequest::encoded(
+                    body.to_string(),
+                    estimated_prompt_tokens,
+                );
+                self.dispatch_prepared_streaming(
+                    &prepared,
+                    &mut *on_delta,
+                    &mut *on_activity,
+                    &mut *should_cancel,
+                )
+            },
+            |error| self.note_thinking_parameter_rejection(error),
+            |error| self.note_stream_options_rejection(error),
+        )
     }
 
     fn dispatch_prepared_streaming(
@@ -341,6 +345,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         )
         .expect("text request should encode");
 
@@ -378,6 +383,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             false,
         )
         .expect("vision request should encode");

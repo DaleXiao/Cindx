@@ -410,7 +410,12 @@ off, while Default/High/Xhigh enable it with growing token budgets
 bounded output budgets spent on the answer instead of provider-side reasoning
 traces, the failure class behind the empty-content responses observed in the
 consumed Delivery Verification v3 and v4 Reviewer calls. Other model families
-keep their provider defaults. Because model support for these parameters is a
+keep their provider defaults. Streaming requests also carry
+`stream_options: {include_usage: true}` so the final usage chunk arrives even
+from providers that would otherwise omit token accounting (the consumed Phase
+4 run's fast tier reported zero tokens without it); an endpoint that rejects
+either extension with the exact 400 naming it gets the same
+strip-then-retry-then-suppress treatment. Because model support for these parameters is a
 provider×model fact no family predicate can know (the consumed Phase 4 run
 measured dashscope-hosted `kimi-k3` rejecting `thinking_budget` with a 400 on
 every High/Xhigh call), a provider whose model answers with exactly that

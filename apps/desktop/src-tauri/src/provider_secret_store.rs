@@ -86,19 +86,32 @@ pub(crate) fn read_provider_api_key() -> String {
 /// thread exits against a closed channel.
 #[cfg(target_os = "macos")]
 pub(crate) fn read_provider_api_key_bounded(timeout: std::time::Duration) -> Option<String> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(read_provider_api_key());
-    });
-    match receiver.recv_timeout(timeout) {
-        Ok(key) => Some(key),
-        Err(_) => {
+    match bounded_keychain_read(timeout, read_provider_api_key) {
+        Some(key) => Some(key),
+        None => {
             crate::persistence_runtime::append_startup_log(
                 "provider api key read did not complete within the startup bound; the keychain is probably waiting on an authorization prompt that cannot be shown (locked or asleep session). Starting without the key: unlock the session and the next run re-reads it, or re-enter the key in Settings.",
             );
             None
         }
     }
+}
+
+/// Runs one blocking keychain-shaped read on a worker thread and gives up
+/// after `timeout`. Generic over the read so the contract test can exercise
+/// the bound hermetically — touching the real item from a test binary raises
+/// an authorization prompt on every test run, because each rebuild is a new
+/// code identity to the item's ACL.
+#[cfg(target_os = "macos")]
+fn bounded_keychain_read(
+    timeout: std::time::Duration,
+    read: impl FnOnce() -> String + Send + 'static,
+) -> Option<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read());
+    });
+    receiver.recv_timeout(timeout).ok()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -220,18 +233,27 @@ pub(crate) fn validate_provider_base_url_for_credentials(base_url: &str) -> Resu
 mod tests {
     use super::*;
 
-    /// The bound is the contract. Whatever the keychain is doing — item present,
-    /// item absent, or waiting on an authorization prompt that cannot be shown —
-    /// the call returns inside the bound plus scheduling slack, so startup can
-    /// never hang on it again.
+    /// The bound is the contract, tested hermetically: a reader that blocks
+    /// longer than the bound is dropped and the call returns inside the bound
+    /// plus scheduling slack. The real keychain item is never touched — a test
+    /// binary is a fresh code identity on every rebuild, and reading the real
+    /// item raised an authorization prompt on every single test run.
     #[test]
     fn a_bounded_keychain_read_returns_inside_its_bound() {
         let started = std::time::Instant::now();
-        let _key = read_provider_api_key_bounded(KEYCHAIN_READ_TIMEOUT);
+        let blocked = bounded_keychain_read(std::time::Duration::from_millis(100), || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            "too-late".to_string()
+        });
         let elapsed = started.elapsed();
+        assert!(blocked.is_none(), "a read past the bound must be dropped");
         assert!(
-            elapsed < KEYCHAIN_READ_TIMEOUT + std::time::Duration::from_secs(3),
+            elapsed < std::time::Duration::from_secs(3),
             "the bounded keychain read took {elapsed:?}"
         );
+
+        let fast =
+            bounded_keychain_read(std::time::Duration::from_millis(500), || "key".to_string());
+        assert_eq!(fast.as_deref(), Some("key"));
     }
 }

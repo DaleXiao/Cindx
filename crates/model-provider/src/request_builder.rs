@@ -126,6 +126,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_and_vision(
         None,
         None,
         false,
+        false,
     )
 }
 
@@ -142,6 +143,7 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
     reasoning_effort: Option<&str>,
     thinking_budget_override: Option<u32>,
     suppress_thinking: bool,
+    suppress_stream_options: bool,
 ) -> Result<String, ModelError> {
     let mut declared_tool_calls = BTreeSet::new();
     let messages_json = messages
@@ -210,13 +212,23 @@ pub(super) fn build_chat_request_json_with_tools_output_limit_vision_and_images(
         .map(|value| value.clamp(0.0, 2.0))
         .map(|value| format!(",\"temperature\":{value}"))
         .unwrap_or_default();
+    // Ask OpenAI-compatible streams for the final usage chunk so token
+    // accounting does not depend on the provider volunteering it (the
+    // consumed Phase 4 run's fast tier reported zero tokens without it).
+    // The exact segment shape is owned with its stripper in thinking_fallback.
+    let stream_options_json = if stream && !suppress_stream_options {
+        crate::thinking_fallback::STREAM_OPTIONS_SEGMENT
+    } else {
+        ""
+    };
 
     Ok(format!(
-        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]{}{}{}{}}}",
+        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]{}{}{}{}{}}}",
         json_escape(model),
         if stream { "true" } else { "false" },
         messages_json.join(","),
         thinking_json,
+        stream_options_json,
         temperature_json,
         output_limit_json,
         tools_json
