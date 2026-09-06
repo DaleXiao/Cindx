@@ -754,14 +754,32 @@ fn execute(
     if rehearsal["report_sha256"] != sha256_file(&rehearsal_report_path).unwrap_or_default() {
         rehearsal_problems.push("rehearsal report digest does not match its receipt");
     }
-    let errored_cells = rehearsal_report
+    // Green means the INSTRUMENT worked, not that the scripted fake model
+    // satisfied the cases: a fake that only reads can never satisfy a
+    // write-requiring prompt, so run-outcome errors (`run ended ...`) are the
+    // expected fake-provider class. Instrument-class errors (censoring,
+    // not-run, composition failures) and cells that never charged a model
+    // call (no telemetry receipt) are what must be zero.
+    let instrument_errored_cells = rehearsal_report
         .cases
         .iter()
         .flat_map(|case| case.arms.iter())
-        .filter(|run| run.report.error.is_some())
+        .filter(|run| match &run.report.error {
+            None => false,
+            Some(error) => !error.starts_with("run ended `"),
+        })
         .count();
-    if errored_cells > 0 {
-        rehearsal_problems.push("rehearsal cells did not all complete");
+    if instrument_errored_cells > 0 {
+        rehearsal_problems.push("rehearsal had instrument-class cell errors");
+    }
+    let silent_cells = rehearsal_report
+        .cases
+        .iter()
+        .flat_map(|case| case.arms.iter())
+        .filter(|run| run.report.receipts.model_calls == 0)
+        .count();
+    if silent_cells > 0 {
+        rehearsal_problems.push("rehearsal cells produced no telemetry receipts");
     }
     if !rehearsal_problems.is_empty() {
         eprintln!(
