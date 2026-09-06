@@ -3,7 +3,10 @@
 //! The private config file keeps only a credential *reference*: on save the key
 //! is written to the login keychain through the Security.framework API and the
 //! on-disk `api_key` field is cleared; on load an empty field is filled from the
-//! keychain. Legacy conf files that still carry a plaintext key are migrated on
+//! keychain. Saving recreates the item (delete, then add) so the saving build
+//! is the item's creator and implicitly trusted — updating in place would
+//! preserve a legacy ACL that keeps prompting (see `store_provider_api_key`).
+//! Legacy conf files that still carry a plaintext key are migrated on
 //! the next save. The secret is handed to the framework in-process and never
 //! appears in argv, the environment, logs, or persisted events. If the keychain
 //! is unavailable the save falls back to the historical private (0600) conf file
@@ -39,6 +42,25 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 pub(crate) fn store_provider_api_key(key: &str) -> Result<(), String> {
     if key.is_empty() {
         return clear_provider_api_key();
+    }
+    // Recreate rather than update: the framework's set is find-then-update,
+    // and an update preserves the item's existing ACL. A legacy item created
+    // by an older ad-hoc-signed build keeps prompting for authorization on
+    // every launch, because that build's cdhash-based requirement can never
+    // match a newer binary. Deleting first makes the current binary the
+    // item's creator, and the creating application is implicitly trusted;
+    // with the stable local signing identity that trust survives rebuilds,
+    // so saving the key once ends the prompts for good. The delete may raise
+    // one authorization prompt for a legacy item — the user is present, since
+    // they are saving the key interactively.
+    match delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+        Ok(()) => {}
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {}
+        Err(error) => {
+            return Err(format!(
+                "keychain could not replace the provider credential: {error}"
+            ))
+        }
     }
     set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key.as_bytes())
         .map_err(|error| format!("keychain rejected the provider credential: {error}"))

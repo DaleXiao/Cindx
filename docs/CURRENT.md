@@ -37,7 +37,13 @@ The desktop app currently includes:
   display — degrades to a start without the key and says so in `startup.log`,
   instead of hanging startup with no window and no log line. Unlocking the session
   makes the next run re-read the key by itself and cache it; re-entering the key in
-  Settings always works.
+  Settings always works. Saving the key recreates the keychain item (delete, then
+  add) instead of updating it in place, so the saving build becomes the item's
+  creator and is implicitly trusted: a legacy item whose ACL still references an
+  old ad-hoc build — the cause of an authorization prompt on every launch — is
+  retired the next time the key is saved. On such a prompt, "Always Allow" (not
+  the default "Allow") also ends it immediately under the stable local signing
+  identity.
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed
