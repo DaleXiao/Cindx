@@ -160,6 +160,14 @@ impl OpenAiCompatibleProvider {
             .insert("model".to_string(), self.config.model.clone());
         attach_request_payload_sha256(&mut response.metadata, &request_payload_sha256);
         normalize_model_usage(&mut response, estimated_prompt_tokens);
+        // `stream_options` only ever rides streaming bodies, so a
+        // non-streaming response is never served "without the usage
+        // extension" — stamping it here would over-report (review D3).
+        crate::thinking_fallback::attach_parameter_suppression_facts(
+            &mut response.metadata,
+            self.thinking_suppressed(),
+            false,
+        );
         Ok(response)
     }
 }

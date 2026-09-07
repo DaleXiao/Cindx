@@ -422,7 +422,14 @@ every High/Xhigh call), a provider whose model answers with exactly that
 rejection strips the thinking parameters from the — possibly pre-prepared —
 request body, retries once, and omits them from every later request it
 prepares; all other errors surface unchanged. There is no runtime or
-per-effort toggle yet.
+per-effort toggle yet. Responses served under suppression stamp durable
+facts (`thinking_params_suppressed`, `usage_extension_suppressed`) into
+their metadata, which the model-turn event whitelists (foreground turns and
+collaboration stages) copy into the durable record, so the evaluation
+receipts' `thinking_suppressed_calls` counter can classify any arm with a
+nonzero count as treatment-undelivered on the thinking axis. Known
+boundary: child model calls on dedicated per-delegation provider instances
+leave no stamped durable event, so a zero count proves nothing for those.
 
 ## Run Lifecycle
 

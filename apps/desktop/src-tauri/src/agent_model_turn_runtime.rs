@@ -769,6 +769,10 @@ pub(crate) fn execute_agent_model_turn(
             "request_payload_sha256",
             "response_semantic_sha256",
             "provider_receipt_status",
+            // Parameter-suppression facts (thinking_fallback): durable proof
+            // of whether the effort tier's thinking treatment was delivered.
+            model_provider::THINKING_SUPPRESSED_METADATA_KEY,
+            model_provider::USAGE_EXTENSION_SUPPRESSED_METADATA_KEY,
         ] {
             if let Some(value) = response.metadata.get(key) {
                 metadata.insert(key.to_string(), value.clone());

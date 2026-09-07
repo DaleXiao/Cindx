@@ -350,6 +350,12 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
 ```
 
 Outputs (report, receipts) stay in the private out directory, never in Git.
+Per-cell receipts carry the treatment-delivery counters (`delegations`,
+`thinking_suppressed_calls`) counted from the run's own durable events, and
+the per-arm summaries aggregate both, so an arm whose foreground model turns
+were served under thinking suppression is treatment-undelivered readable
+from the receipt alone (child calls on dedicated per-delegation provider
+instances are the known unstamped boundary).
 The frozen successor suite is `crates/agent-eval/suite/delegation_v1.json`
 (four cases, two of them explicitly delegation-inducing; digest recorded in
 EVALUATION.md). The driver binary must be signed with the stable local

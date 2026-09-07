@@ -114,6 +114,90 @@ fn shipping_run_path_completes_headlessly_with_durable_lineage() {
     assert_eq!(counters.embeddings, 0, "fast performs no retrieval");
 }
 
+/// The treatment-delivered measurement chain: when the provider rejects the
+/// thinking parameters, the shipping run recovers via the compatibility
+/// fallback AND stamps the durable suppression fact onto its model-turn
+/// events — the exact key the evaluation driver counts into
+/// `thinking_suppressed_calls`. Without this, an effort arm whose thinking
+/// budget was stripped stays silently treatment-undelivered (the run-2
+/// confound this instrumentation exists to prevent).
+#[test]
+fn thinking_rejection_leaves_a_durable_suppression_fact_on_model_turns() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::write(workspace.path().join("README.md"), "line one\nline two\n")
+        .expect("seed README");
+    let server = FakeOpenAiServer::start_with_thinking_rejection("README says line one");
+
+    // The tier model must be thinking-default family (qwen/kimi/...), or the
+    // request carries no thinking params, there is nothing to strip, and the
+    // fallback correctly declines to retry — the mirror of production, where
+    // the tier models are exactly the families that send thinking params.
+    // `fast_model` is pinned because an empty pin falls back to the provider
+    // catalog's hardcoded fast default, which is not a thinking family.
+    let provider_config = ProviderConfig {
+        model: "kimi-k3".to_string(),
+        executor_model: "kimi-k3".to_string(),
+        fast_model: "kimi-k3".to_string(),
+        ..fake_eval_config(&server.base_url)
+    };
+    let outcome = drive_product_path_run(ProductPathRunRequest {
+        prompt: "Read README.md and answer with its first line.".to_string(),
+        effort: "fast".to_string(),
+        no_delegation: false,
+        provider_config,
+        workspace_root: workspace.path().to_path_buf(),
+        store_path: workspace.path().join("state.sqlite3"),
+    });
+
+    let state = outcome.state.as_ref().expect("composed state");
+    let events = {
+        let store = state.store.lock().expect("store lock");
+        crate::agent_read_model::agent_events_for_session(
+            &store,
+            &phase16_task_id(),
+            Some(&outcome.session_id),
+        )
+        .expect("session events should load")
+    };
+    assert_eq!(
+        outcome.status, "completed",
+        "the stripped retry should recover the run; error: {:?}",
+        outcome.run_error
+    );
+    // The same predicate the evaluation driver counts (ModelRequestFinished
+    // events carrying the key — assistant message events copy the same
+    // response metadata and must not double-count a call), so this assertion
+    // is the receipt's durable-fact pipeline itself, not a parallel copy. It
+    // runs over EVERY model turn of the run: the retry-recovered first turn
+    // and every later turn served under prepare-time suppression. That the
+    // later turns carry the fact pins the provider instance (and its
+    // suppression state) persisting across the run — the exact mechanism
+    // that silently voided run 2's high/xhigh tiers.
+    let model_turns = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ModelRequestFinished)
+        .count();
+    let suppressed_turns = events
+        .iter()
+        .filter(|event| {
+            event.kind == EventKind::ModelRequestFinished
+                && event
+                    .metadata
+                    .contains_key(model_provider::THINKING_SUPPRESSED_METADATA_KEY)
+        })
+        .count();
+    assert!(
+        model_turns > 0 && suppressed_turns == model_turns,
+        "every model turn served under suppression must carry the durable fact \
+         ({suppressed_turns} stamped of {model_turns} turns)"
+    );
+    assert_eq!(
+        server.counters().chat, 3,
+        "the rejected first request, its stripped retry (the tool-call turn), \
+         and the final-answer turn"
+    );
+}
+
 /// The second seam behavior: detached state jobs run against the host-owned
 /// state and report through the returned channel, with the caller keeping its
 /// timeout semantics (the guardian-review shape).

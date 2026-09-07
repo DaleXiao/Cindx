@@ -625,6 +625,7 @@ fn case_report_serializes_for_suite_json_output() {
             network_tool_calls: 0,
             wall_clock_ms: 5,
             delegations: 1,
+            thinking_suppressed_calls: 0,
         },
     };
     let suite = SuiteReport::new(vec![report]);

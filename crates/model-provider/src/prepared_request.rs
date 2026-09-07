@@ -149,6 +149,11 @@ impl OpenAiCompatibleProvider {
             request_payload_sha256,
         );
         normalize_model_usage(&mut response, estimated_prompt_tokens);
+        crate::thinking_fallback::attach_parameter_suppression_facts(
+            &mut response.metadata,
+            self.thinking_suppressed(),
+            self.stream_options_suppressed(),
+        );
         Ok(response)
     }
 }

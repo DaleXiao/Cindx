@@ -31,6 +31,9 @@ mod streaming_finish;
 mod streaming_response;
 mod streaming_wire;
 mod thinking_fallback;
+pub use thinking_fallback::{
+    THINKING_SUPPRESSED_METADATA_KEY, USAGE_EXTENSION_SUPPRESSED_METADATA_KEY,
+};
 mod usage;
 
 use redirect_policy::{api_key_safe_redirect_policy, provider_redirect_policy};
@@ -1207,6 +1210,14 @@ mod tests {
             .complete_once(high_effort_request(ModelCallMode::NonStreaming))
             .expect("the stripped retry should recover");
         assert_eq!(response.message.content, "done");
+        assert_eq!(
+            response
+                .metadata
+                .get(crate::THINKING_SUPPRESSED_METADATA_KEY)
+                .map(String::as_str),
+            Some("true"),
+            "the recovered response must prove its thinking treatment was stripped"
+        );
         {
             let bodies = bodies.lock().expect("recorded bodies");
             assert_eq!(bodies.len(), 2, "one rejection plus one stripped retry");
@@ -1221,13 +1232,42 @@ mod tests {
         }
 
         // The recorded rejection now suppresses at prepare time: the next
-        // call is a single request with no thinking params and no 400.
-        provider
+        // call is a single request with no thinking params and no 400, and
+        // every later response carries the suppression fact for receipts.
+        let suppressed_response = provider
             .complete_once(high_effort_request(ModelCallMode::NonStreaming))
             .expect("suppressed call succeeds");
+        assert_eq!(
+            suppressed_response
+                .metadata
+                .get(crate::THINKING_SUPPRESSED_METADATA_KEY)
+                .map(String::as_str),
+            Some("true"),
+            "later responses must keep stamping the suppression fact"
+        );
         let bodies = bodies.lock().expect("recorded bodies");
         assert_eq!(bodies.len(), 3);
         assert!(!bodies[2].contains("enable_thinking"));
+    }
+
+    #[test]
+    fn an_unrejected_provider_never_stamps_suppression_facts() {
+        let ok_body = r#"{"id":"r1","model":"kimi-k3","choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#;
+        let (base_url, _bodies, _server) =
+            serve_sequential_chat_responses(vec![(200, ok_body.to_string())]);
+        let provider = thinking_provider(base_url);
+        let response = provider
+            .complete_once(high_effort_request(ModelCallMode::NonStreaming))
+            .expect("clean call succeeds");
+        assert!(
+            !response
+                .metadata
+                .contains_key(crate::THINKING_SUPPRESSED_METADATA_KEY)
+                && !response
+                    .metadata
+                    .contains_key(crate::USAGE_EXTENSION_SUPPRESSED_METADATA_KEY),
+            "a provider that never hit a rejection delivered its full treatment"
+        );
     }
 
     #[test]
@@ -1299,6 +1339,14 @@ mod tests {
             .complete_streaming(high_effort_request(ModelCallMode::Streaming), |_| {})
             .expect("the stripped streaming retry should recover");
         assert_eq!(response.message.content, "done");
+        assert_eq!(
+            response
+                .metadata
+                .get(crate::USAGE_EXTENSION_SUPPRESSED_METADATA_KEY)
+                .map(String::as_str),
+            Some("true"),
+            "the recovered response must prove its usage extension was stripped"
+        );
         {
             let bodies = bodies.lock().expect("recorded bodies");
             assert_eq!(bodies.len(), 2);
@@ -1341,9 +1389,24 @@ mod tests {
         assert!(bodies[0].contains("thinking_budget") && bodies[0].contains("stream_options"));
         assert!(!bodies[1].contains("enable_thinking") && bodies[1].contains("stream_options"));
         assert!(!bodies[2].contains("enable_thinking") && !bodies[2].contains("stream_options"));
-        // Both rejections were learned for future prepares.
+        // Both rejections were learned for future prepares, and the recovered
+        // response stamps both suppression facts for durable receipts.
         assert!(provider.thinking_suppressed());
         assert!(provider.stream_options_suppressed());
+        assert_eq!(
+            response
+                .metadata
+                .get(crate::THINKING_SUPPRESSED_METADATA_KEY)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            response
+                .metadata
+                .get(crate::USAGE_EXTENSION_SUPPRESSED_METADATA_KEY)
+                .map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]

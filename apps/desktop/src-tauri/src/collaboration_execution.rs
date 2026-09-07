@@ -580,6 +580,12 @@ fn collaboration_usage_metadata(response_metadata: &Metadata, configured_model: 
         "request_payload_sha256",
         "response_semantic_sha256",
         "provider_receipt_status",
+        // Parameter-suppression facts (thinking_fallback): collaboration
+        // stage turns are durable ModelRequestFinished producers too, and a
+        // silently stripped thinking treatment must stay receipt-visible on
+        // every path that serves a model turn.
+        model_provider::THINKING_SUPPRESSED_METADATA_KEY,
+        model_provider::USAGE_EXTENSION_SUPPRESSED_METADATA_KEY,
     ] {
         if let Some(value) = response_metadata.get(key) {
             usage.insert(key.to_string(), value.clone());

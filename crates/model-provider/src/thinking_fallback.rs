@@ -10,7 +10,37 @@
 //! (possibly pre-prepared) request body, retries once, and suppresses the
 //! params at prepare time for the rest of the provider instance's life.
 
+use agent_core::Metadata;
+
 use crate::ModelError;
+
+/// Response-metadata fact: this response was served with the thinking
+/// parameters suppressed (the endpoint rejected them on a body that actually
+/// carried them), so an effort tier's thinking budget was NOT delivered on
+/// this call. The durable model-turn event whitelists copy this key, and
+/// evaluation receipts classify a nonzero count as treatment-undelivered.
+pub const THINKING_SUPPRESSED_METADATA_KEY: &str = "thinking_params_suppressed";
+
+/// Response-metadata fact: this streaming response was served without the
+/// `stream_options` usage extension (the endpoint rejected it). Non-streaming
+/// bodies never carry the extension and are never stamped.
+pub const USAGE_EXTENSION_SUPPRESSED_METADATA_KEY: &str = "usage_extension_suppressed";
+
+/// Stamps the suppression facts a response was served under; absent flags leave the metadata untouched.
+pub(crate) fn attach_parameter_suppression_facts(
+    metadata: &mut Metadata,
+    thinking_suppressed: bool,
+    usage_extension_suppressed: bool,
+) {
+    if thinking_suppressed {
+        let key = THINKING_SUPPRESSED_METADATA_KEY;
+        metadata.insert(key.to_string(), "true".to_string());
+    }
+    if usage_extension_suppressed {
+        let key = USAGE_EXTENSION_SUPPRESSED_METADATA_KEY;
+        metadata.insert(key.to_string(), "true".to_string());
+    }
+}
 
 /// True only for the precise provider rejection this fallback addresses: an
 /// HTTP 400 whose message names a thinking parameter. Deliberately narrow —
@@ -80,9 +110,13 @@ pub(crate) fn strip_stream_options(body: &str) -> Option<String> {
 /// The shared chained parameter-rejection fallback for both dispatch stages.
 /// Dispatches the current body; on an exact 400 naming the thinking params or
 /// the `stream_options` extension, strips that family (each at most once) and
-/// re-dispatches. The loop bound plus strip-returns-None-when-absent guarantee
-/// termination after at most two extra requests, in any rejection order —
-/// including one 400 naming both families.
+/// re-dispatches. A rejection is recorded (for prepare-time suppression and
+/// the response-metadata facts) only when the body actually carried that
+/// family's strippable segment, so a 400 merely naming a parameter this
+/// request never sent cannot mark the provider treatment-undelivered. The
+/// loop bound plus strip-returns-None-when-absent guarantee termination
+/// after at most two extra requests, in any rejection order — including one
+/// 400 naming both families.
 pub(crate) fn dispatch_with_parameter_fallbacks<Response>(
     body: String,
     mut dispatch: impl FnMut(&str) -> Result<Response, ModelError>,
@@ -94,9 +128,10 @@ pub(crate) fn dispatch_with_parameter_fallbacks<Response>(
     let mut stream_options_stripped = false;
     for _pass in 0..2 {
         match dispatch(&body) {
-            Err(error) if !thinking_stripped && note_thinking(&error) => {
+            Err(error) if !thinking_stripped && is_thinking_parameter_rejection(&error) => {
                 match strip_thinking_params(&body) {
                     Some(stripped) => {
+                        note_thinking(&error);
                         body = stripped;
                         thinking_stripped = true;
                         continue;
@@ -104,9 +139,10 @@ pub(crate) fn dispatch_with_parameter_fallbacks<Response>(
                     None => return Err(error),
                 }
             }
-            Err(error) if !stream_options_stripped && note_stream_options(&error) => {
+            Err(error) if !stream_options_stripped && is_stream_options_rejection(&error) => {
                 match strip_stream_options(&body) {
                     Some(stripped) => {
+                        note_stream_options(&error);
                         body = stripped;
                         stream_options_stripped = true;
                         continue;

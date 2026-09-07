@@ -1008,8 +1008,9 @@ const modelProviderModuleBudgets = new Map([
   // consumed Phase 4 run's in-vivo kimi-k3 finding) and the stream_options
   // usage extension — exact-400 detect, strip-from-encoded-body, retry-once,
   // prepare-time suppression, with both segment shapes owned beside their
-  // strippers.
-  ["thinking_fallback.rs", 145],
+  // strippers, plus the response-metadata suppression facts (run-2 confound
+  // disclosure) that make treatment-undelivered arms receipt-visible.
+  ["thinking_fallback.rs", 160],
   ["streaming_wire.rs", 160],
   ["usage.rs", 220],
 ]);

@@ -176,6 +176,13 @@ pub struct CaseReceipts {
     /// to measure instead of leaving the evidence in per-cell event stores.
     #[serde(default)]
     pub delegations: usize,
+    /// Model turns served with the thinking parameters suppressed (the
+    /// endpoint rejected them). Any arm with a nonzero count did NOT receive
+    /// its effort tier's thinking treatment and must be classified
+    /// treatment-undelivered on the thinking axis. Counted by the product-path
+    /// driver from the durable model-turn events; 0 in the kernel runner.
+    #[serde(default)]
+    pub thinking_suppressed_calls: usize,
 }
 
 impl CaseReceipts {

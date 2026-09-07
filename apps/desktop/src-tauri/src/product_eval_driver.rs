@@ -390,7 +390,7 @@ fn run_eval_cell(
     let censored = slept_ms > SUSPENSION_DRIFT_CENSOR_MS;
     // Count the delegations the run actually executed from its durable
     // events, so a subagent-arm report can prove the contrast it measures.
-    let delegations = outcome
+    let (delegations, thinking_suppressed_calls) = outcome
         .state
         .as_ref()
         .map(|state| {
@@ -401,7 +401,7 @@ fn run_eval_cell(
                 Some(&outcome.session_id),
             )
             .map(|events| {
-                events
+                let delegations = events
                     .iter()
                     .filter(|event| {
                         event
@@ -413,11 +413,27 @@ fn run_eval_cell(
                                 .values()
                                 .any(|value| value.contains("cindx.agent.subagent-run.v1"))
                     })
-                    .count()
+                    .count();
+                // Model turns served with thinking suppressed: the durable
+                // proof of whether the effort tier's thinking treatment was
+                // actually delivered (Phase 4 confound disclosure, run 2).
+                // Counted over ModelRequestFinished only — assistant message
+                // events copy the same response metadata and must not
+                // double-count a call.
+                let thinking_suppressed_calls = events
+                    .iter()
+                    .filter(|event| {
+                        event.kind == agent_core::EventKind::ModelRequestFinished
+                            && event
+                                .metadata
+                                .contains_key(model_provider::THINKING_SUPPRESSED_METADATA_KEY)
+                    })
+                    .count();
+                (delegations, thinking_suppressed_calls)
             })
-            .unwrap_or(0)
+            .unwrap_or((0, 0))
         })
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
     let telemetry = outcome.telemetry.as_ref();
     let receipts = CaseReceipts {
         model_calls: telemetry
@@ -447,6 +463,7 @@ fn run_eval_cell(
         network_tool_calls: outcome.network_tool_calls,
         wall_clock_ms: outcome.wall_ms,
         delegations,
+        thinking_suppressed_calls,
     };
     let checks = check_postconditions(&workspace, &outcome.final_answer, &cell.case.postconditions);
     let mut error = outcome.run_error.clone();
@@ -571,6 +588,7 @@ fn per_arm_summary(report: &agent_eval::MatchedArmReport) -> serde_json::Value {
         let (mut cells, mut passed, mut calls, mut tokens, mut wall) =
             (0u64, 0u64, 0u64, 0u64, 0u64);
         let mut delegations = 0u64;
+        let mut thinking_suppressed = 0u64;
         for case in &report.cases {
             for run in &case.arms {
                 if &run.arm != arm {
@@ -582,6 +600,7 @@ fn per_arm_summary(report: &agent_eval::MatchedArmReport) -> serde_json::Value {
                 tokens += run.report.receipts.total_tokens;
                 wall += run.report.receipts.wall_clock_ms;
                 delegations += run.report.receipts.delegations as u64;
+                thinking_suppressed += run.report.receipts.thinking_suppressed_calls as u64;
             }
         }
         arms.insert(
@@ -593,6 +612,7 @@ fn per_arm_summary(report: &agent_eval::MatchedArmReport) -> serde_json::Value {
                 "total_tokens": tokens,
                 "wall_ms": wall,
                 "delegations": delegations,
+                "thinking_suppressed_calls": thinking_suppressed,
             }),
         );
     }

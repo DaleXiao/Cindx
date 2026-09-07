@@ -30,7 +30,7 @@ use agent_storage::SqliteStore;
 use std::io::{BufRead, BufReader, Read as IoRead, Write as IoWrite};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -139,10 +139,28 @@ pub(crate) struct FakeOpenAiServer {
 
 impl FakeOpenAiServer {
     pub(crate) fn start(final_answer: &str) -> Self {
+        Self::start_inner(final_answer, false)
+    }
+
+    /// The same double with the first chat request answered by the exact
+    /// provider 400 that rejects `thinking_budget` (the shape seen in the
+    /// consumed Phase 4 run 1). This arms the provider's compatibility
+    /// fallback inside the harness so tests can prove the suppression fact
+    /// reaches the durable model-turn events — the key the evaluation driver
+    /// counts into `thinking_suppressed_calls` — instead of staying
+    /// provider-internal and silently voiding an effort arm's treatment.
+    #[cfg(test)]
+    pub(crate) fn start_with_thinking_rejection(final_answer: &str) -> Self {
+        Self::start_inner(final_answer, true)
+    }
+
+    fn start_inner(final_answer: &str, thinking_rejection: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("fake provider should bind");
         let port = listener.local_addr().expect("listener address").port();
         let counters = Arc::new(Mutex::new(FakeProviderCounters::default()));
         let server_counters = counters.clone();
+        let rejection_armed = Arc::new(AtomicBool::new(thinking_rejection));
+        let server_rejection = rejection_armed.clone();
         let answer = final_answer.to_string();
         let server = std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -191,7 +209,14 @@ impl FakeOpenAiServer {
                 let body_text = String::from_utf8_lossy(&body).to_string();
                 let streaming = body_text.replace(' ', "").contains("\"stream\":true");
                 let embeddings = request_line.contains("embeddings");
-                let payload = if embeddings {
+                let rejected = !embeddings && server_rejection.swap(false, Ordering::SeqCst);
+                let payload = if rejected {
+                    {
+                        let mut counters = server_counters.lock().expect("fake counters");
+                        counters.chat += 1;
+                    }
+                    "{\"error\":{\"message\":\"InternalError.Algo.InvalidParameter: Parameter thinking_budget is not supported.\",\"type\":\"invalid_request_error\"}}".to_string()
+                } else if embeddings {
                     {
                         let mut counters = server_counters.lock().expect("fake counters");
                         counters.embeddings += 1;
@@ -214,13 +239,18 @@ impl FakeOpenAiServer {
                         )
                     }
                 };
-                let content_type = if streaming && !embeddings {
+                let content_type = if streaming && !embeddings && !rejected {
                     "text/event-stream"
                 } else {
                     "application/json"
                 };
+                let status_line = if rejected {
+                    "HTTP/1.1 400 Bad Request"
+                } else {
+                    "HTTP/1.1 200 OK"
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
                     payload.len()
                 );
                 if stream.write_all(response.as_bytes()).is_err() {
