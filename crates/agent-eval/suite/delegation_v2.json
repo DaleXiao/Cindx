@@ -1,0 +1,292 @@
+[
+ {
+  "id": "reasoning-audit-fanout",
+  "category": "multi_step",
+  "prompt": "Six service configuration files live under services/: auth.py, payments.py, search.py, notify.py, billing.py, users.py. Review all six. Compute the sum of the MAX_RETRIES values across the six services, and identify which service has the highest REQUEST_TIMEOUT. Write audit.md containing a section headed '## Retries' with the exact line SUM_RETRIES=<sum> and a section headed '## Slowest service' with the exact line SLOWEST=<service name, the file name without its extension>. You may parallelize the independent per-file review work through delegation if you wish. Do not run shell commands or scripts; use the file tools for all work. End your final answer with the exact line: AUDIT COMPLETE.",
+  "fixture": [
+   {
+    "path": "services/auth.py",
+    "content": "\"\"\"Auth service configuration.\"\"\"\n\nSERVICE_NAME = \"auth\"\nMAX_RETRIES = 3\nREQUEST_TIMEOUT = 30\nCACHE_LIMIT_MB = 128\n\n\ndef describe():\n    return f\"service={SERVICE_NAME} retries={MAX_RETRIES} timeout={REQUEST_TIMEOUT}\"\n"
+   },
+   {
+    "path": "services/payments.py",
+    "content": "\"\"\"Payments service configuration.\"\"\"\n\nSERVICE_NAME = \"payments\"\nMAX_RETRIES = 5\nREQUEST_TIMEOUT = 120\nCACHE_LIMIT_MB = 512\n\n\ndef describe():\n    return f\"service={SERVICE_NAME} retries={MAX_RETRIES} timeout={REQUEST_TIMEOUT}\"\n"
+   },
+   {
+    "path": "services/search.py",
+    "content": "\"\"\"Search service configuration.\"\"\"\n\nSERVICE_NAME = \"search\"\nMAX_RETRIES = 2\nREQUEST_TIMEOUT = 45\nCACHE_LIMIT_MB = 256\n\n\ndef describe():\n    return f\"service={SERVICE_NAME} retries={MAX_RETRIES} timeout={REQUEST_TIMEOUT}\"\n"
+   },
+   {
+    "path": "services/notify.py",
+    "content": "\"\"\"Notify service configuration.\"\"\"\n\nSERVICE_NAME = \"notify\"\nMAX_RETRIES = 4\nREQUEST_TIMEOUT = 60\nCACHE_LIMIT_MB = 64\n\n\ndef describe():\n    return f\"service={SERVICE_NAME} retries={MAX_RETRIES} timeout={REQUEST_TIMEOUT}\"\n"
+   },
+   {
+    "path": "services/billing.py",
+    "content": "\"\"\"Billing service configuration.\"\"\"\n\nSERVICE_NAME = \"billing\"\nMAX_RETRIES = 7\nREQUEST_TIMEOUT = 90\nCACHE_LIMIT_MB = 384\n\n\ndef describe():\n    return f\"service={SERVICE_NAME} retries={MAX_RETRIES} timeout={REQUEST_TIMEOUT}\"\n"
+   },
+   {
+    "path": "services/users.py",
+    "content": "\"\"\"Users service configuration.\"\"\"\n\nSERVICE_NAME = \"users\"\nMAX_RETRIES = 3\nREQUEST_TIMEOUT = 75\nCACHE_LIMIT_MB = 192\n\n\ndef describe():\n    return f\"service={SERVICE_NAME} retries={MAX_RETRIES} timeout={REQUEST_TIMEOUT}\"\n"
+   }
+  ],
+  "allowed_tools": [
+   "file.read",
+   "file.read_many",
+   "file.search",
+   "file.write",
+   "task"
+  ],
+  "postconditions": [
+   {
+    "type": "file_contains",
+    "path": "audit.md",
+    "needle": "## Retries"
+   },
+   {
+    "type": "file_contains",
+    "path": "audit.md",
+    "needle": "SUM_RETRIES=24"
+   },
+   {
+    "type": "file_contains",
+    "path": "audit.md",
+    "needle": "## Slowest service"
+   },
+   {
+    "type": "file_contains",
+    "path": "audit.md",
+    "needle": "SLOWEST=payments"
+   },
+   {
+    "type": "output_contains",
+    "needle": "AUDIT COMPLETE"
+   }
+  ],
+  "budget": {
+   "max_turns": 12,
+   "max_tool_calls": 24
+  }
+ },
+ {
+  "id": "reasoning-crossref-repair",
+  "category": "code_edit",
+  "prompt": "The function process() in src/api.py accepts exactly two arguments: (order, strict). Find every call to process() inside src/jobs/ (four files: importer.py, exporter.py, audit.py, retry.py). Exactly one call site passes the wrong number of arguments. Repair that call site so it keeps its intended strictness; the repaired call site must read exactly `return process(order, True)`. Then write fix-report.md listing all four call-site file names, marking the repaired one FIXED and the others OK. You may parallelize the independent per-file review work through delegation if you wish. Do not run shell commands or scripts; use the file tools for all work. End your final answer with the exact line: REPAIR COMPLETE.",
+  "fixture": [
+   {
+    "path": "src/api.py",
+    "content": "\"\"\"Shared order API.\"\"\"\n\n\ndef process(order, strict=False):\n    return (order, strict)\n"
+   },
+   {
+    "path": "src/jobs/importer.py",
+    "content": "from src.api import process\n\n\ndef run(order):\n    return process(order, True)\n"
+   },
+   {
+    "path": "src/jobs/exporter.py",
+    "content": "from src.api import process\n\n\ndef run(order):\n    return process(order, False)\n"
+   },
+   {
+    "path": "src/jobs/audit.py",
+    "content": "from src.api import process\n\n\ndef run(order):\n    return process(order, True, 3)\n"
+   },
+   {
+    "path": "src/jobs/retry.py",
+    "content": "from src.api import process\n\n\ndef run(order):\n    return process(order, False)\n"
+   }
+  ],
+  "allowed_tools": [
+   "file.read",
+   "file.read_many",
+   "file.search",
+   "file.patch",
+   "file.write",
+   "task"
+  ],
+  "postconditions": [
+   {
+    "type": "file_contains",
+    "path": "src/jobs/audit.py",
+    "needle": "return process(order, True)"
+   },
+   {
+    "type": "file_contains",
+    "path": "fix-report.md",
+    "needle": "audit.py"
+   },
+   {
+    "type": "file_contains",
+    "path": "fix-report.md",
+    "needle": "FIXED"
+   },
+   {
+    "type": "file_contains",
+    "path": "fix-report.md",
+    "needle": "importer.py"
+   },
+   {
+    "type": "file_contains",
+    "path": "fix-report.md",
+    "needle": "exporter.py"
+   },
+   {
+    "type": "file_contains",
+    "path": "fix-report.md",
+    "needle": "retry.py"
+   },
+   {
+    "type": "output_contains",
+    "needle": "REPAIR COMPLETE"
+   }
+  ],
+  "budget": {
+   "max_turns": 12,
+   "max_tool_calls": 24
+  }
+ },
+ {
+  "id": "reasoning-corpus-needle",
+  "category": "multi_step",
+  "prompt": "The notes/ directory holds ten markdown notes, notes/n01.md through notes/n10.md. Exactly four of them mention the config key retention_days, with conflicting values. Find all four mentions, determine which value occurs most often among them (the majority is unique), and identify the note that sets retention_days to 90. Write answer.md containing the exact line MAJORITY=<value> and the exact line OUTLIER_NOTE=<note file name without its extension>. You may parallelize the independent per-file review work through delegation if you wish. Do not run shell commands or scripts; use the file tools for all work. End your final answer with the exact line: NEEDLE FOUND.",
+  "fixture": [
+   {
+    "path": "notes/n01.md",
+    "content": "# Deployment notes\n\nSection 1: deployment guidance item 1 for the team.\n\nSection 2: deployment guidance item 2 for the team.\n\nSection 3: deployment guidance item 3 for the team.\n\nSection 4: deployment guidance item 4 for the team.\n\nSection 5: deployment guidance item 5 for the team.\n\nSection 6: deployment guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n02.md",
+    "content": "# Backups notes\n\nSection 1: backups guidance item 1 for the team.\n\nretention_days = 7\n\nSection 2: backups guidance item 2 for the team.\n\nSection 3: backups guidance item 3 for the team.\n\nSection 4: backups guidance item 4 for the team.\n\nSection 5: backups guidance item 5 for the team.\n\nSection 6: backups guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n03.md",
+    "content": "# Monitoring notes\n\nSection 1: monitoring guidance item 1 for the team.\n\nSection 2: monitoring guidance item 2 for the team.\n\nSection 3: monitoring guidance item 3 for the team.\n\nSection 4: monitoring guidance item 4 for the team.\n\nSection 5: monitoring guidance item 5 for the team.\n\nSection 6: monitoring guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n04.md",
+    "content": "# Onboarding notes\n\nSection 1: onboarding guidance item 1 for the team.\n\nSection 2: onboarding guidance item 2 for the team.\n\nSection 3: onboarding guidance item 3 for the team.\n\nSection 4: onboarding guidance item 4 for the team.\n\nSection 5: onboarding guidance item 5 for the team.\n\nSection 6: onboarding guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n05.md",
+    "content": "# Indexing notes\n\nSection 1: indexing guidance item 1 for the team.\n\nretention_days = 30\n\nSection 2: indexing guidance item 2 for the team.\n\nSection 3: indexing guidance item 3 for the team.\n\nSection 4: indexing guidance item 4 for the team.\n\nSection 5: indexing guidance item 5 for the team.\n\nSection 6: indexing guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n06.md",
+    "content": "# Caching notes\n\nSection 1: caching guidance item 1 for the team.\n\nSection 2: caching guidance item 2 for the team.\n\nSection 3: caching guidance item 3 for the team.\n\nSection 4: caching guidance item 4 for the team.\n\nSection 5: caching guidance item 5 for the team.\n\nSection 6: caching guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n07.md",
+    "content": "# Webhooks notes\n\nSection 1: webhooks guidance item 1 for the team.\n\nretention_days = 30\n\nSection 2: webhooks guidance item 2 for the team.\n\nSection 3: webhooks guidance item 3 for the team.\n\nSection 4: webhooks guidance item 4 for the team.\n\nSection 5: webhooks guidance item 5 for the team.\n\nSection 6: webhooks guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n08.md",
+    "content": "# Reporting notes\n\nSection 1: reporting guidance item 1 for the team.\n\nSection 2: reporting guidance item 2 for the team.\n\nSection 3: reporting guidance item 3 for the team.\n\nSection 4: reporting guidance item 4 for the team.\n\nSection 5: reporting guidance item 5 for the team.\n\nSection 6: reporting guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n09.md",
+    "content": "# Migration notes\n\nSection 1: migration guidance item 1 for the team.\n\nretention_days = 90\n\nSection 2: migration guidance item 2 for the team.\n\nSection 3: migration guidance item 3 for the team.\n\nSection 4: migration guidance item 4 for the team.\n\nSection 5: migration guidance item 5 for the team.\n\nSection 6: migration guidance item 6 for the team.\n"
+   },
+   {
+    "path": "notes/n10.md",
+    "content": "# Alerting notes\n\nSection 1: alerting guidance item 1 for the team.\n\nSection 2: alerting guidance item 2 for the team.\n\nSection 3: alerting guidance item 3 for the team.\n\nSection 4: alerting guidance item 4 for the team.\n\nSection 5: alerting guidance item 5 for the team.\n\nSection 6: alerting guidance item 6 for the team.\n"
+   }
+  ],
+  "allowed_tools": [
+   "file.read",
+   "file.read_many",
+   "file.search",
+   "file.write",
+   "task"
+  ],
+  "postconditions": [
+   {
+    "type": "file_contains",
+    "path": "answer.md",
+    "needle": "MAJORITY=30"
+   },
+   {
+    "type": "file_contains",
+    "path": "answer.md",
+    "needle": "OUTLIER_NOTE=n09"
+   },
+   {
+    "type": "output_contains",
+    "needle": "NEEDLE FOUND"
+   }
+  ],
+  "budget": {
+   "max_turns": 12,
+   "max_tool_calls": 24
+  }
+ },
+ {
+  "id": "reasoning-totals-chain",
+  "category": "multi_step",
+  "prompt": "Five CSV files live under data/: q1.csv through q5.csv, each with a name,value header and six data rows. Compute the sum of the value column for each file and the grand total across all five sums. Write totals.md containing the exact lines Q1=<sum>, Q2=<sum>, Q3=<sum>, Q4=<sum>, Q5=<sum>, and GRAND=<grand total>. You may parallelize the independent per-file work through delegation if you wish. Do not run shell commands or scripts; use the file tools for all work. End your final answer with the exact line: TOTALS WRITTEN.",
+  "fixture": [
+   {
+    "path": "data/q1.csv",
+    "content": "name,value\nq1-metric-1,12\nq1-metric-2,7\nq1-metric-3,20\nq1-metric-4,3\nq1-metric-5,15\nq1-metric-6,8\n"
+   },
+   {
+    "path": "data/q2.csv",
+    "content": "name,value\nq2-metric-1,30\nq2-metric-2,25\nq2-metric-3,41\nq2-metric-4,17\nq2-metric-5,9\nq2-metric-6,22\n"
+   },
+   {
+    "path": "data/q3.csv",
+    "content": "name,value\nq3-metric-1,5\nq3-metric-2,11\nq3-metric-3,4\nq3-metric-4,19\nq3-metric-5,7\nq3-metric-6,13\n"
+   },
+   {
+    "path": "data/q4.csv",
+    "content": "name,value\nq4-metric-1,40\nq4-metric-2,36\nq4-metric-3,28\nq4-metric-4,45\nq4-metric-5,33\nq4-metric-6,50\n"
+   },
+   {
+    "path": "data/q5.csv",
+    "content": "name,value\nq5-metric-1,6\nq5-metric-2,14\nq5-metric-3,9\nq5-metric-4,21\nq5-metric-5,3\nq5-metric-6,17\n"
+   }
+  ],
+  "allowed_tools": [
+   "file.read",
+   "file.read_many",
+   "file.write",
+   "task"
+  ],
+  "postconditions": [
+   {
+    "type": "file_contains",
+    "path": "totals.md",
+    "needle": "Q1=65"
+   },
+   {
+    "type": "file_contains",
+    "path": "totals.md",
+    "needle": "Q2=144"
+   },
+   {
+    "type": "file_contains",
+    "path": "totals.md",
+    "needle": "Q3=59"
+   },
+   {
+    "type": "file_contains",
+    "path": "totals.md",
+    "needle": "Q4=232"
+   },
+   {
+    "type": "file_contains",
+    "path": "totals.md",
+    "needle": "Q5=70"
+   },
+   {
+    "type": "file_contains",
+    "path": "totals.md",
+    "needle": "GRAND=570"
+   },
+   {
+    "type": "output_contains",
+    "needle": "TOTALS WRITTEN"
+   }
+  ],
+  "budget": {
+   "max_turns": 12,
+   "max_tool_calls": 24
+  }
+ }
+]

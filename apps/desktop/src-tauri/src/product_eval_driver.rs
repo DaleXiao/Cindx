@@ -33,29 +33,32 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const PREFLIGHT_RECEIPT_SCHEMA: &str = "cindx.phase4-preflight.v1";
 pub const RUN_RECEIPT_SCHEMA: &str = "cindx.phase4-run-receipt.v1";
 
-/// The frozen owner-confirmed budget (EVALUATION.md: confirmed 2026-09-04;
-/// the provider-call cap was amended 200 → 700 on 2026-09-06 against the
-/// measured 64-cell rehearsal floor of 256 HTTP calls and the judge-eligible
-/// provider binding; tokens and wall clock unchanged).
-pub const PROTOCOL_MAX_PROVIDER_CALLS: u64 = 700;
-pub const PROTOCOL_MAX_TOTAL_TOKENS: u64 = 2_000_000;
+/// Frozen v2 protocol budgets (superseding the consumed v1 caps of
+/// 700/2M/4h, whose freeze history is recorded in EVALUATION.md): sized
+/// from run 2's measured 61K tokens/cell mean scaled for v2's larger
+/// fan-out fixtures (~2x) with a 1.5x margin over 24 cells, and 16
+/// calls/cell with the same margin. Owner authorization of the v2 execute
+/// adopts these numbers; any revision is a re-freeze.
+pub const PROTOCOL_MAX_PROVIDER_CALLS: u64 = 600;
+pub const PROTOCOL_MAX_TOTAL_TOKENS: u64 = 4_500_000;
 pub const PROTOCOL_WALL_BUDGET_MS: u64 = 4 * 60 * 60 * 1000;
 
 /// A wall-minus-monotonic drift beyond this censors the cell: the host slept,
 /// so its latency and possibly its work are structurally invalid.
 pub const SUSPENSION_DRIFT_CENSOR_MS: u64 = 30_000;
 
-/// The frozen arm matrix: single-agent versus subagent delegation across
-/// every effort tier, exactly as the protocol clause names them.
-pub const FROZEN_ARMS: [&str; 8] = [
+/// The frozen v2 arm matrix: single-agent versus subagent delegation across
+/// three effort tiers. Xhigh is deliberately NOT frozen: run 2's confound
+/// disclosure showed the owner config maps high and xhigh to one model with
+/// one delivered treatment, so an xhigh arm would duplicate high and burn
+/// budget measuring nothing (EVALUATION.md successor-design consequence 2).
+pub const FROZEN_ARMS: [&str; 6] = [
     "single-fast",
     "single-default",
     "single-high",
-    "single-xhigh",
     "subagent-fast",
     "subagent-default",
     "subagent-high",
-    "subagent-xhigh",
 ];
 
 fn now_ms() -> u64 {

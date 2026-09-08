@@ -334,17 +334,18 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
 # 1. provider-free preflight: binds HEAD/tree, suite digest, frozen matrix
 #    digest, driver binary digest, and the redacted provider authority
 ./apps/desktop/src-tauri/target/debug/product-eval preflight \
-  --suite crates/agent-eval/suite/general_v1.json --out <private-dir>
-# 2. provider-free rehearsal: the full 64-cell matrix against a local fake
-#    provider; validates instrumentation and prices the real budget
+  --suite crates/agent-eval/suite/delegation_v2.json --out <private-dir>
+# 2. provider-free rehearsal: the full frozen matrix (v2: 6 arms × 4 cases
+#    = 24 cells) against a local fake provider; validates instrumentation
+#    and prices the real budget
 ./apps/desktop/src-tauri/target/debug/product-eval rehearse \
-  --suite crates/agent-eval/suite/general_v1.json --out <private-dir>
+  --suite crates/agent-eval/suite/delegation_v2.json --out <private-dir>
 # 3. the authorized one-shot execute (refuses unless BOTH the rehearsal
 #    receipt is green for this suite/matrix AND the preflight receipt matches
 #    the current tree, binary, provider binding, skills catalog and host
 #    toolchain; holds caffeinate; enforces the frozen budget live; no-retry)
 ./apps/desktop/src-tauri/target/release/product-eval execute \
-  --suite crates/agent-eval/suite/delegation_v1.json --out <private-dir> \
+  --suite crates/agent-eval/suite/delegation_v2.json --out <private-dir> \
   --preflight <private-dir>/preflight-receipt.json \
   --rehearsal <rehearsal-dir>/rehearsal-receipt.json
 ```
@@ -355,10 +356,13 @@ Per-cell receipts carry the treatment-delivery counters (`delegations`,
 the per-arm summaries aggregate both, so an arm whose foreground model turns
 were served under thinking suppression is treatment-undelivered readable
 from the receipt alone (child calls on dedicated per-delegation provider
-instances are the known unstamped boundary).
-The frozen successor suite is `crates/agent-eval/suite/delegation_v1.json`
-(four cases, two of them explicitly delegation-inducing; digest recorded in
-EVALUATION.md). The driver binary must be signed with the stable local
+instances are the known unstamped boundary). The frozen successor suite is
+`crates/agent-eval/suite/delegation_v2.json` (four reasoning-bound,
+park-free cases; digest, matrix, budgets, and pre-registered decision rules
+in EVALUATION.md; deterministic tests pin its park-free and
+oracle-satisfiable invariants). `delegation_v1.json` remains in the tree as
+the consumed v1 protocol's frozen input — historical record, never to be
+executed again. The driver binary must be signed with the stable local
 identity so one keychain "Always Allow" persists across rebuilds and an
 unattended execute never blocks on a password:
 

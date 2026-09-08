@@ -687,3 +687,142 @@ fn eval_harness_shares_the_product_effort_scheduling_authority() {
         knowledge_decision_for_effort("high", "x").memory_policy
     );
 }
+
+/// The frozen v2 successor suite is the protocol input for the next one-shot
+/// execute. This test pins its parseability and its two design rules: the
+/// park-free invariant (no case may grant an interpreter or process tool —
+/// an unattended cell has no approver, and script-file execution never
+/// auto-grants by design: the run-2 lesson of 8/8 symmetric parks) and the
+/// sealed-answer invariant (every case ends on an exact output needle, so a
+/// cell can never pass without a delivered final answer).
+#[test]
+fn frozen_delegation_v2_suite_is_parseable_and_park_free() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("suite/delegation_v2.json");
+    let json = std::fs::read_to_string(&path).expect("the frozen v2 suite must be readable");
+    let cases = parse_suite(&json).expect("the frozen v2 suite must parse");
+    assert_eq!(
+        cases
+            .iter()
+            .map(|case| case.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "reasoning-audit-fanout",
+            "reasoning-crossref-repair",
+            "reasoning-corpus-needle",
+            "reasoning-totals-chain",
+        ],
+        "v2 freezes exactly these four reasoning-bound cases in this order"
+    );
+    for case in &cases {
+        for tool in &case.allowed_tools {
+            assert!(
+                !tool.contains("shell") && !tool.contains("process"),
+                "park-free rule: case {} must not grant {tool}",
+                case.id
+            );
+        }
+        assert!(
+            case.postconditions
+                .iter()
+                .any(|postcondition| matches!(postcondition, Postcondition::OutputContains { .. })),
+            "sealed-answer rule: case {} must pin an exact final-answer needle",
+            case.id
+        );
+        assert!(
+            case.postconditions.iter().all(|postcondition| !matches!(
+                postcondition,
+                Postcondition::CommandExitCode { .. }
+            )),
+            "park-free rule: case {} must not verify through shell commands",
+            case.id
+        );
+        assert_eq!(
+            case.budget,
+            CaseBudget {
+                max_turns: 12,
+                max_tool_calls: 24
+            },
+            "case {} budgets must stay within the fast tier's caps so no tier is budget-crippled",
+            case.id
+        );
+        assert_eq!(case.category, expected_v2_category(&case.id));
+    }
+}
+
+fn expected_v2_category(id: &str) -> CaseCategory {
+    match id {
+        "reasoning-crossref-repair" => CaseCategory::CodeEdit,
+        _ => CaseCategory::MultiStep,
+    }
+}
+
+/// Oracle satisfiability for the frozen v2 suite: one scripted winning
+/// trajectory per case must pass every postcondition. This pins the
+/// generator's arithmetic (sums, majority, outlier) and the needle shapes
+/// BEFORE the suite is frozen for a one-shot execute — an unsatisfiable
+/// oracle would burn the authorization on an unwinnable protocol.
+#[test]
+fn frozen_delegation_v2_suite_oracles_are_satisfiable() {
+    let root = temp_root("v2-winnability");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("suite/delegation_v2.json");
+    let json = std::fs::read_to_string(&path).expect("the frozen v2 suite must be readable");
+    let cases = parse_suite(&json).expect("the frozen v2 suite must parse");
+
+    for case in &cases {
+        let steps = match case.id.as_str() {
+            "reasoning-audit-fanout" => vec![
+                read_step("services/auth.py"),
+                write_step(
+                    "audit.md",
+                    "## Retries\nSUM_RETRIES=24\n\n## Slowest service\nSLOWEST=payments\n",
+                ),
+                ScriptedStep::Final("Reviewed all six services. AUDIT COMPLETE".to_string()),
+            ],
+            "reasoning-crossref-repair" => vec![
+                read_step("src/jobs/audit.py"),
+                write_step(
+                    "src/jobs/audit.py",
+                    "from src.api import process\n\n\ndef run(order):\n    return process(order, True)\n",
+                ),
+                write_step(
+                    "fix-report.md",
+                    "importer.py OK\nexporter.py OK\naudit.py FIXED\nretry.py OK\n",
+                ),
+                ScriptedStep::Final("Repaired the stale call site. REPAIR COMPLETE".to_string()),
+            ],
+            "reasoning-corpus-needle" => vec![
+                read_step("notes/n09.md"),
+                write_step("answer.md", "MAJORITY=30\nOUTLIER_NOTE=n09\n"),
+                ScriptedStep::Final("Found all four mentions. NEEDLE FOUND".to_string()),
+            ],
+            "reasoning-totals-chain" => vec![
+                read_step("data/q1.csv"),
+                write_step(
+                    "totals.md",
+                    "Q1=65\nQ2=144\nQ3=59\nQ4=232\nQ5=70\nGRAND=570\n",
+                ),
+                ScriptedStep::Final("Computed every sum. TOTALS WRITTEN".to_string()),
+            ],
+            other => panic!("no winning script for v2 case {other}"),
+        };
+        let mut provider = ScriptedProvider::new(steps);
+        let report = run_case(case, &mut provider, &root);
+        assert!(
+            report.error.is_none(),
+            "v2 case {} errored: {:?}",
+            case.id,
+            report.error
+        );
+        assert_eq!(
+            provider.remaining(),
+            0,
+            "v2 case {} consumed its winning script",
+            case.id
+        );
+        assert!(
+            report.passed,
+            "v2 case {} must pass under its winning trajectory; checks: {:?}",
+            case.id, report.checks
+        );
+    }
+}
