@@ -871,7 +871,7 @@
         "--nocapture"
       ],
       "required_output": [
-        "test result: ok. 16 passed; 0 failed"
+        "test result: ok. 17 passed; 0 failed"
       ]
     }
   ]

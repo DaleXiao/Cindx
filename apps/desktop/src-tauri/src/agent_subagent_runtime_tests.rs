@@ -208,6 +208,46 @@ fn merged_subagent_facts_count_as_parent_contract_mutations() {
     assert_eq!(runtime.task_contract.successful_mutations(), 1);
 }
 
+/// Run-2 root cause: providers echo tool names in wire form (`file_read`),
+/// and the child loop checked the whitelist with that raw name, so EVERY
+/// subagent tool call was denied as "not permitted" — six cells died behind
+/// denied reads and both runs' delegation contrast was void. The child must
+/// normalize to the canonical registry name before any dispatch decision,
+/// exactly like the owner loop.
+#[test]
+fn subagent_child_normalizes_provider_wire_tool_names_before_dispatch() {
+    let (_workspace, registry, task_id) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_call_step(ModelToolCall {
+            id: "c1".to_string(),
+            name: "file_read".to_string(),
+            arguments_json: r#"{"path":"README.md"}"#.to_string(),
+        }),
+        final_answer("README.md:1 says line one"),
+    ]);
+    let control = Arc::new(AgentRunControl::new("fast"));
+    let tools = subagent_tool_specs_for_mode(&registry, false);
+
+    let outcome = subagent_child_answer(
+        &provider,
+        &delegation_input(),
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        None,
+        None,
+        &[],
+        "default",
+    );
+
+    assert_eq!(outcome.stop_reason, SubagentStopReason::Completed);
+    assert_eq!(outcome.tool_calls, 1, "the wire-name call must execute, not be denied");
+    // The structured fact travels under the canonical registry name.
+    assert_eq!(outcome.tool_facts.len(), 1);
+    assert_eq!(outcome.tool_facts[0].tool_name, "file.read");
+}
+
 #[test]
 fn subagent_child_request_carries_the_parent_effort_reasoning() {
     let (_workspace, registry, task_id) = fixture();
@@ -358,6 +398,7 @@ fn subagent_read_tool_executes_and_returns_line_addressable_content() {
         &registry,
         &task_id,
         &read_call("r1", "README.md"),
+        &[],
         None,
         &Arc::new(AgentRunControl::new("fast")),
     );
@@ -378,6 +419,7 @@ fn subagent_denies_effectful_tool() {
         &registry,
         &task_id,
         &write_call,
+        &[],
         None,
         &Arc::new(AgentRunControl::new("fast")),
     );
@@ -395,6 +437,7 @@ fn subagent_read_tool_is_gated_by_steer_and_cancel_before_execution() {
         &registry,
         &task_id,
         &read_call("r1", "README.md"),
+        &[],
         None,
         &control,
     );
@@ -1192,6 +1235,7 @@ fn subagent_network_tool_fails_closed_without_a_capability_context() {
         &registry,
         &task_id,
         &web_call,
+        &[],
         None,
         &Arc::new(AgentRunControl::new("fast")),
     );
@@ -1413,6 +1457,85 @@ fn honored_model_choices_get_one_provider_each_and_the_run_model_gets_none() {
 
     // Without the configuration nothing is honored, so nothing is built.
     assert!(subagent_model_providers(None, &choices, "run-model", &control).is_empty());
+}
+
+/// Review F10: the write branch's wire-name coverage. The child loop
+/// normalizes before routing, so a provider echoing `file_patch` must pass
+/// the patch gate and reach the registry — the two decisions that a raw wire
+/// name silently failed in run 2.
+#[test]
+fn wire_name_patch_calls_pass_the_write_gate_after_normalization() {
+    let (_workspace, registry, _task_id) = fixture();
+    let specs = subagent_tool_specs_for_mode(&registry, true);
+    let normalized = original_tool_name("file_patch", &specs);
+    assert_eq!(normalized, "file.patch");
+    assert!(
+        subagent_patch_tool_allowed(&normalized),
+        "the normalized wire name must route to the write path"
+    );
+    assert!(
+        registry.get(&normalized).is_some(),
+        "the registry speaks the canonical name"
+    );
+    // And the raw wire name would NOT have passed — the defect the child-loop
+    // normalization removes.
+    assert!(!subagent_patch_tool_allowed("file_patch"));
+}
+
+/// Review F3: the child's observed locations ride the persisted
+/// `subagent_result` carrier, so the parent's claim binder treats delegated
+/// reads and patches as observed evidence (whitelisted file tools only).
+#[test]
+fn delegated_observed_locations_ride_the_subagent_result_carrier() {
+    let mut message = Message {
+        role: MessageRole::System,
+        content: "Subagent result for \"inspect\": done".to_string(),
+        metadata: [(
+            "kind".to_string(),
+            agent_runtime::SUBAGENT_RESULT_MESSAGE_KIND.to_string(),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    stamp_delegated_observed_locations(
+        &mut message,
+        &[
+            SubagentToolFact {
+                tool_name: "file.read".to_string(),
+                input_json: r#"{"path":"src/a.py"}"#.to_string(),
+            },
+            SubagentToolFact {
+                tool_name: "file.patch".to_string(),
+                input_json: r#"{"path":"src/b.py"}"#.to_string(),
+            },
+            SubagentToolFact {
+                tool_name: "web.search".to_string(),
+                input_json: r#"{"query":"q"}"#.to_string(),
+            },
+        ],
+    );
+
+    let recovered = agent_runtime::observed_locations_from_messages(&[message]);
+    let read = agent_runtime::observed_locations_for_call(
+        "file.read",
+        r#"{"path":"src/a.py"}"#,
+        true,
+    );
+    let patch = agent_runtime::observed_locations_for_call(
+        "file.patch",
+        r#"{"path":"src/b.py"}"#,
+        true,
+    );
+    for expected in read.iter().chain(&patch) {
+        assert!(
+            recovered.contains(expected),
+            "delegated {expected:?} must bind as observed evidence"
+        );
+    }
+    assert!(
+        recovered.iter().all(|item| !item.path.is_empty()),
+        "non-file tools contribute nothing to the carrier"
+    );
 }
 
 #[test]

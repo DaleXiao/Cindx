@@ -220,6 +220,48 @@ fn plan_mode_contract_loop_runs_read_only_tools_to_a_plan() {
     assert_eq!(provider.served(), 2);
 }
 
+/// Review F2: the plan-drafting loop shares the read-only dispatch entry,
+/// and providers echo wire-form names there too. A raw `file_read` must
+/// execute (not be denied) and surface under its canonical name.
+#[test]
+fn plan_mode_contract_loop_normalizes_provider_wire_tool_names() {
+    let (_workspace, registry, task_id) = fixture();
+    let provider = ScriptedProvider::new(vec![
+        tool_call_step(ModelToolCall {
+            id: "c1".to_string(),
+            name: "file_read".to_string(),
+            arguments_json: r#"{"path":"README.md"}"#.to_string(),
+        }),
+        final_answer(plan_text()),
+    ]);
+    let control = Arc::new(AgentRunControl::new("high"));
+    let tools = plan_phase_tool_specs(&registry);
+
+    let mut seen = Vec::new();
+    let outcome = run_plan_phase(
+        &provider,
+        "document the crate",
+        &control,
+        &registry,
+        &tools,
+        &task_id,
+        &mut |name: &str, _id: &str, observation: &str| {
+            seen.push((
+                name.to_string(),
+                observation.lines().nth(1).unwrap_or("").to_string(),
+            ));
+        },
+    );
+
+    assert!(matches!(outcome, PlanPhaseOutcome::Proposed(_)));
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "file.read", "the report carries the canonical name");
+    assert_eq!(
+        seen[0].1, "status=succeeded",
+        "the wire-name exploration read must execute, not be denied"
+    );
+}
+
 #[test]
 fn plan_mode_contract_loop_denies_effectful_tools() {
     let (workspace, registry, task_id) = fixture();

@@ -221,13 +221,25 @@ pub fn insert_observed_locations(metadata: &mut Metadata, locations: &[ObservedL
     metadata.insert(OBSERVED_LOCATIONS_KEY.to_string(), encoded);
 }
 
+/// The internal System-message kind the delegation join stamps with the
+/// child's observed locations. A child's own tool messages live and die in
+/// its isolated scope; without this carrier, files only a subagent read
+/// would bind as unsupported citations and the delivery judge would be told
+/// false "never read" facts about work the child actually did.
+pub const SUBAGENT_RESULT_MESSAGE_KIND: &str = "subagent_result";
+
 /// Recovers every stamped location from a run's messages, deduplicated and
 /// bounded. Only messages this runtime stamped are read; a message without the
-/// schema contributes nothing.
+/// schema contributes nothing. Carriers are owner-dispatched Tool messages and
+/// the delegation join's `subagent_result` System message — both stamped
+/// exclusively by this runtime, never by model output.
 pub fn observed_locations_from_messages(messages: &[Message]) -> Vec<ObservedLocation> {
     let mut recovered = BTreeSet::new();
     for message in messages {
-        if message.role != MessageRole::Tool {
+        let is_delegation_carrier = message.role == MessageRole::System
+            && message.metadata.get("kind").map(String::as_str)
+                == Some(SUBAGENT_RESULT_MESSAGE_KIND);
+        if message.role != MessageRole::Tool && !is_delegation_carrier {
             continue;
         }
         if message
@@ -459,17 +471,36 @@ fn glob_pattern_root(pattern: &str) -> String {
     }
 }
 
-/// Collects every string under a `path` key at any nesting depth, which covers
-/// the single-path tools and the batch tools' arrays with one rule.
+/// Collects every string under a `path` key at any nesting depth, plus the
+/// bare-string items of a batch `paths` array — the exact input grammar
+/// `file.read_many` accepts (bare strings or `{path, offset_bytes}` objects).
+/// A binder that speaks less grammar than the tool reports successful reads
+/// as unobserved (run-2 root cause: the delivery judge received false
+/// "file never read" facts for every string-form `read_many` call).
 fn collect_path_values(value: &serde_json::Value, paths: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
                 if key == "path" {
-                    if let Some(path) = child.as_str() {
-                        if !path.trim().is_empty() {
+                    // Trimmed to match the tools' own `non_empty_path`
+                    // normalization, so a padded argument still binds.
+                    if let Some(path) = child.as_str().map(str::trim) {
+                        if !path.is_empty() {
                             paths.insert(path.to_string());
                         }
+                    }
+                } else if key == "paths" {
+                    if let Some(items) = child.as_array() {
+                        for item in items {
+                            match item.as_str().map(str::trim) {
+                                Some(path) if !path.is_empty() => {
+                                    paths.insert(path.to_string());
+                                }
+                                _ => collect_path_values(item, paths),
+                            }
+                        }
+                    } else {
+                        collect_path_values(child, paths);
                     }
                 } else {
                     collect_path_values(child, paths);
@@ -732,6 +763,33 @@ mod tests {
             .iter()
             .all(|item| item.kind == ObservedLocationKind::Read));
 
+        // The batch tool equally accepts bare strings (and mixes both forms);
+        // the binder must speak the tool's full grammar or successful reads
+        // go unobserved and the judge is told the files were never read.
+        let string_batch = observed_locations_for_call(
+            "file.read_many",
+            r#"{"paths":["src/config.py","src/api.py"]}"#,
+            true,
+        );
+        assert_eq!(string_batch.len(), 2);
+        assert!(string_batch
+            .iter()
+            .all(|item| item.kind == ObservedLocationKind::Read));
+        let mixed_batch = observed_locations_for_call(
+            "file.read_many",
+            r#"{"paths":["a.rs",{"path":"b.rs","offset_bytes":10}]}"#,
+            true,
+        );
+        assert_eq!(mixed_batch.len(), 2);
+
+        // Padded entries bind trimmed, matching the tool's own
+        // `non_empty_path` normalization.
+        let padded = observed_locations_for_call("file.read_many", r#"{"paths":[" a.rs "]}"#, true);
+        assert_eq!(
+            padded,
+            vec![location("a.rs", ObservedLocationKind::Read, true)]
+        );
+
         // A patch batch is mutation evidence for every target.
         let patch_batch = observed_locations_for_call(
             "file.patch_batch",
@@ -803,6 +861,35 @@ mod tests {
         assert_eq!(
             recovered,
             vec![location("src/a.rs", ObservedLocationKind::Read, true)]
+        );
+
+        // The delegation carrier is the one System message that contributes:
+        // the join stamps the child's observed locations on the
+        // `subagent_result` instruction. Any other System message stays
+        // invisible to the binder even when stamped.
+        let mut carrier = Metadata::new();
+        carrier.insert("kind".to_string(), SUBAGENT_RESULT_MESSAGE_KIND.to_string());
+        insert_observed_locations(
+            &mut carrier,
+            &[location("src/child.rs", ObservedLocationKind::Read, true)],
+        );
+        let mut impostor = carrier.clone();
+        impostor.insert("kind".to_string(), "other_instruction".to_string());
+        let carried = observed_locations_from_messages(&[
+            Message {
+                role: MessageRole::System,
+                content: "Subagent result".to_string(),
+                metadata: carrier,
+            },
+            Message {
+                role: MessageRole::System,
+                content: "other".to_string(),
+                metadata: impostor,
+            },
+        ]);
+        assert_eq!(
+            carried,
+            vec![location("src/child.rs", ObservedLocationKind::Read, true)]
         );
 
         let mut corrupt = Metadata::new();

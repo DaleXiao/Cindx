@@ -381,12 +381,19 @@ pub(crate) fn run_plan_phase(
                 registry,
                 task_id,
                 call,
+                plan_tools,
                 // Plan drafting holds no network capability context: web
                 // tools fail closed here (audit E1).
                 None,
                 cancellation,
             );
-            on_tool_call(&call.name, &call.id, &observation);
+            // The user-visible exploration report carries the canonical
+            // registry name, never the provider's wire echo.
+            on_tool_call(
+                &agent_runtime::original_tool_name(&call.name, plan_tools),
+                &call.id,
+                &observation,
+            );
             messages.push(Message {
                 role: MessageRole::Tool,
                 content: observation,

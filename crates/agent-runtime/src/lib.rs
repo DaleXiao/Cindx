@@ -63,7 +63,7 @@ pub use claim_evidence::{
     answer_citations, bind_answer_citations, claim_evidence_facts, insert_observed_locations,
     observed_locations_for_call, observed_locations_from_messages, AnswerCitation, CitationFinding,
     CitationStatus, ClaimEvidenceReceipt, ObservedLocation, ObservedLocationKind,
-    CLAIM_EVIDENCE_SCHEMA, OBSERVED_LOCATIONS_SCHEMA,
+    CLAIM_EVIDENCE_SCHEMA, OBSERVED_LOCATIONS_SCHEMA, SUBAGENT_RESULT_MESSAGE_KIND,
 };
 pub use completion_intent::{
     prompt_completion_intent, prompt_evidence_target_anchors, prompt_replaces_prior_objective,

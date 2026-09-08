@@ -246,12 +246,21 @@ pub(crate) fn execute_subagent_delegations(
         strip_subagent_call_id(runtime, &call.call_id.0);
         agent_runtime::append_internal_instruction(
             runtime,
-            "subagent_result",
+            agent_runtime::SUBAGENT_RESULT_MESSAGE_KIND,
             &format!(
                 "Subagent result for {:?}:\n{}",
                 outcome.description, outcome.answer
             ),
         );
+        // Stamp the child's observed locations onto the carrier BEFORE it is
+        // persisted: the parent's claim binder recovers locations from Tool
+        // messages and this carrier, so delegated reads and patches bind as
+        // observed evidence instead of leaving subagent-arm citations
+        // unsupported (review F3: without this the judge is told false
+        // "never read" facts about work the child actually did).
+        if let Some(message) = runtime.messages.last_mut() {
+            stamp_delegated_observed_locations(message, &outcome.tool_facts);
+        }
         // Persist the appended result message where it is appended. It carries
         // `internal=true`, so the chat projection skips it while the recovery and
         // resume transcripts keep it: the delegated answer survives an app restart
@@ -618,13 +627,24 @@ pub(crate) fn subagent_child_answer(
                 )
                 .with_tool_facts(tool_facts);
             }
+            // Providers echo tool names in wire form (`file_read`); the patch
+            // gate, the read-only whitelist, and the registry all speak
+            // canonical dotted names. Normalize before any dispatch decision —
+            // the same contract the owner loop applies — or every child call
+            // is denied as "not permitted" (run-2 root cause: all six subagent
+            // cells died behind denied reads, voiding both runs' delegation
+            // contrast).
+            let call = agent_core::ModelToolCall {
+                name: original_tool_name(&call.name, subagent_tools),
+                ..call.clone()
+            };
             let observation = match &write {
                 Some(context) if subagent_patch_tool_allowed(&call.name) => {
                     execute_write_subagent_tool_call(
                         context,
                         registry,
                         task_id,
-                        call,
+                        &call,
                         cancellation,
                         &description,
                     )
@@ -632,7 +652,8 @@ pub(crate) fn subagent_child_answer(
                 _ => execute_subagent_tool_call(
                     registry,
                     task_id,
-                    call,
+                    &call,
+                    subagent_tools,
                     network.as_ref(),
                     cancellation,
                 ),
@@ -1008,6 +1029,32 @@ fn execute_write_subagent_tool_call(
     }
 }
 
+/// Carrier-stamp bound: each child tool call contributes at most
+/// MAX_OBSERVED_LOCATIONS_PER_CALL locations and child calls are capped per
+/// child; 64 keeps one persisted carrier message's metadata proportionate
+/// while the binder's recovery bound (512) governs the run-wide total.
+const MAX_DELEGATED_OBSERVED_LOCATIONS: usize = 64;
+
+/// Stamps the locations a child's successful whitelisted file-tool calls
+/// observed onto the parent-side `subagent_result` carrier message, so the
+/// parent's claim binder sees delegated reads and patches as observed
+/// evidence. Non-file tools contribute nothing (the binder's whitelist).
+fn stamp_delegated_observed_locations(message: &mut Message, tool_facts: &[SubagentToolFact]) {
+    let mut delegated = Vec::new();
+    for fact in tool_facts {
+        delegated.extend(agent_runtime::observed_locations_for_call(
+            &fact.tool_name,
+            &fact.input_json,
+            true,
+        ));
+        if delegated.len() >= MAX_DELEGATED_OBSERVED_LOCATIONS {
+            break;
+        }
+    }
+    delegated.truncate(MAX_DELEGATED_OBSERVED_LOCATIONS);
+    agent_runtime::insert_observed_locations(&mut message.metadata, &delegated);
+}
+
 /// Execute one whitelisted read-only subagent tool call and format its
 /// observation. The whitelist and the registry's read-only/permissionless guard
 /// are both enforced, so a disallowed or effectful call becomes an observation
@@ -1022,9 +1069,20 @@ pub(crate) fn execute_subagent_tool_call(
     registry: &ToolRegistry,
     task_id: &TaskId,
     call: &agent_core::ModelToolCall,
+    tools: &[ToolSpec],
     network: Option<&SubagentNetworkContext>,
     cancellation: &Arc<AgentRunControl>,
 ) -> String {
+    // Providers echo tool names in wire form (`file_read`); the whitelist,
+    // the registry, and the durable lineage all speak canonical dotted names.
+    // Normalizing inside this entry — not at callers — makes
+    // normalize-before-dispatch the function's own contract, shared by the
+    // child loop and plan drafting (run-2 root cause 1: raw wire names denied
+    // every child read; review F2: the plan-drafting loop had the same gap).
+    let call = agent_core::ModelToolCall {
+        name: original_tool_name(&call.name, tools),
+        ..call.clone()
+    };
     let request = AgentToolRequest {
         call_id: agent_core::ToolCallId(call.id.clone()),
         tool_name: call.name.clone(),

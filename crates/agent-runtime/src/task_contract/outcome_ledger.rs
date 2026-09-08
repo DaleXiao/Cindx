@@ -591,17 +591,37 @@ impl AgentTaskContract {
             })
             .unwrap_or_default();
         let (postconditions, dropped_postconditions) = self.project_postconditions();
-        let postcondition_evidence_sequences = postconditions
-            .iter()
-            .flat_map(|item| std::iter::once(item.action_sequence).chain(item.observation_sequence))
-            .collect::<BTreeSet<_>>();
+        let (mut obligations, dropped_obligations) = self.project_obligations(&postconditions);
+        // Protected evidence is selected by PRIORITY, not by ascending
+        // sequence: postcondition sequences first (ledger validity hard-
+        // requires them), then obligation receipt sequences, then recency.
+        // An obligation whose receipt falls out of the window would otherwise
+        // project as Satisfied-but-unpointed and fail delivery closed as
+        // MissingEvidence — a pure evidence-count threshold that punished the
+        // longest runs (run-2 root cause: a knowledge-recall grounding
+        // receipt at sequence 1 evicted by the run's own later observations,
+        // killing exactly the high/xhigh cells). An unordered ascending take
+        // would instead drop the LARGEST postcondition sequences once the
+        // references exceed the window, invalidating the ledger outright.
+        // Residual limit: when verified postconditions alone fill the window,
+        // a receipt pointer can still be evicted — the same fail-closed
+        // behavior as before receipts were protected, never an invalid ledger.
+        let mut required_evidence_sequences: Vec<u64> = Vec::new();
+        for item in &postconditions {
+            required_evidence_sequences.push(item.action_sequence);
+            required_evidence_sequences.extend(item.observation_sequence);
+        }
+        for obligation in &obligations {
+            if let Some(sequence) = obligation.evidence_sequence {
+                required_evidence_sequences.push(sequence);
+            }
+        }
         let (evidence, dropped_evidence) =
-            self.project_evidence(&trusted_sequences, &postcondition_evidence_sequences);
+            self.project_evidence(&trusted_sequences, &required_evidence_sequences);
         let visible_evidence = evidence
             .iter()
             .map(|item| item.sequence)
             .collect::<BTreeSet<_>>();
-        let (mut obligations, dropped_obligations) = self.project_obligations(&postconditions);
         for obligation in &mut obligations {
             if obligation
                 .evidence_sequence
@@ -681,13 +701,17 @@ impl AgentTaskContract {
     fn project_evidence(
         &self,
         available_terminal_sequences: &BTreeSet<u64>,
-        required_sequences: &BTreeSet<u64>,
+        priority_sequences: &[u64],
     ) -> (Vec<OutcomeEvidence>, u64) {
-        let mut selected_sequences = required_sequences
-            .iter()
-            .copied()
-            .take(MAX_OUTCOME_EVIDENCE)
-            .collect::<BTreeSet<_>>();
+        // Priority order decides who keeps a window slot when the protected
+        // references exceed it: earlier entries win, duplicates fold.
+        let mut selected_sequences = BTreeSet::new();
+        for sequence in priority_sequences {
+            if selected_sequences.len() >= MAX_OUTCOME_EVIDENCE {
+                break;
+            }
+            selected_sequences.insert(*sequence);
+        }
         for item in self.evidence.iter().rev() {
             if selected_sequences.len() >= MAX_OUTCOME_EVIDENCE {
                 break;
@@ -1388,6 +1412,135 @@ mod tests {
             OutcomeLedgerPhase::Completed
         )
         .is_none());
+    }
+
+    #[test]
+    fn postcondition_sequences_win_the_window_over_recency_and_receipts() {
+        // Overflow boundary: eight verified postconditions occupy all sixteen
+        // window slots on their own. An ascending take over the union of
+        // protected references would drop the LARGEST postcondition sequences
+        // and invalidate the ledger; priority selection must keep validity
+        // hard and treat a receipt pointer as the documented fail-closed
+        // residual (identical to the pre-protection behavior, never an
+        // invalid ledger).
+        let mut contract = AgentTaskContract::default();
+        contract.replace_prompt_evidence_requirement(0, Some("workspace_grounding"), ["file.read"]);
+        assert!(contract.record_prompt_context_evidence_for_requirement_at(
+            0,
+            "workspace_grounding",
+            "knowledge_context",
+            r#"{"source":"knowledge_context","files":["src/pipeline.py"]}"#,
+            "recalled workspace knowledge covering the prompted files",
+        ));
+        for index in 0..MAX_OUTCOME_POSTCONDITIONS {
+            crate::task_contract::test_support::record_interaction_transition(
+                &mut contract,
+                "browser.click",
+                &format!(r#"{{"index":{index}}}"#),
+                ToolRisk::UsesNetwork,
+            );
+            crate::task_contract::test_support::record_interaction_transition(
+                &mut contract,
+                "browser.capture",
+                "{}",
+                ToolRisk::UsesNetwork,
+            )
+            .expect("matching browser observation should mint a receipt");
+        }
+        // Recency pressure beyond the window.
+        for index in 0..4 {
+            contract.record_tool_outcome(
+                "file.read",
+                &format!(r#"{{"path":"src/late-{index}.rs"}}"#),
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::ReadOnly),
+            );
+        }
+
+        let ledger = contract.outcome_ledger_shadow(0);
+        assert!(
+            ledger.contract_is_valid(),
+            "postcondition sequences must never lose a window slot"
+        );
+        assert_eq!(ledger.evidence.len(), MAX_OUTCOME_EVIDENCE);
+        for item in &ledger.postconditions {
+            assert!(ledger
+                .evidence
+                .iter()
+                .any(|evidence| evidence.sequence == item.action_sequence));
+            if let Some(observation) = item.observation_sequence {
+                assert!(ledger
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.sequence == observation));
+            }
+        }
+    }
+
+    #[test]
+    fn an_obligation_receipt_survives_the_evidence_recency_window() {
+        // Run-2 regression: an early receipt (sequence 1) was evicted by the
+        // run's own 16+ later observations; the ledger kept the obligation
+        // Satisfied but nulled its pointer, and delivery fail-closed as
+        // MissingEvidence — a pure evidence-count threshold that punished
+        // exactly the cells that did the most work (single-high/xhigh died
+        // where single-default with two fewer observations passed).
+        let mut contract = AgentTaskContract::default();
+        // The run-2 shape: the workspace grounding obligation is satisfied at
+        // sequence 1 by the trusted knowledge-recall receipt (first receipt
+        // sealed, never refreshed), then the run keeps observing.
+        contract.replace_prompt_evidence_requirement(0, Some("workspace_grounding"), ["file.read"]);
+        assert!(contract.record_prompt_context_evidence_for_requirement_at(
+            0,
+            "workspace_grounding",
+            "knowledge_context",
+            r#"{"source":"knowledge_context","files":["src/pipeline.py"]}"#,
+            "recalled workspace knowledge covering the prompted files",
+        ));
+        let receipt_sequence = contract
+            .evidence()
+            .iter()
+            .map(|item| item.sequence)
+            .min()
+            .expect("the grounding receipt recorded evidence");
+        for index in 0..(MAX_OUTCOME_EVIDENCE + 2) {
+            contract.record_tool_outcome(
+                "file.read",
+                &format!(r#"{{"path":"src/late-{index}.rs"}}"#),
+                &ToolOutcomeStatus::Succeeded,
+                Some(&ToolRisk::ReadOnly),
+            );
+        }
+
+        let ledger = contract.outcome_ledger_shadow(0);
+        let receipted = ledger
+            .obligations
+            .iter()
+            .find(|obligation| obligation.satisfaction == OutcomeSatisfaction::Satisfied)
+            .expect("the grounding receipt satisfied its obligation");
+        assert_eq!(
+            receipted.evidence_sequence,
+            Some(receipt_sequence),
+            "the receipt pointer must survive the recency window"
+        );
+        assert!(
+            ledger
+                .evidence
+                .iter()
+                .any(|item| item.sequence == receipt_sequence),
+            "the receipt evidence itself must stay visible in the projection"
+        );
+        // While the protected references fit the window, the contradiction
+        // state is structurally impossible: no obligation is Satisfied
+        // without a visible pointer.
+        assert!(ledger
+            .obligations
+            .iter()
+            .all(
+                |obligation| obligation.satisfaction != OutcomeSatisfaction::Satisfied
+                    || obligation.evidence_sequence.is_some()
+            ));
+        assert!(ledger.contract_is_valid());
     }
 
     #[test]
