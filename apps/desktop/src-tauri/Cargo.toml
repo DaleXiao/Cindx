@@ -1,6 +1,6 @@
 [package]
 name = "cindx-desktop"
-version = "0.3.65"
+version = "0.3.66"
 edition = "2021"
 license = "Apache-2.0"
 
