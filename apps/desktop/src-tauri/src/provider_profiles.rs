@@ -62,8 +62,10 @@ pub(crate) struct ProviderModelDefaults {
     pub(crate) reviewer: String,
     pub(crate) summarizer: String,
     pub(crate) fast: String,
-    pub(crate) auto: String,
-    pub(crate) pro: String,
+    #[serde(rename = "default")]
+    pub(crate) default_tier: String,
+    pub(crate) high: String,
+    pub(crate) xhigh: String,
     pub(crate) embedding: String,
     pub(crate) image: String,
     pub(crate) voice: String,
@@ -76,8 +78,11 @@ fn provider_catalog() -> &'static ProviderCatalogDocument {
     PROVIDER_CATALOG.get_or_init(|| {
         let catalog: ProviderCatalogDocument = serde_json::from_str(PROVIDER_CATALOG_JSON)
             .expect("embedded provider catalog must be valid JSON");
+        // Version 3: the tier-default keys speak the canonical effort
+        // vocabulary (fast/default/high/xhigh) — the retired auto/pro keys
+        // were renamed and the shared pro slot split into high+xhigh.
         assert_eq!(
-            catalog.version, 2,
+            catalog.version, 3,
             "unsupported embedded provider catalog version"
         );
         catalog
@@ -132,8 +137,9 @@ pub(crate) fn provider_effort_default_model(provider_id: &str, effort_label: &st
     // boundary before reaching the catalog.
     match effort_label {
         "fast" => defaults.fast.as_str(),
-        "default" => defaults.auto.as_str(),
-        "high" | "xhigh" => defaults.pro.as_str(),
+        "default" => defaults.default_tier.as_str(),
+        "high" => defaults.high.as_str(),
+        "xhigh" => defaults.xhigh.as_str(),
         _ => "",
     }
 }

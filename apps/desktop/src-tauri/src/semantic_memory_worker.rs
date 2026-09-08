@@ -57,7 +57,7 @@ fn semantic_memory_worker_loop(app: tauri::AppHandle, queue: &'static SemanticMe
             }
         };
         let state = app.state::<AppState>();
-        let idle_control = Arc::new(AgentRunControl::new("auto"));
+        let idle_control = Arc::new(AgentRunControl::new("default"));
         match wait_for_foreground_agent_idle(
             &state,
             &idle_control,

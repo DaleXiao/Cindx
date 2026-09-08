@@ -86,8 +86,9 @@ fn provider_state(auth_verified_at_ms: Option<u64>) -> ProviderConfigState {
         }
         .to_string(),
         fast_model: String::new(),
-        auto_model: String::new(),
-        pro_model: String::new(),
+        default_model: String::new(),
+        high_model: String::new(),
+        xhigh_model: String::new(),
         embedding_model: if configured {
             "text-embedding-contract"
         } else {

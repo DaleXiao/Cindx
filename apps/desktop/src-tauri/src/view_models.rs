@@ -439,8 +439,9 @@ pub(crate) struct ProviderConfigState {
     pub(crate) reviewer_model: String,
     pub(crate) summarizer_model: String,
     pub(crate) fast_model: String,
-    pub(crate) auto_model: String,
-    pub(crate) pro_model: String,
+    pub(crate) default_model: String,
+    pub(crate) high_model: String,
+    pub(crate) xhigh_model: String,
     pub(crate) embedding_model: String,
     pub(crate) image_model: String,
     pub(crate) image_endpoint: String,
@@ -929,9 +930,11 @@ pub(crate) struct ProviderConfigInput {
     #[serde(default)]
     pub(crate) fast_model: String,
     #[serde(default)]
-    pub(crate) auto_model: String,
+    pub(crate) default_model: String,
     #[serde(default)]
-    pub(crate) pro_model: String,
+    pub(crate) high_model: String,
+    #[serde(default)]
+    pub(crate) xhigh_model: String,
     pub(crate) embedding_model: String,
     #[serde(default)]
     pub(crate) image_model: String,

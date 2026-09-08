@@ -192,7 +192,8 @@ fn thinking_rejection_leaves_a_durable_suppression_fact_on_model_turns() {
          ({suppressed_turns} stamped of {model_turns} turns)"
     );
     assert_eq!(
-        server.counters().chat, 3,
+        server.counters().chat,
+        3,
         "the rejected first request, its stripped retry (the tool-call turn), \
          and the final-answer turn"
     );

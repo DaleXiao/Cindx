@@ -232,7 +232,8 @@ pub(crate) fn runtime_preparation_error(
 }
 
 /// Effort-tier model selection: the actor/finalizer model is the pinned default for
-/// the run's effort tier (Fast/Auto/Pro), falling back to the executor role model.
+/// the run's effort tier (Fast/Default/High/Xhigh, each anchoring its own slot),
+/// falling back to the executor role model.
 /// This is the single scheduling source; no conductor/router override is consulted.
 pub(crate) fn effort_tier_model(config: &ProviderConfig, effort_label: &str) -> String {
     let pinned = config.effort_default_model(effort_label);

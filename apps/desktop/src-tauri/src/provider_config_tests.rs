@@ -25,8 +25,9 @@ fn provider_config_input_preserves_existing_key_when_blank() {
             reviewer_model: "".to_string(),
             summarizer_model: "".to_string(),
             fast_model: "".to_string(),
-            auto_model: "".to_string(),
-            pro_model: "".to_string(),
+            default_model: "".to_string(),
+            high_model: "".to_string(),
+            xhigh_model: "".to_string(),
             embedding_model: "".to_string(),
             image_model: "image-model-a".to_string(),
             image_endpoint: "https://images.example.test/v1".to_string(),
@@ -237,19 +238,22 @@ fn provider_profiles_resolve_fixed_and_resource_scoped_endpoints() {
 #[test]
 fn effort_default_models_parse_and_anchor_per_tier() {
     let config = provider_config_from_text(
-        "base_url=https://example.test/v1\napi_key=secret\nmodel=base-model\nfast_model=fast-model\nauto_model=auto-model\npro_model=pro-model\n",
+        "base_url=https://example.test/v1\napi_key=secret\nmodel=base-model\nfast_model=fast-model\ndefault_model=default-model\nhigh_model=high-model\nxhigh_model=xhigh-model\n",
     );
     assert_eq!(config.fast_model, "fast-model");
-    assert_eq!(config.auto_model, "auto-model");
-    assert_eq!(config.pro_model, "pro-model");
-    // Canonical tier chain: fast/default/high/xhigh.
+    assert_eq!(config.default_model, "default-model");
+    assert_eq!(config.high_model, "high-model");
+    assert_eq!(config.xhigh_model, "xhigh-model");
+    // Canonical tier chain: fast/default/high/xhigh — each tier anchors its
+    // OWN slot now; high and xhigh no longer share one binding (the run-2
+    // confound where both tiers resolved to one model is structurally gone).
     assert_eq!(config.effort_default_model("fast"), "fast-model");
-    assert_eq!(config.effort_default_model("default"), "auto-model");
-    assert_eq!(config.effort_default_model("high"), "pro-model");
-    assert_eq!(config.effort_default_model("xhigh"), "pro-model");
+    assert_eq!(config.effort_default_model("default"), "default-model");
+    assert_eq!(config.effort_default_model("high"), "high-model");
+    assert_eq!(config.effort_default_model("xhigh"), "xhigh-model");
     // Legacy labels migrate at the ingress boundary only.
-    assert_eq!(config.effort_default_model("auto"), "auto-model");
-    assert_eq!(config.effort_default_model("pro"), "pro-model");
+    assert_eq!(config.effort_default_model("auto"), "default-model");
+    assert_eq!(config.effort_default_model("pro"), "high-model");
     assert_eq!(config.effort_default_model("other"), "");
 
     let empty = provider_config_from_text("base_url=https://example.test/v1\nmodel=base-model\n");
@@ -278,17 +282,54 @@ fn effort_default_models_parse_and_anchor_per_tier() {
     let pinned = effort_model_candidates(&config, "auto");
     assert!(pinned
         .iter()
-        .any(|candidate| candidate.name == "auto-model"));
+        .any(|candidate| candidate.name == "default-model"));
 
     let candidates = model_candidates_for_config(&config);
     assert!(!candidates
         .iter()
-        .any(|candidate| candidate.name == "auto-model"));
+        .any(|candidate| candidate.name == "default-model"));
 
     let text = provider_config_text(&config);
     assert!(text.contains("fast_model=fast-model"));
-    assert!(text.contains("auto_model=auto-model"));
-    assert!(text.contains("pro_model=pro-model"));
+    assert!(text.contains("default_model=default-model"));
+    assert!(text.contains("high_model=high-model"));
+    assert!(text.contains("xhigh_model=xhigh-model"));
+    assert!(
+        !text.contains("auto_model") && !text.contains("pro_model"),
+        "saves write only the new tier-slot keys"
+    );
+}
+
+#[test]
+fn legacy_auto_pro_slot_keys_migrate_once_at_load() {
+    // A pre-split persisted config: the old pro slot served BOTH high and
+    // xhigh, so its value seeds both new slots.
+    let legacy = provider_config_from_text(
+        "base_url=https://example.test/v1\napi_key=secret\nmodel=base-model\nauto_model=legacy-auto\npro_model=legacy-pro\n",
+    );
+    assert_eq!(legacy.default_model, "legacy-auto");
+    assert_eq!(legacy.high_model, "legacy-pro");
+    assert_eq!(legacy.xhigh_model, "legacy-pro");
+    assert_eq!(legacy.effort_default_model("high"), "legacy-pro");
+    assert_eq!(legacy.effort_default_model("xhigh"), "legacy-pro");
+
+    // New keys win over legacy ones regardless of line order.
+    let mixed = provider_config_from_text(
+        "pro_model=legacy-pro\nhigh_model=new-high\ndefault_model=new-default\nauto_model=legacy-auto\nbase_url=https://example.test/v1\n",
+    );
+    assert_eq!(mixed.default_model, "new-default");
+    assert_eq!(mixed.high_model, "new-high");
+    assert_eq!(
+        mixed.xhigh_model, "legacy-pro",
+        "unset xhigh still inherits the legacy pro value"
+    );
+
+    // The next save retires the legacy keys from disk.
+    let saved = provider_config_text(&legacy);
+    assert!(saved.contains("default_model=legacy-auto"));
+    assert!(saved.contains("high_model=legacy-pro"));
+    assert!(saved.contains("xhigh_model=legacy-pro"));
+    assert!(!saved.contains("auto_model") && !saved.contains("pro_model"));
 }
 
 #[test]

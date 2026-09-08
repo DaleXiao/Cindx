@@ -85,15 +85,16 @@ pub(crate) struct ProviderConfig {
     pub(crate) reviewer_model: String,
     pub(crate) summarizer_model: String,
     pub(crate) fast_model: String,
-    pub(crate) auto_model: String,
-    pub(crate) pro_model: String,
+    pub(crate) default_model: String,
+    pub(crate) high_model: String,
+    pub(crate) xhigh_model: String,
     pub(crate) embedding_model: String,
     pub(crate) image_model: String,
     pub(crate) image_endpoint: String,
     pub(crate) voice_model: String,
     pub(crate) auth_verified_at_ms: Option<u64>,
     pub(crate) collaboration_policy: String,
-    /// When true, a mutation-bearing Auto/Pro run whose delivery judge never
+    /// When true, a mutation-bearing Default/High/Xhigh run whose delivery judge never
     /// reached a pass (recheck still revising, or the repair could not be
     /// grounded) fails closed instead of delivering the unverified candidate.
     /// Defaults false: the judge gate stays fail-open.
@@ -167,8 +168,9 @@ impl Default for ProviderConfig {
             reviewer_model: defaults.reviewer.clone(),
             summarizer_model: defaults.summarizer.clone(),
             fast_model: String::new(),
-            auto_model: String::new(),
-            pro_model: String::new(),
+            default_model: String::new(),
+            high_model: String::new(),
+            xhigh_model: String::new(),
             embedding_model: defaults.embedding.clone(),
             image_model: defaults.image.clone(),
             image_endpoint: profile.image_endpoint,
@@ -227,8 +229,9 @@ impl ProviderConfig {
         let canonical = policy.label();
         let pinned = match canonical {
             "fast" => self.fast_model.trim(),
-            "default" => self.auto_model.trim(),
-            _ => self.pro_model.trim(), // high | xhigh
+            "default" => self.default_model.trim(),
+            "high" => self.high_model.trim(),
+            _ => self.xhigh_model.trim(), // xhigh
         };
         if !pinned.is_empty() {
             return pinned.to_string();
@@ -278,8 +281,9 @@ impl ProviderConfig {
                 &self.reviewer_model,
                 &self.summarizer_model,
                 &self.fast_model,
-                &self.auto_model,
-                &self.pro_model,
+                &self.default_model,
+                &self.high_model,
+                &self.xhigh_model,
             ]
             .iter()
             .any(|model| model.trim() == name)

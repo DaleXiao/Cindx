@@ -85,7 +85,7 @@ pub(super) fn build_agent_recovery_envelope_with_task_state(
         effort: run_context
             .get("agent_effort")
             .cloned()
-            .unwrap_or_else(|| "auto".to_string()),
+            .unwrap_or_else(|| "default".to_string()),
         policy: run_context
             .get("collaboration_policy")
             .or_else(|| run_context.get("requested_policy"))

@@ -71,7 +71,7 @@ pub(crate) fn ensure_workspace_knowledge_blocking(
     let config = clone_provider_config(&state)?;
     let mut snapshot = cached_workspace_knowledge_snapshot_for(&state, &root)?;
     let cache_hit = snapshot.cache_hit;
-    let cancellation = Arc::new(AgentRunControl::new("auto"));
+    let cancellation = Arc::new(AgentRunControl::new("default"));
     let expected_epoch = cancellation.steer_epoch();
     let indexed = ensure_workspace_knowledge_index(WorkspaceKnowledgeIndexRequest {
         workspace_root: &root,

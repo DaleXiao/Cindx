@@ -242,7 +242,10 @@ fn subagent_child_normalizes_provider_wire_tool_names_before_dispatch() {
     );
 
     assert_eq!(outcome.stop_reason, SubagentStopReason::Completed);
-    assert_eq!(outcome.tool_calls, 1, "the wire-name call must execute, not be denied");
+    assert_eq!(
+        outcome.tool_calls, 1,
+        "the wire-name call must execute, not be denied"
+    );
     // The structured fact travels under the canonical registry name.
     assert_eq!(outcome.tool_facts.len(), 1);
     assert_eq!(outcome.tool_facts[0].tool_name, "file.read");
@@ -1375,7 +1378,7 @@ fn a_delegation_model_is_honored_only_when_the_configuration_can_serve_it() {
     // picker but cannot be checked here without a provider call.
     let pinned = ProviderConfig {
         model: "run-model".to_string(),
-        pro_model: "strong-model".to_string(),
+        high_model: "strong-model".to_string(),
         ..Default::default()
     };
     assert_eq!(
@@ -1516,16 +1519,10 @@ fn delegated_observed_locations_ride_the_subagent_result_carrier() {
     );
 
     let recovered = agent_runtime::observed_locations_from_messages(&[message]);
-    let read = agent_runtime::observed_locations_for_call(
-        "file.read",
-        r#"{"path":"src/a.py"}"#,
-        true,
-    );
-    let patch = agent_runtime::observed_locations_for_call(
-        "file.patch",
-        r#"{"path":"src/b.py"}"#,
-        true,
-    );
+    let read =
+        agent_runtime::observed_locations_for_call("file.read", r#"{"path":"src/a.py"}"#, true);
+    let patch =
+        agent_runtime::observed_locations_for_call("file.patch", r#"{"path":"src/b.py"}"#, true);
     for expected in read.iter().chain(&patch) {
         assert!(
             recovered.contains(expected),

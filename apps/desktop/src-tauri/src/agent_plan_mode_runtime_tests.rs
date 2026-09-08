@@ -255,7 +255,10 @@ fn plan_mode_contract_loop_normalizes_provider_wire_tool_names() {
 
     assert!(matches!(outcome, PlanPhaseOutcome::Proposed(_)));
     assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].0, "file.read", "the report carries the canonical name");
+    assert_eq!(
+        seen[0].0, "file.read",
+        "the report carries the canonical name"
+    );
     assert_eq!(
         seen[0].1, "status=succeeded",
         "the wire-name exploration read must execute, not be denied"

@@ -70,16 +70,18 @@ export function providerSupportsModelDiscovery(providerId: ProviderId) {
 
 export type ProviderTierDefaults = {
   fast: string;
-  auto: string;
-  pro: string;
+  default: string;
+  high: string;
+  xhigh: string;
 };
 
 export function providerTierDefaults(providerId: ProviderId): ProviderTierDefaults {
   const defaults = providerPreset(providerId)?.defaults;
   return {
     fast: defaults?.fast ?? "",
-    auto: defaults?.auto ?? "",
-    pro: defaults?.pro ?? ""
+    default: defaults?.default ?? "",
+    high: defaults?.high ?? "",
+    xhigh: defaults?.xhigh ?? ""
   };
 }
 

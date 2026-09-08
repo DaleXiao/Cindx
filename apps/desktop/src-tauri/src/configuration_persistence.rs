@@ -89,8 +89,9 @@ pub(crate) fn apply_provider_config_input(config: &mut ProviderConfig, input: Pr
             .unwrap_or_default(),
     );
     config.fast_model = normalized_config_value(&input.fast_model);
-    config.auto_model = normalized_config_value(&input.auto_model);
-    config.pro_model = normalized_config_value(&input.pro_model);
+    config.default_model = normalized_config_value(&input.default_model);
+    config.high_model = normalized_config_value(&input.high_model);
+    config.xhigh_model = normalized_config_value(&input.xhigh_model);
     config.enabled_models = input
         .enabled_models
         .iter()
@@ -181,6 +182,8 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
     let mut config = ProviderConfig::default();
     let mut loaded_model_fields = HashSet::new();
     let mut provider_id_loaded = false;
+    // Retired auto/pro keys, resolved after the loop so new keys always win.
+    let (mut legacy_auto_model, mut legacy_pro_model) = (None, None);
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -227,8 +230,12 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
             }
             "image_endpoint" => config.image_endpoint = value.to_string(),
             "fast_model" => config.fast_model = value.to_string(),
-            "auto_model" => config.auto_model = value.to_string(),
-            "pro_model" => config.pro_model = value.to_string(),
+            "default_model" => config.default_model = value.to_string(),
+            "high_model" => config.high_model = value.to_string(),
+            "xhigh_model" => config.xhigh_model = value.to_string(),
+            // Retired auto/pro tier-slot keys: one-time ingress migration.
+            "auto_model" => legacy_auto_model = Some(value.to_string()),
+            "pro_model" => legacy_pro_model = Some(value.to_string()),
             "voice_model" => {
                 config.voice_model = value.to_string();
                 loaded_model_fields.insert("voice_model");
@@ -258,6 +265,19 @@ pub(crate) fn provider_config_from_text(text: &str) -> ProviderConfig {
                 }
             }
             _ => {}
+        }
+    }
+    // The old shared pro slot served BOTH high and xhigh, so its value seeds
+    // each new slot the file did not set; the next save writes only new keys.
+    for (slot, legacy) in [
+        (&mut config.default_model, legacy_auto_model),
+        (&mut config.high_model, legacy_pro_model.clone()),
+        (&mut config.xhigh_model, legacy_pro_model),
+    ] {
+        if slot.trim().is_empty() {
+            if let Some(value) = legacy {
+                *slot = value;
+            }
         }
     }
     let mut profile = resolve_provider_profile(
@@ -385,7 +405,7 @@ pub(crate) fn save_provider_config_to_disk(config: &ProviderConfig) -> Result<()
 
 pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
     format!(
-        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\nauto_model={}\npro_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ndirect_judge_fail_closed={}\nguardian_auto_approval={}\nplan_first_enabled={}\napproval_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
+        "provider_id={}\nprovider_resource={}\nbase_url={}\napi_key={}\nmodel={}\nconductor_model={}\nplanner_model={}\nexecutor_model={}\nreviewer_model={}\nsummarizer_model={}\nfast_model={}\ndefault_model={}\nhigh_model={}\nxhigh_model={}\nembedding_model={}\nimage_model={}\nimage_endpoint={}\nvoice_model={}\nauth_verified_at_ms={}\ncollaboration_policy={}\ndirect_judge_fail_closed={}\nguardian_auto_approval={}\nplan_first_enabled={}\napproval_policy={}\ncontext_window_tokens={}\nagent_system_prompt_hex={}\nenabled_models={}\n",
         sanitize_config_value(&config.provider_id),
         sanitize_config_value(&config.provider_resource),
         sanitize_config_value(&config.base_url),
@@ -397,8 +417,9 @@ pub(crate) fn provider_config_text(config: &ProviderConfig) -> String {
         sanitize_config_value(&config.reviewer_model),
         sanitize_config_value(&config.summarizer_model),
         sanitize_config_value(&config.fast_model),
-        sanitize_config_value(&config.auto_model),
-        sanitize_config_value(&config.pro_model),
+        sanitize_config_value(&config.default_model),
+        sanitize_config_value(&config.high_model),
+        sanitize_config_value(&config.xhigh_model),
         sanitize_config_value(&config.embedding_model),
         sanitize_config_value(&config.image_model),
         sanitize_config_value(&config.image_endpoint),

@@ -291,17 +291,26 @@ retrying. Every resolution records its source (`local-user` or `auto-timeout`)
 on the `plan_resolved` event so an audit can tell a timeout approval from an
 explicit click.
 
-Each tier can pin a configured default model (`fast_model`, `auto_model`,
-`pro_model` in the provider configuration). The Settings Models panel exposes
-the three tier pins plus the legacy compatibility fallback slot; the legacy
-per-stage role slots (Primary/Reasoning/Verifier/Utility and the planning
-override) are no longer surfaced there. They remain persisted provider fields;
-the executor-role slot is the fallback when a tier is unpinned. A pinned model
-anchors the tier's primary model directly. When a tier is unpinned, the provider
-catalog's tier default applies instead — for the DashScope provider that is a
-flash-class model for Fast and progressively more capable plus/max-class models
-for Default, High, and Extra High — and providers without catalog tier defaults
-keep the legacy role-slot behavior.
+Each tier can pin a configured default model (`fast_model`, `default_model`,
+`high_model`, `xhigh_model` in the provider configuration — the canonical
+tier-slot keys). The retired `auto_model`/`pro_model` keys migrate once at
+config load: `auto_model` seeds `default_model`, and the old shared
+`pro_model` slot (which served BOTH High and Extra High — the config-level
+root of the consumed Phase 4 run's identical high/xhigh treatment) seeds
+`high_model` and `xhigh_model` alike unless the file sets them explicitly;
+the next save writes only the new keys. The Settings Models panel exposes
+the fallback-model slot and the enabled-models picker; the tier pins and the
+legacy per-stage role slots (Primary/Reasoning/Verifier/Utility and the
+planning override) remain persisted provider fields that are not surfaced
+there. The executor-role slot is the fallback when a tier is unpinned and
+the provider has no catalog tier default. A pinned model anchors the tier's
+primary model directly. When a tier is unpinned, the provider catalog's
+tier default applies instead — for the DashScope provider that is a
+flash-class model for Fast and progressively more capable plus/max-class
+models for Default, High, and Extra High (catalog version 3 carries high
+and xhigh as separate keys, so the two top tiers can diverge) — and
+providers without catalog tier defaults keep the legacy role-slot
+behavior.
 
 Default, High, and Extra High do not automatically run every configured model;
 one model executes the effort plan.

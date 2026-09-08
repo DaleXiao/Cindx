@@ -340,8 +340,9 @@ export type ProviderConfigState = {
   reviewerModel: string;
   summarizerModel: string;
   fastModel: string;
-  autoModel: string;
-  proModel: string;
+  defaultModel: string;
+  highModel: string;
+  xhighModel: string;
   embeddingModel: string;
   imageModel: string;
   imageEndpoint: string;
@@ -377,8 +378,9 @@ export type ProviderConfigInput = {
   reviewerModel: string;
   summarizerModel: string;
   fastModel: string;
-  autoModel: string;
-  proModel: string;
+  defaultModel: string;
+  highModel: string;
+  xhighModel: string;
   embeddingModel: string;
   imageModel: string;
   imageEndpoint: string;

@@ -912,7 +912,9 @@ const criticalDesktopAgentModuleBudgets = new Map([
   ["sidecar_runtime.rs", 300],
   ["semantic_memory_runtime.rs", 260],
   ["semantic_memory_worker.rs", 240],
-  ["knowledge_runtime.rs", 1_000],
+  // +1: the tier-slot split (auto/pro → default/high/xhigh) adds one
+  // unavoidable field to the mechanical ProviderConfigState mapping.
+  ["knowledge_runtime.rs", 1_001],
   ["memory_projection_runtime.rs", 260],
   ["memory_runtime.rs", 950],
   ["manual_tool_execution.rs", 180],
