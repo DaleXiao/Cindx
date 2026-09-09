@@ -320,15 +320,25 @@ pub(crate) fn run_plan_phase(
         // Reserve a physical attempt on the unified ledger (audit P1-01): the
         // logical stage call above bounded plan drafting, but the physical
         // tokens/attempts were never counted against the run budget.
+        // Wire activity marks run progress (throttled 1s), same contract as
+        // the foreground turn and subagent loops.
+        let mut last_activity_mark = std::time::Instant::now();
+        let mut on_activity = || {
+            if last_activity_mark.elapsed() >= std::time::Duration::from_secs(1) {
+                last_activity_mark = std::time::Instant::now();
+                cancellation.note_wire_activity("plan", "provider wire activity");
+            }
+        };
         let outcome = crate::model_resource_runtime::controlled_aux_model_call(
             cancellation,
             "plan",
             &request,
             RunStageClass::Worker,
             || {
-                actor_provider.complete_streaming_cancellable(
+                actor_provider.complete_streaming_cancellable_with_activity(
                     request.clone(),
                     &mut |_| {},
+                    &mut on_activity,
                     &mut should_cancel,
                 )
             },

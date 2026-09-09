@@ -448,7 +448,16 @@ leave no stamped durable event, so a zero count proves nothing for those.
 3. A logical run identity and a physical attempt identity are created. Retry
    and recovery retain logical lineage while receiving a new physical attempt.
 4. Run control applies cancellation, steer, turn, stage, and deadline budgets;
-   `agent-harness` prevents duplicate active work for the same key.
+   `agent-harness` prevents duplicate active work for the same key. While a
+   model call is in flight its own timeout governs the stall guard, and
+   provider wire activity — every parsed streaming event, including
+   reasoning-only and empty deltas that never surface as content — marks run
+   progress (throttled to 1s) on the foreground model turns and the
+   subagent, summary, and plan-drafting stage calls, so a healthy
+   long-thinking stream on those paths is not mistaken for a stalled run; a
+   truly silent connection still trips the in-call timeout and checkpoints
+   the run for resumption. Collaboration-stage calls keep their own
+   policy-flag-gated activity marking.
 5. The effective objective and bounded history are compiled into context.
 6. The effort-tier planner deterministically builds the run plan (no model
    call) and preparation applies the prompt-derived route requirements onto it.

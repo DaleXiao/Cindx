@@ -379,6 +379,55 @@ prompt, so the driver retries on a `--key-wait <seconds>` window (default 60
 preflight / 900 execute); every failed attempt is provider-call-free and the
 mode fails closed without the key.
 
+Keychain grants need the TEAM-bearing signing identity: macOS books
+partition-list entries for team-less local signatures by cdhash, so an
+"Always Allow" grant dies at every rebuild (empirically falsified
+2026-09-08 — a broker signed with the app's exact designated requirement
+still prompted, because shell-launched binaries are booked by cdhash, not
+DR). `scripts/setup-local-codesign.mjs` therefore creates the identity with
+`OU = CNDXLOCAL1` (codesign derives `TeamIdentifier` from it; the setup
+probe and `build-local-app.mjs` both fail loudly if a signature lacks it),
+and team-signed code is booked by team — one grant then survives rebuilds
+of the app, driver, and broker alike. Migrating an existing install:
+`node scripts/setup-local-codesign.mjs --force` (one GUI authorization),
+rebuild/reinstall, then ONE "Always Allow" click on the app's first launch
+re-establishes the channel for every same-team binary.
+
+Fallback channel when a prompt is unacceptable mid-chain: the feature-gated
+`provider-key-broker` binary reads the key and pipes it to
+`product-eval … --key-stdin`, keeping it out of argv and env. Silence comes
+from the TEAM-bearing signature (the identifier is irrelevant to partition
+bookkeeping — DR matching alone was empirically falsified), so the broker
+must be signed with the same local identity after every rebuild:
+
+```sh
+cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
+  --features product-eval --bin provider-key-broker --release
+codesign --force --sign "Cindx Local Dev" \
+  --identifier app.cindx.desktop \
+  apps/desktop/src-tauri/target/release/provider-key-broker
+./apps/desktop/src-tauri/target/release/provider-key-broker | \
+  ./apps/desktop/src-tauri/target/release/product-eval preflight \
+  --suite <suite.json> --out <private-dir> --key-stdin --key-wait 5
+```
+
+The broker is a same-user extraction oracle by design — local-dev only,
+never shipped. Two known edges: a bounded-read timeout appends one
+degraded-start line to the real data root's startup.log (same log-only
+exception the driver documents), and `--key-stdin` on a TTY without a pipe
+blocks until EOF — always pipe the broker into it.
+
+Migration checklist for an existing install (each step once): commit or
+stash local changes (`build-local-app.mjs` requires a clean tracked tree),
+`node scripts/setup-local-codesign.mjs --force` (one GUI authorization),
+`node scripts/build-local-app.mjs --skip-tests` (rebuild + reinstall with
+the TeamIdentifier assertion), rebuild AND re-sign the driver and broker
+(old signatures carry no team and stay cdhash-booked), launch the app once
+and click ONE "Always Allow" (re-establishes the channel for every
+same-team binary), then verify: rebuild the driver again (new cdhash) and
+confirm `preflight --key-wait 5` returns `api_key_present: true` with no
+dialog.
+
 The Goal 3D preflight was provider-free. Its `cindx-collaboration-successor-preflight`
 binary (and the Goal 3E authorize/execute and Delivery Verification binaries)
 were removed in the phase-3 effort-tier rebuild along with the `realworld-eval`

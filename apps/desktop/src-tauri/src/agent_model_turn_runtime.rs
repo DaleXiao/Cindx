@@ -419,11 +419,25 @@ pub(crate) fn execute_agent_model_turn(
             agent_run_should_stop(cancellation)
                 || !cancellation.execution_epoch_lease_is_current(epoch_lease)
         };
+        // Wire-level activity (every parsed SSE event, including reasoning
+        // and empty deltas that never become content) counts as run
+        // progress, throttled to 1s: a live-but-quiet stream must not trip
+        // the in-call no-progress guard (run-3 fast-tier pause on a healthy
+        // 182s reasoning stream). A truly silent connection still trips
+        // model_call_timeout by design.
+        let mut last_activity_mark = std::time::Instant::now();
+        let mut on_activity = || {
+            if last_activity_mark.elapsed() >= std::time::Duration::from_secs(1) {
+                last_activity_mark = std::time::Instant::now();
+                cancellation.note_wire_activity("model_stream", turn_role.label());
+            }
+        };
         let result = prepared_streaming_request_once(provider, &request, &mut prepared_request)
             .and_then(|prepared| {
-                provider.complete_prepared_streaming_cancellable(
+                provider.complete_prepared_streaming_cancellable_with_activity(
                     prepared,
                     &mut on_delta,
+                    &mut on_activity,
                     &mut should_cancel,
                 )
             });

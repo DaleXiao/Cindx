@@ -954,6 +954,31 @@ fn flag_value(args: &[String], name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The provider-key broker entry (its own feature-gated binary, signed with
+/// the DESKTOP APP's designated requirement): reads the keychain key through
+/// the app's creator-trust channel — the only channel empirically proven to
+/// survive binary rebuilds, because macOS books "Always Allow" grants for
+/// team-less local signatures by cdhash in the item's partition list, so a
+/// grant to the driver's own identifier dies at every recompile (run-3
+/// falsification). The driver consumes the key over stdin (`--key-stdin`),
+/// keeping it out of argv and env. Local-dev-only artifact: the broker is a
+/// same-user extraction oracle, acceptable on the operator's machine only —
+/// it stays behind the non-default `product-eval` feature and out of every
+/// shipping bundle.
+pub fn provider_key_broker_main() -> i32 {
+    let mut config = crate::configuration_persistence::load_provider_config();
+    crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
+    let key = config.api_key.trim();
+    if key.is_empty() {
+        eprintln!("broker: provider key not readable (keychain denied, prompt pending, or empty)");
+        return 1;
+    }
+    use std::io::Write;
+    print!("{key}");
+    let _ = std::io::stdout().flush();
+    0
+}
+
 pub fn product_eval_main(argv: Vec<String>) -> i32 {
     let Some(mode) = argv.first().cloned() else {
         eprintln!("usage: product-eval <preflight|rehearse|execute> --suite <path> --out <dir> [--preflight <receipt>]");
@@ -972,6 +997,30 @@ pub fn product_eval_main(argv: Vec<String>) -> i32 {
     // hermetic inside the eval out directory.
     let provider_authority = matches!(mode.as_str(), "preflight" | "execute").then(|| {
         let mut config = crate::configuration_persistence::load_provider_config();
+        if args.iter().any(|arg| arg == "--key-stdin") {
+            // The key arrives over stdin from a process that already holds
+            // keychain trust (the provider-key broker, signed with the app's
+            // designated requirement). This channel survives driver rebuilds;
+            // the direct keychain read below does not, because "Always Allow"
+            // for a team-less signature is booked by cdhash and dies at every
+            // recompile (run-3 falsification). Stdin keeps the key out of
+            // argv and env.
+            let mut piped = String::new();
+            match std::io::Read::read_to_string(&mut std::io::stdin(), &mut piped) {
+                Ok(_) if !piped.trim().is_empty() => {
+                    config.api_key = piped.trim().to_string();
+                }
+                Ok(_) => eprintln!(
+                    "--key-stdin: stdin was empty — falling back to the config value; \
+                     the mode fails closed if no key is present"
+                ),
+                Err(error) => eprintln!(
+                    "--key-stdin: reading stdin failed ({error}) — falling back to the config value; \
+                     the mode fails closed if no key is present"
+                ),
+            }
+            return config;
+        }
         crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
         // The bounded keychain read (1.5s) cannot wait out an authorization
         // prompt, so the driver retries on a pace the operator can meet. The

@@ -175,6 +175,22 @@ impl AgentRunControl {
         true
     }
 
+    /// Marks run progress for provider wire activity (every parsed SSE
+    /// event) observed during an in-flight model call. Epoch-free by
+    /// design: it refreshes against the control's own current state, so
+    /// auxiliary loops (subagent children, summary, plan drafting) need no
+    /// lease plumbing. Never revives a stopped or cancelled run — the same
+    /// precondition `mark_progress_at` enforces.
+    pub fn note_wire_activity(&self, stage: &str, detail: &str) {
+        let mut state = self.state.lock().expect("run control state poisoned");
+        if state.stop_reason.is_some() || self.cancellation_requested() {
+            return;
+        }
+        state.stage = stage.to_string();
+        state.detail = detail.to_string();
+        state.last_progress_at = Instant::now();
+    }
+
     /// Counts one session-history compaction materialized for this run.
     /// Measurement only; never gates execution.
     pub fn record_context_compaction(&self) {

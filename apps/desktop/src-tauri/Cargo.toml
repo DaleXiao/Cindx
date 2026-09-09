@@ -21,6 +21,11 @@ name = "product-eval"
 path = "src/bin/product_eval.rs"
 required-features = ["product-eval"]
 
+[[bin]]
+name = "provider-key-broker"
+path = "src/bin/provider_key_broker.rs"
+required-features = ["product-eval"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

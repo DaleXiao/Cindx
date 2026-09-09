@@ -123,15 +123,25 @@ pub(crate) fn model_rolling_summary(
     }
     let mut should_cancel = || agent_run_should_stop(cancellation);
     let mut ignore_delta = |_delta: &str| {};
+    // Wire activity marks run progress (throttled 1s), same contract as the
+    // foreground turn and subagent loops.
+    let mut last_activity_mark = std::time::Instant::now();
+    let mut on_activity = || {
+        if last_activity_mark.elapsed() >= std::time::Duration::from_secs(1) {
+            last_activity_mark = std::time::Instant::now();
+            cancellation.note_wire_activity(SUMMARY_MODEL_LABEL, "provider wire activity");
+        }
+    };
     let outcome = crate::model_resource_runtime::controlled_aux_model_call(
         cancellation,
         SUMMARY_MODEL_LABEL,
         &request,
         RunStageClass::Other,
         || {
-            provider.complete_streaming_cancellable(
+            provider.complete_streaming_cancellable_with_activity(
                 request.clone(),
                 &mut ignore_delta,
+                &mut on_activity,
                 &mut should_cancel,
             )
         },

@@ -18,6 +18,15 @@
 // signing. Expect exactly ONE GUI authorization prompt (the trust setting);
 // everything else is non-interactive.
 //
+// The certificate carries OU = CNDXLOCAL1 so signed binaries expose a stable
+// TeamIdentifier. This matters for the keychain: macOS books partition-list
+// entries for team-less local signatures by cdhash, so an "Always Allow"
+// grant dies at every rebuild (empirically falsified 2026-09-08: a broker
+// binary signed with the app's exact designated requirement still prompted,
+// because shell-launched binaries are booked by cdhash, not DR). Team-signed
+// code is booked by team, so one grant survives every rebuild of the app,
+// the eval driver, and the key broker alike.
+//
 // Usage: node scripts/setup-local-codesign.mjs [--force]
 
 import fs from "node:fs";
@@ -54,6 +63,34 @@ if (process.platform !== "darwin") {
   throw new Error("Local code signing setup is macOS-only.");
 }
 
+if (process.argv.includes("--force")) {
+  // Migration path (e.g. adding the OU/TeamID): remove every previous
+  // identity so codesign never faces two "Cindx Local Dev" candidates.
+  // find-certificate (not find-identity) is the existence check: a prior
+  // run that imported but never got trusted is invisible to find-identity,
+  // and skipping its deletion here would create the very duplicate this
+  // block exists to prevent. Bounded loop because delete-identity removes
+  // one match at a time.
+  const certExists = () => {
+    const probe = spawnSync(
+      "security",
+      ["find-certificate", "-c", IDENTITY_NAME, "-Z"],
+      { encoding: "utf8" }
+    );
+    return probe.status === 0 && (probe.stdout ?? "").includes(IDENTITY_NAME);
+  };
+  for (let removed = 0; certExists() && removed < 5; removed += 1) {
+    run("security", ["delete-identity", "-c", IDENTITY_NAME]);
+    console.log(`Removed a previous "${IDENTITY_NAME}" identity for re-creation.`);
+  }
+  if (certExists()) {
+    throw new Error(
+      `"${IDENTITY_NAME}" certificates survived five delete attempts; ` +
+      "inspect `security find-certificate -a -c \"Cindx Local Dev\"` manually"
+    );
+  }
+}
+
 // LibreSSL's PKCS#12 output (3DES/SHA-1) is what `security import` accepts
 // everywhere; Homebrew OpenSSL 3 defaults to AES-256 PBES2, which older
 // import paths reject. Prefer the system binary, fall back to PATH openssl.
@@ -78,6 +115,10 @@ try {
       "prompt = no",
       "[dn]",
       `CN = ${IDENTITY_NAME}`,
+      // Team-style OU: codesign derives TeamIdentifier from it, and the
+      // keychain partition list books team-signed code by team instead of
+      // by per-build cdhash (see header).
+      "OU = CNDXLOCAL1",
       "[v3]",
       "basicConstraints = critical, CA:false",
       "keyUsage = critical, digitalSignature",
@@ -122,7 +163,21 @@ try {
       "check `security find-identity -v -p codesigning`"
     );
   }
-  console.log(`Code-signing identity "${IDENTITY_NAME}" is ready.`);
+  // Probe: find-identity listing is not enough — verify a real signature
+  // actually carries the TeamIdentifier (the property the keychain partition
+  // list keys on). Do not skip: a malformed OU silently yields TeamIdentifier
+  // "not set" and the whole migration is void.
+  const probePath = path.join(temporaryRoot, "probe.bin");
+  fs.writeFileSync(probePath, "probe");
+  run("codesign", ["--force", "--sign", IDENTITY_NAME, probePath]);
+  const probeInfo = spawnSync("codesign", ["-dvv", probePath], { encoding: "utf8" });
+  const probeText = `${probeInfo.stdout ?? ""}${probeInfo.stderr ?? ""}`;
+  if (!probeText.includes("TeamIdentifier=CNDXLOCAL1")) {
+    throw new Error(
+      `identity signs without TeamIdentifier=CNDXLOCAL1; codesign reported:\n${probeText}`
+    );
+  }
+  console.log(`Code-signing identity "${IDENTITY_NAME}" is ready (TeamIdentifier=CNDXLOCAL1 verified by probe).`);
 } finally {
   // Shred the plaintext key material.
   try {

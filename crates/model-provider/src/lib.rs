@@ -174,12 +174,44 @@ pub trait StreamingModelProvider: Send + Sync {
         self.complete_streaming_cancellable(request.clone(), on_delta, should_cancel)
     }
 
+    /// The prepared streaming entry with a wire-activity callback: fires on
+    /// EVERY parsed server-sent event, including reasoning-only and
+    /// empty-content deltas that never surface as content. Callers use it to
+    /// keep a live-but-quiet stream from looking like run-level no-progress
+    /// (the run-3 fast-tier pause: a healthy 182s reasoning stream exceeded
+    /// the in-call guard because only content deltas marked progress).
+    /// The default drops activity for providers without native support.
+    fn complete_prepared_streaming_cancellable_with_activity(
+        &self,
+        request: &PreparedStreamingModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        _on_activity: &mut dyn FnMut(),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        self.complete_prepared_streaming_cancellable(request, on_delta, should_cancel)
+    }
+
     fn complete_streaming_cancellable(
         &self,
         request: ModelRequest,
         on_delta: &mut dyn FnMut(&str),
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<ModelResponse, ModelError>;
+
+    /// The unprepared streaming entry with the same wire-activity callback
+    /// as its prepared sibling — the auxiliary loops (subagent, summary,
+    /// plan drafting) dispatch through this shape, and a reasoning-only
+    /// stream there must mark run progress exactly like a foreground turn.
+    /// The default drops activity for providers without native support.
+    fn complete_streaming_cancellable_with_activity(
+        &self,
+        request: ModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        _on_activity: &mut dyn FnMut(),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        self.complete_streaming_cancellable(request, on_delta, should_cancel)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,6 +751,21 @@ impl StreamingModelProvider for OpenAiCompatibleProvider {
         self.complete_prepared_streaming_model_request(request, on_delta, should_cancel)
     }
 
+    fn complete_prepared_streaming_cancellable_with_activity(
+        &self,
+        request: &PreparedStreamingModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        on_activity: &mut dyn FnMut(),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        self.complete_prepared_streaming_model_request_with_activity(
+            request,
+            on_delta,
+            on_activity,
+            should_cancel,
+        )
+    }
+
     fn complete_streaming_cancellable(
         &self,
         request: ModelRequest,
@@ -730,6 +777,22 @@ impl StreamingModelProvider for OpenAiCompatibleProvider {
             request,
             |delta| on_delta(delta),
             should_cancel,
+        )
+    }
+
+    fn complete_streaming_cancellable_with_activity(
+        &self,
+        request: ModelRequest,
+        on_delta: &mut dyn FnMut(&str),
+        on_activity: &mut dyn FnMut(),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelResponse, ModelError> {
+        OpenAiCompatibleProvider::complete_streaming_cancellable_with_activity(
+            self,
+            request,
+            |delta| on_delta(delta),
+            || on_activity(),
+            || should_cancel(),
         )
     }
 }
@@ -1248,6 +1311,69 @@ mod tests {
         let bodies = bodies.lock().expect("recorded bodies");
         assert_eq!(bodies.len(), 3);
         assert!(!bodies[2].contains("enable_thinking"));
+    }
+
+    /// Run-3 regression shape: a thinking model streams reasoning-only
+    /// deltas for minutes while the visible content stays empty. Through the
+    /// TRAIT entry the turn runtime uses, every parsed SSE event must fire
+    /// on_activity (the run-control progress feed) even though on_delta sees
+    /// nothing until the answer lands — otherwise a healthy live stream
+    /// looks like no-progress and the run pauses mid-call.
+    #[test]
+    fn trait_activity_entry_fires_for_reasoning_only_streams() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking hard\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"still thinking\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, _bodies, _server) =
+            serve_sequential_chat_responses(vec![(200, sse.to_string())]);
+        let provider = thinking_provider(base_url);
+        let trait_provider: &dyn StreamingModelProvider = &provider;
+        let request = high_effort_request(ModelCallMode::Streaming);
+        let prepared = trait_provider
+            .prepare_streaming_request(&request)
+            .expect("prepared streaming request");
+
+        let mut deltas = String::new();
+        let mut activity = 0usize;
+        let response = trait_provider
+            .complete_prepared_streaming_cancellable_with_activity(
+                &prepared,
+                &mut |delta| deltas.push_str(delta),
+                &mut || activity += 1,
+                &mut || false,
+            )
+            .expect("the reasoning stream completes");
+
+        assert_eq!(response.message.content, "done");
+        assert_eq!(deltas, "done", "reasoning deltas never surface as content");
+        assert!(
+            activity >= 3,
+            "every parsed SSE event must mark wire activity, got {activity}"
+        );
+
+        // The unprepared trait entry (the auxiliary-loop dispatch shape:
+        // subagent, summary, plan drafting) carries the same contract.
+        let (base_url, _bodies, _server) =
+            serve_sequential_chat_responses(vec![(200, sse.to_string())]);
+        let provider = thinking_provider(base_url);
+        let trait_provider: &dyn StreamingModelProvider = &provider;
+        let mut activity = 0usize;
+        let response = trait_provider
+            .complete_streaming_cancellable_with_activity(
+                high_effort_request(ModelCallMode::Streaming),
+                &mut |_| {},
+                &mut || activity += 1,
+                &mut || false,
+            )
+            .expect("the unprepared activity entry completes");
+        assert_eq!(response.message.content, "done");
+        assert!(
+            activity >= 3,
+            "the unprepared entry must fire activity too, got {activity}"
+        );
     }
 
     #[test]

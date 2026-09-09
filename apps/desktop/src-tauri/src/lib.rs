@@ -151,7 +151,7 @@ use persistence_runtime::*;
 use personalization_persistence::*;
 use platform_runtime::*;
 #[cfg(feature = "product-eval")]
-pub use product_path_eval::driver::product_eval_main;
+pub use product_path_eval::driver::{product_eval_main, provider_key_broker_main};
 use project_commands::*;
 use project_config_persistence::*;
 use project_lifecycle_runtime::*;

@@ -203,6 +203,27 @@ try {
     builtApp
   ]);
   run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", builtApp]);
+  if (codesignIdentity !== "-") {
+    // The keychain partition list books team-less local signatures by cdhash
+    // (an "Always Allow" dies at every rebuild — falsified 2026-09-08), but
+    // team-signed code by team. What must hold for ANY identity is a real
+    // TeamIdentifier; for the local identity it must be exactly the OU the
+    // setup script bakes in. Fail the build loudly otherwise: without team
+    // bookkeeping the unattended-run guarantee is silently void and every
+    // rebuild re-arms the authorization prompt.
+    const info = spawnSync("codesign", ["-dvv", builtApp], { encoding: "utf8" });
+    const infoText = `${info.stdout ?? ""}${info.stderr ?? ""}`;
+    const teamOk =
+      codesignIdentity === "Cindx Local Dev"
+        ? infoText.includes("TeamIdentifier=CNDXLOCAL1")
+        : /TeamIdentifier=(?!not set)\S+/.test(infoText);
+    if (!teamOk) {
+      throw new Error(
+        `signed bundle lacks the required TeamIdentifier (identity: ${codesignIdentity}) — ` +
+        `for the local identity rerun scripts/setup-local-codesign.mjs --force;\ncodesign reported:\n${infoText}`
+      );
+    }
+  }
 
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cindx-local-probe-"));
   try {

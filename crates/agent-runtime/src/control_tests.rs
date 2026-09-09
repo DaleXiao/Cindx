@@ -1871,6 +1871,39 @@ fn delayed_treatment_uses_the_parent_absolute_remaining_deadline() {
 }
 
 #[test]
+fn wire_activity_keeps_a_live_model_call_from_stalling() {
+    // Run-3 regression: a healthy reasoning stream (SSE events arriving, no
+    // content deltas) must not trip the in-call stall guard; a truly silent
+    // call still must.
+    let mut budget = test_budget();
+    budget.max_duration = Duration::from_secs(5);
+    budget.no_progress_timeout = Duration::from_millis(20);
+    budget.model_call_timeout = Duration::from_millis(80);
+    let control = AgentRunControl::with_budget(budget);
+
+    control
+        .begin_model_call("executor")
+        .expect("model call should start");
+    for _ in 0..4 {
+        thread::sleep(Duration::from_millis(35));
+        control.note_wire_activity("model_stream", "executor");
+        assert_eq!(
+            control.stop_reason(),
+            None,
+            "activity inside the model-call timeout must keep the run alive"
+        );
+    }
+    // 140ms of total call time already exceeds the 80ms in-call threshold;
+    // only the activity marks kept it alive. Now go silent: the guard fires.
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(control.stop_reason(), Some(RunStopReason::NoProgress));
+
+    // A stopped run is never revived by late activity.
+    control.note_wire_activity("model_stream", "executor");
+    assert_eq!(control.stop_reason(), Some(RunStopReason::NoProgress));
+}
+
+#[test]
 fn active_model_call_uses_the_model_timeout_before_no_progress() {
     let mut budget = test_budget();
     budget.max_duration = Duration::from_secs(1);

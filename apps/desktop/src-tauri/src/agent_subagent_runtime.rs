@@ -526,15 +526,27 @@ pub(crate) fn subagent_child_answer(
         // logical stage call above bounded the child loop, but the physical
         // tokens/attempts were never counted, so parallel children could
         // amplify provider calls for free under the parent budget.
+        // Wire activity (reasoning-only deltas included) marks parent-run
+        // progress, throttled to 1s: a child's healthy long-thinking stream
+        // must not trip the parent's in-call stall guard (review finding —
+        // the same blind spot the foreground turn fix closed).
+        let mut last_activity_mark = std::time::Instant::now();
+        let mut on_activity = || {
+            if last_activity_mark.elapsed() >= std::time::Duration::from_secs(1) {
+                last_activity_mark = std::time::Instant::now();
+                cancellation.note_wire_activity("subagent", "provider wire activity");
+            }
+        };
         let outcome = crate::model_resource_runtime::controlled_aux_model_call(
             cancellation,
             "subagent",
             &request,
             RunStageClass::Worker,
             || {
-                actor_provider.complete_streaming_cancellable(
+                actor_provider.complete_streaming_cancellable_with_activity(
                     request.clone(),
                     &mut |_| {},
+                    &mut on_activity,
                     &mut should_cancel,
                 )
             },
