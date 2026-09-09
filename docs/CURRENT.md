@@ -42,8 +42,10 @@ The desktop app currently includes:
   creator and is implicitly trusted: a legacy item whose ACL still references an
   old ad-hoc build — the cause of an authorization prompt on every launch — is
   retired the next time the key is saved. On such a prompt, "Always Allow" (not
-  the default "Allow") also ends it immediately under the stable local signing
-  identity.
+  the default "Allow") ends it for that build; permanent silence across
+  rebuilds comes from the save-time re-creation above, which makes the
+  current stable signing identity the item's creator (reader grants alone
+  are booked per-build and decay at every rebuild).
 - Browser and computer sidecars, image generation, speech input, and managed
   local processes when configured and permitted.
 - A `todo.write` tool gives the run a flat, persisted working-memory list (borrowed

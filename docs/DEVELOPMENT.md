@@ -370,42 +370,59 @@ unattended execute never blocks on a password:
 cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
   --features product-eval --bin product-eval --release
 codesign --force --sign "Cindx Local Dev" \
-  --identifier app.cindx.product-eval \
+  --identifier app.cindx.desktop \
   apps/desktop/src-tauri/target/release/product-eval
 ```
+
+The driver is signed with the APP identifier on purpose: keychain silence
+comes from the creator-DR channel explained below, which keys on the
+designated requirement, and a distinct `app.cindx.product-eval` identifier
+would form a different DR and fall back to per-cdhash reader grants.
 
 The keychain read is bounded (1.5s) and cannot wait out an authorization
 prompt, so the driver retries on a `--key-wait <seconds>` window (default 60
 preflight / 900 execute); every failed attempt is provider-call-free and the
 mode fails closed without the key.
 
-Keychain grants need the TEAM-bearing signing identity: macOS books
-partition-list entries for team-less local signatures by cdhash, so an
-"Always Allow" grant dies at every rebuild (empirically falsified
-2026-09-08 — a broker signed with the app's exact designated requirement
-still prompted, because shell-launched binaries are booked by cdhash, not
-DR). `scripts/setup-local-codesign.mjs` therefore creates the identity with
-`OU = CNDXLOCAL1` (codesign derives `TeamIdentifier` from it; the setup
-probe and `build-local-app.mjs` both fail loudly if a signature lacks it),
-and team-signed code is booked by team — one grant then survives rebuilds
-of the app, driver, and broker alike. Migrating an existing install:
-`node scripts/setup-local-codesign.mjs --force` (one GUI authorization),
-rebuild/reinstall, then ONE "Always Allow" click on the app's first launch
-re-establishes the channel for every same-team binary.
-
-Fallback channel when a prompt is unacceptable mid-chain: the feature-gated
-`provider-key-broker` binary reads the key and pipes it to
-`product-eval … --key-stdin`, keeping it out of argv and env. Silence comes
-from the TEAM-bearing signature (the identifier is irrelevant to partition
-bookkeeping — DR matching alone was empirically falsified), so the broker
-must be signed with the same local identity after every rebuild:
+Keychain silence rests on the CREATOR-DR channel, not on reader grants
+(both facts empirical, 2026-09-08/09): macOS books "Always Allow" reader
+grants for local signatures by cdhash — they die at every rebuild — and
+codesign stamps `TeamIdentifier` only for Apple-issued certificates ("man
+codesign"), so team bookkeeping is unreachable with a local identity. What
+survives rebuilds is the item's creator, tracked by designated requirement:
+the app has always read its provider item silently across rebuilds because
+it created the item (the 0.3.60 delete-then-create). Therefore every binary
+that must read the key silently — the app, the eval driver, and the key
+broker — is signed with the SAME identity AND identifier
+(`app.cindx.desktop`), and after any identity rotation the item is
+re-created through the broker so its creator DR covers all three:
 
 ```sh
 cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml \
-  --features product-eval --bin provider-key-broker --release
+  --features product-eval --bin product-eval --bin provider-key-broker --release
+codesign --force --sign "Cindx Local Dev" \
+  --identifier app.cindx.desktop \
+  apps/desktop/src-tauri/target/release/product-eval
 codesign --force --sign "Cindx Local Dev" \
   --identifier app.cindx.desktop \
   apps/desktop/src-tauri/target/release/provider-key-broker
+# one-time migration / re-seed after an identity rotation: the first read
+# may cost one "Always Allow" click (reader grants are per-cdhash); the
+# restore then makes the shared DR the item's creator and every later
+# rebuild of app/driver/broker reads with zero clicks:
+./apps/desktop/src-tauri/target/release/provider-key-broker | \
+  ./apps/desktop/src-tauri/target/release/provider-key-broker restore-app-item
+```
+
+`build-local-app.mjs` asserts the installed bundle carries
+`Authority=Cindx Local Dev` and `Identifier=app.cindx.desktop` (the
+creator-DR anchors), and the setup script probe-verifies a real signature
+while reporting the (expected) absent TeamIdentifier honestly.
+
+Fallback channel when a prompt is unacceptable mid-chain: pipe the broker
+into `product-eval … --key-stdin` (the key never touches argv or env):
+
+```sh
 ./apps/desktop/src-tauri/target/release/provider-key-broker | \
   ./apps/desktop/src-tauri/target/release/product-eval preflight \
   --suite <suite.json> --out <private-dir> --key-stdin --key-wait 5
@@ -417,16 +434,10 @@ degraded-start line to the real data root's startup.log (same log-only
 exception the driver documents), and `--key-stdin` on a TTY without a pipe
 blocks until EOF — always pipe the broker into it.
 
-Migration checklist for an existing install (each step once): commit or
-stash local changes (`build-local-app.mjs` requires a clean tracked tree),
-`node scripts/setup-local-codesign.mjs --force` (one GUI authorization),
-`node scripts/build-local-app.mjs --skip-tests` (rebuild + reinstall with
-the TeamIdentifier assertion), rebuild AND re-sign the driver and broker
-(old signatures carry no team and stay cdhash-booked), launch the app once
-and click ONE "Always Allow" (re-establishes the channel for every
-same-team binary), then verify: rebuild the driver again (new cdhash) and
-confirm `preflight --key-wait 5` returns `api_key_present: true` with no
-dialog.
+Verification after any migration: rebuild the driver once more (fresh
+cdhash), run `preflight --key-wait 5`, and require `api_key_present: true`
+with NO dialog on screen; then relaunch the app and confirm the provider
+shows ready without a prompt.
 
 The Goal 3D preflight was provider-free. Its `cindx-collaboration-successor-preflight`
 binary (and the Goal 3E authorize/execute and Delivery Verification binaries)

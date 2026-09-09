@@ -18,14 +18,16 @@
 // signing. Expect exactly ONE GUI authorization prompt (the trust setting);
 // everything else is non-interactive.
 //
-// The certificate carries OU = CNDXLOCAL1 so signed binaries expose a stable
-// TeamIdentifier. This matters for the keychain: macOS books partition-list
-// entries for team-less local signatures by cdhash, so an "Always Allow"
-// grant dies at every rebuild (empirically falsified 2026-09-08: a broker
-// binary signed with the app's exact designated requirement still prompted,
-// because shell-launched binaries are booked by cdhash, not DR). Team-signed
-// code is booked by team, so one grant survives every rebuild of the app,
-// the eval driver, and the key broker alike.
+// Keychain mechanism (empirical, 2026-09-08/09): macOS books READER grants
+// ("Always Allow") for local signatures by cdhash — they die at every
+// rebuild — and codesign stamps TeamIdentifier only for Apple-issued
+// certificates, so team bookkeeping is unreachable locally (the OU below is
+// kept as harmless future-proofing). What DOES survive rebuilds is the
+// item's CREATOR tracked by designated requirement: signing every silent
+// consumer (app, eval driver, key broker) with identifier
+// `app.cindx.desktop` under this stable identity, and re-creating the item
+// through the broker after any identity rotation, gives permanent
+// zero-click reads. Full runbook in docs/DEVELOPMENT.md.
 //
 // Usage: node scripts/setup-local-codesign.mjs [--force]
 
@@ -163,21 +165,30 @@ try {
       "check `security find-identity -v -p codesigning`"
     );
   }
-  // Probe: find-identity listing is not enough — verify a real signature
-  // actually carries the TeamIdentifier (the property the keychain partition
-  // list keys on). Do not skip: a malformed OU silently yields TeamIdentifier
-  // "not set" and the whole migration is void.
+  // Probe: verify a real signature carries the identity and report the team
+  // situation honestly. NOTE (empirical, macOS 26): codesign records
+  // TeamIdentifier only for Apple-issued certificates ("suitable
+  // Apple-issued signing certificates", man codesign) — a self-signed OU is
+  // NOT stamped, so keychain team bookkeeping is unreachable locally. The
+  // silent-unattended mechanism is the CREATOR-DR channel instead: the
+  // keychain item's creator is tracked by designated requirement, so every
+  // consumer that must read silently (app, eval driver, key broker) is
+  // signed with identifier app.cindx.desktop under this identity, and
+  // `provider-key-broker restore-app-item` re-creates the item under that
+  // shared DR after any identity rotation. See docs/DEVELOPMENT.md.
   const probePath = path.join(temporaryRoot, "probe.bin");
   fs.writeFileSync(probePath, "probe");
   run("codesign", ["--force", "--sign", IDENTITY_NAME, probePath]);
   const probeInfo = spawnSync("codesign", ["-dvv", probePath], { encoding: "utf8" });
   const probeText = `${probeInfo.stdout ?? ""}${probeInfo.stderr ?? ""}`;
-  if (!probeText.includes("TeamIdentifier=CNDXLOCAL1")) {
-    throw new Error(
-      `identity signs without TeamIdentifier=CNDXLOCAL1; codesign reported:\n${probeText}`
-    );
+  if (!probeText.includes(`Authority=${IDENTITY_NAME}`)) {
+    throw new Error(`probe signature does not carry the new identity; codesign reported:\n${probeText}`);
   }
-  console.log(`Code-signing identity "${IDENTITY_NAME}" is ready (TeamIdentifier=CNDXLOCAL1 verified by probe).`);
+  console.log(`Code-signing identity "${IDENTITY_NAME}" is ready (probe signed and verified).`);
+  if (!probeText.includes("TeamIdentifier=CNDXLOCAL1")) {
+    console.log("note: TeamIdentifier is not stamped for self-signed identities on this macOS (expected;");
+    console.log("      the creator-DR channel is the operative mechanism — see the runbook in docs/DEVELOPMENT.md).");
+  }
 } finally {
   // Shred the plaintext key material.
   try {

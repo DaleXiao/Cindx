@@ -203,24 +203,20 @@ try {
     builtApp
   ]);
   run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", builtApp]);
-  if (codesignIdentity !== "-") {
-    // The keychain partition list books team-less local signatures by cdhash
-    // (an "Always Allow" dies at every rebuild — falsified 2026-09-08), but
-    // team-signed code by team. What must hold for ANY identity is a real
-    // TeamIdentifier; for the local identity it must be exactly the OU the
-    // setup script bakes in. Fail the build loudly otherwise: without team
-    // bookkeeping the unattended-run guarantee is silently void and every
-    // rebuild re-arms the authorization prompt.
+  if (codesignIdentity === "Cindx Local Dev") {
+    // The silent-keychain mechanism is the creator-DR channel: the bundle
+    // must carry the stable identity and the app identifier, or the
+    // keychain item's creator DR stops matching and every launch re-prompts
+    // (codesign stamps TeamIdentifier only for Apple-issued certificates —
+    // team bookkeeping is not the mechanism; see docs/DEVELOPMENT.md).
     const info = spawnSync("codesign", ["-dvv", builtApp], { encoding: "utf8" });
     const infoText = `${info.stdout ?? ""}${info.stderr ?? ""}`;
-    const teamOk =
-      codesignIdentity === "Cindx Local Dev"
-        ? infoText.includes("TeamIdentifier=CNDXLOCAL1")
-        : /TeamIdentifier=(?!not set)\S+/.test(infoText);
-    if (!teamOk) {
+    if (
+      !infoText.includes("Authority=Cindx Local Dev") ||
+      !infoText.includes("Identifier=app.cindx.desktop")
+    ) {
       throw new Error(
-        `signed bundle lacks the required TeamIdentifier (identity: ${codesignIdentity}) — ` +
-        `for the local identity rerun scripts/setup-local-codesign.mjs --force;\ncodesign reported:\n${infoText}`
+        `signed bundle does not carry the stable identity/identifier the keychain creator-DR channel needs;\ncodesign reported:\n${infoText}`
       );
     }
   }

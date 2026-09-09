@@ -954,18 +954,51 @@ fn flag_value(args: &[String], name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The provider-key broker entry (its own feature-gated binary, signed with
-/// the DESKTOP APP's designated requirement): reads the keychain key through
-/// the app's creator-trust channel — the only channel empirically proven to
-/// survive binary rebuilds, because macOS books "Always Allow" grants for
-/// team-less local signatures by cdhash in the item's partition list, so a
-/// grant to the driver's own identifier dies at every recompile (run-3
-/// falsification). The driver consumes the key over stdin (`--key-stdin`),
-/// keeping it out of argv and env. Local-dev-only artifact: the broker is a
-/// same-user extraction oracle, acceptable on the operator's machine only —
-/// it stays behind the non-default `product-eval` feature and out of every
-/// shipping bundle.
-pub fn provider_key_broker_main() -> i32 {
+/// The provider-key broker (its own feature-gated binary, signed with the
+/// DESKTOP APP's designated requirement — identifier `app.cindx.desktop`
+/// and the stable local certificate). Two mechanisms, both empirical:
+/// macOS books keychain READER grants for team-less local signatures by
+/// cdhash (an "Always Allow" dies at every rebuild — falsified 2026-09-08),
+/// but tracks the item's CREATOR by designated requirement (the app reads
+/// silently across every rebuild). The broker therefore has two modes:
+///
+/// - no argument: read the provider key and print it to stdout (the driver
+///   consumes it via `--key-stdin`, keeping it out of argv and env). A
+///   reader grant may cost one prompt click per broker rebuild.
+/// - `restore-app-item`: read the key from stdin and RE-CREATE the app's
+///   keychain item (delete-then-add, the 0.3.60 semantics), making the
+///   broker's DR — identical to the app's and to any driver signed with
+///   `--identifier app.cindx.desktop` — the item's creator. After one
+///   migration run, the app, the broker, and the driver all read silently
+///   across rebuilds with zero clicks. Use it after any signing-identity
+///   rotation or when a reader grant has decayed.
+///
+/// Local-dev-only artifact: the broker is a same-user extraction oracle,
+/// acceptable on the operator's machine only — it stays behind the
+/// non-default `product-eval` feature and out of every shipping bundle.
+pub fn provider_key_broker_main(argv: Vec<String>) -> i32 {
+    if argv.first().map(String::as_str) == Some("restore-app-item") {
+        let mut piped = String::new();
+        if std::io::Read::read_to_string(&mut std::io::stdin(), &mut piped).is_err() {
+            eprintln!("broker: reading the key from stdin failed");
+            return 1;
+        }
+        let key = piped.trim();
+        if key.is_empty() {
+            eprintln!("broker: stdin was empty; refusing to clear the app item");
+            return 1;
+        }
+        return match crate::provider_secret_store::store_provider_api_key(key) {
+            Ok(()) => {
+                eprintln!("broker: app keychain item re-created; creator DR now covers app, broker, and driver");
+                0
+            }
+            Err(error) => {
+                eprintln!("broker: could not re-create the app keychain item: {error}");
+                1
+            }
+        };
+    }
     let mut config = crate::configuration_persistence::load_provider_config();
     crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
     let key = config.api_key.trim();

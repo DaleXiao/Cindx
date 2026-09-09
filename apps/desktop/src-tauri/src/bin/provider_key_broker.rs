@@ -5,6 +5,6 @@
 //! `provider_key_broker_main` for the full rationale.
 
 fn main() {
-    let code = cindx_desktop::provider_key_broker_main();
+    let code = cindx_desktop::provider_key_broker_main(std::env::args().skip(1).collect());
     std::process::exit(code);
 }
