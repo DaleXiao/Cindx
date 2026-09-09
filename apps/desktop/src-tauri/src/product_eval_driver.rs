@@ -999,8 +999,30 @@ pub fn provider_key_broker_main(argv: Vec<String>) -> i32 {
             }
         };
     }
+    // The bounded keychain read (1.5s) cannot wait out an authorization
+    // prompt, so the read retries on a window (default 300s, `--key-wait
+    // <seconds>`) exactly like the driver's: on the migration run the old
+    // item's reader prompt costs one click, and every later run reads
+    // silently through the creator-DR channel.
+    let argv_wait = argv
+        .iter()
+        .position(|arg| arg == "--key-wait")
+        .and_then(|index| argv.get(index + 1))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300);
+    let deadline = Instant::now() + std::time::Duration::from_secs(argv_wait);
     let mut config = crate::configuration_persistence::load_provider_config();
     crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
+    let mut attempt = 0u32;
+    while config.api_key.trim().is_empty() && Instant::now() < deadline {
+        attempt += 1;
+        eprintln!(
+            "broker: provider key not readable yet (attempt {attempt}, window {argv_wait}s) — approve the keychain prompt if one is showing; retrying in 12s"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(12));
+        config = crate::configuration_persistence::load_provider_config();
+        crate::provider_secret_store::fill_api_key_from_keychain(&mut config);
+    }
     let key = config.api_key.trim();
     if key.is_empty() {
         eprintln!("broker: provider key not readable (keychain denied, prompt pending, or empty)");
