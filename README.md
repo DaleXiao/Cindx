@@ -24,8 +24,9 @@ permission, tool, persistence, and completion paths.
 
 The checked-in evidence does **not** prove that Default, High, or Extra High
 generally outperform Fast, or that any prompt-evolution or multi-model
-collaboration improves production quality. The exact boundary is documented in
-[Evaluation](docs/EVALUATION.md).
+collaboration improves production quality. Deterministic gates prove contracts,
+not quality uplift; provider-backed claims require the explicit evaluation
+protocol described in [Development](docs/DEVELOPMENT.md).
 
 ## Repository Map
 
@@ -52,8 +53,6 @@ scripts/                  Checks, builds, and release helpers
 - [Current product facts](docs/CURRENT.md)
 - [Architecture and ownership](docs/ARCHITECTURE.md)
 - [Development, verification, and release](docs/DEVELOPMENT.md)
-- [Evaluation results and claim boundary](docs/EVALUATION.md)
-- [Current coding-agent handoff](docs/HANDOFF.md)
 
 These are the only maintained project documents. Historical reports and old
 release notes remain available in Git history; they are not current product
@@ -80,7 +79,19 @@ and are never implied by a green deterministic test run.
 
 - [GitHub Releases](https://github.com/DaleXiao/Cindx/releases)
 
-The current release identity (version, tag, asset name/size/SHA-256, and
-installed bundle) is maintained in [HANDOFF.md](docs/HANDOFF.md). Do not
-commit application archives to the Git tree; publish them as GitHub Release
-assets.
+The current release identity (version, tag, asset name/size/SHA-256) is
+published on the release page itself. Do not commit application archives to
+the Git tree; publish them as GitHub Release assets.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md). Please report vulnerabilities through GitHub
+private vulnerability reporting rather than public issues.
+
+## License
+
+[Apache-2.0](LICENSE)
