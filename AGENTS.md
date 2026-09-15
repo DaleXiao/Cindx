@@ -5,9 +5,12 @@ architecture, read:
 
 1. `docs/CURRENT.md`
 2. `docs/ARCHITECTURE.md`
-3. `docs/EVALUATION.md`
-4. `docs/HANDOFF.md`
-5. `docs/DEVELOPMENT.md` for the required checks
+3. `docs/DEVELOPMENT.md` for the required checks
+
+Two documents are internal and local-only — present in the maintainer's working
+tree, deliberately absent from the published repository: `docs/EVALUATION.md`
+(benchmarks, provider results, claims) and `docs/HANDOFF.md` (continuation state
+for another coding agent). Read them when they are present.
 
 ## Scope
 
@@ -25,8 +28,11 @@ Update the matching maintained document in the same change:
 - Product behavior or known limits -> `docs/CURRENT.md`
 - Ownership, dependencies, or run flow -> `docs/ARCHITECTURE.md`
 - Tests, build, release, or operational behavior -> `docs/DEVELOPMENT.md`
-- Benchmarks, provider results, or claims -> `docs/EVALUATION.md`
-- Continuation state for another coding agent -> `docs/HANDOFF.md`
+
+`docs/EVALUATION.md` and `docs/HANDOFF.md` are internal and local-only: they are
+untracked and stripped from the published history, so never commit them. Update
+them in place in the working tree; the docs gate still validates them when they
+are present.
 
 There is exactly one handoff document. Update it in place. Do not add phase
 reports, roadmaps, duplicate architecture summaries, per-run evaluation prose,

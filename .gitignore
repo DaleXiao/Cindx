@@ -9,3 +9,7 @@ apps/desktop/src/**/*.js
 !/examples/.env.example
 /releases/*.zip
 /benchmarks/agent/hidden/
+
+# Internal, local-only documents (never published)
+/docs/EVALUATION.md
+/docs/HANDOFF.md

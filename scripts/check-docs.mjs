@@ -40,14 +40,17 @@ const maintained = [
   "AGENTS.md",
   "docs/CURRENT.md",
   "docs/ARCHITECTURE.md",
-  "docs/DEVELOPMENT.md",
-  "docs/EVALUATION.md",
-  "docs/HANDOFF.md"
+  "docs/DEVELOPMENT.md"
 ];
+// Internal, local-only documents: deliberately kept out of the published tree
+// (untracked and stripped from history), so their absence never fails this
+// check; when they exist locally they are validated like every other document.
+const internalOnly = ["docs/EVALUATION.md", "docs/HANDOFF.md"];
 maintained.forEach(requireFile);
 
+const allDocs = maintained.concat(internalOnly);
 const allowedDocs = new Set(
-  maintained.filter((file) => file.startsWith("docs/")).map((file) => file.slice(5))
+  allDocs.filter((file) => file.startsWith("docs/")).map((file) => file.slice(5))
 );
 for (const file of walk(path.join(root, "docs"))) {
   const relative = path.relative(path.join(root, "docs"), file);
@@ -80,7 +83,10 @@ const tauriConfig = JSON.parse(read("apps/desktop/src-tauri/tauri.conf.json"));
 const cargoTomlVersion = packageVersion(read("apps/desktop/src-tauri/Cargo.toml"));
 const cargoLockVersion = lockVersion(read("apps/desktop/src-tauri/Cargo.lock"));
 const currentVersion = markedVersion(read("docs/CURRENT.md"), "Current application version");
-const handoffVersion = markedVersion(read("docs/HANDOFF.md"), "Current release version");
+const handoffPath = path.join(root, "docs/HANDOFF.md");
+const handoffVersion = fs.existsSync(handoffPath)
+  ? markedVersion(fs.readFileSync(handoffPath, "utf8"), "Current release version")
+  : expectedVersion;
 const expectedVersion = tauriConfig.version;
 
 for (const [label, version] of new Map([
@@ -98,9 +104,10 @@ for (const [label, version] of new Map([
   }
 }
 
-const markdownFiles = maintained
+const markdownFiles = allDocs
   .filter((file) => file.endsWith(".md"))
-  .map((file) => path.join(root, file));
+  .map((file) => path.join(root, file))
+  .filter((file) => fs.existsSync(file));
 const linkPattern = /\[[^\]]*\]\(([^)]+)\)/g;
 for (const file of markdownFiles) {
   const source = fs.readFileSync(file, "utf8");
@@ -208,5 +215,8 @@ if (failures.length > 0) {
 }
 
 process.stdout.write(
-  `Documentation baseline ${expectedVersion} is consistent (${maintained.length} maintained files).\n`
+  `Documentation baseline ${expectedVersion} is consistent (${
+    maintained.length +
+    internalOnly.filter((file) => fs.existsSync(path.join(root, file))).length
+  } maintained files).\n`
 );
